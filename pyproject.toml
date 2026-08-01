@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "task4-consistency"
+version = "0.1.0"
+description = "Task4: cross-document field alignment and robust consistency checks for auto finance lease"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.0",
+  "httpx>=0.27",
+]
+web = [
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.27",
+  "python-multipart>=0.0.9",
+  "httpx>=0.27",
+]
+
+
+[project.scripts]
+task4-check = "task4_consistency.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["task4_consistency*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

@@ -1,0 +1,937 @@
+{
+  "applications": {
+    "APP-AMT-CN": {
+      "overall": "consistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-ATK-BRAND-JV": {
+      "overall": "inconsistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_BRAND_CROSS": "inconsistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-ATK-DATE-AMBIG": {
+      "overall": "uncertain",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "uncertain",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-ATK-LOWCONF-VIN": {
+      "overall": "inconsistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "inconsistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-ATK-MONEY-APPROX": {
+      "overall": "uncertain",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "uncertain",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-ATK-VIN-IOQ": {
+      "overall": "uncertain",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "uncertain",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-BAD-AMT2": {
+      "overall": "inconsistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "inconsistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-BAD-BRAND": {
+      "overall": "inconsistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_BRAND_CROSS": "inconsistent",
+        "R_MODEL_CROSS": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-BAD-ENGINE": {
+      "overall": "inconsistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "inconsistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-BAD-ENGINE-OCR": {
+      "overall": "inconsistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "inconsistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-BAD-ID2": {
+      "overall": "inconsistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "inconsistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-BAD-MODEL": {
+      "overall": "inconsistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_BRAND_CROSS": "consistent",
+        "R_MODEL_CROSS": "inconsistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-BAD-MULTI": {
+      "overall": "inconsistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "inconsistent",
+        "R_AMOUNT_TOL": "inconsistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "inconsistent"
+      }
+    },
+    "APP-BAD-NAME2": {
+      "overall": "inconsistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "inconsistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-BAD-PLATE": {
+      "overall": "inconsistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "inconsistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "inconsistent"
+      }
+    },
+    "APP-BAD-REGCERT": {
+      "overall": "inconsistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "inconsistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-BAD-VIN2": {
+      "overall": "inconsistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "inconsistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-BRAND-OK": {
+      "overall": "consistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_BRAND_CROSS": "consistent",
+        "R_MODEL_CROSS": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-OK-001": {
+      "overall": "consistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-OK-FMT": {
+      "overall": "consistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-DATE-DMY": {
+      "overall": "consistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-ID15-18": {
+      "overall": "consistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-BAD-AMT": {
+      "overall": "inconsistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "inconsistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-BAD-NAME-ID": {
+      "overall": "inconsistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "inconsistent",
+        "R_ID_EXACT": "inconsistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-BAD-VIN": {
+      "overall": "inconsistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "inconsistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-BAD-VINFMT": {
+      "overall": "uncertain",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "uncertain",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-TAX-INCL": {
+      "overall": "inconsistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "inconsistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-BAD-COND": {
+      "overall": "inconsistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "uncertain",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "inconsistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-MISS-VINDOC": {
+      "overall": "uncertain",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "uncertain",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-MORTGAGE-OK": {
+      "overall": "consistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_BRAND_CROSS": "consistent",
+        "R_MODEL_CROSS": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-NAME-BAND": {
+      "overall": "uncertain",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "uncertain",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-NAME-CONF": {
+      "overall": "uncertain",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "uncertain",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-NAME-NEAR": {
+      "overall": "uncertain",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "inconsistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-OCR-HARD-2": {
+      "overall": "consistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_BRAND_CROSS": "consistent",
+        "R_MODEL_CROSS": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-OCR-OK": {
+      "overall": "consistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_BRAND_CROSS": "consistent",
+        "R_MODEL_CROSS": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-PLATE-DOT": {
+      "overall": "consistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-PLATE-NEG": {
+      "overall": "inconsistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "inconsistent"
+      }
+    },
+    "APP-PLATE-XFER": {
+      "overall": "inconsistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "inconsistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "inconsistent"
+      }
+    },
+    "APP-R11-ADDR": {
+      "overall": "consistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-R11-FEN": {
+      "overall": "consistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-R11-BUY": {
+      "overall": "consistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-R11-ENG": {
+      "overall": "consistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-R11-ORG": {
+      "overall": "consistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_BRAND_CROSS": "consistent",
+        "R_MODEL_CROSS": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-R11-PLT": {
+      "overall": "consistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-R12-S2-TAX": {
+      "overall": "inconsistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "inconsistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-R12-S2-ID15": {
+      "overall": "consistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-R12-S2-LOW": {
+      "overall": "uncertain",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "uncertain",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-R12-S2-XFER": {
+      "overall": "uncertain",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "uncertain",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-R12-S2-01": {
+      "overall": "consistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_BRAND_CROSS": "consistent",
+        "R_MODEL_CROSS": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-R12-S2-02": {
+      "overall": "consistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_BRAND_CROSS": "consistent",
+        "R_MODEL_CROSS": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-R12-S2-ORG": {
+      "overall": "consistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_BRAND_CROSS": "consistent",
+        "R_MODEL_CROSS": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-R12-S2-PLT": {
+      "overall": "inconsistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "inconsistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "inconsistent"
+      }
+    },
+    "APP-R12-S2-VIN": {
+      "overall": "inconsistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "inconsistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-DATE-SPLIT": {
+      "overall": "consistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "consistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-UNC-OCR": {
+      "overall": "uncertain",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "uncertain",
+        "R_ENGINE_CROSS": "uncertain",
+        "R_NAME_FUZZY": "uncertain",
+        "R_ID_EXACT": "uncertain",
+        "R_PLATE_CROSS": "uncertain",
+        "R_AMOUNT_TOL": "uncertain",
+        "R_DATE_CROSS": "uncertain",
+        "R_REG_CERT_CROSS": "uncertain",
+        "R_ADDRESS_FUZZY": "uncertain",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "uncertain"
+      }
+    },
+    "APP-USED-CAR-TRANSFER": {
+      "overall": "uncertain",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "uncertain",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    },
+    "APP-USED-NAME": {
+      "overall": "inconsistent",
+      "expected_verdicts": {
+        "R_VIN_CROSS": "consistent",
+        "R_ENGINE_CROSS": "consistent",
+        "R_NAME_FUZZY": "inconsistent",
+        "R_ID_EXACT": "consistent",
+        "R_PLATE_CROSS": "consistent",
+        "R_AMOUNT_TOL": "consistent",
+        "R_DATE_CROSS": "consistent",
+        "R_REG_CERT_CROSS": "consistent",
+        "R_ADDRESS_FUZZY": "consistent",
+        "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+        "R_PLATE_IN_LIST": "consistent"
+      }
+    }
+  }
+}

@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>任务4 · 跨单据一致性校验（放款审核演示）</title>
+  <link rel="stylesheet" href="/static/style.css"/>
+</head>
+<body>
+<header>
+  <div>
+    <h1>汽车融资租赁放款审核 · 跨单据一致性校验</h1>
+    <p class="subtitle">赛题任务4演示：多份单据关键字段交叉核验 → 一致 / 不一致 / 存疑</p>
+    <div class="meta" id="health-meta">连接中…</div>
+  </div>
+  <nav>
+    <button type="button" data-tab="guide" class="active">① 业务演示</button>
+    <button type="button" data-tab="rules">② 规则维护</button>
+    <button type="button" data-tab="kb">③ 实体知识库</button>
+    <button type="button" data-tab="advanced">高级 / 原始JSON</button>
+  </nav>
+</header>
+
+<main>
+  <!-- ========== 业务演示 ========== -->
+  <section id="tab-guide" class="tab">
+    <div class="hero panel">
+      <h2>这个演示在做什么？</h2>
+      <p>
+        放款审核时，同一笔申请会有多份材料：<b>机动车登记证书、交强险保单、融资租赁合同、发票、身份证</b> 等。
+        任务4不负责「从照片里认字」（那是任务1–3），而是在<strong>已经提取出的结构化字段</strong>上，做跨单据对齐与一致性校验。
+      </p>
+      <div class="req-grid">
+        <div class="req-card">
+          <div class="req-no">（1）</div>
+          <h3>字段标准化与实体链接</h3>
+          <p>日期/金额/地址/VIN/车牌/姓名等写成统一形式；模糊匹配 + 知识库消解「苏A·12345」与「苏A12345」等变体。</p>
+        </div>
+        <div class="req-card">
+          <div class="req-no">（2）</div>
+          <h3>多层级规则框架</h3>
+          <p>完全一致、数值容差、列表包含、条件必填等，配置化；业务可在「规则维护」页改规则并生效。</p>
+        </div>
+        <div class="req-card">
+          <div class="req-no">（3）</div>
+          <h3>三态可解释报告</h3>
+          <p>每个校验点输出<strong>一致 / 不一致 / 存疑</strong>，并给出各单据字段快照与差异高亮，方便人工复核。</p>
+        </div>
+      </div>
+      <p class="data-note">
+        <b>数据说明：</b><code>1.zip</code> 为赛题方提供的登记证影像样例；
+        <code>step2-排序</code> 为我们做的页序/区域检测结果（有框无 OCR 文本）。
+        本演示用的「多单据字段」是按业务构造的结构化申请 JSON（模拟任务1–3 输出），用于单独验证任务4能力。
+      </p>
+    </div>
+
+    <div class="panel">
+      <h2>赛题数据从哪来？（1.zip → step2 → 任务4）</h2>
+      <ol class="pipeline">
+        <li><b>1.zip</b>：赛题方登记证影像（本仓库仅部分样例）</li>
+        <li><b>step2-排序</b>：页序 + 字段区域检测框（有位置、无 OCR 字）</li>
+        <li><b>任务1–3</b>（赛题其它模块）：识别文字 → 结构化字段</li>
+        <li><b>任务4（本页）</b>：多单据结构化字段交叉校验</li>
+      </ol>
+      <div class="row">
+        <div class="col">
+          <label>step2 样例（检测结果）</label>
+          <select id="step2-select"></select>
+          <button class="btn" id="btn-load-step2" type="button" style="margin-top:8px">查看检测字段</button>
+        </div>
+        <div class="col">
+          <div id="step2-detail" class="hint">选择 step2 样例可看到登记证上检出的字段区域；下方演示仍用多单据 JSON 做交叉校验。</div>
+          <div id="ocr-inbox-summary" class="hint" style="margin-top:10px"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>第一步：选择演示场景</h2>
+      <div class="scenario-grid" id="scenario-grid"></div>
+    </div>
+
+    <div class="panel">
+      <h2>第二步：多单据字段一览（校验前）</h2>
+      <p class="hint">下表把同一申请的多份单据「摊开」——任务4要检查的是：各单据上 VIN、姓名、金额等是否对齐。</p>
+      <div class="table-wrap">
+        <table id="doc-matrix">
+          <thead></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="actions">
+        <button class="btn primary" id="btn-run-check" type="button">第三步：运行跨单据校验</button>
+        <span class="msg" id="check-msg"></span>
+      </div>
+    </div>
+
+    <div class="panel" id="result-panel">
+      <h2>第三步：校验结果（三态 + 快照 + 差异）</h2>
+      <div class="kpis" id="kpis">
+        <div class="kpi muted">尚未运行</div>
+      </div>
+      <div id="check-cards" class="check-cards"></div>
+    </div>
+  </section>
+
+  <!-- ========== 规则 ========== -->
+  <section id="tab-rules" class="tab hidden">
+    <div class="panel">
+      <h2>业务规则维护（对应任务4-2）</h2>
+      <p class="hint">
+        表单编辑常用字段；支持 exact / fuzzy / numeric_tolerance / list_contains / conditional_required。
+        保存写入 <code>runtime_rules.yaml</code>。VIN/证件等 critical 规则不可删除或掏空。
+      </p>
+      <p class="msg" id="rules-meta"></p>
+      <div id="rules-form" class="rules-form"></div>
+      <div class="actions">
+        <button class="btn" id="btn-load-rules" type="button">重新加载</button>
+        <button class="btn primary" id="btn-save-rules-form" type="button">保存表单并生效</button>
+        <button class="btn danger" id="btn-reset-rules" type="button">恢复默认包</button>
+      </div>
+      <p class="msg" id="rules-msg"></p>
+      <details style="margin-top:14px">
+        <summary class="hint" style="cursor:pointer">高级：原始 YAML</summary>
+        <textarea id="rules-yaml" spellcheck="false" style="min-height:280px;margin-top:8px"></textarea>
+        <div class="actions">
+          <button class="btn" id="btn-validate-rules" type="button">仅校验 YAML</button>
+          <button class="btn primary" id="btn-save-rules" type="button">保存 YAML 并生效</button>
+        </div>
+      </details>
+    </div>
+  </section>
+
+  <!-- ========== KB ========== -->
+  <section id="tab-kb" class="tab hidden">
+    <div class="row">
+      <div class="col panel">
+        <h2>实体知识库（对应任务4-1 变体消解）</h2>
+        <p class="hint">地址/机构别名会在标准化阶段应用，例如把「高新技术产业开发区」规范为「高新区」。</p>
+        <label>分区</label>
+        <select id="kb-section">
+          <option value="address_aliases">地址别名 address_aliases</option>
+          <option value="org_aliases">机构别名 org_aliases</option>
+          <option value="plate_prefixes">车牌前缀 plate_prefixes</option>
+        </select>
+        <label style="margin-top:8px">原文 key</label>
+        <input id="kb-key" placeholder="例如：高新技术产业开发区"/>
+        <label style="margin-top:8px">规范值 value</label>
+        <input id="kb-value" placeholder="例如：高新区"/>
+        <div class="actions">
+          <button class="btn primary" id="btn-add-kb" type="button">添加别名</button>
+          <button class="btn" id="btn-load-kb" type="button">刷新</button>
+        </div>
+        <p class="msg" id="kb-msg"></p>
+        <div class="table-wrap" style="margin-top:12px">
+          <table id="kb-table">
+            <thead><tr><th>原文</th><th>规范形</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="col panel">
+        <h2>当前知识库 JSON</h2>
+        <pre id="kb-json"></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========== 高级 ========== -->
+  <section id="tab-advanced" class="tab hidden">
+    <div class="panel">
+      <h2>原始申请 JSON（开发/联调）</h2>
+      <p class="hint">任务1–3 输出应遵循此契约。也可从下拉加载全部 fixtures。</p>
+      <div class="row">
+        <select id="fixture-select" style="flex:1"></select>
+        <button class="btn" id="btn-load-fixture" type="button">加载</button>
+        <button class="btn primary" id="btn-run-check-adv" type="button">运行校验</button>
+      </div>
+      <textarea id="app-json" spellcheck="false" style="min-height:360px;margin-top:10px"></textarea>
+      <p class="msg" id="adv-msg"></p>
+      <iframe id="report-html-frame" title="report" style="width:100%;min-height:320px;margin-top:12px;border:1px solid var(--border);border-radius:8px;background:#fff"></iframe>
+    </div>
+  </section>
+</main>
+
+<footer class="footer">
+  任务4模块 <code>task4_consistency</code> · 验收 <code>bash scripts/ci_gate.sh</code> ·
+  一键启动 <code>bash scripts/run_web.sh</code>
+</footer>
+<script src="/static/app.js"></script>
+</body>
+</html>

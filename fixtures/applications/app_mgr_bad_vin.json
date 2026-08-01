@@ -1,0 +1,158 @@
+{
+  "application_id": "APP-MGR-BAD-VIN",
+  "label": "inconsistent",
+  "meta": {
+    "field_source": "synthetic",
+    "batch": "continuous-manager"
+  },
+  "documents": [
+    {
+      "doc_id": "reg",
+      "doc_type": "机动车登记证书",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N2123456",
+          "confidence": 0.95,
+          "source_page": 1
+        },
+        "engine_no": {
+          "raw": "EA888-10001",
+          "confidence": 0.9
+        },
+        "owner_name": {
+          "raw": "张三",
+          "confidence": 0.95
+        },
+        "plate_no": {
+          "raw": "苏A·12345",
+          "confidence": 0.92
+        },
+        "reg_cert_no": {
+          "raw": "320100123456",
+          "confidence": 0.9
+        },
+        "reg_date": {
+          "raw": "2024年5月8日",
+          "confidence": 0.9
+        },
+        "address": {
+          "raw": "江苏省南京市高新技术产业开发区XX路1号",
+          "confidence": 0.88
+        },
+        "vehicle_brand": {
+          "raw": "一汽大众",
+          "confidence": 0.9
+        }
+      }
+    },
+    {
+      "doc_id": "pol",
+      "doc_type": "交强险保单",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N2123456",
+          "confidence": 0.93
+        },
+        "engine_no": {
+          "raw": "EA888-10001",
+          "confidence": 0.9
+        },
+        "insured_name": {
+          "raw": "张三",
+          "confidence": 0.9
+        },
+        "plate_no": {
+          "raw": "苏A12345",
+          "confidence": 0.9
+        },
+        "plate_list": {
+          "raw": "苏A·12345",
+          "confidence": 0.9
+        }
+      }
+    },
+    {
+      "doc_id": "ctr",
+      "doc_type": "融资租赁合同",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N2000001",
+          "confidence": 0.99
+        },
+        "lessee_name": {
+          "raw": "张三",
+          "confidence": 0.99
+        },
+        "id_number": {
+          "raw": "320102199001011232",
+          "confidence": 0.99
+        },
+        "financed_amount": {
+          "raw": "128000.00元",
+          "confidence": 0.99
+        },
+        "reg_cert_no": {
+          "raw": "320100123456",
+          "confidence": 0.95
+        },
+        "reg_date": {
+          "raw": "2024年5月8日",
+          "confidence": 0.95
+        },
+        "contract_date": {
+          "raw": "2024-06-01",
+          "confidence": 0.95
+        }
+      }
+    },
+    {
+      "doc_id": "inv",
+      "doc_type": "发票",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N2123456",
+          "confidence": 0.9
+        },
+        "engine_no": {
+          "raw": "EA888-10001",
+          "confidence": 0.9
+        },
+        "invoice_amount": {
+          "raw": "128000.00元",
+          "confidence": 0.95
+        }
+      }
+    },
+    {
+      "doc_id": "id",
+      "doc_type": "身份证",
+      "fields": {
+        "owner_name": {
+          "raw": "张三",
+          "confidence": 0.95
+        },
+        "id_number": {
+          "raw": "320102199001011232",
+          "confidence": 0.95
+        },
+        "address": {
+          "raw": "江苏省南京市高新技术产业开发区XX路1号",
+          "confidence": 0.9
+        }
+      }
+    }
+  ],
+  "expected_verdicts": {
+    "R_VIN_CROSS": "inconsistent",
+    "R_ENGINE_CROSS": "consistent",
+    "R_NAME_FUZZY": "consistent",
+    "R_ID_EXACT": "consistent",
+    "R_PLATE_CROSS": "consistent",
+    "R_AMOUNT_TOL": "consistent",
+    "R_DATE_CROSS": "consistent",
+    "R_REG_CERT_CROSS": "consistent",
+    "R_ADDRESS_FUZZY": "consistent",
+    "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+    "R_PLATE_IN_LIST": "consistent"
+  }
+}

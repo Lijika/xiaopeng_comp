@@ -1,0 +1,149 @@
+{
+  "application_id": "APP-MISS-VINDOC",
+  "label": "uncertain",
+  "documents": [
+    {
+      "doc_id": "reg_cert",
+      "doc_type": "机动车登记证书",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N2444555",
+          "confidence": 0.95,
+          "source_page": 1
+        },
+        "engine_no": {
+          "raw": "EA888-123456",
+          "confidence": 0.95
+        },
+        "owner_name": {
+          "raw": "张三",
+          "confidence": 0.95
+        },
+        "plate_no": {
+          "raw": "苏A·22222",
+          "confidence": 0.95
+        },
+        "reg_cert_no": {
+          "raw": "320100222333",
+          "confidence": 0.95
+        },
+        "reg_date": {
+          "raw": "2021-09-09",
+          "confidence": 0.95
+        },
+        "address": {
+          "raw": "江苏省南京市建邺区江东中路1号",
+          "confidence": 0.95
+        }
+      }
+    },
+    {
+      "doc_id": "policy",
+      "doc_type": "交强险保单",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N2444555",
+          "confidence": 0.95
+        },
+        "engine_no": {
+          "raw": "EA888123456",
+          "confidence": 0.95
+        },
+        "insured_name": {
+          "raw": "张三",
+          "confidence": 0.95
+        },
+        "plate_no": {
+          "raw": "苏A22222",
+          "confidence": 0.95
+        },
+        "plate_list": {
+          "raw": "苏A22222",
+          "confidence": 0.95
+        }
+      }
+    },
+    {
+      "doc_id": "lease",
+      "doc_type": "融资租赁合同",
+      "fields": {
+        "lessee_name": {
+          "raw": "张三",
+          "confidence": 0.95
+        },
+        "financed_amount": {
+          "raw": "77777元",
+          "confidence": 0.95
+        },
+        "reg_cert_no": {
+          "raw": "320100222333",
+          "confidence": 0.95
+        },
+        "reg_date": {
+          "raw": "2021-09-09",
+          "confidence": 0.95
+        },
+        "contract_date": {
+          "raw": "2024-05-18",
+          "confidence": 0.95
+        },
+        "id_number": {
+          "raw": "320102199001011232",
+          "confidence": 0.95
+        }
+      }
+    },
+    {
+      "doc_id": "invoice",
+      "doc_type": "发票",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N2444555",
+          "confidence": 0.95
+        },
+        "engine_no": {
+          "raw": "EA888-123456",
+          "confidence": 0.95
+        },
+        "invoice_amount": {
+          "raw": "77777",
+          "confidence": 0.95
+        }
+      }
+    },
+    {
+      "doc_id": "id_card",
+      "doc_type": "身份证",
+      "fields": {
+        "owner_name": {
+          "raw": "张三",
+          "confidence": 0.95
+        },
+        "address": {
+          "raw": "江苏南京市建邺区江东中路1号",
+          "confidence": 0.95
+        },
+        "id_number": {
+          "raw": "320102199001011232",
+          "confidence": 0.95
+        }
+      }
+    }
+  ],
+  "expected_verdicts": {
+    "R_VIN_CROSS": "uncertain",
+    "R_ENGINE_CROSS": "consistent",
+    "R_NAME_FUZZY": "consistent",
+    "R_ID_EXACT": "consistent",
+    "R_PLATE_CROSS": "consistent",
+    "R_AMOUNT_TOL": "consistent",
+    "R_DATE_CROSS": "consistent",
+    "R_REG_CERT_CROSS": "consistent",
+    "R_ADDRESS_FUZZY": "consistent",
+    "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+    "R_PLATE_IN_LIST": "consistent"
+  },
+  "meta": {
+    "field_source": "synthetic"
+  }
+}

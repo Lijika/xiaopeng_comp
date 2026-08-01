@@ -1,0 +1,189 @@
+{
+  "application_id": "APP-R31-AMT",
+  "label": "inconsistent",
+  "meta": {
+    "source": "semi_real_step2",
+    "step2_sample_id": "JFL25P02L080310-01",
+    "step2_file": "JFL25P02L080310-01_page_order.json",
+    "step2_pages": 7,
+    "step2_note": "OCR text synthetic; layout/page_order from step2",
+    "field_source": "synthetic",
+    "round": 31,
+    "r31_note": "amount hard diverge"
+  },
+  "documents": [
+    {
+      "doc_id": "reg",
+      "doc_type": "机动车登记证书",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N5000001",
+          "confidence": 0.99
+        },
+        "engine_no": {
+          "raw": "S2ENG01",
+          "confidence": 0.99
+        },
+        "owner_name": {
+          "raw": "半真甲",
+          "confidence": 0.99
+        },
+        "plate_no": {
+          "raw": "苏A92001",
+          "confidence": 0.99
+        },
+        "reg_cert_no": {
+          "raw": "RC12",
+          "confidence": 0.99
+        },
+        "reg_date": {
+          "raw": "2024-09-01",
+          "confidence": 0.99
+        },
+        "address": {
+          "raw": "江苏省南京市建邺区半真实路1号",
+          "confidence": 0.99
+        },
+        "brand": {
+          "raw": "比亚迪汽车工业有限公司",
+          "confidence": 0.99
+        },
+        "model": {
+          "raw": "汉EV",
+          "confidence": 0.99
+        }
+      }
+    },
+    {
+      "doc_id": "pol",
+      "doc_type": "交强险保单",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N5000001",
+          "confidence": 0.99
+        },
+        "engine_no": {
+          "raw": "S2ENG01",
+          "confidence": 0.99
+        },
+        "insured_name": {
+          "raw": "半真甲",
+          "confidence": 0.99
+        },
+        "plate_no": {
+          "raw": "苏A92001",
+          "confidence": 0.99
+        },
+        "plate_list": {
+          "raw": "苏A92001",
+          "confidence": 0.99
+        },
+        "brand": {
+          "raw": "比亚迪汽车工业有限公司",
+          "confidence": 0.99
+        },
+        "model": {
+          "raw": "汉EV",
+          "confidence": 0.99
+        }
+      }
+    },
+    {
+      "doc_id": "lease",
+      "doc_type": "融资租赁合同",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N5000001",
+          "confidence": 0.99
+        },
+        "lessee_name": {
+          "raw": "半真甲",
+          "confidence": 0.99
+        },
+        "id_number": {
+          "raw": "320102199001012016",
+          "confidence": 0.99
+        },
+        "financed_amount": {
+          "raw": "130000",
+          "confidence": 0.99
+        },
+        "reg_cert_no": {
+          "raw": "RC12",
+          "confidence": 0.99
+        },
+        "reg_date": {
+          "raw": "2024-09-01",
+          "confidence": 0.99
+        },
+        "brand": {
+          "raw": "比亚迪汽车工业有限公司",
+          "confidence": 0.99
+        },
+        "model": {
+          "raw": "汉EV",
+          "confidence": 0.99
+        }
+      }
+    },
+    {
+      "doc_id": "inv",
+      "doc_type": "发票",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N5000001",
+          "confidence": 0.99
+        },
+        "engine_no": {
+          "raw": "S2ENG01",
+          "confidence": 0.99
+        },
+        "invoice_amount": {
+          "raw": "88888",
+          "confidence": 0.99
+        },
+        "brand": {
+          "raw": "比亚迪汽车工业有限公司",
+          "confidence": 0.99
+        },
+        "model": {
+          "raw": "汉EV",
+          "confidence": 0.99
+        }
+      }
+    },
+    {
+      "doc_id": "id",
+      "doc_type": "身份证",
+      "fields": {
+        "owner_name": {
+          "raw": "半真甲",
+          "confidence": 0.99
+        },
+        "id_number": {
+          "raw": "320102199001012016",
+          "confidence": 0.99
+        },
+        "address": {
+          "raw": "江苏南京市建邺区半真实路1号",
+          "confidence": 0.99
+        }
+      }
+    }
+  ],
+  "expected_verdicts": {
+    "R_VIN_CROSS": "consistent",
+    "R_ENGINE_CROSS": "consistent",
+    "R_NAME_FUZZY": "consistent",
+    "R_BRAND_CROSS": "consistent",
+    "R_MODEL_CROSS": "consistent",
+    "R_ID_EXACT": "consistent",
+    "R_PLATE_CROSS": "consistent",
+    "R_AMOUNT_TOL": "inconsistent",
+    "R_DATE_CROSS": "consistent",
+    "R_REG_CERT_CROSS": "consistent",
+    "R_ADDRESS_FUZZY": "consistent",
+    "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+    "R_PLATE_IN_LIST": "consistent"
+  }
+}

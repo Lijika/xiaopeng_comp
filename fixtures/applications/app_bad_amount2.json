@@ -1,0 +1,152 @@
+{
+  "application_id": "APP-BAD-AMT2",
+  "documents": [
+    {
+      "doc_id": "reg",
+      "doc_type": "机动车登记证书",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N3000007",
+          "confidence": 0.95
+        },
+        "engine_no": {
+          "raw": "ENG888888",
+          "confidence": 0.95
+        },
+        "owner_name": {
+          "raw": "赵庚",
+          "confidence": 0.95
+        },
+        "plate_no": {
+          "raw": "苏A70007",
+          "confidence": 0.95
+        },
+        "reg_cert_no": {
+          "raw": "320100123456",
+          "confidence": 0.95
+        },
+        "reg_date": {
+          "raw": "2024-05-18",
+          "confidence": 0.95
+        },
+        "address": {
+          "raw": "四川省成都市武侯区人民南路7号",
+          "confidence": 0.95
+        }
+      }
+    },
+    {
+      "doc_id": "pol",
+      "doc_type": "交强险保单",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N3000007",
+          "confidence": 0.95
+        },
+        "engine_no": {
+          "raw": "ENG888888",
+          "confidence": 0.95
+        },
+        "insured_name": {
+          "raw": "赵庚",
+          "confidence": 0.95
+        },
+        "plate_no": {
+          "raw": "苏A70007",
+          "confidence": 0.95
+        },
+        "plate_list": {
+          "raw": "苏A70007",
+          "confidence": 0.95
+        }
+      }
+    },
+    {
+      "doc_id": "lease",
+      "doc_type": "融资租赁合同",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N3000007",
+          "confidence": 0.95
+        },
+        "lessee_name": {
+          "raw": "赵庚",
+          "confidence": 0.95
+        },
+        "id_number": {
+          "raw": "320211199512125559",
+          "confidence": 0.95
+        },
+        "financed_amount": {
+          "raw": "200000",
+          "confidence": 0.95
+        },
+        "reg_cert_no": {
+          "raw": "320100123456",
+          "confidence": 0.95
+        },
+        "reg_date": {
+          "raw": "2024-05-18",
+          "confidence": 0.95
+        },
+        "contract_date": {
+          "raw": "2024-06-01",
+          "confidence": 0.95
+        }
+      }
+    },
+    {
+      "doc_id": "inv",
+      "doc_type": "发票",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N3000007",
+          "confidence": 0.95
+        },
+        "engine_no": {
+          "raw": "ENG888888",
+          "confidence": 0.95
+        },
+        "invoice_amount": {
+          "raw": "180000",
+          "confidence": 0.95
+        }
+      }
+    },
+    {
+      "doc_id": "id",
+      "doc_type": "身份证",
+      "fields": {
+        "owner_name": {
+          "raw": "赵庚",
+          "confidence": 0.95
+        },
+        "id_number": {
+          "raw": "320211199512125559",
+          "confidence": 0.95
+        },
+        "address": {
+          "raw": "四川成都市武侯区人民南路7号",
+          "confidence": 0.95
+        }
+      }
+    }
+  ],
+  "label": "inconsistent",
+  "expected_verdicts": {
+    "R_VIN_CROSS": "consistent",
+    "R_ENGINE_CROSS": "consistent",
+    "R_NAME_FUZZY": "consistent",
+    "R_ID_EXACT": "consistent",
+    "R_PLATE_CROSS": "consistent",
+    "R_AMOUNT_TOL": "inconsistent",
+    "R_DATE_CROSS": "consistent",
+    "R_REG_CERT_CROSS": "consistent",
+    "R_ADDRESS_FUZZY": "consistent",
+    "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+    "R_PLATE_IN_LIST": "consistent"
+  },
+  "meta": {
+    "field_source": "synthetic"
+  }
+}

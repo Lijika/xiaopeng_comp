@@ -1,0 +1,153 @@
+{
+  "application_id": "APP-USED-CAR-TRANSFER",
+  "label": "uncertain",
+  "meta": {
+    "scenario": "used_car_name_transfer",
+    "field_source": "synthetic"
+  },
+  "documents": [
+    {
+      "doc_id": "reg",
+      "doc_type": "机动车登记证书",
+      "fields": {
+        "owner_name": {
+          "raw": "原车主甲",
+          "confidence": 0.99
+        },
+        "vin": {
+          "raw": "LGXCE4CB0N0123456",
+          "confidence": 0.99
+        },
+        "engine_no": {
+          "raw": "ENGXFER1",
+          "confidence": 0.99
+        },
+        "plate_no": {
+          "raw": "苏A80001",
+          "confidence": 0.99
+        },
+        "reg_cert_no": {
+          "raw": "RCXFER",
+          "confidence": 0.99
+        },
+        "reg_date": {
+          "raw": "2023-01-01",
+          "confidence": 0.99
+        },
+        "address": {
+          "raw": "江苏省南京市鼓楼区过户路1号",
+          "confidence": 0.99
+        }
+      }
+    },
+    {
+      "doc_id": "pol",
+      "doc_type": "交强险保单",
+      "fields": {
+        "insured_name": {
+          "raw": "新承租乙",
+          "confidence": 0.99
+        },
+        "vin": {
+          "raw": "LGXCE4CB0N0123456",
+          "confidence": 0.99
+        },
+        "engine_no": {
+          "raw": "ENGXFER1",
+          "confidence": 0.99
+        },
+        "plate_no": {
+          "raw": "苏A80001",
+          "confidence": 0.99
+        },
+        "plate_list": {
+          "raw": "苏A80001",
+          "confidence": 0.99
+        }
+      }
+    },
+    {
+      "doc_id": "lease",
+      "doc_type": "融资租赁合同",
+      "fields": {
+        "lessee_name": {
+          "raw": "新承租乙",
+          "confidence": 0.99
+        },
+        "vin": {
+          "raw": "LGXCE4CB0N0123456",
+          "confidence": 0.99
+        },
+        "financed_amount": {
+          "raw": "100000",
+          "confidence": 0.99
+        },
+        "id_number": {
+          "raw": "320102199001011232",
+          "confidence": 0.99
+        },
+        "reg_cert_no": {
+          "raw": "RCXFER",
+          "confidence": 0.99
+        },
+        "reg_date": {
+          "raw": "2023-01-01",
+          "confidence": 0.99
+        }
+      }
+    },
+    {
+      "doc_id": "inv",
+      "doc_type": "发票",
+      "fields": {
+        "vin": {
+          "raw": "LGXCE4CB0N0123456",
+          "confidence": 0.99
+        },
+        "engine_no": {
+          "raw": "ENGXFER1",
+          "confidence": 0.99
+        },
+        "invoice_amount": {
+          "raw": "100000",
+          "confidence": 0.99
+        },
+        "buyer_name": {
+          "raw": "新承租乙",
+          "confidence": 0.99
+        }
+      }
+    },
+    {
+      "doc_id": "id",
+      "doc_type": "身份证",
+      "fields": {
+        "owner_name": {
+          "raw": "新承租乙",
+          "confidence": 0.99
+        },
+        "id_number": {
+          "raw": "320102199001011232",
+          "confidence": 0.99
+        },
+        "address": {
+          "raw": "江苏南京市鼓楼区过户路1号",
+          "confidence": 0.99
+        }
+      }
+    }
+  ],
+  "expected_verdicts": {
+    "R_VIN_CROSS": "consistent",
+    "R_ENGINE_CROSS": "consistent",
+    "R_NAME_FUZZY": "uncertain",
+    "R_ID_EXACT": "consistent",
+    "R_PLATE_CROSS": "consistent",
+    "R_AMOUNT_TOL": "consistent",
+    "R_DATE_CROSS": "consistent",
+    "R_REG_CERT_CROSS": "consistent",
+    "R_ADDRESS_FUZZY": "consistent",
+    "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+    "R_PLATE_IN_LIST": "consistent"
+  }
+}

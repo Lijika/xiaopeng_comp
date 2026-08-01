@@ -1,0 +1,182 @@
+{
+  "application_id": "APP-OCR-HARD-2",
+  "label": "consistent",
+  "documents": [
+    {
+      "doc_id": "d1",
+      "doc_type": "机动车登记证书",
+      "fields": {
+        "vin": {
+          "raw": "lsvaa4182n2777001",
+          "confidence": 0.99
+        },
+        "engine_no": {
+          "raw": "ABC-99 88",
+          "confidence": 0.99
+        },
+        "owner_name": {
+          "raw": "王　五",
+          "confidence": 0.99
+        },
+        "plate_no": {
+          "raw": "浙Ａ·８８８８８",
+          "confidence": 0.99
+        },
+        "reg_cert_no": {
+          "raw": "3301-888001",
+          "confidence": 0.99
+        },
+        "reg_date": {
+          "raw": "20240520",
+          "confidence": 0.99
+        },
+        "address": {
+          "raw": "浙江省杭州市西湖区文三路88号",
+          "confidence": 0.99
+        },
+        "brand": {
+          "raw": "吉利",
+          "confidence": 0.99
+        },
+        "model": {
+          "raw": "星瑞-1.5T",
+          "confidence": 0.99
+        }
+      }
+    },
+    {
+      "doc_id": "d2",
+      "doc_type": "交强险保单",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N2777001",
+          "confidence": 0.99
+        },
+        "engine_no": {
+          "raw": "ABC9988",
+          "confidence": 0.99
+        },
+        "insured_name": {
+          "raw": "王五",
+          "confidence": 0.99
+        },
+        "plate_no": {
+          "raw": "浙A88888",
+          "confidence": 0.99
+        },
+        "plate_list": {
+          "raw": "浙A·88888",
+          "confidence": 0.99
+        },
+        "brand": {
+          "raw": "吉利",
+          "confidence": 0.99
+        },
+        "model": {
+          "raw": "星瑞1.5T",
+          "confidence": 0.99
+        }
+      }
+    },
+    {
+      "doc_id": "d3",
+      "doc_type": "融资租赁合同",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N2777001",
+          "confidence": 0.99
+        },
+        "lessee_name": {
+          "raw": "王五",
+          "confidence": 0.99
+        },
+        "id_number": {
+          "raw": "330106199203034560",
+          "confidence": 0.99
+        },
+        "financed_amount": {
+          "raw": "￥88,000.00",
+          "confidence": 0.99
+        },
+        "reg_cert_no": {
+          "raw": "3301888001",
+          "confidence": 0.99
+        },
+        "reg_date": {
+          "raw": "2024-05-20",
+          "confidence": 0.99
+        },
+        "brand": {
+          "raw": "吉利",
+          "confidence": 0.99
+        },
+        "model": {
+          "raw": "星瑞1.5T",
+          "confidence": 0.99
+        }
+      }
+    },
+    {
+      "doc_id": "d4",
+      "doc_type": "发票",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N2777001",
+          "confidence": 0.99
+        },
+        "engine_no": {
+          "raw": "ABC9988",
+          "confidence": 0.99
+        },
+        "invoice_amount": {
+          "raw": "88000元",
+          "confidence": 0.99
+        },
+        "brand": {
+          "raw": "吉利",
+          "confidence": 0.99
+        },
+        "model": {
+          "raw": "星瑞1.5T",
+          "confidence": 0.99
+        }
+      }
+    },
+    {
+      "doc_id": "d5",
+      "doc_type": "身份证",
+      "fields": {
+        "owner_name": {
+          "raw": "王五",
+          "confidence": 0.99
+        },
+        "id_number": {
+          "raw": "330106199203034560",
+          "confidence": 0.99
+        },
+        "address": {
+          "raw": "浙江杭州市西湖区文三路88号",
+          "confidence": 0.99
+        }
+      }
+    }
+  ],
+  "expected_verdicts": {
+    "R_VIN_CROSS": "consistent",
+    "R_ENGINE_CROSS": "consistent",
+    "R_NAME_FUZZY": "consistent",
+    "R_BRAND_CROSS": "consistent",
+    "R_MODEL_CROSS": "consistent",
+    "R_ID_EXACT": "consistent",
+    "R_PLATE_CROSS": "consistent",
+    "R_AMOUNT_TOL": "consistent",
+    "R_DATE_CROSS": "consistent",
+    "R_REG_CERT_CROSS": "consistent",
+    "R_ADDRESS_FUZZY": "consistent",
+    "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+    "R_PLATE_IN_LIST": "consistent"
+  },
+  "meta": {
+    "field_source": "synthetic"
+  }
+}

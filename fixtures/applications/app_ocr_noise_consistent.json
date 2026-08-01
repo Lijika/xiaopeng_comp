@@ -1,0 +1,182 @@
+{
+  "application_id": "APP-OCR-OK",
+  "label": "consistent",
+  "documents": [
+    {
+      "doc_id": "reg",
+      "doc_type": "机动车登记证书",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA 4182 N2123456",
+          "confidence": 0.95
+        },
+        "engine_no": {
+          "raw": "EA888-123456",
+          "confidence": 0.95
+        },
+        "owner_name": {
+          "raw": "张　三",
+          "confidence": 0.95
+        },
+        "plate_no": {
+          "raw": "苏Ａ·１２３４５",
+          "confidence": 0.95
+        },
+        "reg_cert_no": {
+          "raw": "320100-123456",
+          "confidence": 0.95
+        },
+        "reg_date": {
+          "raw": "2024年5月18日",
+          "confidence": 0.95
+        },
+        "address": {
+          "raw": "江苏省南京市鼓楼区中山路100号",
+          "confidence": 0.95
+        },
+        "brand": {
+          "raw": "大众牌",
+          "confidence": 0.95
+        },
+        "model": {
+          "raw": "Passat 380TSI",
+          "confidence": 0.95
+        }
+      }
+    },
+    {
+      "doc_id": "pol",
+      "doc_type": "交强险保单",
+      "fields": {
+        "vin": {
+          "raw": "ＬＳＶＡＡ４１８２Ｎ２１２３４５６",
+          "confidence": 0.95
+        },
+        "engine_no": {
+          "raw": "EA888123456",
+          "confidence": 0.95
+        },
+        "insured_name": {
+          "raw": "张三",
+          "confidence": 0.95
+        },
+        "plate_no": {
+          "raw": "苏A12345",
+          "confidence": 0.95
+        },
+        "plate_list": {
+          "raw": "苏A·12345",
+          "confidence": 0.95
+        },
+        "brand": {
+          "raw": "大众",
+          "confidence": 0.95
+        },
+        "model": {
+          "raw": "PASSAT380TSI",
+          "confidence": 0.95
+        }
+      }
+    },
+    {
+      "doc_id": "lease",
+      "doc_type": "融资租赁合同",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N2123456",
+          "confidence": 0.95
+        },
+        "lessee_name": {
+          "raw": "张三",
+          "confidence": 0.95
+        },
+        "id_number": {
+          "raw": "320102199001011232",
+          "confidence": 0.95
+        },
+        "financed_amount": {
+          "raw": "￥128,000.00元",
+          "confidence": 0.95
+        },
+        "reg_cert_no": {
+          "raw": "320100123456",
+          "confidence": 0.95
+        },
+        "reg_date": {
+          "raw": "2024-05-18",
+          "confidence": 0.95
+        },
+        "brand": {
+          "raw": "大众",
+          "confidence": 0.95
+        },
+        "model": {
+          "raw": "passat380tsi",
+          "confidence": 0.95
+        }
+      }
+    },
+    {
+      "doc_id": "inv",
+      "doc_type": "发票",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N2123456",
+          "confidence": 0.95
+        },
+        "engine_no": {
+          "raw": "EA888123456",
+          "confidence": 0.95
+        },
+        "invoice_amount": {
+          "raw": "128000",
+          "confidence": 0.95
+        },
+        "brand": {
+          "raw": "大众",
+          "confidence": 0.95
+        },
+        "model": {
+          "raw": "PASSAT380TSI",
+          "confidence": 0.95
+        }
+      }
+    },
+    {
+      "doc_id": "id",
+      "doc_type": "身份证",
+      "fields": {
+        "owner_name": {
+          "raw": "张三",
+          "confidence": 0.95
+        },
+        "id_number": {
+          "raw": "320102199001011232",
+          "confidence": 0.95
+        },
+        "address": {
+          "raw": "江苏南京市鼓楼区中山路100号",
+          "confidence": 0.95
+        }
+      }
+    }
+  ],
+  "expected_verdicts": {
+    "R_VIN_CROSS": "consistent",
+    "R_ENGINE_CROSS": "consistent",
+    "R_NAME_FUZZY": "consistent",
+    "R_BRAND_CROSS": "consistent",
+    "R_MODEL_CROSS": "consistent",
+    "R_ID_EXACT": "consistent",
+    "R_PLATE_CROSS": "consistent",
+    "R_AMOUNT_TOL": "consistent",
+    "R_DATE_CROSS": "consistent",
+    "R_REG_CERT_CROSS": "consistent",
+    "R_ADDRESS_FUZZY": "consistent",
+    "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+    "R_PLATE_IN_LIST": "consistent"
+  },
+  "meta": {
+    "field_source": "synthetic"
+  }
+}

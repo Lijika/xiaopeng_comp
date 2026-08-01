@@ -1,0 +1,165 @@
+{
+  "application_id": "APP-ATK-BRAND-JV",
+  "label": "inconsistent",
+  "documents": [
+    {
+      "doc_id": "d1",
+      "doc_type": "机动车登记证书",
+      "fields": {
+        "brand": {
+          "raw": "一汽大众",
+          "confidence": 0.99
+        },
+        "vin": {
+          "raw": "LGXCE4CB0N0123456",
+          "confidence": 0.99
+        },
+        "engine_no": {
+          "raw": "ENGATK001",
+          "confidence": 0.99
+        },
+        "owner_name": {
+          "raw": "对抗甲",
+          "confidence": 0.99
+        },
+        "plate_no": {
+          "raw": "苏A11111",
+          "confidence": 0.99
+        },
+        "reg_cert_no": {
+          "raw": "RCATK01",
+          "confidence": 0.99
+        },
+        "reg_date": {
+          "raw": "2024-01-10",
+          "confidence": 0.99
+        },
+        "address": {
+          "raw": "江苏省南京市鼓楼区对抗路1号",
+          "confidence": 0.99
+        }
+      }
+    },
+    {
+      "doc_id": "d2",
+      "doc_type": "交强险保单",
+      "fields": {
+        "brand": {
+          "raw": "上汽大众",
+          "confidence": 0.99
+        },
+        "vin": {
+          "raw": "LGXCE4CB0N0123456",
+          "confidence": 0.99
+        },
+        "engine_no": {
+          "raw": "ENGATK001",
+          "confidence": 0.99
+        },
+        "insured_name": {
+          "raw": "对抗甲",
+          "confidence": 0.99
+        },
+        "plate_no": {
+          "raw": "苏A11111",
+          "confidence": 0.99
+        },
+        "plate_list": {
+          "raw": "苏A11111",
+          "confidence": 0.99
+        }
+      }
+    },
+    {
+      "doc_id": "d3",
+      "doc_type": "融资租赁合同",
+      "fields": {
+        "brand": {
+          "raw": "一汽-大众",
+          "confidence": 0.99
+        },
+        "vin": {
+          "raw": "LGXCE4CB0N0123456",
+          "confidence": 0.99
+        },
+        "lessee_name": {
+          "raw": "对抗甲",
+          "confidence": 0.99
+        },
+        "id_number": {
+          "raw": "32010219900101111X",
+          "confidence": 0.99
+        },
+        "financed_amount": {
+          "raw": "100000",
+          "confidence": 0.99
+        },
+        "reg_cert_no": {
+          "raw": "RCATK01",
+          "confidence": 0.99
+        },
+        "reg_date": {
+          "raw": "2024-01-10",
+          "confidence": 0.99
+        }
+      }
+    },
+    {
+      "doc_id": "d4",
+      "doc_type": "发票",
+      "fields": {
+        "brand": {
+          "raw": "大众",
+          "confidence": 0.99
+        },
+        "vin": {
+          "raw": "LGXCE4CB0N0123456",
+          "confidence": 0.99
+        },
+        "engine_no": {
+          "raw": "ENGATK001",
+          "confidence": 0.99
+        },
+        "invoice_amount": {
+          "raw": "100000",
+          "confidence": 0.99
+        }
+      }
+    },
+    {
+      "doc_id": "d5",
+      "doc_type": "身份证",
+      "fields": {
+        "owner_name": {
+          "raw": "对抗甲",
+          "confidence": 0.99
+        },
+        "id_number": {
+          "raw": "32010219900101111X",
+          "confidence": 0.99
+        },
+        "address": {
+          "raw": "江苏南京市鼓楼区对抗路1号",
+          "confidence": 0.99
+        }
+      }
+    }
+  ],
+  "expected_verdicts": {
+    "R_VIN_CROSS": "consistent",
+    "R_ENGINE_CROSS": "consistent",
+    "R_NAME_FUZZY": "consistent",
+    "R_BRAND_CROSS": "inconsistent",
+    "R_ID_EXACT": "consistent",
+    "R_PLATE_CROSS": "consistent",
+    "R_AMOUNT_TOL": "consistent",
+    "R_DATE_CROSS": "consistent",
+    "R_REG_CERT_CROSS": "consistent",
+    "R_ADDRESS_FUZZY": "consistent",
+    "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+    "R_PLATE_IN_LIST": "consistent"
+  },
+  "meta": {
+    "field_source": "synthetic"
+  }
+}

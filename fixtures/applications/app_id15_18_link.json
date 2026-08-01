@@ -1,0 +1,148 @@
+{
+  "application_id": "APP-ID15-18",
+  "label": "consistent",
+  "documents": [
+    {
+      "doc_id": "reg",
+      "doc_type": "机动车登记证书",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N3000104",
+          "confidence": 0.99
+        },
+        "engine_no": {
+          "raw": "ENGID1",
+          "confidence": 0.99
+        },
+        "owner_name": {
+          "raw": "证件丁",
+          "confidence": 0.99
+        },
+        "plate_no": {
+          "raw": "苏A71004",
+          "confidence": 0.99
+        },
+        "reg_cert_no": {
+          "raw": "RCBASE",
+          "confidence": 0.99
+        },
+        "reg_date": {
+          "raw": "2024-07-01",
+          "confidence": 0.99
+        },
+        "address": {
+          "raw": "江苏省南京市鼓楼区商业路1号",
+          "confidence": 0.99
+        }
+      }
+    },
+    {
+      "doc_id": "pol",
+      "doc_type": "交强险保单",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N3000104",
+          "confidence": 0.99
+        },
+        "engine_no": {
+          "raw": "ENGID1",
+          "confidence": 0.99
+        },
+        "insured_name": {
+          "raw": "证件丁",
+          "confidence": 0.99
+        },
+        "plate_no": {
+          "raw": "苏A71004",
+          "confidence": 0.99
+        },
+        "plate_list": {
+          "raw": "苏A71004",
+          "confidence": 0.99
+        }
+      }
+    },
+    {
+      "doc_id": "lease",
+      "doc_type": "融资租赁合同",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N3000104",
+          "confidence": 0.99
+        },
+        "lessee_name": {
+          "raw": "证件丁",
+          "confidence": 0.99
+        },
+        "id_number": {
+          "raw": "320102900101703",
+          "confidence": 0.99
+        },
+        "financed_amount": {
+          "raw": "60000",
+          "confidence": 0.99
+        },
+        "reg_cert_no": {
+          "raw": "RCBASE",
+          "confidence": 0.99
+        },
+        "reg_date": {
+          "raw": "2024-07-01",
+          "confidence": 0.99
+        }
+      }
+    },
+    {
+      "doc_id": "inv",
+      "doc_type": "发票",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N3000104",
+          "confidence": 0.99
+        },
+        "engine_no": {
+          "raw": "ENGID1",
+          "confidence": 0.99
+        },
+        "invoice_amount": {
+          "raw": "60000",
+          "confidence": 0.99
+        }
+      }
+    },
+    {
+      "doc_id": "id",
+      "doc_type": "身份证",
+      "fields": {
+        "owner_name": {
+          "raw": "证件丁",
+          "confidence": 0.99
+        },
+        "id_number": {
+          "raw": "320102199001017036",
+          "confidence": 0.99
+        },
+        "address": {
+          "raw": "江苏南京市鼓楼区商业路1号",
+          "confidence": 0.99
+        }
+      }
+    }
+  ],
+  "expected_verdicts": {
+    "R_VIN_CROSS": "consistent",
+    "R_ENGINE_CROSS": "consistent",
+    "R_NAME_FUZZY": "consistent",
+    "R_ID_EXACT": "consistent",
+    "R_PLATE_CROSS": "consistent",
+    "R_AMOUNT_TOL": "consistent",
+    "R_DATE_CROSS": "consistent",
+    "R_REG_CERT_CROSS": "consistent",
+    "R_ADDRESS_FUZZY": "consistent",
+    "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+    "R_PLATE_IN_LIST": "consistent"
+  },
+  "meta": {
+    "field_source": "synthetic"
+  }
+}

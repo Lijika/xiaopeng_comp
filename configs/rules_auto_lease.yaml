@@ -1,0 +1,211 @@
+package: auto_lease
+version: "1.9.0"
+changelog:
+  - "1.9.0 Round9: ADV-16/17 CLOSED (underscore money, placeholder reason_codes); VIN strict default documented"
+  - "1.8.0 Round8: used-car transfer_name_policy=uncertain; R_NAME docs include 发票/buyer; money underscore; placeholders"
+  - "1.7.0 Round7: reason_codes, package version, metrics.html, fixtures>=40"
+  - "1.6.0 Round6: ID15/18 link, name confusable, optional VIN check digit"
+  - "1.5.0 Round5: miss_rate gate, amount rel_tol 0.0001, sci notation"
+  - "1.0.0 MVP baseline"
+low_confidence_threshold: 0.6
+# null/omitted: critical rules auto-enable require_all_docs
+default_require_all_docs: null
+# null = ambiguous slash dates (01/02/2023) → normalize fail → uncertain (ADV-03)
+date_order: null
+# VIN I/O/Q OCR fix on; different raw that only match after fix → uncertain (ADV-02)
+vin_fix_ioq: true
+# ISO 3779 check digit (default false for synthetic fixtures; enable in production)
+vin_strict_check_digit: false
+# 15-digit ID → 18 with century 19 for cross-doc link (safe historical rule)
+expand_id15_to_18: true
+# ADV-05: critical rules still surface clear mismatch under low OCR conf
+critical_low_conf_compare: true
+
+field_aliases:
+  owner_name:
+    - owner_name
+    - lessee_name
+    - insured_name
+    - buyer_name
+    - 姓名
+  vin:
+    - vin
+    - vehicle_id
+    - 车辆识别代号
+  engine_no:
+    - engine_no
+    - 发动机号
+  plate_no:
+    - plate_no
+    - plate_number
+    - 号牌号码
+    - 车牌
+  id_number:
+    - id_number
+    - id_no
+    - 身份证号
+    - 证件号
+  financed_amount:
+    - financed_amount
+    - invoice_amount
+    - loan_amount
+    - amount
+    - 金额
+  reg_cert_no:
+    - reg_cert_no
+    - 登记证编号
+    - 登记证书编号
+  # reg_date must NOT alias contract_date (登记日 ≠ 合同签署日)
+  reg_date:
+    - reg_date
+    - issue_date
+    - 登记日期
+  contract_date:
+    - contract_date
+    - sign_date
+    - 合同日期
+  address:
+    - address
+    - owner_address
+    - 地址
+  plate_list:
+    - plate_list
+    - 号牌列表
+  brand:
+    - brand
+    - vehicle_brand
+    - 品牌
+  model:
+    - model
+    - vehicle_model
+    - 型号
+    - 车型
+
+rules:
+  - id: R_VIN_CROSS
+    name: VIN跨单据一致
+    type: exact
+    field: vin
+    docs: [机动车登记证书, 交强险保单, 融资租赁合同, 发票]
+    on_missing: uncertain
+    severity: critical
+    require_all_docs: true
+
+  - id: R_ENGINE_CROSS
+    name: 发动机号跨单据一致
+    type: exact
+    field: engine_no
+    docs: [机动车登记证书, 交强险保单, 发票]
+    on_missing: uncertain
+    severity: critical
+    require_all_docs: true
+
+  - id: R_NAME_FUZZY
+    name: 姓名模糊一致
+    type: fuzzy
+    field: owner_name
+    # 含发票 buyer_name（别名链）— ADV-21
+    docs: [机动车登记证书, 交强险保单, 融资租赁合同, 身份证, 发票]
+    threshold: 0.88
+    uncertain_band: 0.12
+    on_missing: uncertain
+    severity: major
+    require_all_docs: false
+    # 二手车过户：登记证旧主 vs 承租/投保/证件/购方新主 → uncertain（ADV-19）
+    transfer_name_policy: uncertain
+    transfer_old_docs: [机动车登记证书]
+    transfer_new_docs: [交强险保单, 融资租赁合同, 身份证, 发票]
+
+  - id: R_BRAND_CROSS
+    name: 品牌跨单据一致
+    type: exact
+    field: brand
+    docs: [机动车登记证书, 交强险保单, 融资租赁合同, 发票]
+    on_missing: skip
+    severity: major
+    require_all_docs: false
+
+  - id: R_MODEL_CROSS
+    name: 型号跨单据一致
+    type: exact
+    field: model
+    docs: [机动车登记证书, 交强险保单, 融资租赁合同, 发票]
+    on_missing: skip
+    severity: major
+    require_all_docs: false
+
+  - id: R_ID_EXACT
+    name: 证件号一致
+    type: exact
+    field: id_number
+    docs: [融资租赁合同, 身份证]
+    on_missing: uncertain
+    severity: critical
+    require_all_docs: true
+
+  - id: R_PLATE_CROSS
+    name: 车牌号一致
+    type: exact
+    field: plate_no
+    docs: [机动车登记证书, 交强险保单]
+    on_missing: uncertain
+    severity: major
+    require_all_docs: false
+
+  - id: R_AMOUNT_TOL
+    name: 融资金额容差
+    type: numeric_tolerance
+    field: financed_amount
+    docs: [融资租赁合同, 发票]
+    # abs_tol=1 覆盖分位四舍五入；rel_tol 收紧至 0.01%（金融字段更严，Round5）
+    abs_tol: 1.0
+    rel_tol: 0.0001
+    on_missing: uncertain
+    severity: major
+    require_all_docs: false
+
+  - id: R_DATE_CROSS
+    name: 登记日期跨单据一致
+    type: exact
+    field: reg_date
+    docs: [机动车登记证书, 融资租赁合同]
+    on_missing: uncertain
+    severity: minor
+    require_all_docs: false
+
+  - id: R_REG_CERT_CROSS
+    name: 登记证编号一致
+    type: exact
+    field: reg_cert_no
+    docs: [机动车登记证书, 融资租赁合同]
+    on_missing: uncertain
+    severity: major
+    require_all_docs: false
+
+  - id: R_ADDRESS_FUZZY
+    name: 地址模糊一致
+    type: fuzzy
+    field: address
+    docs: [机动车登记证书, 身份证]
+    threshold: 0.85
+    uncertain_band: 0.05
+    on_missing: uncertain
+    severity: minor
+    require_all_docs: false
+
+  - id: R_ID_REQUIRED_IF_AMOUNT
+    name: 有融资金额则身份证必填
+    type: conditional_required
+    if_field_present: financed_amount
+    required_field: id_number
+    docs: [融资租赁合同]
+    severity: major
+
+  - id: R_PLATE_IN_LIST
+    name: 车牌在保单号牌列表中
+    type: list_contains
+    list_field: plate_list
+    item_field: plate_no
+    docs: [交强险保单, 机动车登记证书]
+    on_missing: uncertain
+    severity: minor

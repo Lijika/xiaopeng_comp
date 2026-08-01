@@ -1,0 +1,153 @@
+{
+  "application_id": "APP-DATE-DMY",
+  "label": "consistent",
+  "documents": [
+    {
+      "doc_id": "reg_cert",
+      "doc_type": "机动车登记证书",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N2777888",
+          "confidence": 0.95,
+          "source_page": 1
+        },
+        "engine_no": {
+          "raw": "WZ112233",
+          "confidence": 0.95
+        },
+        "owner_name": {
+          "raw": "王五",
+          "confidence": 0.95
+        },
+        "plate_no": {
+          "raw": "浙C·44444",
+          "confidence": 0.95
+        },
+        "reg_cert_no": {
+          "raw": "330300444555",
+          "confidence": 0.95
+        },
+        "reg_date": {
+          "raw": "13/02/2023",
+          "confidence": 0.95
+        },
+        "address": {
+          "raw": "浙江省温州市鹿城区府路8号",
+          "confidence": 0.95
+        }
+      }
+    },
+    {
+      "doc_id": "policy",
+      "doc_type": "交强险保单",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N2777888",
+          "confidence": 0.95
+        },
+        "engine_no": {
+          "raw": "WZ112233",
+          "confidence": 0.95
+        },
+        "insured_name": {
+          "raw": "王五",
+          "confidence": 0.95
+        },
+        "plate_no": {
+          "raw": "浙C44444",
+          "confidence": 0.95
+        },
+        "plate_list": {
+          "raw": "浙C44444",
+          "confidence": 0.95
+        }
+      }
+    },
+    {
+      "doc_id": "lease",
+      "doc_type": "融资租赁合同",
+      "fields": {
+        "lessee_name": {
+          "raw": "王五",
+          "confidence": 0.95
+        },
+        "financed_amount": {
+          "raw": "110000元",
+          "confidence": 0.95
+        },
+        "reg_cert_no": {
+          "raw": "330300444555",
+          "confidence": 0.95
+        },
+        "reg_date": {
+          "raw": "2023-02-13",
+          "confidence": 0.95
+        },
+        "contract_date": {
+          "raw": "15/03/2023",
+          "confidence": 0.95
+        },
+        "vin": {
+          "raw": "LSVAA4182N2777888",
+          "confidence": 0.95
+        },
+        "id_number": {
+          "raw": "330106199203034560",
+          "confidence": 0.95
+        }
+      }
+    },
+    {
+      "doc_id": "invoice",
+      "doc_type": "发票",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N2777888",
+          "confidence": 0.95
+        },
+        "engine_no": {
+          "raw": "WZ112233",
+          "confidence": 0.95
+        },
+        "invoice_amount": {
+          "raw": "110000",
+          "confidence": 0.95
+        }
+      }
+    },
+    {
+      "doc_id": "id_card",
+      "doc_type": "身份证",
+      "fields": {
+        "owner_name": {
+          "raw": "王五",
+          "confidence": 0.95
+        },
+        "address": {
+          "raw": "浙江温州市鹿城区府路8号",
+          "confidence": 0.95
+        },
+        "id_number": {
+          "raw": "330106199203034560",
+          "confidence": 0.95
+        }
+      }
+    }
+  ],
+  "expected_verdicts": {
+    "R_VIN_CROSS": "consistent",
+    "R_ENGINE_CROSS": "consistent",
+    "R_NAME_FUZZY": "consistent",
+    "R_ID_EXACT": "consistent",
+    "R_PLATE_CROSS": "consistent",
+    "R_AMOUNT_TOL": "consistent",
+    "R_DATE_CROSS": "consistent",
+    "R_REG_CERT_CROSS": "consistent",
+    "R_ADDRESS_FUZZY": "consistent",
+    "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+    "R_PLATE_IN_LIST": "consistent"
+  },
+  "meta": {
+    "field_source": "synthetic"
+  }
+}

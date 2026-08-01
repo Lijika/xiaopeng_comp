@@ -1,0 +1,148 @@
+{
+  "application_id": "APP-ATK-DATE-AMBIG",
+  "label": "uncertain",
+  "documents": [
+    {
+      "doc_id": "d1",
+      "doc_type": "机动车登记证书",
+      "fields": {
+        "reg_date": {
+          "raw": "01/02/2023",
+          "confidence": 0.99
+        },
+        "vin": {
+          "raw": "LGXCE4CB0N0123456",
+          "confidence": 0.99
+        },
+        "engine_no": {
+          "raw": "E2",
+          "confidence": 0.99
+        },
+        "owner_name": {
+          "raw": "丙",
+          "confidence": 0.99
+        },
+        "plate_no": {
+          "raw": "苏A33333",
+          "confidence": 0.99
+        },
+        "reg_cert_no": {
+          "raw": "RC3",
+          "confidence": 0.99
+        },
+        "address": {
+          "raw": "江苏省南京市秦淮区3号",
+          "confidence": 0.99
+        }
+      }
+    },
+    {
+      "doc_id": "d2",
+      "doc_type": "交强险保单",
+      "fields": {
+        "vin": {
+          "raw": "LGXCE4CB0N0123456",
+          "confidence": 0.99
+        },
+        "engine_no": {
+          "raw": "E2",
+          "confidence": 0.99
+        },
+        "insured_name": {
+          "raw": "丙",
+          "confidence": 0.99
+        },
+        "plate_no": {
+          "raw": "苏A33333",
+          "confidence": 0.99
+        },
+        "plate_list": {
+          "raw": "苏A33333",
+          "confidence": 0.99
+        }
+      }
+    },
+    {
+      "doc_id": "d3",
+      "doc_type": "融资租赁合同",
+      "fields": {
+        "reg_date": {
+          "raw": "2023-02-01",
+          "confidence": 0.99
+        },
+        "vin": {
+          "raw": "LGXCE4CB0N0123456",
+          "confidence": 0.99
+        },
+        "lessee_name": {
+          "raw": "丙",
+          "confidence": 0.99
+        },
+        "id_number": {
+          "raw": "320102199001011339",
+          "confidence": 0.99
+        },
+        "financed_amount": {
+          "raw": "80000",
+          "confidence": 0.99
+        },
+        "reg_cert_no": {
+          "raw": "RC3",
+          "confidence": 0.99
+        }
+      }
+    },
+    {
+      "doc_id": "d4",
+      "doc_type": "发票",
+      "fields": {
+        "vin": {
+          "raw": "LGXCE4CB0N0123456",
+          "confidence": 0.99
+        },
+        "engine_no": {
+          "raw": "E2",
+          "confidence": 0.99
+        },
+        "invoice_amount": {
+          "raw": "80000",
+          "confidence": 0.99
+        }
+      }
+    },
+    {
+      "doc_id": "d5",
+      "doc_type": "身份证",
+      "fields": {
+        "owner_name": {
+          "raw": "丙",
+          "confidence": 0.99
+        },
+        "id_number": {
+          "raw": "320102199001011339",
+          "confidence": 0.99
+        },
+        "address": {
+          "raw": "江苏南京市秦淮区3号",
+          "confidence": 0.99
+        }
+      }
+    }
+  ],
+  "expected_verdicts": {
+    "R_VIN_CROSS": "consistent",
+    "R_ENGINE_CROSS": "consistent",
+    "R_NAME_FUZZY": "consistent",
+    "R_ID_EXACT": "consistent",
+    "R_PLATE_CROSS": "consistent",
+    "R_AMOUNT_TOL": "consistent",
+    "R_DATE_CROSS": "uncertain",
+    "R_REG_CERT_CROSS": "consistent",
+    "R_ADDRESS_FUZZY": "consistent",
+    "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+    "R_PLATE_IN_LIST": "consistent"
+  },
+  "meta": {
+    "field_source": "synthetic"
+  }
+}

@@ -1,0 +1,114 @@
+{
+  "version": 1,
+  "description": "可维护实体知识库：地址/机构/车牌前缀别名（赛题 D1）",
+  "address_aliases": {
+    "南京市": "南京",
+    "苏州市": "苏州",
+    "无锡市": "无锡",
+    "杭州市": "杭州",
+    "宁波市": "宁波",
+    "广州市": "广州",
+    "深圳市": "深圳",
+    "成都市": "成都",
+    "武汉市": "武汉",
+    "鼓楼区": "鼓楼",
+    "玄武区": "玄武",
+    "建邺区": "建邺",
+    "江宁区": "江宁",
+    "浦东新区": "浦东",
+    "高新开发区": "高新区",
+    "高新技术开发区": "高新区",
+    "高新技术产业开发区": "高新区",
+    "江苏省南京市": "南京市",
+    "江苏南京": "南京市"
+  },
+  "org_aliases": {
+    "一汽-大众汽车有限公司": "一汽大众",
+    "上汽大众汽车有限公司": "上汽大众",
+    "比亚迪汽车工业有限公司": "比亚迪",
+    "中国人民财产保险股份有限公司": "人保财险",
+    "中国平安财产保险股份有限公司": "平安财险"
+  },
+  "plate_prefixes": {
+    "苏B": "江苏无锡",
+    "苏E": "江苏苏州",
+    "浙A": "浙江杭州",
+    "沪A": "上海",
+    "京A": "北京",
+    "粤B": "广东深圳",
+    "苏A": "江苏南京"
+  },
+  "graph": {
+    "version": 1,
+    "description": "轻量实体图：节点+同义边+上下位边（可维护；normalize 仍用 aliases 投影）",
+    "nodes": [
+      {
+        "id": "addr:nanjing",
+        "type": "city",
+        "label": "南京市"
+      },
+      {
+        "id": "addr:gaoxin",
+        "type": "district",
+        "label": "高新区"
+      },
+      {
+        "id": "addr:gxq_full",
+        "type": "alias",
+        "label": "高新技术产业开发区"
+      },
+      {
+        "id": "org:picc",
+        "type": "insurer",
+        "label": "人保财险"
+      },
+      {
+        "id": "org:picc_full",
+        "type": "alias",
+        "label": "中国人民财产保险股份有限公司"
+      },
+      {
+        "id": "org:pingan",
+        "type": "insurer",
+        "label": "平安财险"
+      },
+      {
+        "id": "brand:faw-vw",
+        "type": "brand",
+        "label": "一汽大众"
+      },
+      {
+        "id": "brand:saic-vw",
+        "type": "brand",
+        "label": "上汽大众"
+      }
+    ],
+    "edges": [
+      {
+        "src": "addr:gxq_full",
+        "rel": "same_as",
+        "dst": "addr:gaoxin"
+      },
+      {
+        "src": "addr:gaoxin",
+        "rel": "part_of",
+        "dst": "addr:nanjing"
+      },
+      {
+        "src": "org:picc_full",
+        "rel": "same_as",
+        "dst": "org:picc"
+      },
+      {
+        "src": "org:pingan",
+        "rel": "type",
+        "dst": "insurer"
+      },
+      {
+        "src": "brand:faw-vw",
+        "rel": "not_same_as",
+        "dst": "brand:saic-vw"
+      }
+    ]
+  }
+}

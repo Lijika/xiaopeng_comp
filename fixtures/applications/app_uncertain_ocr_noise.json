@@ -1,0 +1,153 @@
+{
+  "application_id": "APP-UNC-OCR",
+  "label": "uncertain",
+  "documents": [
+    {
+      "doc_id": "reg_cert",
+      "doc_type": "机动车登记证书",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N2123999",
+          "confidence": 0.5,
+          "source_page": 1
+        },
+        "engine_no": {
+          "raw": "EA888-999",
+          "confidence": 0.5
+        },
+        "owner_name": {
+          "raw": "赵六",
+          "confidence": 0.5
+        },
+        "plate_no": {
+          "raw": "苏C11111",
+          "confidence": 0.5
+        },
+        "reg_cert_no": {
+          "raw": "320100111222",
+          "confidence": 0.5
+        },
+        "reg_date": {
+          "raw": "2022-08-08",
+          "confidence": 0.5
+        },
+        "address": {
+          "raw": "江苏省无锡市梁溪区中山路1号",
+          "confidence": 0.5
+        }
+      }
+    },
+    {
+      "doc_id": "policy",
+      "doc_type": "交强险保单",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N2123999",
+          "confidence": 0.5
+        },
+        "engine_no": {
+          "raw": "EA888999",
+          "confidence": 0.5
+        },
+        "insured_name": {
+          "raw": "赵六",
+          "confidence": 0.5
+        },
+        "plate_no": {
+          "raw": "苏C11111",
+          "confidence": 0.5
+        },
+        "plate_list": {
+          "raw": "苏C11111",
+          "confidence": 0.5
+        }
+      }
+    },
+    {
+      "doc_id": "lease",
+      "doc_type": "融资租赁合同",
+      "fields": {
+        "lessee_name": {
+          "raw": "赵六",
+          "confidence": 0.5
+        },
+        "financed_amount": {
+          "raw": "98000元",
+          "confidence": 0.5
+        },
+        "reg_cert_no": {
+          "raw": "320100111222",
+          "confidence": 0.5
+        },
+        "reg_date": {
+          "raw": "2022-08-08",
+          "confidence": 0.5
+        },
+        "contract_date": {
+          "raw": "2024-05-18",
+          "confidence": 0.5
+        },
+        "vin": {
+          "raw": "LSVAA4182N2123999",
+          "confidence": 0.5
+        },
+        "id_number": {
+          "raw": "320211199512125559",
+          "confidence": 0.5
+        }
+      }
+    },
+    {
+      "doc_id": "invoice",
+      "doc_type": "发票",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N2123999",
+          "confidence": 0.5
+        },
+        "engine_no": {
+          "raw": "EA888-999",
+          "confidence": 0.5
+        },
+        "invoice_amount": {
+          "raw": "98000",
+          "confidence": 0.5
+        }
+      }
+    },
+    {
+      "doc_id": "id_card",
+      "doc_type": "身份证",
+      "fields": {
+        "owner_name": {
+          "raw": "赵六",
+          "confidence": 0.5
+        },
+        "address": {
+          "raw": "江苏无锡市梁溪区中山路1号",
+          "confidence": 0.5
+        },
+        "id_number": {
+          "raw": "320211199512125559",
+          "confidence": 0.5
+        }
+      }
+    }
+  ],
+  "expected_verdicts": {
+    "R_VIN_CROSS": "uncertain",
+    "R_ENGINE_CROSS": "uncertain",
+    "R_NAME_FUZZY": "uncertain",
+    "R_ID_EXACT": "uncertain",
+    "R_PLATE_CROSS": "uncertain",
+    "R_AMOUNT_TOL": "uncertain",
+    "R_DATE_CROSS": "uncertain",
+    "R_REG_CERT_CROSS": "uncertain",
+    "R_ADDRESS_FUZZY": "uncertain",
+    "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+    "R_PLATE_IN_LIST": "uncertain"
+  },
+  "meta": {
+    "field_source": "synthetic"
+  }
+}

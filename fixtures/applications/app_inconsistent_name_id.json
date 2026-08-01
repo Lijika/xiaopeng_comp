@@ -1,0 +1,153 @@
+{
+  "application_id": "APP-BAD-NAME-ID",
+  "label": "inconsistent",
+  "documents": [
+    {
+      "doc_id": "reg_cert",
+      "doc_type": "机动车登记证书",
+      "fields": {
+        "vin": {
+          "raw": "WVWZZZ3CZWE123456",
+          "confidence": 0.95,
+          "source_page": 1
+        },
+        "engine_no": {
+          "raw": "CJZ12345",
+          "confidence": 0.95
+        },
+        "owner_name": {
+          "raw": "陈七",
+          "confidence": 0.95
+        },
+        "plate_no": {
+          "raw": "沪A12345",
+          "confidence": 0.95
+        },
+        "reg_cert_no": {
+          "raw": "310100777888",
+          "confidence": 0.95
+        },
+        "reg_date": {
+          "raw": "2021-03-15",
+          "confidence": 0.95
+        },
+        "address": {
+          "raw": "上海市浦东新区世纪大道1号",
+          "confidence": 0.95
+        }
+      }
+    },
+    {
+      "doc_id": "policy",
+      "doc_type": "交强险保单",
+      "fields": {
+        "vin": {
+          "raw": "WVWZZZ3CZWE123456",
+          "confidence": 0.95
+        },
+        "engine_no": {
+          "raw": "CJZ12345",
+          "confidence": 0.95
+        },
+        "insured_name": {
+          "raw": "陈八",
+          "confidence": 0.95
+        },
+        "plate_no": {
+          "raw": "沪A12345",
+          "confidence": 0.95
+        },
+        "plate_list": {
+          "raw": "沪A12345",
+          "confidence": 0.95
+        }
+      }
+    },
+    {
+      "doc_id": "lease",
+      "doc_type": "融资租赁合同",
+      "fields": {
+        "lessee_name": {
+          "raw": "陈七",
+          "confidence": 0.95
+        },
+        "financed_amount": {
+          "raw": "88000.50元",
+          "confidence": 0.95
+        },
+        "reg_cert_no": {
+          "raw": "310100777888",
+          "confidence": 0.95
+        },
+        "reg_date": {
+          "raw": "2021-03-15",
+          "confidence": 0.95
+        },
+        "contract_date": {
+          "raw": "2024-05-18",
+          "confidence": 0.95
+        },
+        "vin": {
+          "raw": "WVWZZZ3CZWE123456",
+          "confidence": 0.95
+        },
+        "id_number": {
+          "raw": "31011519900101111X",
+          "confidence": 0.99
+        }
+      }
+    },
+    {
+      "doc_id": "invoice",
+      "doc_type": "发票",
+      "fields": {
+        "vin": {
+          "raw": "WVWZZZ3CZWE123456",
+          "confidence": 0.95
+        },
+        "engine_no": {
+          "raw": "CJZ12345",
+          "confidence": 0.95
+        },
+        "invoice_amount": {
+          "raw": "88000.50",
+          "confidence": 0.95
+        }
+      }
+    },
+    {
+      "doc_id": "id_card",
+      "doc_type": "身份证",
+      "fields": {
+        "owner_name": {
+          "raw": "陈七",
+          "confidence": 0.95
+        },
+        "address": {
+          "raw": "上海浦东新区世纪大道1号",
+          "confidence": 0.95
+        },
+        "id_number": {
+          "raw": "310115199001019998",
+          "confidence": 0.99
+        }
+      }
+    }
+  ],
+  "expected_verdicts": {
+    "R_VIN_CROSS": "consistent",
+    "R_ENGINE_CROSS": "consistent",
+    "R_NAME_FUZZY": "inconsistent",
+    "R_ID_EXACT": "inconsistent",
+    "R_PLATE_CROSS": "consistent",
+    "R_AMOUNT_TOL": "consistent",
+    "R_DATE_CROSS": "consistent",
+    "R_REG_CERT_CROSS": "consistent",
+    "R_ADDRESS_FUZZY": "consistent",
+    "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+    "R_PLATE_IN_LIST": "consistent"
+  },
+  "meta": {
+    "field_source": "synthetic"
+  }
+}

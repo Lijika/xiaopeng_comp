@@ -1,0 +1,186 @@
+{
+  "application_id": "APP-BRAND-OK",
+  "documents": [
+    {
+      "doc_id": "reg",
+      "doc_type": "机动车登记证书",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N3000012",
+          "confidence": 0.95
+        },
+        "engine_no": {
+          "raw": "ENG141414",
+          "confidence": 0.95
+        },
+        "owner_name": {
+          "raw": "刘癸",
+          "confidence": 0.95
+        },
+        "plate_no": {
+          "raw": "苏A10012",
+          "confidence": 0.95
+        },
+        "reg_cert_no": {
+          "raw": "320100123456",
+          "confidence": 0.95
+        },
+        "reg_date": {
+          "raw": "2024-05-18",
+          "confidence": 0.95
+        },
+        "address": {
+          "raw": "重庆市渝北区金开大道12号",
+          "confidence": 0.95
+        },
+        "brand": {
+          "raw": "比亚迪",
+          "confidence": 0.95
+        },
+        "model": {
+          "raw": "汉EV",
+          "confidence": 0.95
+        }
+      }
+    },
+    {
+      "doc_id": "pol",
+      "doc_type": "交强险保单",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N3000012",
+          "confidence": 0.95
+        },
+        "engine_no": {
+          "raw": "ENG141414",
+          "confidence": 0.95
+        },
+        "insured_name": {
+          "raw": "刘癸",
+          "confidence": 0.95
+        },
+        "plate_no": {
+          "raw": "苏A10012",
+          "confidence": 0.95
+        },
+        "plate_list": {
+          "raw": "苏A10012",
+          "confidence": 0.95
+        },
+        "brand": {
+          "raw": "比亚迪",
+          "confidence": 0.95
+        },
+        "model": {
+          "raw": "汉EV",
+          "confidence": 0.95
+        }
+      }
+    },
+    {
+      "doc_id": "lease",
+      "doc_type": "融资租赁合同",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N3000012",
+          "confidence": 0.95
+        },
+        "lessee_name": {
+          "raw": "刘癸",
+          "confidence": 0.95
+        },
+        "id_number": {
+          "raw": "510102199404044448",
+          "confidence": 0.95
+        },
+        "financed_amount": {
+          "raw": "128000",
+          "confidence": 0.95
+        },
+        "reg_cert_no": {
+          "raw": "320100123456",
+          "confidence": 0.95
+        },
+        "reg_date": {
+          "raw": "2024-05-18",
+          "confidence": 0.95
+        },
+        "contract_date": {
+          "raw": "2024-06-01",
+          "confidence": 0.95
+        },
+        "brand": {
+          "raw": "比亚迪",
+          "confidence": 0.95
+        },
+        "model": {
+          "raw": "汉EV",
+          "confidence": 0.95
+        }
+      }
+    },
+    {
+      "doc_id": "inv",
+      "doc_type": "发票",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N3000012",
+          "confidence": 0.95
+        },
+        "engine_no": {
+          "raw": "ENG141414",
+          "confidence": 0.95
+        },
+        "invoice_amount": {
+          "raw": "128000",
+          "confidence": 0.95
+        },
+        "brand": {
+          "raw": "比亚迪",
+          "confidence": 0.95
+        },
+        "model": {
+          "raw": "汉EV",
+          "confidence": 0.95
+        }
+      }
+    },
+    {
+      "doc_id": "id",
+      "doc_type": "身份证",
+      "fields": {
+        "owner_name": {
+          "raw": "刘癸",
+          "confidence": 0.95
+        },
+        "id_number": {
+          "raw": "510102199404044448",
+          "confidence": 0.95
+        },
+        "address": {
+          "raw": "重庆市渝北区金开大道12号",
+          "confidence": 0.95
+        }
+      }
+    }
+  ],
+  "label": "consistent",
+  "expected_verdicts": {
+    "R_VIN_CROSS": "consistent",
+    "R_ENGINE_CROSS": "consistent",
+    "R_NAME_FUZZY": "consistent",
+    "R_BRAND_CROSS": "consistent",
+    "R_MODEL_CROSS": "consistent",
+    "R_ID_EXACT": "consistent",
+    "R_PLATE_CROSS": "consistent",
+    "R_AMOUNT_TOL": "consistent",
+    "R_DATE_CROSS": "consistent",
+    "R_REG_CERT_CROSS": "consistent",
+    "R_ADDRESS_FUZZY": "consistent",
+    "R_ID_REQUIRED_IF_AMOUNT": "consistent",
+    "R_PLATE_IN_LIST": "consistent"
+  },
+  "meta": {
+    "field_source": "synthetic"
+  }
+}
