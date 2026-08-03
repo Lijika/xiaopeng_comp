@@ -1,0 +1,82 @@
+{
+  "schema_version": "s02-source-conformance/1",
+  "adapter_build": "s02-registered-source-adapters/1",
+  "hash_policy": "sha256_exact_source_bytes_preserved_as_source_result_sha256",
+  "registered_shapes": [
+    {
+      "source_shape": "step2-page-order/unversioned",
+      "adapter_id": "step2-page-order",
+      "adapter_version": "1",
+      "occurrence_counter": "pages[].detections[]",
+      "accepted_top_level": ["pages"],
+      "unsupported_top_level": ["generated_time", "sample_id", "statistics", "warnings"],
+      "unsupported_facts": [
+        "detection.class_id",
+        "page.has_rec_marker",
+        "page.has_reg_marker",
+        "page.inferred",
+        "page.page_numbers",
+        "page.page_type"
+      ]
+    },
+    {
+      "source_shape": "step2-slots/v1",
+      "adapter_id": "step2-slots",
+      "adapter_version": "1",
+      "occurrence_counter": "slots[]",
+      "accepted_top_level": ["n_slots", "schema", "slots"],
+      "unsupported_top_level": ["doc_type", "note", "sample_id", "source"],
+      "unsupported_facts": ["slot.page_order", "slot.page_type"]
+    },
+    {
+      "source_shape": "ocr-aggregate/unversioned",
+      "adapter_id": "ocr-aggregate",
+      "adapter_version": "1",
+      "occurrence_counter": "fields.*.sources[]",
+      "accepted_top_level": ["fields"],
+      "unsupported_top_level": ["sample_id", "statistics", "warnings"],
+      "unsupported_facts": ["field.consistent"]
+    },
+    {
+      "source_shape": "ocr-detection/unversioned",
+      "adapter_id": "ocr-detection",
+      "adapter_version": "1",
+      "occurrence_counter": "per_image_results[].detections[]",
+      "accepted_top_level": ["per_image_results"],
+      "unsupported_top_level": ["generated_time", "sample_id", "statistics", "warnings"],
+      "unsupported_facts": ["detection.class_id"]
+    },
+    {
+      "source_shape": "external-ocr/v1",
+      "adapter_id": "external-ocr",
+      "adapter_version": "1",
+      "occurrence_counter": "documents[].fields.*",
+      "accepted_top_level": ["documents", "ocr_model", "ocr_version", "schema_version"],
+      "unsupported_top_level": ["application_id", "expected_verdicts", "label"],
+      "unsupported_facts": ["document.doc_id", "document.doc_type", "field.field_type"]
+    }
+  ],
+  "caller_reconciliation": [
+    {
+      "legacy_id": "A07",
+      "legacy_surface": "step2_page_order",
+      "s02_status": "source_facing_replaced",
+      "legacy_target_authority_writes": false,
+      "retirement_status": "deferred_until_caller_zero_and_rollback_gate"
+    },
+    {
+      "legacy_id": "A08",
+      "legacy_surface": "step2_slots",
+      "s02_status": "conformance_input_only",
+      "legacy_target_authority_writes": false,
+      "retirement_status": "deferred_until_all_manifests_reconciled"
+    },
+    {
+      "legacy_id": "A09",
+      "legacy_surface": "external_ocr_import",
+      "s02_status": "offline_fixture_path_only",
+      "legacy_target_authority_writes": false,
+      "retirement_status": "deferred_until_caller_zero_and_rollback_gate"
+    }
+  ]
+}

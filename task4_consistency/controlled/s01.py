@@ -13,7 +13,7 @@ import secrets
 import tempfile
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
@@ -37,11 +37,21 @@ from .s01_checker import (
     TargetRunResult as _RunResult,
 )
 from .s01_store import SQLiteTargetStore, StaleStoreRevision
+from .s02 import (
+    ControlledObject,
+    RegisteredSource,
+    RegisteredSourceBoundary,
+    S02CanonicalEnvelope,
+    S02IntakeError,
+    is_registered_scope,
+)
 
 
 class AdmissionDisposition(str, Enum):
     ACCEPTED = "accepted"
     REJECTED = "rejected"
+    QUARANTINED = "quarantined"
+    AWAITING_PREDECESSOR = "awaiting_predecessor"
 
 
 @dataclass(frozen=True)
@@ -52,8 +62,8 @@ class AdmissionResult:
     job_id: str | None = None
     reason_code: str | None = None
     replayed: bool = False
-    lifecycle_revision: int = 0
-    evidence_revision: int = 0
+    lifecycle_revision: int | None = 0
+    evidence_revision: int | None = 0
     audit_recorded: bool = False
     envelope_version: str | None = None
     schema_version: str | None = None
@@ -77,6 +87,22 @@ class AdmissionResult:
     adapter_version: str | None = None
     source_sha256: str | None = None
     artifact_manifest_digest: str | None = None
+    retryable: bool = False
+    responsible_party: str | None = None
+    recovery_action: str | None = None
+    related_reasons: tuple[str, ...] = ()
+    fact_counts: dict[str, int] = field(default_factory=dict)
+    gate_results: tuple[str, ...] = ()
+    real_cross_document_opportunities: int | None = None
+    performance_status: str | None = None
+    source_registration_digest: str | None = None
+    source_revision: int | None = None
+
+    @property
+    def claim_label(self) -> str | None:
+        if self.performance_status == "not_estimable":
+            return "R-OBSERVED"
+        return None
 
 
 @dataclass(frozen=True)
@@ -259,6 +285,8 @@ class ControlledScenarioService:
         state_path: str | Path | None = None,
         worker_identity: str = "s01-worker",
         clock: Callable[[], int] | None = None,
+        registered_sources: tuple[RegisteredSource, ...] = (),
+        controlled_objects: tuple[ControlledObject, ...] = (),
     ) -> None:
         if not worker_identity or worker_identity.strip() != worker_identity:
             raise ValueError("worker identity must be a non-empty canonical value")
@@ -275,6 +303,9 @@ class ControlledScenarioService:
         )
         self._worker_identity = worker_identity
         self._clock = clock or (lambda: int(time.time()))
+        self._registered_source_boundary = RegisteredSourceBoundary(
+            registered_sources, controlled_objects
+        )
         if state_path is None:
             raise ValueError("state_path is required for the S01 target authority")
         self._store = _TargetStore(state_path)
@@ -400,6 +431,164 @@ class ControlledScenarioService:
                     envelope, result, principal=command_principal
                 )
             return result
+
+    def submit_registered(
+        self,
+        *,
+        submission: dict[str, Any],
+        idempotency_key: str,
+        principal: S01CommandPrincipal | None = None,
+    ) -> AdmissionResult:
+        """Verify and atomically admit one registered R-OBSERVED envelope."""
+        if principal is None or not self._valid_registered_principal(principal):
+            return self._registered_rejected("intake.forbidden")
+        if not self._valid_idempotency_key(idempotency_key):
+            return self._registered_rejected("intake.idempotency_key_invalid")
+        try:
+            command_fingerprint = self._registered_source_boundary.command_fingerprint(
+                submission
+            )
+        except S02IntakeError as error:
+            return self._registered_failure_result(error)
+        workload_id = (
+            str(submission.get("workload_identity_id") or "")
+            if isinstance(submission, dict)
+            else ""
+        )
+        binding_key = self._registered_idempotency_binding_key(
+            principal, idempotency_key, workload_id
+        )
+
+        with self._lock:
+            self._reload_store()
+            previous = self._store.idempotency.get(binding_key)
+            if previous is not None:
+                previous_fingerprint, previous_result = previous
+                if previous_fingerprint == command_fingerprint:
+                    return self._registered_replay(previous_result)
+                return self._registered_idempotency_conflict(previous_result)
+
+        try:
+            envelope = self._registered_source_boundary.canonicalize(
+                submission,
+                scope=principal.scope,
+                source_system_id=principal.source_id,
+            )
+        except S02IntakeError as error:
+            with self._lock:
+                self._reload_store()
+                return self._record_registered_disposition(
+                    error=error,
+                    command_fingerprint=command_fingerprint,
+                    binding_key=binding_key,
+                    principal=principal,
+                    submission=submission if isinstance(submission, dict) else {},
+                )
+
+        with self._lock:
+            self._reload_store()
+            previous = self._store.idempotency.get(binding_key)
+            if previous is not None:
+                previous_fingerprint, previous_result = previous
+                if previous_fingerprint == command_fingerprint:
+                    return self._registered_replay(previous_result)
+                return self._registered_idempotency_conflict(previous_result)
+
+            accepted = [
+                event
+                for event in self._store.audit_events
+                if event.get("action") == "controlled_admission"
+                and event.get("result") == "accepted"
+                and event.get("scope") == principal.scope
+                and isinstance(event.get("envelope"), dict)
+                and event["envelope"].get("track") == "R-OBSERVED"
+            ]
+            same_revision = [
+                event
+                for event in accepted
+                if event["envelope"].get("stream_id") == envelope.stream_id
+                and event["envelope"].get("source_revision")
+                == envelope.source_revision
+            ]
+            if same_revision:
+                event = same_revision[0]
+                if event.get("envelope_fingerprint") == envelope.fingerprint:
+                    existing = self._store.receipts.get(str(event.get("receipt_id")))
+                    if isinstance(existing, AdmissionResult):
+                        return self._registered_replay(existing)
+                conflict = S02IntakeError(
+                    "quarantined",
+                    "intake.source_revision_conflict",
+                    responsible_party="source_owner",
+                    recovery_action="reconcile_the_source_revision_history",
+                    gate_results=(
+                        "identity:verified",
+                        "contract:verified",
+                        "object:verified",
+                        "causality:failed",
+                    ),
+                    adapter_id=envelope.adapter_id,
+                    adapter_version=envelope.adapter_version,
+                    registration_digest=envelope.registration_digest,
+                )
+                return self._record_registered_disposition(
+                    error=conflict,
+                    command_fingerprint=command_fingerprint,
+                    binding_key=binding_key,
+                    principal=principal,
+                    submission=submission,
+                    envelope=envelope,
+                )
+            if envelope.source_revision != 1:
+                predecessor_exists = any(
+                    event["envelope"].get("stream_id") == envelope.stream_id
+                    and event["envelope"].get("source_revision")
+                    == envelope.predecessor_revision
+                    for event in accepted
+                )
+                error = S02IntakeError(
+                    "rejected" if predecessor_exists else "awaiting_predecessor",
+                    (
+                        "evidence.late_input_requires_reopen"
+                        if predecessor_exists
+                        else "intake.sequence_gap"
+                    ),
+                    responsible_party=(
+                        "lifecycle_owner" if predecessor_exists else "source_owner"
+                    ),
+                    recovery_action=(
+                        "use_the_later_reopen_contract"
+                        if predecessor_exists
+                        else "submit_and_reconcile_the_declared_predecessor"
+                    ),
+                    gate_results=(
+                        "identity:verified",
+                        "contract:verified",
+                        "object:verified",
+                        "causality:failed",
+                    ),
+                    adapter_id=envelope.adapter_id,
+                    adapter_version=envelope.adapter_version,
+                    registration_digest=envelope.registration_digest,
+                )
+                return self._record_registered_disposition(
+                    error=error,
+                    command_fingerprint=command_fingerprint,
+                    binding_key=binding_key,
+                    principal=principal,
+                    submission=submission,
+                    envelope=envelope,
+                )
+            if not self.audit_available:
+                return self._registered_rejected("intake.audit_unavailable")
+            if not self.storage_available:
+                return self._registered_rejected("intake.storage_unavailable")
+            return self._admit_registered(
+                envelope,
+                principal=principal,
+                binding_key=binding_key,
+                command_fingerprint=command_fingerprint,
+            )
 
     def stop_new_cohort(
         self,
@@ -963,6 +1152,7 @@ class ControlledScenarioService:
         ttl_seconds: int,
         subject: str,
         roles: tuple[str, ...],
+        scope: str | None = None,
     ) -> tuple[str, dict[str, Any]]:
         if ttl_seconds <= 0:
             raise ValueError("session TTL must be positive")
@@ -971,6 +1161,8 @@ class ControlledScenarioService:
         session_roles = tuple(dict.fromkeys(roles))
         if not session_roles or set(session_roles) - {"integrator", "reviewer"}:
             raise ValueError("session roles must be registered demo roles")
+        if scope is not None and not self.is_registered_scope(scope):
+            raise ValueError("registered session scope is invalid")
         self._purge_expired_sessions(now=float(now))
         for _ in range(3):
             with self._lock:
@@ -982,7 +1174,7 @@ class ControlledScenarioService:
                     "demo_session_id": session_id,
                     "subject": subject,
                     "roles": list(session_roles),
-                    "scope": f"{self._SESSION_SCOPE_PREFIX}{session_id}",
+                    "scope": scope or f"{self._SESSION_SCOPE_PREFIX}{session_id}",
                     "issued_at": float(now),
                     "expires_at": float(now) + ttl_seconds,
                     "cleanup_due_at": float(now) + self._DEMO_RETENTION_SECONDS,
@@ -991,17 +1183,18 @@ class ControlledScenarioService:
                 staged = copy.deepcopy(self._store)
                 self._remove_expired_sessions(staged, now=float(now))
                 staged.sessions[token_digest] = principal
-                staged.demo_sessions.append(
-                    {
-                        "demo_session_id": session_id,
-                        "scope": principal["scope"],
-                        "token_digest": token_digest,
-                        "issued_at": principal["issued_at"],
-                        "expires_at": principal["expires_at"],
-                        "cleanup_due_at": principal["cleanup_due_at"],
-                        "policy": "public-demo-retention/1",
-                    }
-                )
+                if scope is None:
+                    staged.demo_sessions.append(
+                        {
+                            "demo_session_id": session_id,
+                            "scope": principal["scope"],
+                            "token_digest": token_digest,
+                            "issued_at": principal["issued_at"],
+                            "expires_at": principal["expires_at"],
+                            "cleanup_due_at": principal["cleanup_due_at"],
+                            "policy": "public-demo-retention/1",
+                        }
+                    )
                 try:
                     staged.persist()
                 except StaleStoreRevision:
@@ -1366,6 +1559,9 @@ class ControlledScenarioService:
     def _projection_from_authority(
         self, application_id: str, *, projection_watermark: int
     ) -> dict[str, Any]:
+        application = self._store.applications.get(application_id)
+        if not isinstance(application, dict):
+            raise RuntimeError("projection application authority is unavailable")
         visibility_scope = self._application_visibility_scope(application_id)
         lifecycle = sorted(
             (
@@ -1434,7 +1630,7 @@ class ControlledScenarioService:
             raise RuntimeError("published projection has no terminal lifecycle route")
         authoritative = {
             "application_id": application_id,
-            "track": "C-DEMO",
+            "track": application.get("track"),
             "visibility_scope": visibility_scope,
             "phase": phase,
             "route": route,
@@ -1575,7 +1771,7 @@ class ControlledScenarioService:
         now: float | None = None,
     ) -> dict[str, Any]:
         """Return a minimized Reviewer queue projection, hiding unauthorized scope."""
-        if role != "reviewer" or not self.is_c_demo_scope(scope):
+        if role != "reviewer" or not self.is_controlled_scope(scope):
             return {"items": [], "projection_watermark": 0}
         with self._lock:
             self._reload_store()
@@ -1741,7 +1937,7 @@ class ControlledScenarioService:
         finding_id: str | None = None,
     ) -> dict[str, Any]:
         """Return finding-first minimized workspace data for an in-scope Reviewer."""
-        if role != "reviewer" or not self.is_c_demo_scope(scope):
+        if role != "reviewer" or not self.is_controlled_scope(scope):
             raise QueryNotFound(application_id)
         with self._lock:
             self._reload_store()
@@ -1765,13 +1961,13 @@ class ControlledScenarioService:
             selected = next((f for f in findings if f["finding_id"] == finding_id), None)
             if selected is None and findings:
                 selected = findings[0]
-            return {
+            result = {
                 "application_id": application_id,
                 "work_item_id": projection["work_item_id"],
                 "assigned_subject": projection["assigned_subject"],
                 "claim_fence": projection["claim_fence"],
                 "claim_expires_at": projection["claim_expires_at"],
-                "track": "C-DEMO",
+                "track": projection["track"],
                 "phase": projection["phase"],
                 "route": projection["route"],
                 "evidence_ready": projection["evidence_ready"],
@@ -1787,6 +1983,15 @@ class ControlledScenarioService:
                 "selected_finding": selected,
                 "actions": ["read_evidence"],
             }
+            if projection["track"] == "R-OBSERVED":
+                result.update(
+                    {
+                        "claim_label": "R-OBSERVED",
+                        "real_cross_document_opportunities": 0,
+                        "performance_status": "not_estimable",
+                    }
+                )
+            return result
 
     def _read_fixed_scenario(self, scenario_id: str) -> tuple[dict[str, Any], str]:
         source = (self.fixture_root / scenario_id).resolve()
@@ -2354,6 +2559,10 @@ class ControlledScenarioService:
         return len(session_id) == 32 and all(character in "0123456789abcdef" for character in session_id)
 
     @classmethod
+    def is_controlled_scope(cls, scope: object) -> bool:
+        return cls.is_c_demo_scope(scope) or cls.is_registered_scope(scope)
+
+    @classmethod
     def _valid_principal(cls, principal: S01CommandPrincipal) -> bool:
         return (
             isinstance(principal.subject, str)
@@ -2491,6 +2700,536 @@ class ControlledScenarioService:
             return result
         return self._rejected("STORAGE_UNAVAILABLE")
 
+    @staticmethod
+    def _registered_fact_counts(*, accepted: bool, attachments: int = 0, observations: int = 0) -> dict[str, int]:
+        return {
+            "applications": int(accepted),
+            "receipts": 1,
+            "idempotency_bindings": 1,
+            "lifecycle_events": int(accepted),
+            "evidence_events": int(accepted),
+            "audit_events": 1,
+            "jobs": int(accepted),
+            "outbox_events": int(accepted),
+            "attachments": attachments if accepted else 0,
+            "pages": attachments if accepted else 0,
+            "producer_results": int(accepted),
+            "observations": observations if accepted else 0,
+        }
+
+    @staticmethod
+    def _registered_rejected(reason_code: str) -> AdmissionResult:
+        return AdmissionResult(
+            disposition=AdmissionDisposition.REJECTED,
+            reason_code=reason_code,
+            lifecycle_revision=None,
+            evidence_revision=None,
+            retryable=False,
+            responsible_party="integrator",
+            recovery_action="repair_and_resubmit",
+            fact_counts={
+                "applications": 0,
+                "receipts": 0,
+                "idempotency_bindings": 0,
+                "lifecycle_events": 0,
+                "evidence_events": 0,
+                "audit_events": 0,
+                "jobs": 0,
+                "outbox_events": 0,
+                "attachments": 0,
+                "pages": 0,
+                "producer_results": 0,
+                "observations": 0,
+            },
+            real_cross_document_opportunities=0,
+            performance_status="not_estimable",
+        )
+
+    def _registered_failure_result(self, error: S02IntakeError) -> AdmissionResult:
+        return AdmissionResult(
+            disposition=AdmissionDisposition(error.disposition),
+            reason_code=error.reason_code,
+            lifecycle_revision=None,
+            evidence_revision=None,
+            retryable=error.retryable,
+            responsible_party=error.responsible_party,
+            recovery_action=error.recovery_action,
+            gate_results=error.gate_results,
+            adapter_id=error.adapter_id,
+            adapter_version=error.adapter_version,
+            source_registration_digest=error.registration_digest,
+            fact_counts=self._registered_rejected(error.reason_code).fact_counts,
+            real_cross_document_opportunities=0,
+            performance_status="not_estimable",
+        )
+
+    @classmethod
+    def is_registered_scope(cls, scope: object) -> bool:
+        del cls
+        return is_registered_scope(scope)
+
+    @classmethod
+    def _valid_registered_principal(cls, principal: S01CommandPrincipal) -> bool:
+        return (
+            isinstance(principal.subject, str)
+            and bool(principal.subject)
+            and principal.subject.strip() == principal.subject
+            and principal.role == "integrator"
+            and cls.is_registered_scope(principal.scope)
+            and isinstance(principal.source_id, str)
+            and bool(principal.source_id)
+            and principal.source_id.strip() == principal.source_id
+        )
+
+    @staticmethod
+    def _registered_idempotency_binding_key(
+        principal: S01CommandPrincipal,
+        idempotency_key: str,
+        workload_identity_id: str,
+    ) -> str:
+        material = json.dumps(
+            {
+                "action": "submit_observation_result",
+                "key": idempotency_key,
+                "role": principal.role,
+                "scope": principal.scope,
+                "source_id": principal.source_id,
+                "subject": principal.subject,
+                "workload_identity_id": workload_identity_id,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return "s02_idempotency_" + hashlib.sha256(material).hexdigest()
+
+    def _registered_idempotency_conflict(
+        self, previous: AdmissionResult
+    ) -> AdmissionResult:
+        return AdmissionResult(
+            disposition=AdmissionDisposition.REJECTED,
+            receipt_id=previous.receipt_id,
+            reason_code="intake.idempotency_conflict",
+            lifecycle_revision=previous.lifecycle_revision,
+            evidence_revision=previous.evidence_revision,
+            envelope_version=previous.envelope_version,
+            schema_version=previous.schema_version,
+            semantic_version=previous.semantic_version,
+            envelope_id=previous.envelope_id,
+            stream_id=previous.stream_id,
+            source_revision_id=previous.source_revision_id,
+            envelope_fingerprint=previous.envelope_fingerprint,
+            idempotency_identity=previous.idempotency_identity,
+            idempotency_key_digest=previous.idempotency_key_digest,
+            adapter_id=previous.adapter_id,
+            adapter_version=previous.adapter_version,
+            artifact_manifest_digest=previous.artifact_manifest_digest,
+            responsible_party="integrator",
+            recovery_action="reconcile_the_existing_idempotent_command",
+            fact_counts={key: 0 for key in previous.fact_counts},
+            gate_results=("identity:verified", "idempotency:conflict"),
+            real_cross_document_opportunities=0,
+            performance_status="not_estimable",
+            source_registration_digest=previous.source_registration_digest,
+            source_revision=previous.source_revision,
+        )
+
+    @staticmethod
+    def _registered_replay(previous: AdmissionResult) -> AdmissionResult:
+        return AdmissionResult(
+            **{
+                **previous.__dict__,
+                "replayed": True,
+                "fact_counts": {key: 0 for key in previous.fact_counts},
+            }
+        )
+
+    def _record_registered_disposition(
+        self,
+        *,
+        error: S02IntakeError,
+        command_fingerprint: str,
+        binding_key: str,
+        principal: S01CommandPrincipal,
+        submission: dict[str, Any],
+        envelope: S02CanonicalEnvelope | None = None,
+    ) -> AdmissionResult:
+        if not self.audit_available:
+            return self._registered_rejected("intake.audit_unavailable")
+        if not self.storage_available:
+            return self._registered_rejected("intake.storage_unavailable")
+        for _ in range(2):
+            previous = self._store.idempotency.get(binding_key)
+            if previous is not None:
+                previous_fingerprint, previous_result = previous
+                if previous_fingerprint == command_fingerprint:
+                    return self._registered_replay(previous_result)
+                return self._registered_idempotency_conflict(previous_result)
+            receipt_id = self._stable_id(
+                "receipt",
+                f"registered:{error.disposition}:{binding_key}:{command_fingerprint}",
+            )
+            envelope_id = (
+                envelope.envelope_id
+                if envelope is not None
+                else submission.get("envelope_id")
+                if isinstance(submission.get("envelope_id"), str)
+                else None
+            )
+            stream_id = (
+                envelope.stream_id
+                if envelope is not None
+                else submission.get("stream_id")
+                if isinstance(submission.get("stream_id"), str)
+                else None
+            )
+            source_revision = (
+                envelope.source_revision
+                if envelope is not None
+                else submission.get("source_revision")
+                if type(submission.get("source_revision")) is int
+                else None
+            )
+            result = AdmissionResult(
+                disposition=AdmissionDisposition(error.disposition),
+                receipt_id=receipt_id,
+                reason_code=error.reason_code,
+                lifecycle_revision=None,
+                evidence_revision=None,
+                audit_recorded=True,
+                envelope_version=(envelope.envelope_version if envelope else None),
+                schema_version=(
+                    envelope.schema_version
+                    if envelope
+                    else str(submission.get("schema_version") or "") or None
+                ),
+                semantic_version=(
+                    envelope.semantic_version
+                    if envelope
+                    else str(submission.get("semantic_version") or "") or None
+                ),
+                envelope_id=envelope_id,
+                stream_id=stream_id,
+                source_revision_id=(
+                    self._stable_id(
+                        "source_revision",
+                        f"{stream_id}:{source_revision}:{command_fingerprint}",
+                    )
+                    if stream_id and source_revision is not None
+                    else None
+                ),
+                envelope_fingerprint=(
+                    envelope.fingerprint if envelope else command_fingerprint
+                ),
+                idempotency_identity=binding_key,
+                idempotency_key_digest=hashlib.sha256(
+                    binding_key.encode("utf-8")
+                ).hexdigest(),
+                adapter_id=(envelope.adapter_id if envelope else error.adapter_id),
+                adapter_version=(
+                    envelope.adapter_version if envelope else error.adapter_version
+                ),
+                artifact_manifest_digest=self._manifest.digest,
+                retryable=error.retryable,
+                responsible_party=error.responsible_party,
+                recovery_action=error.recovery_action,
+                fact_counts=self._registered_fact_counts(accepted=False),
+                gate_results=tuple(dict.fromkeys((*error.gate_results, "idempotency:bound"))),
+                real_cross_document_opportunities=0,
+                performance_status="not_estimable",
+                source_registration_digest=(
+                    envelope.registration_digest
+                    if envelope
+                    else error.registration_digest
+                ),
+                source_revision=source_revision,
+            )
+            staged = copy.deepcopy(self._store)
+            staged.audit_events.append(
+                {
+                    "event_id": self._stable_id(
+                        "audit", f"registered_intake:{receipt_id}"
+                    ),
+                    "action": "registered_intake",
+                    "subject": principal.subject,
+                    "role": principal.role,
+                    "scope": principal.scope,
+                    "source_id": principal.source_id,
+                    "application_id": None,
+                    "receipt_id": receipt_id,
+                    "result": error.disposition,
+                    "reason_code": error.reason_code,
+                    "command_type": "submit_observation_result",
+                    "command_fingerprint": command_fingerprint,
+                    "idempotency_scope": binding_key,
+                    **self._audit_time_fields(staged),
+                }
+            )
+            staged.idempotency[binding_key] = (command_fingerprint, result)
+            staged.receipts[receipt_id] = result
+            try:
+                staged.persist()
+            except StaleStoreRevision:
+                self._reload_store()
+                continue
+            except Exception:
+                return self._registered_rejected("intake.storage_unavailable")
+            self._store = staged
+            return result
+        return self._registered_rejected("intake.storage_unavailable")
+
+    def _admit_registered(
+        self,
+        envelope: S02CanonicalEnvelope,
+        *,
+        principal: S01CommandPrincipal,
+        binding_key: str,
+        command_fingerprint: str,
+    ) -> AdmissionResult:
+        if any(
+            event.get("action") == "controlled_admission"
+            and event.get("result") == "accepted"
+            and event.get("scope") == principal.scope
+            and isinstance(event.get("envelope"), dict)
+            and event["envelope"].get("upstream_application_reference")
+            == envelope.upstream_application_reference
+            for event in self._store.audit_events
+        ):
+            error = S02IntakeError(
+                "rejected",
+                "intake.source_revision_conflict",
+                responsible_party="integrator",
+                recovery_action="use_the_existing_application_stream",
+                gate_results=(
+                    "identity:verified",
+                    "contract:verified",
+                    "object:verified",
+                    "causality:failed",
+                ),
+                adapter_id=envelope.adapter_id,
+                adapter_version=envelope.adapter_version,
+                registration_digest=envelope.registration_digest,
+            )
+            return self._record_registered_disposition(
+                error=error,
+                command_fingerprint=command_fingerprint,
+                binding_key=binding_key,
+                principal=principal,
+                submission={},
+                envelope=envelope,
+            )
+        try:
+            app_id = self._application_id_allocator()
+            if (
+                not isinstance(app_id, str)
+                or not app_id.startswith("app_")
+                or not 8 <= len(app_id) <= 100
+                or app_id.strip() != app_id
+                or app_id in self._store.applications
+            ):
+                return self._registered_rejected("intake.storage_unavailable")
+        except Exception:
+            return self._registered_rejected("intake.storage_unavailable")
+
+        receipt_id = self._stable_id("receipt", envelope.fingerprint)
+        job_id = self._stable_id("job", envelope.fingerprint)
+        source_revision_id = self._stable_id(
+            "source_revision",
+            f"{envelope.stream_id}:{envelope.source_revision}:{envelope.fingerprint}",
+        )
+        evidence_revision = 1
+        lifecycle_revision = 1
+        accepted_envelope = copy.deepcopy(envelope.payload["envelope"])
+        accepted_envelope.update(
+            {
+                "track": "R-OBSERVED",
+                "fingerprint": envelope.fingerprint,
+                "disposition": AdmissionDisposition.ACCEPTED.value,
+            }
+        )
+        fact_counts = self._registered_fact_counts(
+            accepted=True,
+            attachments=envelope.attachment_count,
+            observations=envelope.observation_count,
+        )
+        result = AdmissionResult(
+            disposition=AdmissionDisposition.ACCEPTED,
+            application_id=app_id,
+            receipt_id=receipt_id,
+            job_id=job_id,
+            reason_code="intake.accepted",
+            lifecycle_revision=lifecycle_revision,
+            evidence_revision=evidence_revision,
+            audit_recorded=True,
+            envelope_version=envelope.envelope_version,
+            schema_version=envelope.schema_version,
+            semantic_version=envelope.semantic_version,
+            envelope_id=envelope.envelope_id,
+            stream_id=envelope.stream_id,
+            source_revision_id=source_revision_id,
+            envelope_fingerprint=envelope.fingerprint,
+            idempotency_identity=binding_key,
+            idempotency_key_digest=hashlib.sha256(
+                binding_key.encode("utf-8")
+            ).hexdigest(),
+            received_at=str(int(self._clock())),
+            received_at_status="server_observed",
+            adapter_id=envelope.adapter_id,
+            adapter_version=envelope.adapter_version,
+            source_sha256=envelope.payload["source"]["source_result_sha256"],
+            artifact_manifest_digest=self._manifest.digest,
+            responsible_party="none",
+            recovery_action="none",
+            fact_counts=fact_counts,
+            gate_results=(
+                "identity:verified",
+                "contract:verified",
+                "object:verified",
+                "causality:verified",
+                "tenant_source_binding:verified",
+                "idempotency:bound",
+                (
+                    "provenance:eligible"
+                    if envelope.provenance_eligible
+                    else "provenance:ineligible"
+                ),
+            ),
+            real_cross_document_opportunities=0,
+            performance_status="not_estimable",
+            source_registration_digest=envelope.registration_digest,
+            source_revision=envelope.source_revision,
+        )
+        evidence = copy.deepcopy(envelope.payload["application"]["evidence"])
+        for document in evidence:
+            for observation in document.get("observations", []):
+                observation["source_receipt_id"] = receipt_id
+        admitted_evidence = {
+            "schema_version": "s02-admitted-evidence/1",
+            "evidence": evidence,
+            "graph": copy.deepcopy(envelope.payload["application"]["graph"]),
+        }
+        admitted_bytes = json.dumps(
+            admitted_evidence,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        admitted_digest = hashlib.sha256(admitted_bytes).hexdigest()
+        evidence_event_id = self._stable_id(
+            "evidence", f"{app_id}:admitted:{envelope.fingerprint}"
+        )
+        application = {
+            "application_id": app_id,
+            "upstream_application_reference": envelope.upstream_application_reference,
+            "track": "R-OBSERVED",
+            "phase": "Intake",
+            "cycle": 1,
+            "lifecycle_revision": lifecycle_revision,
+            "evidence_revision": evidence_revision,
+            "envelope": copy.deepcopy(accepted_envelope),
+            "source": copy.deepcopy(envelope.payload["source"]),
+            "artifact_manifest": {
+                "digest": self._manifest.digest,
+                "release_id": self._manifest.release_id,
+                "release_digest": self._manifest.release_digest,
+                "checker_build": self._manifest.checker_build,
+                "source_registration_digest": envelope.registration_digest,
+            },
+            "admitted_evidence_event_id": evidence_event_id,
+            "legacy_oracle_outcomes": (),
+            "evidence_ready": False,
+            "route": "pending_check",
+            "phase_history": ["Intake"],
+            "current_run_id": None,
+            "projection_visible": False,
+            "projection_pending": False,
+        }
+        staged = copy.deepcopy(self._store)
+        try:
+            self._before_write("registered_admission.application")
+            staged.applications[app_id] = application
+            self._before_write("registered_admission.lifecycle_event")
+            staged.lifecycle_events.append(
+                {
+                    "event_id": self._stable_id(
+                        "lifecycle", f"{app_id}:1:{lifecycle_revision}"
+                    ),
+                    "application_id": app_id,
+                    "revision": lifecycle_revision,
+                    "phase": "Intake",
+                    "cycle": 1,
+                    "reason_code": "intake.accepted",
+                }
+            )
+            self._before_write("registered_admission.evidence_event")
+            staged.evidence_events.append(
+                {
+                    "event_id": evidence_event_id,
+                    "application_id": app_id,
+                    "revision": evidence_revision,
+                    "kind": "admitted_snapshot",
+                    "fingerprint": envelope.fingerprint,
+                    "content_sha256": admitted_digest,
+                    "content_bytes": len(admitted_bytes),
+                    "payload": admitted_evidence,
+                }
+            )
+            self._before_write("registered_admission.audit_event")
+            staged.audit_events.append(
+                {
+                    "event_id": self._stable_id(
+                        "audit", f"controlled_admission:{receipt_id}"
+                    ),
+                    "action": "controlled_admission",
+                    "subject": principal.subject,
+                    "role": principal.role,
+                    "scope": principal.scope,
+                    "source_id": principal.source_id,
+                    "application_id": app_id,
+                    "receipt_id": receipt_id,
+                    "result": "accepted",
+                    "reason_code": "intake.accepted",
+                    "command_type": envelope.command_type,
+                    "envelope_fingerprint": envelope.fingerprint,
+                    "idempotency_scope": binding_key,
+                    "envelope": copy.deepcopy(accepted_envelope),
+                    **self._audit_time_fields(staged),
+                }
+            )
+            self._before_write("registered_admission.job")
+            staged.jobs.append(
+                self._admission_job_record(job_id, app_id, envelope.fingerprint)
+            )
+            self._before_write("registered_admission.outbox")
+            staged.outbox.append(
+                {
+                    "event_id": self._stable_id("outbox", job_id),
+                    "kind": "controlled_check_requested",
+                    "application_id": app_id,
+                    "job_id": job_id,
+                    "fingerprint": envelope.fingerprint,
+                    "status": "pending",
+                }
+            )
+            self._before_write("registered_admission.idempotency_binding")
+            staged.idempotency[binding_key] = (command_fingerprint, result)
+            self._before_write("registered_admission.receipt")
+            staged.receipts[receipt_id] = result
+            self._before_write("registered_admission.publish")
+        except _StoreWriteFailure:
+            return self._registered_rejected("intake.storage_unavailable")
+        try:
+            staged.persist()
+        except StaleStoreRevision:
+            self._reload_store()
+            previous = self._store.idempotency.get(binding_key)
+            if previous is not None and previous[0] == command_fingerprint:
+                return self._registered_replay(previous[1])
+            return self._registered_rejected("intake.storage_unavailable")
+        except Exception:
+            return self._registered_rejected("intake.storage_unavailable")
+        self._store = staged
+        return result
+
     def _load_baseline_release(self) -> dict[str, Any]:
         if not self.rules_path.is_file():
             raise FileNotFoundError(f"baseline release not found: {self.rules_path}")
@@ -2535,9 +3274,10 @@ class ControlledScenarioService:
             raise RuntimeError("admitted evidence authority is unavailable")
         event = matching[0]
         payload = event.get("payload")
-        if not isinstance(payload, dict) or payload.get("schema_version") != (
-            "s01-admitted-evidence/1"
-        ):
+        if not isinstance(payload, dict) or payload.get("schema_version") not in {
+            "s01-admitted-evidence/1",
+            "s02-admitted-evidence/1",
+        }:
             raise RuntimeError("admitted evidence authority is invalid")
         evidence = payload.get("evidence")
         if not isinstance(evidence, list) or not evidence:
@@ -2845,13 +3585,17 @@ class ControlledScenarioService:
                         envelope.get("upstream_application_reference"), str
                     )
                     or not envelope["upstream_application_reference"]
-                    or not self.is_c_demo_scope(event.get("scope"))
+                    or not self.is_controlled_scope(event.get("scope"))
                     or not isinstance(authenticated_context, dict)
                     or authenticated_context.get("scope") != event.get("scope")
                     or event.get("envelope_fingerprint")
                     != envelope.get("fingerprint")
                 ):
                     raise ValueError("accepted admission authority is invalid")
+                if self.is_registered_scope(event.get("scope")) and envelope.get(
+                    "track"
+                ) != "R-OBSERVED":
+                    raise ValueError("registered admission track is invalid")
                 authorities.append(event)
         except (KeyError, TypeError, ValueError) as error:
             raise _ApplicationStateAuthorityUnavailable(
@@ -3544,6 +4288,8 @@ class ControlledScenarioService:
             )
 
         findings = []
+        if app.get("track") == "R-OBSERVED":
+            findings.append(self._r_observed_finding(app, run_spec))
         for check in run_result.checks:
             mandatory = check.severity in {"critical", "major"}
             finding_id = self._stable_id("finding", f"{run_id}:{check.rule_id}")
@@ -3581,9 +4327,8 @@ class ControlledScenarioService:
                 }
             )
         has_mandatory_blocker = any(
-            check.severity in {"critical", "major"}
-            and check.verdict != "consistent"
-            for check in run_result.checks
+            finding["mandatory"] and finding["verdict"] != "consistent"
+            for finding in findings
         )
         review_assignee = (
             self._application_review_assignee(app["application_id"])
@@ -4038,6 +4783,61 @@ class ControlledScenarioService:
             "R_ID_EXACT": "ID_MISMATCH",
             "R_NAME_FUZZY": "NAME_NEAR_UNCERTAIN",
         }.get(rule_id, "MANDATORY_CHECK_FINDING")
+
+    def _r_observed_finding(
+        self, app: dict[str, Any], run_spec: dict[str, Any]
+    ) -> dict[str, Any]:
+        links: list[dict[str, Any]] = []
+        for document in run_spec["evidence_snapshot"]["evidence"]:
+            for observation in document.get("observations", []):
+                links.append(
+                    {
+                        "document_id": document["document_id"],
+                        "document_role": document["document_role"],
+                        "field": observation["field"],
+                        "value_state": observation["value_state"],
+                        "raw_masked": (
+                            "[REDACTED]"
+                            if observation["value_state"] in {"present", "empty"}
+                            else None
+                        ),
+                        "observation_id": observation["observation_id"],
+                        "source_object_ref": observation.get("source_object_ref"),
+                        "source_sha256": observation.get("source_sha256"),
+                        "provenance_manifest_digest": observation.get(
+                            "provenance_manifest_digest"
+                        ),
+                        "source_page": observation.get("source_page"),
+                        "source_region": observation.get("source_region"),
+                        "coordinate_system": copy.deepcopy(
+                            observation.get("coordinate_system")
+                        ),
+                        "producer_id": observation.get("producer_id"),
+                        "producer_family": observation.get("producer_family"),
+                        "producer_run_id": observation.get("producer_run_id"),
+                        "model_id": observation.get("model_id"),
+                        "model_version": observation.get("model_version"),
+                        "source_receipt_id": observation.get("source_receipt_id"),
+                        "evidence_eligible": observation.get("evidence_eligible")
+                        is True,
+                        "eligibility_reason": observation.get(
+                            "eligibility_reason"
+                        ),
+                    }
+                )
+        return {
+            "finding_id": self._stable_id(
+                "finding", f"{run_spec['run_id']}:R-OBSERVED"
+            ),
+            "application_id": app["application_id"],
+            "run_id": run_spec["run_id"],
+            "rule_id": "R-OBSERVED",
+            "verdict": "uncertain",
+            "severity": "major",
+            "reason_code": "R_OBSERVED_PROVENANCE_REVIEW",
+            "mandatory": True,
+            "evidence_links": links,
+        }
 
     @staticmethod
     def _finding_projection(finding: dict[str, Any]) -> dict[str, Any]:

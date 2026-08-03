@@ -18,7 +18,7 @@ import yaml
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from task4_consistency.audit import audit_log_path, audit_status, read_audit_tail, write_audit
@@ -27,6 +27,11 @@ from task4_consistency.controlled.s01 import (
     ControlledScenarioTestDriver,
     QueryNotFound,
     S01CommandPrincipal,
+)
+from task4_consistency.controlled.s02 import (
+    ControlledObject,
+    RegisteredSource,
+    load_runtime_registry,
 )
 from task4_consistency.kb.store import get_kb, reload_kb
 
@@ -48,6 +53,7 @@ STATIC = Path(__file__).resolve().parent / "static"
 TEMPLATES = Path(__file__).resolve().parent / "templates"
 _KB_SECTIONS = {"address_aliases", "org_aliases", "plate_prefixes"}
 S01_TEMPLATE = TEMPLATES / "s01.html"
+S02_TEMPLATE = TEMPLATES / "s02.html"
 
 
 def _s01_demo_flag(name: str, *, default: bool) -> bool:
@@ -56,6 +62,30 @@ def _s01_demo_flag(name: str, *, default: bool) -> bool:
         return default
     return value.strip().lower() not in {"0", "false", "no", "off"}
 
+
+def _s02_registry_from_environment(
+    *, test: bool = False
+) -> tuple[tuple[RegisteredSource, ...], tuple[ControlledObject, ...]]:
+    prefix = "TASK4_S02_TEST" if test else "TASK4_S02"
+    registry_value = os.environ.get(f"{prefix}_REGISTRY_PATH", "").strip()
+    object_root_value = os.environ.get(f"{prefix}_OBJECT_ROOT", "").strip()
+    if not registry_value and not object_root_value:
+        return (), ()
+    if not registry_value or not object_root_value:
+        raise ValueError("S02 source registry configuration is incomplete")
+    registry = Path(registry_value)
+    object_root = Path(object_root_value)
+    if not registry.is_absolute() or not object_root.is_absolute():
+        raise ValueError("S02 source registry paths must be absolute")
+    return load_runtime_registry(registry, object_root)
+
+
+S02_CONFIGURATION_ERROR: str | None = None
+try:
+    S02_REGISTERED_SOURCES, S02_CONTROLLED_OBJECTS = _s02_registry_from_environment()
+except Exception:
+    S02_REGISTERED_SOURCES, S02_CONTROLLED_OBJECTS = (), ()
+    S02_CONFIGURATION_ERROR = "S02 source registry configuration is invalid"
 
 S01_CONFIGURATION_ERROR: str | None = None
 try:
@@ -71,6 +101,8 @@ try:
         state_path=_s01_state_path,
         audit_available=_s01_demo_flag("TASK4_S01_AUDIT_AVAILABLE", default=True),
         storage_available=_s01_demo_flag("TASK4_S01_STORAGE_AVAILABLE", default=True),
+        registered_sources=S02_REGISTERED_SOURCES,
+        controlled_objects=S02_CONTROLLED_OBJECTS,
     )
 except Exception as error:
     S01_SERVICE = None
@@ -89,6 +121,25 @@ S01_OPERATOR_CREDENTIAL = os.environ.get("TASK4_S01_OPERATOR_CREDENTIAL", "").st
 S01_OPERATOR_SUBJECT = os.environ.get("TASK4_S01_OPERATOR_SUBJECT", "").strip()
 S01_AUDITOR_CREDENTIAL = os.environ.get("TASK4_S01_AUDITOR_CREDENTIAL", "").strip()
 S01_AUDITOR_SUBJECT = os.environ.get("TASK4_S01_AUDITOR_SUBJECT", "").strip()
+S02_SESSION_COOKIE = "s02_session"
+S02_SESSION_TTL_SECONDS = 15 * 60
+S02_MAX_COMMAND_BYTES = 256 * 1024
+S02_CREDENTIAL = os.environ.get("TASK4_S02_CREDENTIAL", "").strip()
+S02_SUBJECT = os.environ.get("TASK4_S02_SUBJECT", "").strip()
+S02_TENANT_ID = os.environ.get("TASK4_S02_TENANT_ID", "").strip()
+S02_SOURCE_SYSTEM_ID = os.environ.get("TASK4_S02_SOURCE_SYSTEM_ID", "").strip()
+S02_CONFIGURED = bool(
+    S02_REGISTERED_SOURCES
+    and S02_CREDENTIAL
+    and S02_SUBJECT
+    and S02_TENANT_ID
+    and S02_SOURCE_SYSTEM_ID
+    and any(
+        source.tenant_id == S02_TENANT_ID
+        and source.source_system_id == S02_SOURCE_SYSTEM_ID
+        for source in S02_REGISTERED_SOURCES
+    )
+)
 
 
 @dataclass(frozen=True)
@@ -207,6 +258,7 @@ class OptionalTokenAuth(BaseHTTPMiddleware):
 
     _PUBLIC_PREFIXES = ("/static",)
     _PUBLIC_EXACT = {"/api/health"}
+    _OWN_AUTH_PREFIXES = ("/controlled/s01", "/controlled/s02")
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         token = os.environ.get("TASK4_WEB_TOKEN", "").strip()
@@ -214,6 +266,8 @@ class OptionalTokenAuth(BaseHTTPMiddleware):
             return await call_next(request)
         path = request.url.path
         if path in self._PUBLIC_EXACT or any(path.startswith(p) for p in self._PUBLIC_PREFIXES):
+            return await call_next(request)
+        if any(path.startswith(prefix) for prefix in self._OWN_AUTH_PREFIXES):
             return await call_next(request)
         # UI shell open; APIs protected (except health)
         if path == "/":
@@ -249,8 +303,10 @@ class S01ResponsePolicy(BaseHTTPMiddleware):
     """Apply the controlled-slice cache and bounded-error policy centrally."""
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        if not request.url.path.startswith("/controlled/s01"):
+        path = request.url.path
+        if not path.startswith(("/controlled/s01", "/controlled/s02")):
             return await call_next(request)
+        slice_id = "S02" if path.startswith("/controlled/s02") else "S01"
         try:
             response = await call_next(request)
         except Exception:
@@ -258,8 +314,8 @@ class S01ResponsePolicy(BaseHTTPMiddleware):
                 status_code=500,
                 content={
                     "detail": {
-                        "error": "S01_INTERNAL_ERROR",
-                        "message": "Controlled S01 request failed",
+                        "error": f"{slice_id}_INTERNAL_ERROR",
+                        "message": f"Controlled {slice_id} request failed",
                     }
                 },
             )
@@ -463,6 +519,13 @@ class S01RecoveryBody(BaseModel):
     expected_failure_reason_code: str
 
 
+class S02SubmitBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: str
+    submission: dict[str, Any]
+
+
 def _s01_principal(request: Request) -> S01Principal | None:
     token = request.cookies.get(S01_SESSION_COOKIE, "")
     if not token:
@@ -602,6 +665,231 @@ def _s01_worker_json(result: Any) -> dict[str, Any]:
 def _s01_disable_cache(response: Response) -> None:
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
+
+
+def _s02_service() -> ControlledScenarioService:
+    if S01_SERVICE is None or not S02_CONFIGURED:
+        raise HTTPException(
+            503,
+            detail={"error": "S02_UNAVAILABLE", "message": "Controlled S02 is unavailable"},
+        )
+    return S01_SERVICE
+
+
+def _s02_principal(request: Request) -> S01Principal | None:
+    token = request.cookies.get(S02_SESSION_COOKIE, "")
+    if not token or S01_SERVICE is None:
+        return None
+    resolved = S01_SERVICE.resolve_session(token, now=S01_SESSION_CLOCK())
+    expected_scope = f"R-OBSERVED/{S02_TENANT_ID}"
+    if resolved is None or resolved.get("scope") != expected_scope:
+        request.state.s02_access_ended = True
+        return None
+    return S01Principal(
+        subject=str(resolved["subject"]),
+        roles=frozenset(str(role) for role in resolved["roles"]),
+        scope=str(resolved["scope"]),
+        expires_at=float(resolved["expires_at"]),
+    )
+
+
+def _issue_s02_session(request: Request, response: Response) -> None:
+    service = _s02_service()
+    if not S02_SUBJECT or not _s01_has_credential(request, S02_CREDENTIAL):
+        raise HTTPException(
+            403,
+            detail={"error": "S02_FORBIDDEN", "message": "Registered source identity required"},
+        )
+    token, _ = service.issue_session(
+        now=S01_SESSION_CLOCK(),
+        ttl_seconds=S02_SESSION_TTL_SECONDS,
+        subject=S02_SUBJECT,
+        roles=("integrator", "reviewer"),
+        scope=f"R-OBSERVED/{S02_TENANT_ID}",
+    )
+    response.set_cookie(
+        S02_SESSION_COOKIE,
+        token,
+        max_age=S02_SESSION_TTL_SECONDS,
+        httponly=True,
+        samesite="strict",
+        secure=False,
+    )
+
+
+def _s02_require_role(request: Request, role: str) -> S01Principal:
+    principal = _s02_principal(request)
+    if (
+        principal is None
+        or role not in principal.roles
+        or not ControlledScenarioService.is_registered_scope(principal.scope)
+    ):
+        raise HTTPException(
+            403,
+            detail={"error": "S02_FORBIDDEN", "message": "S02 scope or role is not allowed"},
+        )
+    return principal
+
+
+def _s02_admission_json(result: Any) -> dict[str, Any]:
+    return {
+        "disposition": result.disposition.value,
+        "reason_code": result.reason_code,
+        "responsible_party": result.responsible_party,
+        "recovery_action": result.recovery_action,
+        "retryable": result.retryable,
+        "application_id": result.application_id,
+        "receipt_id": result.receipt_id,
+        "job_id": result.job_id,
+        "lifecycle_revision": result.lifecycle_revision,
+        "evidence_revision": result.evidence_revision,
+        "replayed": result.replayed,
+        "envelope_version": result.envelope_version,
+        "schema_version": result.schema_version,
+        "semantic_version": result.semantic_version,
+        "envelope_id": result.envelope_id,
+        "stream_id": result.stream_id,
+        "source_revision": result.source_revision,
+        "source_revision_id": result.source_revision_id,
+        "envelope_fingerprint": result.envelope_fingerprint,
+        "adapter_id": result.adapter_id,
+        "adapter_version": result.adapter_version,
+        "source_registration_digest": result.source_registration_digest,
+        "artifact_manifest_digest": result.artifact_manifest_digest,
+        "fact_counts": result.fact_counts,
+        "gate_results": result.gate_results,
+        "tenant_id": S02_TENANT_ID,
+        "source_system_id": S02_SOURCE_SYSTEM_ID,
+        "claim_label": result.claim_label,
+        "real_cross_document_opportunities": result.real_cross_document_opportunities,
+        "performance_status": result.performance_status,
+    }
+
+
+@app.get("/controlled/s02", response_class=HTMLResponse)
+def controlled_s02_page(request: Request) -> HTMLResponse:
+    _s02_service()
+    if not S02_TEMPLATE.is_file():
+        raise HTTPException(500, detail={"error": "S02_PAGE_UNAVAILABLE"})
+    response = HTMLResponse(S02_TEMPLATE.read_text(encoding="utf-8"))
+    _issue_s02_session(request, response)
+    _s01_disable_cache(response)
+    return response
+
+
+@app.post("/controlled/s02/api/session", status_code=204)
+def controlled_s02_session(request: Request, response: Response) -> Response:
+    _issue_s02_session(request, response)
+    _s01_disable_cache(response)
+    response.status_code = 204
+    return response
+
+
+@app.post("/controlled/s02/api/commands/submit")
+async def controlled_s02_submit(
+    request: Request, response: Response
+) -> dict[str, Any]:
+    principal = _s02_require_role(request, "integrator")
+    _s01_disable_cache(response)
+    declared_length = request.headers.get("content-length")
+    try:
+        if declared_length is not None and (
+            int(declared_length) < 0 or int(declared_length) > S02_MAX_COMMAND_BYTES
+        ):
+            raise HTTPException(
+                413,
+                detail={
+                    "error": "S02_COMMAND_TOO_LARGE",
+                    "message": "S02 command exceeds the allowed size",
+                },
+            )
+    except ValueError as error:
+        raise HTTPException(
+            400,
+            detail={"error": "S02_INVALID_COMMAND", "message": "Invalid content length"},
+        ) from error
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > S02_MAX_COMMAND_BYTES:
+            raise HTTPException(
+                413,
+                detail={
+                    "error": "S02_COMMAND_TOO_LARGE",
+                    "message": "S02 command exceeds the allowed size",
+                },
+            )
+        chunks.append(chunk)
+    try:
+        body = S02SubmitBody.model_validate_json(b"".join(chunks))
+    except ValidationError as error:
+        raise HTTPException(
+            422,
+            detail={
+                "error": "S02_INVALID_COMMAND",
+                "message": "S02 command does not match the registered contract",
+            },
+        ) from error
+    result = _s02_service().submit_registered(
+        submission=body.submission,
+        idempotency_key=body.idempotency_key,
+        principal=S01CommandPrincipal(
+            subject=principal.subject,
+            role="integrator",
+            scope=principal.scope,
+            source_id=S02_SOURCE_SYSTEM_ID,
+        ),
+    )
+    return _s02_admission_json(result)
+
+
+@app.get("/controlled/s02/api/queries/queue")
+def controlled_s02_queue(request: Request, response: Response) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s02_principal(request)
+    if (
+        principal is None
+        or "reviewer" not in principal.roles
+        or not ControlledScenarioService.is_registered_scope(principal.scope)
+    ):
+        if getattr(request.state, "s02_access_ended", False):
+            response.headers["X-S02-Access-Ended"] = "1"
+        return {"items": [], "projection_watermark": 0}
+    return _s02_service().queue_view(
+        role="reviewer",
+        scope=principal.scope,
+        subject=principal.subject,
+        now=S01_SESSION_CLOCK(),
+    )
+
+
+@app.get("/controlled/s02/api/queries/applications/{application_id}/workspace")
+def controlled_s02_workspace(
+    application_id: str,
+    request: Request,
+    response: Response,
+    finding_id: str | None = None,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s02_principal(request)
+    if (
+        principal is None
+        or "reviewer" not in principal.roles
+        or not ControlledScenarioService.is_registered_scope(principal.scope)
+    ):
+        raise HTTPException(404, detail={"error": "S02_NOT_FOUND"})
+    try:
+        return _s02_service().workspace_view(
+            application_id,
+            role="reviewer",
+            scope=principal.scope,
+            subject=principal.subject,
+            now=S01_SESSION_CLOCK(),
+            finding_id=finding_id,
+        )
+    except QueryNotFound as error:
+        raise HTTPException(404, detail={"error": "S02_NOT_FOUND"}) from error
 
 
 @app.get("/controlled/s01", response_class=HTMLResponse)
@@ -1394,11 +1682,76 @@ def create_s01_test_app() -> FastAPI:
             ),
             worker_identity="s01-test-server-worker",
             clock=lambda: int(S01_SESSION_CLOCK()),
+            registered_sources=S02_REGISTERED_SOURCES,
+            controlled_objects=S02_CONTROLLED_OBJECTS,
         )
         S01_TEST_DRIVER = ControlledScenarioTestDriver(S01_SERVICE)
     except Exception:
         S01_SERVICE = None
         S01_TEST_DRIVER = None
+    return app
+
+
+def create_s02_test_app() -> FastAPI:
+    """Build explicit S02 test wiring without weakening production startup."""
+    global S01_BACKGROUND_ENABLED, S01_REQUIRE_CONFIGURED_STARTUP
+    global S01_SERVICE, S01_TEST_DRIVER
+    global S02_REGISTERED_SOURCES, S02_CONTROLLED_OBJECTS
+    global S02_CONFIGURATION_ERROR, S02_CONFIGURED
+    global S02_CREDENTIAL, S02_SUBJECT, S02_TENANT_ID, S02_SOURCE_SYSTEM_ID
+
+    S02_CONFIGURATION_ERROR = None
+    try:
+        S02_REGISTERED_SOURCES, S02_CONTROLLED_OBJECTS = (
+            _s02_registry_from_environment(test=True)
+        )
+    except Exception:
+        S02_REGISTERED_SOURCES, S02_CONTROLLED_OBJECTS = (), ()
+        S02_CONFIGURATION_ERROR = "S02 source registry configuration is invalid"
+
+    S02_CREDENTIAL = os.environ.get("TASK4_S02_CREDENTIAL", "").strip()
+    S02_SUBJECT = os.environ.get("TASK4_S02_SUBJECT", "").strip()
+    S02_TENANT_ID = os.environ.get("TASK4_S02_TENANT_ID", "").strip()
+    S02_SOURCE_SYSTEM_ID = os.environ.get("TASK4_S02_SOURCE_SYSTEM_ID", "").strip()
+    S02_CONFIGURED = bool(
+        S02_CONFIGURATION_ERROR is None
+        and S02_REGISTERED_SOURCES
+        and S02_CREDENTIAL
+        and S02_SUBJECT
+        and S02_TENANT_ID
+        and S02_SOURCE_SYSTEM_ID
+        and any(
+            source.tenant_id == S02_TENANT_ID
+            and source.source_system_id == S02_SOURCE_SYSTEM_ID
+            for source in S02_REGISTERED_SOURCES
+        )
+    )
+
+    state_value = os.environ.get("TASK4_S02_TEST_STATE_PATH", "").strip()
+    state_path = (
+        Path(state_value)
+        if state_value and Path(state_value).is_absolute()
+        else Path(tempfile.mkdtemp(prefix="xiaopeng-s02-test-")) / "target.sqlite3"
+    )
+    S01_BACKGROUND_ENABLED = _s01_demo_flag(
+        "TASK4_S02_TEST_BACKGROUND_ENABLED", default=True
+    )
+    S01_REQUIRE_CONFIGURED_STARTUP = False
+    try:
+        S01_SERVICE = ControlledScenarioService(
+            fixture_root=FIXTURES,
+            rules_path=DEFAULT_RULES,
+            state_path=state_path,
+            worker_identity="s02-test-server-worker",
+            clock=lambda: int(S01_SESSION_CLOCK()),
+            registered_sources=S02_REGISTERED_SOURCES,
+            controlled_objects=S02_CONTROLLED_OBJECTS,
+        )
+        S01_TEST_DRIVER = None
+    except Exception:
+        S01_SERVICE = None
+        S01_TEST_DRIVER = None
+        S02_CONFIGURED = False
     return app
 
 
