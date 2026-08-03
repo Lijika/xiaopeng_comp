@@ -1,0 +1,10 @@
+{
+  "name": "xiaopeng-comp-s01-browser",
+  "private": true,
+  "scripts": {
+    "test:s01:browser": "playwright test tests/test_s01_browser.spec.js"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.58.2"
+  }
+}

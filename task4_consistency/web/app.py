@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import shutil
 import tempfile
 import threading
+import time
+from contextlib import asynccontextmanager
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -18,6 +22,12 @@ from pydantic import BaseModel, Field, field_validator
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from task4_consistency.audit import audit_log_path, audit_status, read_audit_tail, write_audit
+from task4_consistency.controlled.s01 import (
+    ControlledScenarioService,
+    ControlledScenarioTestDriver,
+    QueryNotFound,
+    S01CommandPrincipal,
+)
 from task4_consistency.kb.store import get_kb, reload_kb
 
 from task4_consistency.models import Application
@@ -37,10 +47,155 @@ FIXTURES = ROOT / "fixtures" / "applications"
 STATIC = Path(__file__).resolve().parent / "static"
 TEMPLATES = Path(__file__).resolve().parent / "templates"
 _KB_SECTIONS = {"address_aliases", "org_aliases", "plate_prefixes"}
+S01_TEMPLATE = TEMPLATES / "s01.html"
+
+
+def _s01_demo_flag(name: str, *, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+S01_CONFIGURATION_ERROR: str | None = None
+try:
+    _s01_state_value = os.environ.get("TASK4_S01_STATE_PATH", "").strip()
+    if not _s01_state_value:
+        raise ValueError("TASK4_S01_STATE_PATH is required")
+    _s01_state_path = Path(_s01_state_value)
+    if not _s01_state_path.is_absolute():
+        raise ValueError("TASK4_S01_STATE_PATH must be absolute")
+    S01_SERVICE: ControlledScenarioService | None = ControlledScenarioService(
+        fixture_root=FIXTURES,
+        rules_path=DEFAULT_RULES,
+        state_path=_s01_state_path,
+        audit_available=_s01_demo_flag("TASK4_S01_AUDIT_AVAILABLE", default=True),
+        storage_available=_s01_demo_flag("TASK4_S01_STORAGE_AVAILABLE", default=True),
+    )
+except Exception as error:
+    S01_SERVICE = None
+    S01_CONFIGURATION_ERROR = str(error)
+S01_TEST_DRIVER: ControlledScenarioTestDriver | None = None
+S01_BACKGROUND_ENABLED = _s01_demo_flag(
+    "TASK4_S01_BACKGROUND_ENABLED", default=True
+)
+S01_REQUIRE_CONFIGURED_STARTUP = True
+S01_SESSION_COOKIE = "s01_session"
+S01_SESSION_TTL_SECONDS = 15 * 60
+S01_SESSION_CLOCK: Callable[[], float] = time.time
+S01_DEMO_CREDENTIAL = os.environ.get("TASK4_S01_DEMO_CREDENTIAL", "").strip()
+S01_DEMO_SUBJECT = os.environ.get("TASK4_S01_DEMO_SUBJECT", "").strip()
+S01_OPERATOR_CREDENTIAL = os.environ.get("TASK4_S01_OPERATOR_CREDENTIAL", "").strip()
+S01_OPERATOR_SUBJECT = os.environ.get("TASK4_S01_OPERATOR_SUBJECT", "").strip()
+S01_AUDITOR_CREDENTIAL = os.environ.get("TASK4_S01_AUDITOR_CREDENTIAL", "").strip()
+S01_AUDITOR_SUBJECT = os.environ.get("TASK4_S01_AUDITOR_SUBJECT", "").strip()
+
+
+@dataclass(frozen=True)
+class S01Principal:
+    subject: str
+    roles: frozenset[str]
+    scope: str
+    expires_at: float
+
+
 # ARCH Round16 W1: serialize put/reset; no concurrent half-writes
 RULES_WRITE_LOCK = threading.Lock()
 
-app = FastAPI(title="Task4 Consistency Demo", version="1.0.0")
+
+class S01BackgroundRuntime:
+    """Independently consume durable S01 work and projection outbox facts."""
+
+    _WORKER_IDENTITY = "s01-background-runtime"
+    _SOURCE_ID = "s01-target-worker"
+
+    def __init__(self, service: ControlledScenarioService) -> None:
+        self._service = service
+        self._principal = S01CommandPrincipal(
+            subject=self._WORKER_IDENTITY,
+            role="operator",
+            scope="C-DEMO",
+            source_id=self._SOURCE_ID,
+        )
+        self._stop = threading.Event()
+        self._health_lock = threading.Lock()
+        self._health = {"status": "created", "reason_code": ""}
+        self._thread = threading.Thread(
+            target=self._run,
+            name=self._WORKER_IDENTITY,
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        with self._health_lock:
+            self._health = {"status": "running", "reason_code": ""}
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=2)
+        with self._health_lock:
+            if self._health["status"] == "running":
+                self._health = {"status": "stopped", "reason_code": "S01_RUNTIME_STOPPED"}
+
+    def health(self) -> dict[str, str]:
+        with self._health_lock:
+            return dict(self._health)
+
+    def _mark_unhealthy(self, reason_code: str) -> None:
+        with self._health_lock:
+            self._health = {"status": "unhealthy", "reason_code": reason_code}
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                worker_result = self._service.process_next_job()
+                projection_result = self._service.refresh_projection()
+            except Exception:
+                reason_code = "S01_BACKGROUND_RUNTIME_EXCEPTION"
+                self._mark_unhealthy(reason_code)
+                try:
+                    self._service.stop_new_cohort(
+                        reason_code="S01_RUNTIME_UNHEALTHY",
+                        failure_reason_code=reason_code,
+                        principal=self._principal,
+                    )
+                except Exception:
+                    pass
+                self._stop.set()
+                return
+            if worker_result.status == "stopped":
+                self._mark_unhealthy(
+                    worker_result.reason_code or "S01_BACKGROUND_RUNTIME_UNHEALTHY"
+                )
+                self._stop.set()
+                return
+            if worker_result.status == "failed" and worker_result.retry_after_seconds:
+                self._stop.wait(worker_result.retry_after_seconds)
+                continue
+            if worker_result.status == "idle" and projection_result["updated"] == 0:
+                self._stop.wait(0.02)
+
+
+@asynccontextmanager
+async def _lifespan(application: FastAPI):
+    runtime: S01BackgroundRuntime | None = None
+    if S01_REQUIRE_CONFIGURED_STARTUP and S01_SERVICE is None:
+        raise RuntimeError(
+            S01_CONFIGURATION_ERROR or "S01 target authority is not configured"
+        )
+    if S01_BACKGROUND_ENABLED and S01_SERVICE is not None:
+        runtime = S01BackgroundRuntime(S01_SERVICE)
+        runtime.start()
+    application.state.s01_background_runtime = runtime
+    try:
+        yield
+    finally:
+        if runtime is not None:
+            runtime.stop()
+
+
+app = FastAPI(title="Task4 Consistency Demo", version="1.0.0", lifespan=_lifespan)
 if STATIC.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 
@@ -88,6 +243,32 @@ class OptionalTokenAuth(BaseHTTPMiddleware):
 
 
 app.add_middleware(OptionalTokenAuth)
+
+
+class S01ResponsePolicy(BaseHTTPMiddleware):
+    """Apply the controlled-slice cache and bounded-error policy centrally."""
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        if not request.url.path.startswith("/controlled/s01"):
+            return await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception:
+            response = JSONResponse(
+                status_code=500,
+                content={
+                    "detail": {
+                        "error": "S01_INTERNAL_ERROR",
+                        "message": "Controlled S01 request failed",
+                    }
+                },
+            )
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+        return response
+
+
+app.add_middleware(S01ResponsePolicy)
 
 
 def _quarantine_bad_runtime(err: Exception) -> None:
@@ -261,6 +442,357 @@ class KBItem(BaseModel):
         if not s:
             raise ValueError("key/value 不能为空")
         return s
+
+
+class S01SubmitBody(BaseModel):
+    scenario_id: str
+    idempotency_key: str
+
+
+class S01ProcessBody(BaseModel):
+    worker_id: str = "s01-http-worker"
+    now: int = 0
+    crash: bool = False
+    partial: bool = False
+    stale: bool = False
+    cas_fault: str | None = None
+    duplicate: bool = False
+
+
+class S01RecoveryBody(BaseModel):
+    expected_failure_reason_code: str
+
+
+def _s01_principal(request: Request) -> S01Principal | None:
+    token = request.cookies.get(S01_SESSION_COOKIE, "")
+    if not token:
+        return None
+    service = S01_SERVICE
+    if service is None:
+        return None
+    resolved = service.resolve_session(token, now=S01_SESSION_CLOCK())
+    if resolved is None:
+        request.state.s01_access_ended = True
+        return None
+    principal = S01Principal(
+        subject=str(resolved["subject"]),
+        roles=frozenset(str(role) for role in resolved["roles"]),
+        scope=str(resolved["scope"]),
+        expires_at=float(resolved["expires_at"]),
+    )
+    return principal
+
+
+def _s01_has_credential(request: Request, expected: str) -> bool:
+    scheme, separator, supplied = request.headers.get("Authorization", "").partition(" ")
+    return bool(
+        expected
+        and separator
+        and scheme.lower() == "bearer"
+        and supplied
+        and hmac.compare_digest(supplied, expected)
+    )
+
+
+def _issue_s01_session(request: Request, response: Response) -> None:
+    if not S01_DEMO_SUBJECT or not _s01_has_credential(request, S01_DEMO_CREDENTIAL):
+        raise HTTPException(
+            403,
+            detail={"error": "S01_FORBIDDEN", "message": "Registered demo identity required"},
+        )
+    token, _ = _s01_service().issue_session(
+        now=S01_SESSION_CLOCK(),
+        ttl_seconds=S01_SESSION_TTL_SECONDS,
+        subject=S01_DEMO_SUBJECT,
+        roles=("integrator", "reviewer"),
+    )
+    response.set_cookie(
+        S01_SESSION_COOKIE,
+        token,
+        max_age=S01_SESSION_TTL_SECONDS,
+        httponly=True,
+        samesite="strict",
+        secure=False,
+    )
+
+
+def _s01_require_role(request: Request, expected: str) -> S01Principal:
+    principal = _s01_principal(request)
+    if (
+        principal is None
+        or expected not in principal.roles
+        or not ControlledScenarioService.is_c_demo_scope(principal.scope)
+    ):
+        raise HTTPException(
+            403,
+            detail={"error": "S01_FORBIDDEN", "message": "S01 scope or role is not allowed"},
+        )
+    return principal
+
+
+def _s01_require_operator(request: Request) -> S01Principal:
+    if not S01_OPERATOR_SUBJECT or not _s01_has_credential(
+        request, S01_OPERATOR_CREDENTIAL
+    ):
+        raise HTTPException(
+            403,
+            detail={"error": "S01_FORBIDDEN", "message": "Registered operator required"},
+        )
+    return S01Principal(
+        subject=S01_OPERATOR_SUBJECT,
+        roles=frozenset({"operator"}),
+        scope="C-DEMO",
+        expires_at=float("inf"),
+    )
+
+
+def _s01_require_auditor(request: Request) -> S01Principal:
+    if not S01_AUDITOR_SUBJECT or not _s01_has_credential(
+        request, S01_AUDITOR_CREDENTIAL
+    ):
+        raise HTTPException(
+            403,
+            detail={"error": "S01_FORBIDDEN", "message": "Registered auditor required"},
+        )
+    return S01Principal(
+        subject=S01_AUDITOR_SUBJECT,
+        roles=frozenset({"auditor"}),
+        scope="C-DEMO",
+        expires_at=float("inf"),
+    )
+
+
+def _s01_service() -> ControlledScenarioService:
+    if S01_SERVICE is None:
+        raise HTTPException(
+            503,
+            detail={
+                "error": "S01_UNAVAILABLE",
+                "message": "Controlled S01 is unavailable",
+            },
+        )
+    return S01_SERVICE
+
+
+def _s01_admission_json(result: Any) -> dict[str, Any]:
+    payload = asdict(result)
+    payload["disposition"] = result.disposition.value
+    payload.update({"track": "C-DEMO", "capability_gate": "G1"})
+    return payload
+
+
+def _s01_workbench_admission_json(result: Any) -> dict[str, Any]:
+    return {
+        "disposition": result.disposition.value,
+        "reason_code": result.reason_code,
+        "application_id": result.application_id,
+        "receipt_id": result.receipt_id,
+        "lifecycle_revision": result.lifecycle_revision,
+        "evidence_revision": result.evidence_revision,
+        "replayed": result.replayed,
+        "track": "C-DEMO",
+        "capability_gate": "G1",
+    }
+
+
+def _s01_worker_json(result: Any) -> dict[str, Any]:
+    return asdict(result)
+
+
+def _s01_disable_cache(response: Response) -> None:
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+
+
+@app.get("/controlled/s01", response_class=HTMLResponse)
+def controlled_s01_page(request: Request) -> HTMLResponse:
+    _s01_service()
+    if not S01_TEMPLATE.is_file():
+        raise HTTPException(500, detail={"error": "S01_PAGE_UNAVAILABLE"})
+    response = HTMLResponse(S01_TEMPLATE.read_text(encoding="utf-8"))
+    _issue_s01_session(request, response)
+    _s01_disable_cache(response)
+    return response
+
+
+@app.post("/controlled/s01/api/session", status_code=204)
+def controlled_s01_session(request: Request, response: Response) -> Response:
+    _issue_s01_session(request, response)
+    _s01_disable_cache(response)
+    response.status_code = 204
+    return response
+
+
+@app.post("/controlled/s01/api/commands/submit")
+def controlled_s01_submit(
+    body: S01SubmitBody, request: Request, response: Response
+) -> dict[str, Any]:
+    principal = _s01_require_role(request, "integrator")
+    _s01_disable_cache(response)
+    result = _s01_service().submit_demo(
+        scenario_id=body.scenario_id,
+        idempotency_key=body.idempotency_key,
+        principal=S01CommandPrincipal(
+            subject=principal.subject,
+            role="integrator",
+            scope=principal.scope,
+            source_id="c-demo-web-session",
+        ),
+    )
+    return _s01_admission_json(result)
+
+
+@app.post("/controlled/s01/api/workbench/commands/submit")
+def controlled_s01_workbench_submit(
+    body: S01SubmitBody, request: Request, response: Response
+) -> dict[str, Any]:
+    principal = _s01_require_role(request, "integrator")
+    _s01_disable_cache(response)
+    result = _s01_service().submit_demo(
+        scenario_id=body.scenario_id,
+        idempotency_key=body.idempotency_key,
+        principal=S01CommandPrincipal(
+            subject=principal.subject,
+            role="integrator",
+            scope=principal.scope,
+            source_id="c-demo-web-session",
+        ),
+    )
+    return _s01_workbench_admission_json(result)
+
+
+@app.post("/controlled/s01/api/_test/commands/process")
+def controlled_s01_test_process(
+    body: S01ProcessBody, request: Request, response: Response
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    if S01_TEST_DRIVER is None:
+        raise HTTPException(404, detail={"error": "S01_NOT_FOUND"})
+    result = S01_TEST_DRIVER.process_next_job(
+        worker_id=body.worker_id,
+        now=body.now,
+        crash=body.crash,
+        partial=body.partial,
+        stale=body.stale,
+        cas_fault=body.cas_fault,
+        duplicate=body.duplicate,
+    )
+    return _s01_worker_json(result)
+
+
+@app.post("/controlled/s01/api/commands/stop-new-cohort")
+def controlled_s01_stop_new_cohort(request: Request, response: Response) -> dict[str, str]:
+    principal = _s01_require_operator(request)
+    _s01_disable_cache(response)
+    return _s01_service().stop_new_cohort(
+        principal=S01CommandPrincipal(
+            subject=principal.subject,
+            role="operator",
+            scope=principal.scope,
+            source_id="c-demo-operator-control-plane",
+        )
+    )
+
+
+@app.post("/controlled/s01/api/commands/recover-runtime")
+def controlled_s01_recover_runtime(
+    body: S01RecoveryBody, request: Request, response: Response
+) -> dict[str, str | int]:
+    principal = _s01_require_operator(request)
+    _s01_disable_cache(response)
+    return _s01_service().recover_runtime(
+        expected_failure_reason_code=body.expected_failure_reason_code,
+        principal=S01CommandPrincipal(
+            subject=principal.subject,
+            role="operator",
+            scope=principal.scope,
+            source_id="c-demo-operator-control-plane",
+        ),
+    )
+
+
+@app.post("/controlled/s01/api/_test/commands/project")
+def controlled_s01_test_project(response: Response) -> dict[str, int]:
+    _s01_disable_cache(response)
+    if S01_TEST_DRIVER is None:
+        raise HTTPException(404, detail={"error": "S01_NOT_FOUND"})
+    return _s01_service().refresh_projection()
+
+
+@app.get("/controlled/s01/api/queries/queue")
+def controlled_s01_queue(request: Request, response: Response) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s01_principal(request)
+    if (
+        principal is None
+        or "reviewer" not in principal.roles
+        or not ControlledScenarioService.is_c_demo_scope(principal.scope)
+    ):
+        if getattr(request.state, "s01_access_ended", False):
+            response.headers["X-S01-Access-Ended"] = "1"
+        return {"items": [], "projection_watermark": 0}
+    return _s01_service().queue_view(
+        role="reviewer",
+        scope=principal.scope,
+        subject=principal.subject,
+        now=S01_SESSION_CLOCK(),
+    )
+
+
+@app.get("/controlled/s01/api/queries/applications/{application_id}/workspace")
+def controlled_s01_workspace(
+    application_id: str,
+    request: Request,
+    response: Response,
+    finding_id: str | None = None,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s01_principal(request)
+    if (
+        principal is None
+        or "reviewer" not in principal.roles
+        or not ControlledScenarioService.is_c_demo_scope(principal.scope)
+    ):
+        raise HTTPException(404, detail={"error": "S01_NOT_FOUND"})
+    try:
+        return _s01_service().workspace_view(
+            application_id,
+            role="reviewer",
+            scope=principal.scope,
+            subject=principal.subject,
+            now=S01_SESSION_CLOCK(),
+            finding_id=finding_id,
+        )
+    except QueryNotFound as error:
+        raise HTTPException(404, detail={"error": "S01_NOT_FOUND"}) from error
+
+
+@app.get(
+    "/controlled/s01/api/queries/applications/{application_id}/audit-timeline"
+)
+def controlled_s01_audit_timeline(
+    application_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s01_require_auditor(request)
+    try:
+        return _s01_service().audit_timeline(
+            principal=S01CommandPrincipal(
+                subject=principal.subject,
+                role="auditor",
+                scope=principal.scope,
+                source_id="c-demo-audit-console",
+            ),
+            application_id=application_id,
+        )
+    except QueryNotFound as error:
+        raise HTTPException(404, detail={"error": "S01_NOT_FOUND"}) from error
+    except RuntimeError as error:
+        raise HTTPException(
+            503, detail={"error": "S01_AUDIT_INTEGRITY_FAILED"}
+        ) from error
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -830,6 +1362,44 @@ def kb_delete(section: str, key: str) -> dict[str, Any]:
 def kb_reload() -> dict[str, Any]:
     kb = reload_kb()
     return {"ok": True, "kb": kb.to_dict()}
+
+
+def create_s01_test_app() -> FastAPI:
+    """Build explicit S01 test wiring without changing the trusted default app."""
+    global S01_BACKGROUND_ENABLED, S01_REQUIRE_CONFIGURED_STARTUP
+    global S01_SERVICE, S01_TEST_DRIVER
+
+    fixture_value = os.environ.get("TASK4_S01_TEST_FIXTURE_ROOT", "").strip()
+    rules_value = os.environ.get("TASK4_S01_TEST_RULES_PATH", "").strip()
+    state_value = os.environ.get("TASK4_S01_TEST_STATE_PATH", "").strip()
+    S01_BACKGROUND_ENABLED = _s01_demo_flag(
+        "TASK4_S01_TEST_BACKGROUND_ENABLED", default=True
+    )
+    S01_REQUIRE_CONFIGURED_STARTUP = False
+    try:
+        S01_SERVICE = ControlledScenarioService(
+            fixture_root=Path(fixture_value).resolve() if fixture_value else FIXTURES,
+            rules_path=Path(rules_value).resolve() if rules_value else DEFAULT_RULES,
+            state_path=(
+                Path(state_value).resolve()
+                if state_value
+                else Path(tempfile.mkdtemp(prefix="xiaopeng-s01-test-"))
+                / "target.sqlite3"
+            ),
+            audit_available=_s01_demo_flag(
+                "TASK4_S01_TEST_AUDIT_AVAILABLE", default=True
+            ),
+            storage_available=_s01_demo_flag(
+                "TASK4_S01_TEST_STORAGE_AVAILABLE", default=True
+            ),
+            worker_identity="s01-test-server-worker",
+            clock=lambda: int(S01_SESSION_CLOCK()),
+        )
+        S01_TEST_DRIVER = ControlledScenarioTestDriver(S01_SERVICE)
+    except Exception:
+        S01_SERVICE = None
+        S01_TEST_DRIVER = None
+    return app
 
 
 def create_app() -> FastAPI:

@@ -17,6 +17,14 @@ venv/
 coverage.xml
 htmlcov/
 
+# Reproducible browser-test dependencies and generated artifacts
+node_modules/
+playwright-report/
+test-results/
+blob-report/
+screenshots/
+traces/
+
 # Local secrets and credentials
 .env
 .env.*

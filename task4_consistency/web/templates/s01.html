@@ -1,0 +1,804 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="Cache-Control" content="no-store" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <title>一致性审核工作台 · C-DEMO</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          "Microsoft YaHei", sans-serif;
+        color: #17221e;
+        background: #f3f5f4;
+        font-synthesis: none;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      [hidden] {
+        display: none !important;
+      }
+
+      body {
+        min-width: 0;
+        min-height: 100vh;
+        margin: 0;
+        background: #f3f5f4;
+      }
+
+      button {
+        min-height: 38px;
+        border: 1px solid #1f6f58;
+        border-radius: 5px;
+        padding: 8px 14px;
+        color: #ffffff;
+        background: #1f6f58;
+        font: inherit;
+        font-weight: 650;
+        cursor: pointer;
+      }
+
+      button:hover:not(:disabled) {
+        background: #175543;
+      }
+
+      button:focus-visible {
+        outline: 3px solid #f0a540;
+        outline-offset: 2px;
+      }
+
+      button:disabled {
+        border-color: #aeb8b3;
+        color: #66716c;
+        background: #e1e5e3;
+        cursor: not-allowed;
+      }
+
+      button.secondary {
+        border-color: #a8b3ae;
+        color: #27332e;
+        background: #ffffff;
+      }
+
+      button.secondary:hover:not(:disabled) {
+        border-color: #66746d;
+        background: #eef1ef;
+      }
+
+      .app-header {
+        min-height: 64px;
+        border-bottom: 1px solid #d7ddda;
+        background: #ffffff;
+      }
+
+      .header-inner {
+        width: min(1320px, calc(100% - 48px));
+        min-height: 64px;
+        margin: 0 auto;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 24px;
+      }
+
+      .brand {
+        min-width: 0;
+      }
+
+      .brand h1 {
+        margin: 0;
+        font-size: 20px;
+        line-height: 1.25;
+        font-weight: 720;
+      }
+
+      .brand p {
+        margin: 3px 0 0;
+        color: #66716c;
+        font-size: 12px;
+      }
+
+      .boundaries {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex: 0 0 auto;
+      }
+
+      .boundary {
+        display: inline-flex;
+        min-height: 28px;
+        align-items: center;
+        border: 1px solid #9eaaa4;
+        border-radius: 4px;
+        padding: 4px 9px;
+        color: #3e4b45;
+        background: #f8faf9;
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .boundary.track {
+        border-color: #78a995;
+        color: #145440;
+        background: #e8f3ee;
+      }
+
+      main {
+        width: min(1320px, calc(100% - 48px));
+        margin: 22px auto 40px;
+      }
+
+      .status-line {
+        min-height: 32px;
+        margin-bottom: 12px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        color: #59645f;
+        font-size: 12px;
+      }
+
+      .status-line strong {
+        color: #26332d;
+        font-weight: 700;
+      }
+
+      .workbench {
+        display: grid;
+        grid-template-columns: minmax(320px, 0.7fr) minmax(560px, 1.3fr);
+        gap: 14px;
+        align-items: start;
+      }
+
+      .column {
+        min-width: 0;
+        display: grid;
+        gap: 14px;
+      }
+
+      .panel {
+        min-width: 0;
+        border: 1px solid #d6ddda;
+        border-radius: 6px;
+        background: #ffffff;
+      }
+
+      .panel-header {
+        min-height: 46px;
+        border-bottom: 1px solid #e2e7e4;
+        padding: 11px 14px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .panel-header h2 {
+        margin: 0;
+        font-size: 14px;
+        line-height: 1.35;
+        font-weight: 720;
+      }
+
+      .panel-body {
+        padding: 14px;
+      }
+
+      .scenario-name {
+        margin: 0;
+        color: #24312c;
+        font-size: 15px;
+        font-weight: 700;
+      }
+
+      .scenario-meta {
+        margin: 4px 0 14px;
+        color: #69746f;
+        font-size: 12px;
+      }
+
+      .command-row {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        flex-wrap: wrap;
+      }
+
+      .command-status {
+        min-width: 0;
+        color: #5b6761;
+        font-size: 12px;
+        overflow-wrap: anywhere;
+      }
+
+      .command-status.success {
+        color: #176348;
+      }
+
+      .command-status.error {
+        color: #a23932;
+      }
+
+      dl {
+        margin: 0;
+        display: grid;
+        grid-template-columns: 126px minmax(0, 1fr);
+        gap: 9px 12px;
+        align-items: baseline;
+      }
+
+      dt {
+        color: #6a746f;
+        font-size: 12px;
+      }
+
+      dd {
+        min-width: 0;
+        margin: 0;
+        color: #1f2d27;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12px;
+        font-weight: 650;
+        overflow-wrap: anywhere;
+      }
+
+      .queue-summary {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        border-bottom: 1px solid #e4e8e6;
+      }
+
+      .queue-fact {
+        min-width: 0;
+        padding: 13px 14px;
+        border-right: 1px solid #e4e8e6;
+      }
+
+      .queue-fact:last-child {
+        border-right: 0;
+      }
+
+      .queue-fact span {
+        display: block;
+        margin-bottom: 4px;
+        color: #707a75;
+        font-size: 11px;
+      }
+
+      .queue-fact strong {
+        display: block;
+        min-width: 0;
+        color: #24312b;
+        font-size: 13px;
+        overflow-wrap: anywhere;
+      }
+
+      .empty-state {
+        margin: 0;
+        color: #737d78;
+        font-size: 13px;
+      }
+
+      .blocker-band {
+        border-left: 4px solid #bd463e;
+        padding-left: 12px;
+      }
+
+      .blocker-title {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 14px;
+      }
+
+      .blocker-title strong {
+        color: #8d2f2a;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 14px;
+      }
+
+      .blocker-title span {
+        color: #6d7772;
+        font-size: 12px;
+      }
+
+      .evidence-heading {
+        margin: 18px 0 8px;
+        color: #4b5751;
+        font-size: 12px;
+        font-weight: 700;
+        text-transform: uppercase;
+      }
+
+      .evidence-list {
+        margin: 0;
+        padding: 0;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+        list-style: none;
+      }
+
+      .evidence-item {
+        min-width: 0;
+        border: 1px solid #dce2df;
+        border-radius: 5px;
+        padding: 10px;
+        background: #f8faf9;
+      }
+
+      .evidence-item strong,
+      .evidence-item span {
+        display: block;
+        min-width: 0;
+        overflow-wrap: anywhere;
+      }
+
+      .evidence-item strong {
+        color: #28352f;
+        font-size: 12px;
+      }
+
+      .evidence-item span {
+        margin-top: 4px;
+        color: #6b7570;
+        font-size: 11px;
+      }
+
+      .read-only {
+        border: 1px solid #d39b3b;
+        border-radius: 4px;
+        padding: 3px 7px;
+        color: #6b4a0d;
+        background: #fff7e7;
+        font-size: 11px;
+        font-weight: 700;
+      }
+
+      @media (max-width: 760px) {
+        .header-inner,
+        main {
+          width: calc(100% - 24px);
+        }
+
+        .header-inner {
+          min-height: 76px;
+          gap: 12px;
+        }
+
+        .brand h1 {
+          font-size: 18px;
+        }
+
+        .boundaries {
+          gap: 5px;
+        }
+
+        .boundary {
+          padding-inline: 7px;
+        }
+
+        main {
+          margin-top: 14px;
+        }
+
+        .status-line {
+          align-items: flex-start;
+          flex-direction: column;
+          gap: 4px;
+        }
+
+        .workbench {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        .queue-summary {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .queue-fact:nth-child(2) {
+          border-right: 0;
+        }
+
+        .queue-fact:nth-child(-n + 2) {
+          border-bottom: 1px solid #e4e8e6;
+        }
+
+        .evidence-list {
+          grid-template-columns: minmax(0, 1fr);
+        }
+      }
+
+      @media (max-width: 420px) {
+        .panel-header {
+          align-items: flex-start;
+        }
+
+        dl {
+          grid-template-columns: 108px minmax(0, 1fr);
+        }
+
+        .blocker-title {
+          align-items: flex-start;
+          flex-direction: column;
+          gap: 4px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="app-header" data-testid="app-header">
+      <div class="header-inner">
+        <div class="brand">
+          <h1>一致性审核工作台</h1>
+          <p>受控场景审阅</p>
+        </div>
+        <div class="boundaries" aria-label="演示边界">
+          <span class="boundary track" data-testid="boundary-track">C-DEMO</span>
+          <span class="boundary" data-testid="boundary-gate">G1 内部证据</span>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <div class="status-line">
+        <span><strong>受控路径</strong> · S01</span>
+        <span>Reviewer workspace · read only</span>
+      </div>
+
+      <div class="workbench">
+        <div class="column">
+          <section class="panel" aria-labelledby="admission-title">
+            <div class="panel-header">
+              <h2 id="admission-title">场景接入</h2>
+              <span class="boundary track">固定输入</span>
+            </div>
+            <div class="panel-body">
+              <p class="scenario-name">C-DEMO 受控场景</p>
+              <p class="scenario-meta">Versioned canonical envelope</p>
+              <div class="command-row">
+                <button type="button" id="submit-command">提交受控场景</button>
+                <span class="command-status" id="submit-status" role="status" aria-live="polite">待提交</span>
+              </div>
+            </div>
+          </section>
+
+          <section
+            class="panel"
+            data-testid="receipt-panel"
+            data-overlap-check
+            aria-labelledby="receipt-title"
+            hidden
+          >
+            <div class="panel-header">
+              <h2 id="receipt-title">稳定回执</h2>
+              <span class="boundary track">Accepted</span>
+            </div>
+            <div class="panel-body">
+              <dl>
+                <dt>Receipt</dt>
+                <dd data-testid="receipt-id" data-fit-text></dd>
+                <dt>Application</dt>
+                <dd data-testid="application-id" data-fit-text></dd>
+                <dt>Current lifecycle revision</dt>
+                <dd data-testid="lifecycle-revision"></dd>
+                <dt>Current evidence revision</dt>
+                <dd data-testid="evidence-revision"></dd>
+                <dt>Current run</dt>
+                <dd data-testid="current-run-id" data-fit-text></dd>
+                <dt>Evidence snapshot</dt>
+                <dd data-testid="evidence-snapshot-id" data-fit-text></dd>
+              </dl>
+              <div class="command-row" style="margin-top: 14px">
+                <span
+                  class="command-status"
+                  data-testid="process-status"
+                  role="status"
+                  aria-live="polite"
+                >待处理</span>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <div class="column">
+          <section class="panel" data-testid="queue-panel" data-overlap-check aria-labelledby="queue-title">
+            <div class="panel-header">
+              <h2 id="queue-title">Reviewer queue</h2>
+              <button type="button" class="secondary" id="refresh-queue">刷新队列</button>
+            </div>
+            <div class="queue-summary" id="queue-summary" hidden>
+              <div class="queue-fact">
+                <span>Phase</span>
+                <strong data-testid="queue-phase" data-fit-text></strong>
+              </div>
+              <div class="queue-fact">
+                <span>Route</span>
+                <strong data-testid="queue-route" data-fit-text></strong>
+              </div>
+              <div class="queue-fact">
+                <span>Evidence</span>
+                <strong data-testid="queue-evidence">Ready</strong>
+              </div>
+              <div class="queue-fact">
+                <span>Watermark</span>
+                <strong data-testid="queue-watermark"></strong>
+              </div>
+            </div>
+            <div class="panel-body" id="queue-empty">
+              <p class="empty-state">队列当前为空</p>
+            </div>
+          </section>
+
+          <section
+            class="panel"
+            data-testid="blocker-panel"
+            data-overlap-check
+            aria-labelledby="blocker-title"
+            hidden
+          >
+            <div class="panel-header">
+              <h2 id="blocker-title">Mandatory blocker</h2>
+              <span class="read-only">READ ONLY</span>
+            </div>
+            <div class="panel-body">
+              <div class="blocker-band">
+                <div class="blocker-title">
+                  <strong data-testid="blocker-rule" data-fit-text></strong>
+                  <span data-testid="blocker-severity"></span>
+                </div>
+                <p class="scenario-meta" data-testid="blocker-reason"></p>
+              </div>
+              <h3 class="evidence-heading">Linked evidence</h3>
+              <ul class="evidence-list" data-testid="evidence-list"></ul>
+            </div>
+          </section>
+        </div>
+      </div>
+    </main>
+
+    <script>
+      (() => {
+        "use strict";
+
+        const API_ROOT = "/controlled/s01/api";
+        const state = {
+          applicationId: null,
+          receiptId: null,
+          pendingSubmissionKey: null,
+          queueRequest: null,
+          hasProjectedResult: false,
+        };
+
+        const byId = (id) => document.getElementById(id);
+        const byTestId = (id) => document.querySelector(`[data-testid="${id}"]`);
+
+        function setStatus(element, text, kind = "") {
+          element.textContent = text;
+          element.className = `command-status${kind ? ` ${kind}` : ""}`;
+        }
+
+        function clearSensitiveState() {
+          state.applicationId = null;
+          state.receiptId = null;
+          state.pendingSubmissionKey = null;
+          state.hasProjectedResult = false;
+          for (const testId of [
+            "receipt-id",
+            "application-id",
+            "lifecycle-revision",
+            "evidence-revision",
+            "current-run-id",
+            "evidence-snapshot-id",
+            "queue-phase",
+            "queue-route",
+            "queue-evidence",
+            "queue-watermark",
+            "blocker-rule",
+            "blocker-severity",
+            "blocker-reason",
+          ]) {
+            byTestId(testId).textContent = "";
+          }
+          byTestId("evidence-list").replaceChildren();
+          byTestId("receipt-panel").hidden = true;
+          byTestId("blocker-panel").hidden = true;
+          byId("queue-summary").hidden = true;
+          byId("queue-empty").hidden = false;
+        }
+
+        async function request(path, options = {}) {
+          if (!path.startsWith(`${API_ROOT}/`)) throw new Error("controlled route required");
+          const response = await fetch(path, {
+            ...options,
+            cache: "no-store",
+            credentials: "same-origin",
+            headers: {
+              "Content-Type": "application/json",
+              ...(options.headers || {}),
+            },
+          });
+          if (!response.ok) throw new Error(`request failed (${response.status})`);
+          return {
+            payload: await response.json(),
+            accessEnded: response.headers.get("X-S01-Access-Ended") === "1",
+          };
+        }
+
+        function renderReceipt(data) {
+          state.applicationId = data.application_id;
+          state.receiptId = data.receipt_id;
+          byTestId("receipt-id").textContent = data.receipt_id;
+          byTestId("application-id").textContent = data.application_id;
+          renderAuthorityRefs(data);
+          byTestId("current-run-id").textContent = "Pending";
+          byTestId("evidence-snapshot-id").textContent = "Pending";
+          byTestId("receipt-panel").hidden = false;
+        }
+
+        function renderAuthorityRefs(data) {
+          byTestId("lifecycle-revision").textContent = String(data.lifecycle_revision);
+          byTestId("evidence-revision").textContent = String(data.evidence_revision);
+          if (data.current_run_id) {
+            byTestId("current-run-id").textContent = data.current_run_id;
+          }
+          if (data.evidence_snapshot_id) {
+            byTestId("evidence-snapshot-id").textContent = data.evidence_snapshot_id;
+          }
+        }
+
+        function renderEvidence(finding) {
+          byTestId("blocker-rule").textContent = finding.rule_id;
+          byTestId("blocker-severity").textContent = finding.severity;
+          byTestId("blocker-reason").textContent = finding.reason_code;
+          const list = byTestId("evidence-list");
+          list.replaceChildren();
+          for (const link of finding.evidence_links || []) {
+            const item = document.createElement("li");
+            item.className = "evidence-item";
+            item.dataset.testid = "evidence-item";
+            const identity = document.createElement("strong");
+            identity.dataset.testid = "evidence-document";
+            identity.textContent = `${link.document_role} · ${link.field}`;
+            const reference = document.createElement("span");
+            reference.dataset.testid = "evidence-reference";
+            reference.textContent = `${link.document_id} · ${link.value_state}`;
+            const provenance = [
+              ["evidence-observation", `Observation ${link.observation_id || "Unavailable"}`],
+              ["evidence-object-ref", `Source ${link.source_object_ref || "Unavailable"}`],
+              ["evidence-sha256", `SHA-256 ${link.source_sha256 || "Unavailable"}`],
+              [
+                "evidence-provenance-manifest",
+                `Manifest SHA-256 ${link.provenance_manifest_digest || "Unavailable"}`,
+              ],
+              ["evidence-page", `Page ${link.source_page ?? "Unavailable"}`],
+              ["evidence-region", `Region ${link.source_region || "Unavailable"}`],
+            ].map(([testId, text]) => {
+              const detail = document.createElement("span");
+              detail.dataset.testid = testId;
+              detail.textContent = text;
+              return detail;
+            });
+            item.append(identity, reference, ...provenance);
+            list.append(item);
+          }
+          byTestId("blocker-panel").hidden = false;
+        }
+
+        async function loadWorkspace(applicationId, findingId, signal) {
+          const query = findingId ? `?finding_id=${encodeURIComponent(findingId)}` : "";
+          const { payload: data } = await request(
+            `${API_ROOT}/queries/applications/${encodeURIComponent(applicationId)}/workspace${query}`,
+            { signal },
+          );
+          renderAuthorityRefs(data);
+          if (data.selected_finding) renderEvidence(data.selected_finding);
+        }
+
+        async function refreshQueue() {
+          if (state.queueRequest) state.queueRequest.abort();
+          const controller = new AbortController();
+          state.queueRequest = controller;
+          try {
+            const { payload: data, accessEnded } = await request(`${API_ROOT}/queries/queue`, {
+              signal: controller.signal,
+            });
+            if (state.queueRequest !== controller) return;
+            if (accessEnded) {
+              clearSensitiveState();
+              setStatus(byId("submit-status"), "访问已结束", "error");
+              return false;
+            }
+            byTestId("queue-watermark").textContent = String(data.projection_watermark);
+            const selected =
+              (data.items || []).find((item) => item.application_id === state.applicationId) ||
+              (data.items || [])[0];
+            if (!selected) {
+              if (state.hasProjectedResult) {
+                clearSensitiveState();
+                setStatus(byId("submit-status"), "访问已结束", "error");
+              }
+              byId("queue-summary").hidden = true;
+              byId("queue-empty").hidden = false;
+              byTestId("blocker-panel").hidden = true;
+              return false;
+            }
+            byTestId("queue-phase").textContent = selected.phase;
+            byTestId("queue-route").textContent = selected.route;
+            byTestId("queue-evidence").textContent = selected.evidence_ready ? "Ready" : "Pending";
+            renderAuthorityRefs(selected);
+            byId("queue-summary").hidden = false;
+            byId("queue-empty").hidden = true;
+            const blocker = (selected.mandatory_blockers || [])[0];
+            if (blocker) {
+              await loadWorkspace(selected.application_id, blocker.finding_id, controller.signal);
+            }
+            state.hasProjectedResult = true;
+            return true;
+          } catch (error) {
+            if (error.name !== "AbortError") {
+              clearSensitiveState();
+              setStatus(byId("submit-status"), "队列请求未完成", "error");
+            }
+            return false;
+          } finally {
+            if (state.queueRequest === controller) state.queueRequest = null;
+          }
+        }
+
+        async function waitForProjectedResult() {
+          const deadline = Date.now() + 8_000;
+          setStatus(byTestId("process-status"), "检查中");
+          while (Date.now() < deadline) {
+            if (await refreshQueue()) {
+              setStatus(byTestId("process-status"), "检查完成", "success");
+              return;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 100));
+          }
+          throw new Error("projected result unavailable");
+        }
+
+        byId("submit-command").addEventListener("click", async () => {
+          const button = byId("submit-command");
+          button.disabled = true;
+          setStatus(byId("submit-status"), "提交中");
+          if (!state.pendingSubmissionKey) {
+            state.pendingSubmissionKey = `s01-browser-${crypto.randomUUID()}`;
+          }
+          try {
+            const { payload: data } = await request(`${API_ROOT}/workbench/commands/submit`, {
+              method: "POST",
+              body: JSON.stringify({
+                scenario_id: "app_r53_bad_engine.json",
+                idempotency_key: state.pendingSubmissionKey,
+              }),
+            });
+            if (!data.receipt_id || !data.application_id) throw new Error("receipt unavailable");
+            renderReceipt(data);
+            state.pendingSubmissionKey = null;
+            setStatus(byId("submit-status"), "回执已确认", "success");
+            await waitForProjectedResult();
+          } catch (error) {
+            button.disabled = false;
+            if (!state.receiptId) {
+              setStatus(byId("submit-status"), "提交未完成", "error");
+            } else {
+              setStatus(byTestId("process-status"), "检查未完成", "error");
+            }
+          }
+        });
+
+        byId("refresh-queue").addEventListener("click", refreshQueue);
+      })();
+    </script>
+  </body>
+</html>
