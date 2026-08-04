@@ -578,6 +578,7 @@ def test_request_is_bound_to_live_claim_unique_and_semantically_idempotent(
     assert request_record["verdict"] == "inconsistent"
     assert request_record["requester_subject"] == REVIEWER.subject
     assert request_record["requester_claim_fence"] == claim["claim_fence"]
+    assert request_record["predecessor_request_id"] is None
     assert request_record["reason_code"] == "DOCUMENTED_BRAND_VARIANCE"
     assert request_record["scope"] == "one_application_cycle_run_finding"
     assert request_record["expires_at"] - request_record["requested_at"] == 900
@@ -593,6 +594,213 @@ def test_request_is_bound_to_live_claim_unique_and_semantically_idempotent(
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
+
+
+@pytest.mark.parametrize("terminal_status", ("rejected", "expired", "invalidated"))
+def test_inactive_exception_rerequest_requires_latest_predecessor_and_new_context(
+    tmp_path: Path,
+    terminal_status: str,
+) -> None:
+    service, application_id, work_item_id, claim, finding = _ready_brand_exception(
+        tmp_path
+    )
+    first = _request_brand_exception(service, work_item_id, claim, finding)
+    exception_view = service.business_exception_view(
+        principal=APPROVER,
+        request_id=str(first["request_id"]),
+        now=102,
+    )
+    if terminal_status == "rejected":
+        approver_claim = service.claim_exception_work_item(
+            principal=APPROVER,
+            work_item_id=str(first["work_item_id"]),
+            expected_context=exception_view["command_context"],
+            now=102,
+        )
+        terminal = service.decide_business_exception(
+            principal=APPROVER,
+            request_id=str(first["request_id"]),
+            work_item_id=str(first["work_item_id"]),
+            decision="rejected",
+            reason_code="DOCUMENTED_VARIANCE_REJECTED",
+            expected_fence=int(approver_claim["claim_fence"]),
+            expected_context=exception_view["command_context"],
+            idempotency_key="s05-rerequest-reject",
+            now=103,
+        )
+        review_time = 104
+    elif terminal_status == "expired":
+        terminal = service.expire_business_exception(
+            principal=ROUTER,
+            request_id=str(first["request_id"]),
+            expected_context=exception_view["command_context"],
+            idempotency_key="s05-rerequest-expire",
+            now=int(first["expires_at"]),
+        )
+        review_time = int(first["expires_at"]) + 1
+    else:
+        terminal = service.invalidate_business_exception(
+            principal=ROUTER,
+            request_id=str(first["request_id"]),
+            reason_code="POLICY_REVOKED",
+            expected_context=exception_view["command_context"],
+            idempotency_key="s05-rerequest-invalidate",
+            now=103,
+        )
+        review_time = 104
+
+    assert terminal["status"] == "accepted"
+    service.refresh_projection()
+    successor_work_item_id = str(terminal["successor_work_item_id"])
+    successor = service.review_work_item_view(
+        principal=REVIEWER,
+        work_item_id=successor_work_item_id,
+        now=review_time,
+    )
+    workspace = service.workspace_view(
+        application_id,
+        role="reviewer",
+        scope=REVIEWER.scope,
+        subject=REVIEWER.subject,
+        now=review_time,
+    )
+    successor_brand = next(
+        item
+        for item in workspace["mandatory_blockers"]
+        if item["rule_id"] == "R_BRAND_CROSS"
+    )
+    successor_claim = service.claim_review_work_item(
+        principal=REVIEWER,
+        work_item_id=successor_work_item_id,
+        expected_context=successor["command_context"],
+        now=review_time,
+    )
+    before_same_context = _authority_snapshot(service)
+    same_context = service.request_business_exception(
+        principal=REVIEWER,
+        work_item_id=successor_work_item_id,
+        finding_id=str(successor_brand["finding_id"]),
+        reason_code="DOCUMENTED_BRAND_VARIANCE",
+        predecessor_request_id=str(first["request_id"]),
+        expected_fence=int(successor_claim["claim_fence"]),
+        expected_context=successor["command_context"],
+        idempotency_key=f"s05-rerequest-same-context-{terminal_status}",
+        now=review_time + 1,
+    )
+
+    assert same_context["status"] == "conflict"
+    assert same_context["reason_code"] == "EXCEPTION_REREQUEST_NOT_MATERIAL"
+    assert _authority_snapshot(service) == before_same_context
+
+    source = next(
+        link
+        for link in successor_brand["evidence_links"]
+        if link["document_id"] == "pol"
+    )
+    corrected = service.correct_field_observation(
+        principal=REVIEWER,
+        application_id=application_id,
+        work_item_id=successor_work_item_id,
+        expected_fence=int(successor_claim["claim_fence"]),
+        expected_context=successor["command_context"],
+        idempotency_key=f"s05-rerequest-new-run-{terminal_status}",
+        correction={
+            "schema_version": "field-observation-correction/1",
+            "finding_id": successor_brand["finding_id"],
+            "observation_id": source["observation_id"],
+            "document_id": source["document_id"],
+            "document_role": source["document_role"],
+            "field": source["field"],
+            "raw": "HONDA",
+            "source_location": {
+                key: source[key]
+                for key in ("source_sha256", "source_page", "source_region")
+            },
+            "reason_code": "SOURCE_VALUE_MISREAD",
+        },
+        now=review_time + 2,
+    )
+    assert corrected["status"] == "accepted"
+    assert service.process_next_job().status == "complete"
+    service.refresh_projection()
+    queue = service.queue_view(
+        role="reviewer",
+        scope=REVIEWER.scope,
+        subject=REVIEWER.subject,
+        now=review_time + 3,
+    )
+    assert len(queue["items"]) == 1
+    new_work_item_id = str(queue["items"][0]["work_item_id"])
+    new_work = service.review_work_item_view(
+        principal=REVIEWER,
+        work_item_id=new_work_item_id,
+        now=review_time + 3,
+    )
+    new_brand = next(
+        item
+        for item in new_work["automatic_findings"]
+        if item["rule_id"] == "R_BRAND_CROSS"
+    )
+    new_claim = service.claim_review_work_item(
+        principal=REVIEWER,
+        work_item_id=new_work_item_id,
+        expected_context=new_work["command_context"],
+        now=review_time + 3,
+    )
+    assert new_work["run_authority"]["run_id"] != successor["run_authority"]["run_id"]
+    assert new_brand["verdict"] == "inconsistent"
+
+    before_predecessor_denials = _authority_snapshot(service)
+    missing = service.request_business_exception(
+        principal=REVIEWER,
+        work_item_id=new_work_item_id,
+        finding_id=str(new_brand["finding_id"]),
+        reason_code="DOCUMENTED_BRAND_VARIANCE",
+        expected_fence=int(new_claim["claim_fence"]),
+        expected_context=new_work["command_context"],
+        idempotency_key=f"s05-rerequest-missing-{terminal_status}",
+        now=review_time + 4,
+    )
+    assert missing["status"] == "conflict"
+    assert missing["reason_code"] == "EXCEPTION_PREDECESSOR_REQUIRED"
+    assert _authority_snapshot(service) == before_predecessor_denials
+
+    wrong = service.request_business_exception(
+        principal=REVIEWER,
+        work_item_id=new_work_item_id,
+        finding_id=str(new_brand["finding_id"]),
+        reason_code="DOCUMENTED_BRAND_VARIANCE",
+        predecessor_request_id=f"{first['request_id']}-wrong",
+        expected_fence=int(new_claim["claim_fence"]),
+        expected_context=new_work["command_context"],
+        idempotency_key=f"s05-rerequest-wrong-{terminal_status}",
+        now=review_time + 4,
+    )
+    assert wrong["status"] == "conflict"
+    assert wrong["reason_code"] == "EXCEPTION_PREDECESSOR_MISMATCH"
+    assert _authority_snapshot(service) == before_predecessor_denials
+
+    accepted = service.request_business_exception(
+        principal=REVIEWER,
+        work_item_id=new_work_item_id,
+        finding_id=str(new_brand["finding_id"]),
+        reason_code="DOCUMENTED_BRAND_VARIANCE",
+        predecessor_request_id=str(first["request_id"]),
+        expected_fence=int(new_claim["claim_fence"]),
+        expected_context=new_work["command_context"],
+        idempotency_key=f"s05-rerequest-accepted-{terminal_status}",
+        now=review_time + 4,
+    )
+
+    assert accepted["status"] == "accepted"
+    service._reload_store()
+    requests = [
+        record
+        for record in service._store.review_records
+        if record.get("record_type") == "business_exception_request"
+    ]
+    assert len(requests) == 2
+    assert requests[-1]["predecessor_request_id"] == first["request_id"]
 
 
 def test_subject_level_sod_and_first_decision_winner_have_zero_second_effect(
@@ -1283,10 +1491,13 @@ def test_restart_rebuild_preserves_minimized_exception_history_and_run_bytes(
 
     assert routed["phase"] == "Verification Completed"
     assert rebuilt["status"] == "approved"
+    assert rebuilt["current"] is False
+    assert rebuilt["currentness_reason"] == "PROCESSING_CYCLE_SEALED"
     assert rebuilt["finding"]["verdict"] == "inconsistent"
     assert rebuilt["actions"] == []
     assert history["runs"][0]["authority_digest"] == before_run["authority_digest"]
     assert request["request_id"] in history["runs"][0]["exception_ids"]
+    assert history["runs"][0]["applicable_exception_ids"] == []
     assert route["route"] == "human_complete"
     fixture = (ROOT / "fixtures" / "applications" / "app_bad_brand.json").read_text(
         encoding="utf-8"
@@ -1562,6 +1773,10 @@ def test_exception_request_write_gates_fail_closed_without_effect(
     "fault_point",
     (
         "exception_operations.record",
+        "exception_operations.lifecycle",
+        "exception_operations.invalidation",
+        "exception_operations.claim_fence",
+        "exception_operations.review_successor",
         "exception_operations.audit",
         "exception_operations.idempotency",
         "exception_operations.publish",
@@ -1571,7 +1786,19 @@ def test_each_exception_operations_write_fault_is_atomic(
     tmp_path: Path,
     fault_point: str,
 ) -> None:
-    service, _, _, _, _ = _ready_brand_exception(tmp_path)
+    service, _, work_item_id, claim, finding = _ready_brand_exception(tmp_path)
+    request = _request_brand_exception(service, work_item_id, claim, finding)
+    view = service.business_exception_view(
+        principal=APPROVER,
+        request_id=str(request["request_id"]),
+        now=102,
+    )
+    service.claim_exception_work_item(
+        principal=APPROVER,
+        work_item_id=str(request["work_item_id"]),
+        expected_context=view["command_context"],
+        now=102,
+    )
     before = _authority_snapshot(service)
     faulty = _faulty_service(service, tmp_path / "target.sqlite3", fault_point)
 
@@ -1588,6 +1815,147 @@ def test_each_exception_operations_write_fault_is_atomic(
         else "STORAGE_UNAVAILABLE"
     )
     assert _authority_snapshot(service) == before
+
+
+def test_close_atomically_drains_multiple_requests_across_scopes_and_restart(
+    tmp_path: Path,
+) -> None:
+    service = ControlledScenarioService(
+        fixture_root=ROOT / "fixtures" / "applications",
+        rules_path=ROOT / "configs" / "rules_auto_lease.yaml",
+        state_path=tmp_path / "target.sqlite3",
+        scenario_id="app_bad_brand.json",
+        exception_approver_subject=APPROVER.subject,
+    )
+    requests: list[dict[str, object]] = []
+    reviewers: list[S01CommandPrincipal] = []
+    for index in range(2):
+        reviewer = S01CommandPrincipal(
+            subject=f"s05-multi-reviewer-{index}",
+            role="reviewer",
+            scope=f"C-DEMO/session/{index:032x}",
+            source_id="s05-review-console",
+        )
+        integrator = S01CommandPrincipal(
+            subject=reviewer.subject,
+            role="integrator",
+            scope=reviewer.scope,
+            source_id="s05-intake",
+        )
+        admitted = service.submit_demo(
+            scenario_id="app_bad_brand.json",
+            idempotency_key=f"s05-multi-intake-{index}",
+            principal=integrator,
+        )
+        assert admitted.application_id is not None
+        assert service.process_next_job().status == "complete"
+        service.refresh_projection()
+        queue = service.queue_view(
+            role="reviewer",
+            scope=reviewer.scope,
+            subject=reviewer.subject,
+            now=100,
+        )
+        assert len(queue["items"]) == 1
+        review_work_item_id = queue["items"][0]["work_item_id"]
+        work = service.review_work_item_view(
+            principal=reviewer,
+            work_item_id=review_work_item_id,
+            now=100,
+        )
+        finding = next(
+            item
+            for item in work["automatic_findings"]
+            if item["rule_id"] == "R_BRAND_CROSS"
+        )
+        claim = service.claim_review_work_item(
+            principal=reviewer,
+            work_item_id=review_work_item_id,
+            expected_context=work["command_context"],
+            now=100,
+        )
+        requested = service.request_business_exception(
+            principal=reviewer,
+            work_item_id=review_work_item_id,
+            finding_id=str(finding["finding_id"]),
+            reason_code="DOCUMENTED_BRAND_VARIANCE",
+            expected_fence=int(claim["claim_fence"]),
+            expected_context=work["command_context"],
+            idempotency_key=f"s05-multi-request-{index}",
+            now=101,
+        )
+        assert requested["status"] == "accepted"
+        requests.append(requested)
+        reviewers.append(reviewer)
+
+    first_view = service.business_exception_view(
+        principal=APPROVER,
+        request_id=str(requests[0]["request_id"]),
+        now=102,
+    )
+    first_claim = service.claim_exception_work_item(
+        principal=APPROVER,
+        work_item_id=str(requests[0]["work_item_id"]),
+        expected_context=first_view["command_context"],
+        now=102,
+    )
+    closed = service.close_business_exception_operations(
+        principal=ROUTER,
+        idempotency_key="s05-multi-close",
+        now=103,
+    )
+
+    assert first_claim["status"] == "claimed"
+    assert closed["invalidated_request_ids"] == sorted(
+        request["request_id"] for request in requests
+    )
+    assert closed["unresolved_request_count"] == 0
+
+    restarted = ControlledScenarioService(
+        fixture_root=service.fixture_root,
+        rules_path=service.rules_path,
+        state_path=tmp_path / "target.sqlite3",
+        scenario_id="app_bad_brand.json",
+        exception_approver_subject=APPROVER.subject,
+    )
+    status = restarted.business_exception_operations_status(
+        principal=ROUTER,
+        now=104,
+    )
+    views = [
+        restarted.business_exception_view(
+            principal=APPROVER,
+            request_id=str(request["request_id"]),
+            now=104,
+        )
+        for request in requests
+    ]
+    restarted.refresh_projection()
+    queues = [
+        restarted.queue_view(
+            role="reviewer",
+            scope=reviewer.scope,
+            subject=reviewer.subject,
+            now=104,
+        )
+        for reviewer in reviewers
+    ]
+    resumed = restarted.resume_business_exception_operations(
+        principal=ROUTER,
+        idempotency_key="s05-multi-resume",
+        now=105,
+    )
+
+    assert status["operations"] == "closed"
+    assert status["unresolved_request_count"] == 0
+    assert [view["status"] for view in views] == ["invalidated", "invalidated"]
+    assert [view["claim_status"] for view in views] == [
+        "invalidated",
+        "invalidated",
+    ]
+    assert all(view["claim_subject"] is None for view in views)
+    assert [len(queue["items"]) for queue in queues] == [1, 1]
+    assert resumed["status"] == "accepted"
 
 
 def test_independent_business_exception_approval_routes_without_mutating_run(
@@ -1952,6 +2320,14 @@ def test_close_drain_fence_invalidate_restart_and_resume(
         request_id=str(request["request_id"]),
         now=105,
     )
+    closed_status = service.business_exception_operations_status(
+        principal=ROUTER,
+        now=105,
+    )
+    history_after_close = service.application_history_view(
+        principal=REVIEWER,
+        application_id=str(request["application_id"]),
+    )
     if decision is None:
         blocked = service.decide_business_exception(
             principal=APPROVER,
@@ -1972,26 +2348,22 @@ def test_close_drain_fence_invalidate_restart_and_resume(
             idempotency_key="s05-route-while-closed",
             now=106,
         )
-    premature_resume = service.resume_business_exception_operations(
-        principal=ROUTER,
-        idempotency_key=f"s05-premature-resume-{decision_first}",
-        now=106,
-    )
 
     assert closed["status"] == "accepted"
+    assert closed["invalidated_request_ids"] == [request["request_id"]]
+    assert closed["unresolved_request_count"] == 0
+    assert closed_status["unresolved_request_count"] == 0
+    assert closed_view["status"] == "invalidated"
+    assert closed_view["current"] is False
+    assert closed_view["claim_status"] == "invalidated"
+    assert closed_view["claim_subject"] is None
     assert closed_view["actions"] == []
     assert blocked["status"] == "stopped"
-    assert premature_resume["status"] == "stopped"
-    assert premature_resume["reason_code"] == "BUSINESS_EXCEPTION_DRAIN_INCOMPLETE"
+    assert service.application_history_view(
+        principal=REVIEWER,
+        application_id=str(request["application_id"]),
+    ) == history_after_close
 
-    invalidated = service.invalidate_business_exception(
-        principal=ROUTER,
-        request_id=str(request["request_id"]),
-        reason_code="BUSINESS_EXCEPTION_OPERATIONS_CLOSED",
-        expected_context=view["command_context"],
-        idempotency_key=f"s05-close-invalidate-{decision_first}",
-        now=107,
-    )
     restarted = ControlledScenarioService(
         fixture_root=service.fixture_root,
         rules_path=service.rules_path,
@@ -1999,27 +2371,66 @@ def test_close_drain_fence_invalidate_restart_and_resume(
         scenario_id="app_bad_brand.json",
         exception_approver_subject=APPROVER.subject,
     )
+    rebuilt = restarted.business_exception_view(
+        principal=APPROVER,
+        request_id=str(request["request_id"]),
+        now=107,
+    )
+    rebuilt_status = restarted.business_exception_operations_status(
+        principal=ROUTER,
+        now=107,
+    )
+    restarted.refresh_projection()
+    queue = restarted.queue_view(
+        role="reviewer",
+        scope=REVIEWER.scope,
+        subject=REVIEWER.subject,
+        now=107,
+    )
     resumed = restarted.resume_business_exception_operations(
         principal=ROUTER,
         idempotency_key=f"s05-resume-after-drain-{decision_first}",
         now=108,
     )
-    late = restarted.decide_business_exception(
-        principal=APPROVER,
-        request_id=str(request["request_id"]),
-        work_item_id=str(request["work_item_id"]),
-        decision="approved",
-        reason_code="DOCUMENTED_VARIANCE_ACCEPTED",
-        expected_fence=int(approver_claim["claim_fence"]),
-        expected_context=view["command_context"],
-        idempotency_key=f"s05-late-old-decision-{decision_first}",
-        now=109,
+    history_before_late = restarted.application_history_view(
+        principal=REVIEWER,
+        application_id=str(request["application_id"]),
     )
+    if decision is None:
+        late = restarted.decide_business_exception(
+            principal=APPROVER,
+            request_id=str(request["request_id"]),
+            work_item_id=str(request["work_item_id"]),
+            decision="approved",
+            reason_code="DOCUMENTED_VARIANCE_ACCEPTED",
+            expected_fence=int(approver_claim["claim_fence"]),
+            expected_context=view["command_context"],
+            idempotency_key="s05-late-old-decision-after-close",
+            now=109,
+        )
+    else:
+        late = restarted.determine_business_exception_route(
+            principal=ROUTER,
+            request_id=str(request["request_id"]),
+            expected_context=decision["routing_context"],
+            idempotency_key="s05-late-old-route-after-close",
+            now=109,
+        )
 
-    assert invalidated["status"] == "accepted"
-    assert invalidated["phase"] == "Manual Review"
+    assert rebuilt["status"] == "invalidated"
+    assert rebuilt["current"] is False
+    assert rebuilt_status["operations"] == "closed"
+    assert rebuilt_status["unresolved_request_count"] == 0
+    assert len(queue["items"]) == 1
+    assert request["finding_id"] in {
+        finding["finding_id"] for finding in queue["items"][0]["mandatory_blockers"]
+    }
     assert restarted.business_exception_operations_status(
         principal=ROUTER, now=108
     )["operations"] == "open"
     assert resumed["status"] == "accepted"
-    assert late["status"] in {"stale", "already_decided"}
+    assert late["status"] == "stale"
+    assert restarted.application_history_view(
+        principal=REVIEWER,
+        application_id=str(request["application_id"]),
+    ) == history_before_late

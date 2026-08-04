@@ -248,6 +248,120 @@ def test_reject_returns_fresh_review_and_forbidden_payloads_write_nothing(
             use_session=False,
         )
         fresh = wait_for_projected_queue_item(server, application_id)
+        fresh_work = server.request(
+            "GET",
+            f"/controlled/s01/api/queries/review-work-items/{fresh['work_item_id']}",
+            headers=headers("reviewer"),
+        ).json()
+        fresh_claim = server.request(
+            "POST",
+            f"/controlled/s01/api/commands/review-work-items/{fresh['work_item_id']}/claim",
+            body={"expected_context": fresh_work["command_context"]},
+            headers=headers("reviewer"),
+        ).json()
+        workspace = server.request(
+            "GET",
+            f"/controlled/s01/api/queries/applications/{application_id}/workspace",
+            headers=headers("reviewer"),
+        ).json()
+        brand = next(
+            item
+            for item in workspace["mandatory_blockers"]
+            if item["rule_id"] == "R_BRAND_CROSS"
+        )
+        same_context = server.request(
+            "POST",
+            f"/controlled/s01/api/commands/review-work-items/{fresh['work_item_id']}/business-exceptions",
+            body={
+                "finding_id": brand["finding_id"],
+                "reason_code": "DOCUMENTED_BRAND_VARIANCE",
+                "predecessor_request_id": request["request_id"],
+                "expected_fence": fresh_claim["claim_fence"],
+                "expected_context": fresh_work["command_context"],
+                "idempotency_key": "s05-http-same-context-rerequest",
+            },
+            headers=headers("reviewer"),
+        )
+        source = next(
+            link for link in brand["evidence_links"] if link["document_id"] == "pol"
+        )
+        corrected = server.request(
+            "POST",
+            f"/controlled/s01/api/commands/review-work-items/{fresh['work_item_id']}/correct-field-observation",
+            body={
+                "application_id": application_id,
+                "expected_fence": fresh_claim["claim_fence"],
+                "expected_context": fresh_work["command_context"],
+                "idempotency_key": "s05-http-rerequest-new-run",
+                "correction": {
+                    "schema_version": "field-observation-correction/1",
+                    "finding_id": brand["finding_id"],
+                    "observation_id": source["observation_id"],
+                    "document_id": source["document_id"],
+                    "document_role": source["document_role"],
+                    "field": source["field"],
+                    "raw": "HONDA",
+                    "source_location": {
+                        key: source[key]
+                        for key in ("source_sha256", "source_page", "source_region")
+                    },
+                    "reason_code": "SOURCE_VALUE_MISREAD",
+                },
+            },
+            headers=headers("reviewer"),
+        )
+        new_item = wait_for_projected_queue_item(server, application_id)
+        new_work = server.request(
+            "GET",
+            f"/controlled/s01/api/queries/review-work-items/{new_item['work_item_id']}",
+            headers=headers("reviewer"),
+        ).json()
+        new_claim = server.request(
+            "POST",
+            f"/controlled/s01/api/commands/review-work-items/{new_item['work_item_id']}/claim",
+            body={"expected_context": new_work["command_context"]},
+            headers=headers("reviewer"),
+        ).json()
+        new_brand = next(
+            item
+            for item in new_work["automatic_findings"]
+            if item["rule_id"] == "R_BRAND_CROSS"
+        )
+        rerequest_body = {
+            "finding_id": new_brand["finding_id"],
+            "reason_code": "DOCUMENTED_BRAND_VARIANCE",
+            "expected_fence": new_claim["claim_fence"],
+            "expected_context": new_work["command_context"],
+        }
+        missing = server.request(
+            "POST",
+            f"/controlled/s01/api/commands/review-work-items/{new_item['work_item_id']}/business-exceptions",
+            body={
+                **rerequest_body,
+                "idempotency_key": "s05-http-rerequest-missing",
+            },
+            headers=headers("reviewer"),
+        )
+        wrong = server.request(
+            "POST",
+            f"/controlled/s01/api/commands/review-work-items/{new_item['work_item_id']}/business-exceptions",
+            body={
+                **rerequest_body,
+                "predecessor_request_id": f"{request['request_id']}-wrong",
+                "idempotency_key": "s05-http-rerequest-wrong",
+            },
+            headers=headers("reviewer"),
+        )
+        accepted_rerequest = server.request(
+            "POST",
+            f"/controlled/s01/api/commands/review-work-items/{new_item['work_item_id']}/business-exceptions",
+            body={
+                **rerequest_body,
+                "predecessor_request_id": request["request_id"],
+                "idempotency_key": "s05-http-rerequest-accepted",
+            },
+            headers=headers("reviewer"),
+        )
 
     assert unknown.status == 422
     assert oversized.status == 413
@@ -255,6 +369,21 @@ def test_reject_returns_fresh_review_and_forbidden_payloads_write_nothing(
     assert rejected.status == 200
     assert rejected.json()["phase"] == "Manual Review"
     assert fresh["work_item_id"] == rejected.json()["successor_work_item_id"]
+    assert same_context.status == 409
+    assert same_context.json()["detail"]["reason_code"] == (
+        "EXCEPTION_REREQUEST_NOT_MATERIAL"
+    )
+    assert corrected.status == 200
+    assert new_item["work_item_id"] != fresh["work_item_id"]
+    assert missing.status == wrong.status == 409
+    assert missing.json()["detail"]["reason_code"] == (
+        "EXCEPTION_PREDECESSOR_REQUIRED"
+    )
+    assert wrong.json()["detail"]["reason_code"] == (
+        "EXCEPTION_PREDECESSOR_MISMATCH"
+    )
+    assert accepted_rerequest.status == 200
+    assert accepted_rerequest.json()["status"] == "accepted"
 
 
 def create_s05_clock_test_app():
@@ -353,7 +482,7 @@ def test_operator_close_drain_and_resume_over_http(tmp_path: Path) -> None:
         app_target="task4_consistency.web.app:create_s01_test_app",
         app_factory=True,
     ) as server:
-        _, _, request = _ready_request(server, "s05-http-rollback")
+        application_id, _, request = _ready_request(server, "s05-http-rollback")
         view, claim = _claim_exception(server, request)
         unauthorized = server.request(
             "POST",
@@ -388,24 +517,6 @@ def test_operator_close_drain_and_resume_over_http(tmp_path: Path) -> None:
             headers=_approver_headers(),
             use_session=False,
         )
-        premature_resume = server.request(
-            "POST",
-            "/controlled/s01/api/commands/business-exception-operations/resume",
-            body={"idempotency_key": "s05-http-premature-resume"},
-            headers=operator_auth_headers(),
-            use_session=False,
-        )
-        invalidated = server.request(
-            "POST",
-            f"/controlled/s01/api/commands/business-exceptions/{request['request_id']}/invalidate",
-            body={
-                "reason_code": "BUSINESS_EXCEPTION_OPERATIONS_CLOSED",
-                "expected_context": view["command_context"],
-                "idempotency_key": "s05-http-rollback-invalidation",
-            },
-            headers=operator_auth_headers(),
-            use_session=False,
-        )
         resumed = server.request(
             "POST",
             "/controlled/s01/api/commands/business-exception-operations/resume",
@@ -419,18 +530,25 @@ def test_operator_close_drain_and_resume_over_http(tmp_path: Path) -> None:
             headers=operator_auth_headers(),
             use_session=False,
         )
+        final = server.request(
+            "GET",
+            f"/controlled/s01/api/queries/business-exceptions/{request['request_id']}",
+            headers=_approver_headers(),
+            use_session=False,
+        )
+        fresh = wait_for_projected_queue_item(server, application_id)
 
     assert unauthorized.status == 403
     assert closed.status == status.status == 200
     assert closed.json()["operations"] == status.json()["operations"] == "closed"
+    assert closed.json()["invalidated_request_ids"] == [request["request_id"]]
+    assert status.json()["unresolved_request_count"] == 0
     assert blocked.status == 503
     assert blocked.json()["detail"]["reason_code"] == (
         "BUSINESS_EXCEPTION_OPERATIONS_CLOSED"
     )
-    assert premature_resume.status == 503
-    assert premature_resume.json()["detail"]["reason_code"] == (
-        "BUSINESS_EXCEPTION_DRAIN_INCOMPLETE"
-    )
-    assert invalidated.status == resumed.status == final_status.status == 200
-    assert invalidated.json()["phase"] == "Manual Review"
+    assert resumed.status == final_status.status == final.status == 200
     assert resumed.json()["operations"] == final_status.json()["operations"] == "open"
+    assert final.json()["status"] == "invalidated"
+    assert final.json()["current"] is False
+    assert fresh["work_item_id"] != request["work_item_id"]

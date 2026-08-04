@@ -565,6 +565,9 @@ class S04RevealBody(S03ClaimBody):
 class S05RequestBody(S03FencedBody):
     finding_id: str = Field(min_length=1, max_length=200, strict=True)
     reason_code: str = Field(min_length=1, max_length=100, strict=True)
+    predecessor_request_id: str | None = Field(
+        default=None, min_length=1, max_length=200, strict=True
+    )
     expected_fence: int = Field(ge=1, strict=True)
 
 
@@ -1677,6 +1680,7 @@ async def controlled_s05_request_business_exception(
             work_item_id=work_item_id,
             finding_id=body.finding_id,
             reason_code=body.reason_code,
+            predecessor_request_id=body.predecessor_request_id,
             expected_fence=body.expected_fence,
             expected_context=body.expected_context,
             idempotency_key=body.idempotency_key,

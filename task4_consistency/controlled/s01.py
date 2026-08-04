@@ -4431,6 +4431,7 @@ class ControlledScenarioService:
                         "revision": current["revision"],
                         "changed_at": current["changed_at"],
                         "unresolved_request_count": len(unresolved),
+                        "invalidated_request_ids": [],
                         "reason_code": current["reason_code"],
                         "unchanged": True,
                     }
@@ -4452,6 +4453,16 @@ class ControlledScenarioService:
                     "exception_operations",
                     f"{sequence}:{operations}:{event_time}",
                 )
+                unresolved_requests = [
+                    next(
+                        record
+                        for record in self._store.review_records
+                        if record.get("record_type")
+                        == "business_exception_request"
+                        and record.get("request_id") == request_id
+                    )
+                    for request_id in unresolved
+                ]
                 try:
                     self._before_write("exception_operations.record")
                     staged.review_records.append(
@@ -4466,7 +4477,248 @@ class ControlledScenarioService:
                             "changed_at": event_time,
                         }
                     )
+                    close_outcomes: list[dict[str, Any]] = []
+                    if operations == "closed":
+                        for request in unresolved_requests:
+                            staged_app = staged.applications[
+                                request["application_id"]
+                            ]
+                            staged_runs = [
+                                run
+                                for run in staged.runs
+                                if run.get("application_id")
+                                == request["application_id"]
+                                and run.get("run_id") == request["run_id"]
+                                and run.get("status") == "complete"
+                            ]
+                            if (
+                                len(staged_runs) != 1
+                                or staged_app.get("phase")
+                                not in {
+                                    "Pending Exception Approval",
+                                    "Routing Determination",
+                                    "Manual Review",
+                                }
+                            ):
+                                raise _StoreWriteFailure(
+                                    "exception_operations.lifecycle"
+                                )
+                            staged_run = staged_runs[0]
+                            current_manual_work = [
+                                item
+                                for item in staged.work_items
+                                if item.get("application_id")
+                                == request["application_id"]
+                                and item.get("run_id") == request["run_id"]
+                                and item.get("kind") == "manual_review"
+                                and item.get("lifecycle_revision")
+                                == staged_app.get("lifecycle_revision")
+                            ]
+                            self._before_write("exception_operations.lifecycle")
+                            staged_app["route"] = "manual_review"
+                            self._transition_lifecycle(
+                                staged_app,
+                                "Manual Review",
+                                "BUSINESS_EXCEPTION_INVALIDATED",
+                                store=staged,
+                            )
+                            staged.lifecycle_events[-1].update(
+                                {
+                                    "run_id": request["run_id"],
+                                    "request_id": request["request_id"],
+                                    "exception_id": request["request_id"],
+                                    "expires_at": request["expires_at"],
+                                    "invalidation_reason_code": reason_code,
+                                    "operations_revision": sequence,
+                                }
+                            )
+                            invalidation_record_id = self._stable_id(
+                                "exception_invalidation",
+                                f"{request['request_id']}:operations:{sequence}",
+                            )
+                            self._before_write("exception_operations.invalidation")
+                            staged.review_records.append(
+                                {
+                                    "record_id": invalidation_record_id,
+                                    "record_type": "business_exception_invalidated",
+                                    "schema_version": (
+                                        "business-exception-invalidation/1"
+                                    ),
+                                    "request_id": request["request_id"],
+                                    "exception_id": request["request_id"],
+                                    "work_item_id": request["work_item_id"],
+                                    "application_id": request["application_id"],
+                                    "run_id": request["run_id"],
+                                    "finding_id": request["finding_id"],
+                                    "status": "invalidated",
+                                    "reason_code": reason_code,
+                                    "operations_revision": sequence,
+                                    "invalidated_at": event_time,
+                                    "lifecycle_revision": staged_app[
+                                        "lifecycle_revision"
+                                    ],
+                                    "evidence_revision": staged_app[
+                                        "evidence_revision"
+                                    ],
+                                }
+                            )
+                            exception_sequence = 1 + sum(
+                                record.get("work_item_id")
+                                == request["work_item_id"]
+                                and str(record.get("record_type", "")).startswith(
+                                    "exception_work_item_"
+                                )
+                                for record in staged.review_records
+                            )
+                            invalidated_claim_fence = max(
+                                (
+                                    int(record["claim_fence"])
+                                    for record in staged.review_records
+                                    if record.get("work_item_id")
+                                    == request["work_item_id"]
+                                    and record.get("record_type")
+                                    == "exception_work_item_claimed"
+                                ),
+                                default=0,
+                            )
+                            self._before_write("exception_operations.claim_fence")
+                            staged.review_records.append(
+                                {
+                                    "record_id": self._stable_id(
+                                        "review_record",
+                                        f"{request['work_item_id']}:operations:"
+                                        f"{exception_sequence}",
+                                    ),
+                                    "record_type": (
+                                        "exception_work_item_invalidated"
+                                    ),
+                                    "sequence": exception_sequence,
+                                    "work_item_id": request["work_item_id"],
+                                    "request_id": request["request_id"],
+                                    "exception_id": request["request_id"],
+                                    "application_id": request["application_id"],
+                                    "run_id": request["run_id"],
+                                    "invalidated_claim_fence": (
+                                        invalidated_claim_fence
+                                    ),
+                                    "invalidated_at": event_time,
+                                    "reason_code": reason_code,
+                                    "recorded_at": event_time,
+                                }
+                            )
+                            for manual_work in current_manual_work:
+                                manual_sequence = 1 + sum(
+                                    record.get("work_item_id")
+                                    == manual_work["work_item_id"]
+                                    and str(
+                                        record.get("record_type", "")
+                                    ).startswith("work_item_")
+                                    for record in staged.review_records
+                                )
+                                staged.review_records.append(
+                                    {
+                                        "record_id": self._stable_id(
+                                            "review_record",
+                                            f"{manual_work['work_item_id']}:"
+                                            f"operations:{manual_sequence}",
+                                        ),
+                                        "record_type": "work_item_invalidated",
+                                        "sequence": manual_sequence,
+                                        "work_item_id": manual_work["work_item_id"],
+                                        "application_id": request[
+                                            "application_id"
+                                        ],
+                                        "run_id": request["run_id"],
+                                        "request_id": request["request_id"],
+                                        "exception_id": request["request_id"],
+                                        "invalidated_at": event_time,
+                                        "reason_code": reason_code,
+                                        "recorded_at": event_time,
+                                    }
+                                )
+                            blocker_ids = [
+                                finding["finding_id"]
+                                for finding in staged.findings
+                                if finding.get("application_id")
+                                == request["application_id"]
+                                and finding.get("run_id") == request["run_id"]
+                                and finding.get("mandatory") is True
+                                and finding.get("verdict") != "consistent"
+                            ]
+                            self._before_write(
+                                "exception_operations.review_successor"
+                            )
+                            successor_work_item_id = (
+                                self._create_manual_review_successor(
+                                    staged,
+                                    staged_app,
+                                    staged_run,
+                                    finding_ids=blocker_ids,
+                                    predecessor_request_id=request["request_id"],
+                                )
+                            )
+                            close_outcomes.append(
+                                {
+                                    "request": request,
+                                    "invalidation_record_id": (
+                                        invalidation_record_id
+                                    ),
+                                    "invalidated_claim_fence": (
+                                        invalidated_claim_fence
+                                    ),
+                                    "successor_work_item_id": (
+                                        successor_work_item_id
+                                    ),
+                                    "lifecycle_revision": staged_app[
+                                        "lifecycle_revision"
+                                    ],
+                                    "evidence_revision": staged_app[
+                                        "evidence_revision"
+                                    ],
+                                }
+                            )
                     self._before_write("exception_operations.audit")
+                    for outcome in close_outcomes:
+                        request = outcome["request"]
+                        staged.audit_events.append(
+                            {
+                                "event_id": self._stable_id(
+                                    "audit",
+                                    "business_exception_invalidated:"
+                                    f"{outcome['invalidation_record_id']}",
+                                ),
+                                "action": "business_exception_invalidated",
+                                "subject": principal.subject,
+                                "role": principal.role,
+                                "scope": request["visibility_scope"],
+                                "source_id": principal.source_id,
+                                "application_id": request["application_id"],
+                                "run_id": request["run_id"],
+                                "finding_id": request["finding_id"],
+                                "request_id": request["request_id"],
+                                "exception_id": request["request_id"],
+                                "work_item_id": request["work_item_id"],
+                                "successor_work_item_id": outcome[
+                                    "successor_work_item_id"
+                                ],
+                                "invalidated_claim_fence": outcome[
+                                    "invalidated_claim_fence"
+                                ],
+                                "operations_revision": sequence,
+                                "reason_code": reason_code,
+                                "lifecycle_revision": outcome[
+                                    "lifecycle_revision"
+                                ],
+                                "evidence_revision": outcome[
+                                    "evidence_revision"
+                                ],
+                                "result": "accepted",
+                                **self._audit_time_fields(
+                                    staged,
+                                    now=event_time,
+                                ),
+                            }
+                        )
                     staged.audit_events.append(
                         {
                             "event_id": self._stable_id(
@@ -4479,7 +4731,13 @@ class ControlledScenarioService:
                             "source_id": principal.source_id,
                             "operations": operations,
                             "operations_revision": sequence,
-                            "unresolved_request_count": len(unresolved),
+                            "unresolved_request_count": (
+                                0 if operations == "closed" else len(unresolved)
+                            ),
+                            "invalidated_request_ids": [
+                                outcome["request"]["request_id"]
+                                for outcome in close_outcomes
+                            ],
                             "reason_code": reason_code,
                             "result": "accepted",
                             **self._audit_time_fields(staged, now=event_time),
@@ -4491,7 +4749,13 @@ class ControlledScenarioService:
                         "operations": operations,
                         "revision": sequence,
                         "changed_at": event_time,
-                        "unresolved_request_count": len(unresolved),
+                        "unresolved_request_count": (
+                            0 if operations == "closed" else len(unresolved)
+                        ),
+                        "invalidated_request_ids": [
+                            outcome["request"]["request_id"]
+                            for outcome in close_outcomes
+                        ],
                         "reason_code": reason_code,
                         "unchanged": False,
                     }
@@ -4712,7 +4976,6 @@ class ControlledScenarioService:
                 "Pending Exception Approval",
                 "Routing Determination",
                 "Manual Review",
-                "Verification Completed",
             }
         )
         fixed = {
@@ -4757,6 +5020,7 @@ class ControlledScenarioService:
         expected_fence: int,
         expected_context: dict[str, Any],
         idempotency_key: str,
+        predecessor_request_id: str | None = None,
         now: float | None = None,
     ) -> dict[str, Any]:
         request_time = int(self._clock() if now is None else now)
@@ -4774,6 +5038,13 @@ class ControlledScenarioService:
             or not isinstance(expected_fence, int)
             or expected_fence < 1
             or not self._valid_idempotency_key(idempotency_key)
+            or predecessor_request_id is not None
+            and (
+                not isinstance(predecessor_request_id, str)
+                or not predecessor_request_id
+                or len(predecessor_request_id) > 200
+                or predecessor_request_id.strip() != predecessor_request_id
+            )
         ):
             raise ValueError("business exception request is invalid")
         fingerprint_bytes = json.dumps(
@@ -4781,6 +5052,7 @@ class ControlledScenarioService:
                 "expected_context": expected_context,
                 "expected_fence": expected_fence,
                 "finding_id": finding_id,
+                "predecessor_request_id": predecessor_request_id,
                 "reason_code": reason_code,
                 "work_item_id": work_item_id,
             },
@@ -4894,22 +5166,63 @@ class ControlledScenarioService:
                     "work_item_id": work_item_id,
                     "reason_code": "CHECK_NOT_WAIVABLE_BY_PINNED_RELEASE",
                 }
-            duplicates = [
+            request_history = [
                 record
                 for record in self._store.review_records
                 if record.get("record_type") == "business_exception_request"
                 and record.get("application_id") == work_item["application_id"]
-                and record.get("cycle") == work_item["cycle"]
+                and record.get("rule_id") == finding["rule_id"]
+            ]
+            active_request_ids = set(self._unresolved_business_exception_ids())
+            conflict = {
+                "status": "conflict",
+                "replayed": False,
+                "application_id": work_item["application_id"],
+                "work_item_id": work_item_id,
+            }
+            if any(
+                record.get("cycle") == work_item["cycle"]
                 and record.get("run_id") == work_item["run_id"]
                 and record.get("finding_id") == finding_id
-            ]
-            if duplicates:
+                and record.get("request_id") in active_request_ids
+                for record in request_history
+            ):
                 return {
-                    "status": "conflict",
-                    "replayed": False,
-                    "application_id": work_item["application_id"],
-                    "work_item_id": work_item_id,
+                    **conflict,
                     "reason_code": "ACTIVE_EXCEPTION_REQUEST_EXISTS",
+                }
+            predecessor = request_history[-1] if request_history else None
+            if predecessor is None:
+                if predecessor_request_id is not None:
+                    return {
+                        **conflict,
+                        "reason_code": "EXCEPTION_PREDECESSOR_MISMATCH",
+                    }
+            elif predecessor_request_id is None:
+                return {
+                    **conflict,
+                    "reason_code": "EXCEPTION_PREDECESSOR_REQUIRED",
+                }
+            elif predecessor_request_id != predecessor["request_id"]:
+                return {
+                    **conflict,
+                    "reason_code": "EXCEPTION_PREDECESSOR_MISMATCH",
+                }
+            elif predecessor["request_id"] in active_request_ids:
+                return {
+                    **conflict,
+                    "reason_code": "ACTIVE_EXCEPTION_REQUEST_EXISTS",
+                }
+            elif (
+                predecessor["run_id"] == work_item["run_id"]
+                and predecessor["waiver_policy_id"] == rule.waiver_policy_id
+                and predecessor["waiver_policy_digest"]
+                == rule.waiver_policy_digest
+                and predecessor["reason_code"] == reason_code
+            ):
+                return {
+                    **conflict,
+                    "reason_code": "EXCEPTION_REREQUEST_NOT_MATERIAL",
                 }
             gate = self._review_write_gate(app=app)
             if gate is not None:
@@ -4951,6 +5264,7 @@ class ControlledScenarioService:
                         "run_id": work_item["run_id"],
                         "request_id": request_id,
                         "finding_id": finding_id,
+                        "predecessor_request_id": predecessor_request_id,
                     }
                 )
                 spec = run["spec"]
@@ -4982,6 +5296,7 @@ class ControlledScenarioService:
                     "requester_role": principal.role,
                     "requester_source_id": principal.source_id,
                     "assigned_approver_subject": self._exception_approver_subject,
+                    "predecessor_request_id": predecessor_request_id,
                     "reason_code": reason_code,
                     "scope": rule.waiver_scope,
                     "requester_claim_fence": expected_fence,
@@ -5069,6 +5384,7 @@ class ControlledScenarioService:
                         "work_item_id": exception_work_item_id,
                         "request_id": request_id,
                         "exception_id": request_id,
+                        "predecessor_request_id": predecessor_request_id,
                         "reason_code": reason_code,
                         "waiver_policy_id": rule.waiver_policy_id,
                         "waiver_policy_digest": rule.waiver_policy_digest,
@@ -5111,6 +5427,8 @@ class ControlledScenarioService:
                     and record.get("cycle") == work_item["cycle"]
                     and record.get("run_id") == work_item["run_id"]
                     and record.get("finding_id") == finding_id
+                    and record.get("request_id")
+                    in set(self._unresolved_business_exception_ids())
                     for record in self._store.review_records
                 )
                 return {
@@ -5201,6 +5519,8 @@ class ControlledScenarioService:
                 "currentness_reason": (
                     "CURRENT_FIXED_CONTEXT"
                     if current
+                    else "PROCESSING_CYCLE_SEALED"
+                    if app.get("phase") == "Verification Completed"
                     else "EXPIRED"
                     if status == "expired"
                     or query_time >= float(request["expires_at"])
