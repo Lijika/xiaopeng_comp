@@ -20,22 +20,16 @@ const ENGINE_PROVENANCE = [
     document: "机动车登记证书 · engine_no",
     reference: "reg · present",
     observation: "Observation observation_0ca1597414109c7274c6a788",
-    page: "Page 1",
-    region: "Region /documents/0/fields/engine_no",
   },
   {
     document: "交强险保单 · engine_no",
     reference: "pol · present",
     observation: "Observation observation_a103a7f1fa8535d64140ef0c",
-    page: "Page 2",
-    region: "Region /documents/1/fields/engine_no",
   },
   {
     document: "发票 · engine_no",
     reference: "inv · present",
     observation: "Observation observation_dd33dc828b5ee2246e1ff6a2",
-    page: "Page 4",
-    region: "Region /documents/3/fields/engine_no",
   },
 ];
 
@@ -345,17 +339,13 @@ async function completeControlledFlow(page, baseURL) {
     await expect(item.getByTestId("evidence-document")).toHaveText(expected.document);
     await expect(item.getByTestId("evidence-reference")).toHaveText(expected.reference);
     await expect(item.getByTestId("evidence-observation")).toHaveText(expected.observation);
-    await expect(item.getByTestId("evidence-object-ref")).toHaveText(
-      `Source c-demo-object:sha256:${SOURCE_SHA256}`,
-    );
+    await expect(item.getByTestId("evidence-object-ref")).toHaveText("Source Unavailable");
     await expect(item.getByTestId("evidence-sha256")).toHaveText(`SHA-256 ${SOURCE_SHA256}`);
     const provenanceManifest = item.getByTestId("evidence-provenance-manifest");
     await expect(provenanceManifest).toHaveText(
       `Manifest SHA-256 ${PROVENANCE_MANIFEST_DIGEST}`,
     );
     provenanceManifestDigests.push(await provenanceManifest.textContent());
-    await expect(item.getByTestId("evidence-page")).toHaveText(expected.page);
-    await expect(item.getByTestId("evidence-region")).toHaveText(expected.region);
   }
   expect(new Set(provenanceManifestDigests).size).toBe(1);
   await expect(page.getByTestId("lifecycle-revision")).toHaveText("6");
@@ -401,6 +391,12 @@ async function completeControlledFlow(page, baseURL) {
     "expected_verdicts",
     "policy",
     "loan",
+    "producer_id",
+    "producer_family",
+    "producer_run_id",
+    "model_id",
+    "model_version",
+    "source_receipt_id",
   ]);
   const leakedKeys = [];
   const leakedValues = [];

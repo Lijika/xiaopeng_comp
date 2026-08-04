@@ -870,18 +870,29 @@ def test_loopback_process_queue_workspace_and_minimized_evidence(
         for link in links
         if link["value_state"] == "present"
     )
-    assert {link["document_id"]: link["source_page"] for link in links} == {
-        "reg": 1,
-        "pol": 2,
-        "inv": 4,
+    assert {link["document_id"] for link in links} == {"reg", "pol", "inv"}
+    unregistered_trace_fields = {
+        "producer_id",
+        "producer_family",
+        "producer_run_id",
+        "model_id",
+        "model_version",
+        "source_receipt_id",
     }
+    assert all(
+        unregistered_trace_fields.isdisjoint(link)
+        and "source_object_ref" not in link
+        and "coordinate_system" not in link
+        and "raw" not in link
+        for link in links
+    )
     provenance_manifest_digests = {
         link["provenance_manifest_digest"] for link in links
     }
     assert len(provenance_manifest_digests) == 1
     assert len(provenance_manifest_digests.pop()) == 64
-    assert "label" not in workspace.text
-    assert "expected_verdicts" not in workspace.text
+    for forbidden in ("label", "expected_verdicts", "source_object_ref", "coordinate_system"):
+        assert forbidden not in workspace.text
 
 
 @pytest.mark.parametrize(

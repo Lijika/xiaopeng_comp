@@ -3884,7 +3884,7 @@ def test_worker_rejects_mutable_lifecycle_state_that_disagrees_with_immutable_ev
     }
 
 
-def test_fixed_adapter_exposes_exact_eligible_synthetic_provenance() -> None:
+def test_fixed_adapter_exposes_minimized_eligible_synthetic_provenance() -> None:
     service = make_service()
     admission = service.submit_demo(
         principal=TEST_INTEGRATOR,
@@ -3902,34 +3902,34 @@ def test_fixed_adapter_exposes_exact_eligible_synthetic_provenance() -> None:
     )
     links = workspace["selected_finding"]["evidence_links"]
     source_sha256 = admission.source_sha256
-    expected_regions = {
-        "reg": "/documents/0/fields/engine_no",
-        "pol": "/documents/1/fields/engine_no",
-        "inv": "/documents/3/fields/engine_no",
-    }
-    expected_pages = {"reg": 1, "pol": 2, "inv": 4}
-
-    assert {link["document_id"] for link in links} == set(expected_regions)
+    assert {link["document_id"] for link in links} == {"reg", "pol", "inv"}
     assert all(link["evidence_eligible"] is True for link in links)
     assert all(
         link["eligibility_reason"] == "REGISTERED_SOURCE_PROVENANCE_VERIFIED"
         for link in links
     )
-    assert all(
-        link["source_page"] == expected_pages[link["document_id"]] for link in links
-    )
-    assert all(
-        link["source_region"] == expected_regions[link["document_id"]]
-        for link in links
-    )
-    assert all(
-        link["source_object_ref"] == f"c-demo-object:sha256:{source_sha256}"
-        for link in links
-    )
     assert all(link["source_sha256"] == source_sha256 for link in links)
+    assert all(link["raw_masked"] == "[REDACTED]" for link in links)
     assert all(str(link["observation_id"]).startswith("observation_") for link in links)
     assert len({link["provenance_manifest_digest"] for link in links}) == 1
     assert len(links[0]["provenance_manifest_digest"]) == 64
+    registered_trace_keys = {
+        "source_page",
+        "source_region",
+        "producer_id",
+        "producer_family",
+        "producer_run_id",
+        "model_id",
+        "model_version",
+        "source_receipt_id",
+    }
+    assert all(
+        registered_trace_keys.isdisjoint(link) and "source_object_ref" not in link
+        for link in links
+    )
+    public_surface = json.dumps(workspace, sort_keys=True)
+    assert "/documents/" not in public_surface
+    assert "c-demo-object:" not in public_surface
 
 
 @pytest.mark.parametrize(
@@ -5019,9 +5019,10 @@ def test_manual_review_requires_lifecycle_owned_assigned_work_item() -> None:
     assert work_item["application_id"] == admission.application_id
     assert work_item["run_id"] == completed.run_id
     assert work_item["assigned_subject"] == "assigned-reviewer"
-    assert work_item["claim_subject"] == "assigned-reviewer"
-    assert work_item["claim_fence"] == 1
-    assert work_item["claim_expires_at"] > 100
+    assert work_item["claim_subject"] is None
+    assert work_item["claim_fence"] == 0
+    assert work_item["claim_started_at"] == 0
+    assert work_item["claim_expires_at"] == 0
 
     assert service.queue_view(
         role="reviewer",
@@ -5044,6 +5045,7 @@ def test_manual_review_requires_lifecycle_owned_assigned_work_item() -> None:
         now=101,
     )
     assert assigned_queue["items"][0]["work_item_id"] == work_item["work_item_id"]
+    assert assigned_queue["items"][0]["claim_fence"] == 0
 
 
 def test_missing_scope_queries_default_deny_without_changing_facts() -> None:

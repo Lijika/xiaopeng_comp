@@ -264,12 +264,10 @@ def test_integrator_receipt_reaches_minimized_reviewer_trace_over_http(
             "value_state",
             "raw_masked",
             "observation_id",
-            "source_object_ref",
             "source_sha256",
             "provenance_manifest_digest",
             "source_page",
             "source_region",
-            "coordinate_system",
             "producer_id",
             "producer_family",
             "producer_run_id",
@@ -279,10 +277,21 @@ def test_integrator_receipt_reaches_minimized_reviewer_trace_over_http(
             "evidence_eligible",
             "eligibility_reason",
         }
-        assert link["source_receipt_id"] == receipt["receipt_id"]
+        assert link["raw_masked"] == "[REDACTED]"
+        assert len(link["source_sha256"]) == 64
+        assert len(link["provenance_manifest_digest"]) == 64
+        assert link["source_page"] == 1
+        assert link["source_region"] == "region:1"
+        assert link["producer_id"] == "http-producer"
+        assert link["producer_family"] == "http-ocr"
         assert link["producer_run_id"] == "http-run-1"
+        assert link["model_id"] == "http-model"
+        assert link["model_version"] == "1"
+        assert link["source_receipt_id"] == receipt["receipt_id"]
         assert "SAFE-VIN-A" not in json.dumps(receipt)
         assert "SAFE-VIN-A" not in json.dumps(workspace)
+        assert "bbox" not in json.dumps(workspace, sort_keys=True)
+        assert "[0,0,1,1]" not in json.dumps(workspace, sort_keys=True)
         for response in (page, admission, queue_response, workspace_response):
             assert response.headers["cache-control"] == "no-store"
 

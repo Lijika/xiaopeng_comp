@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta http-equiv="Cache-Control" content="no-store" />
     <meta http-equiv="Pragma" content="no-cache" />
-    <title>登记证证据工作台 · R-OBSERVED</title>
+    <title>人工核实工作台 · R-OBSERVED</title>
     <style>
       :root {
         color-scheme: light;
@@ -39,7 +39,7 @@
 
       .header-inner,
       main {
-        width: min(1280px, calc(100% - 40px));
+        width: min(1360px, calc(100% - 40px));
         margin: 0 auto;
       }
 
@@ -53,6 +53,7 @@
 
       h1,
       h2,
+      h3,
       p {
         margin: 0;
       }
@@ -62,10 +63,21 @@
         line-height: 1.3;
       }
 
-      .brand p,
+      h2 {
+        font-size: 14px;
+      }
+
+      h3,
+      legend {
+        font-size: 12px;
+        font-weight: 750;
+      }
+
+      .subtle,
       .status,
-      dt,
-      .empty {
+      .empty,
+      .field-help,
+      dt {
         color: #65706b;
         font-size: 12px;
       }
@@ -74,14 +86,23 @@
         margin-top: 3px;
       }
 
-      .badges {
+      .badges,
+      .actions,
+      .route-strip,
+      .lease-actions,
+      .batch-actions {
         display: flex;
-        gap: 7px;
+        gap: 8px;
         flex-wrap: wrap;
+        align-items: center;
+      }
+
+      .badges {
         justify-content: flex-end;
       }
 
-      .badge {
+      .badge,
+      .route-chip {
         min-height: 27px;
         display: inline-flex;
         align-items: center;
@@ -94,19 +115,20 @@
         font-weight: 700;
       }
 
-      .badge.track {
+      .badge.track,
+      .route-chip.human {
         border-color: #75a894;
         color: #15553f;
         background: #e8f3ee;
       }
 
       main {
-        margin-top: 20px;
-        margin-bottom: 36px;
+        margin-top: 18px;
+        margin-bottom: 32px;
       }
 
       .toolbar {
-        min-height: 40px;
+        min-height: 42px;
         display: flex;
         align-items: center;
         justify-content: space-between;
@@ -114,25 +136,42 @@
         margin-bottom: 12px;
       }
 
+      button,
+      select,
+      textarea {
+        font: inherit;
+      }
+
       button {
         min-width: 40px;
         min-height: 36px;
         border: 1px solid #1f6b55;
         border-radius: 5px;
-        padding: 7px 13px;
+        padding: 7px 12px;
         color: #ffffff;
         background: #1f6b55;
-        font: inherit;
         font-size: 12px;
         font-weight: 700;
         cursor: pointer;
       }
 
-      button:hover:not(:disabled) {
-        background: #16513f;
+      button.secondary {
+        border-color: #8f9b95;
+        color: #26332d;
+        background: #ffffff;
       }
 
-      button:focus-visible {
+      button:hover:not(:disabled) {
+        border-color: #16513f;
+        background: #16513f;
+        color: #ffffff;
+      }
+
+      button:focus-visible,
+      select:focus-visible,
+      textarea:focus-visible,
+      input:focus-visible,
+      [tabindex="-1"]:focus-visible {
         outline: 3px solid #eaa33a;
         outline-offset: 2px;
       }
@@ -141,56 +180,73 @@
         border-color: #adb7b2;
         color: #68736e;
         background: #dfe4e1;
-        cursor: wait;
+        cursor: not-allowed;
       }
 
       .workbench {
         display: grid;
-        grid-template-columns: minmax(280px, 0.72fr) minmax(520px, 1.28fr);
+        grid-template-columns: minmax(260px, 0.32fr) minmax(0, 1fr);
         gap: 14px;
         align-items: start;
       }
 
-      .panel {
+      .queue-pane,
+      .review-section {
         min-width: 0;
         border: 1px solid #d5dcda;
-        border-radius: 6px;
         background: #ffffff;
       }
 
-      .panel-header {
+      .queue-pane {
+        border-radius: 6px;
+        overflow: hidden;
+      }
+
+      .pane-header,
+      .section-header {
         min-height: 45px;
         border-bottom: 1px solid #e1e6e3;
-        padding: 11px 14px;
+        padding: 10px 13px;
         display: flex;
         align-items: center;
         justify-content: space-between;
         gap: 12px;
       }
 
-      .panel-header h2 {
-        font-size: 14px;
-        line-height: 1.35;
+      .count,
+      dd,
+      .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       }
 
       .count {
         color: #3f4d46;
-        font: 700 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12px;
+        font-weight: 700;
       }
 
-      .panel-body {
-        min-height: 184px;
-        padding: 14px;
+      .queue-body {
+        min-height: 420px;
+        max-height: calc(100vh - 152px);
+        overflow: auto;
+        padding: 10px;
       }
 
       .queue-item {
         width: 100%;
-        min-height: 76px;
+        min-height: 78px;
+        margin-bottom: 8px;
         border: 1px solid #91a099;
-        padding: 11px 12px;
+        padding: 10px 11px;
         color: #1d2b25;
         background: #f8faf9;
         text-align: left;
+      }
+
+      .queue-item[aria-current="true"] {
+        border-color: #1f6b55;
+        box-shadow: inset 3px 0 #1f6b55;
+        background: #eef6f2;
       }
 
       .queue-item strong,
@@ -206,37 +262,301 @@
         font-weight: 500;
       }
 
+      .review-pane {
+        min-width: 0;
+      }
+
+      .review-empty {
+        min-height: 420px;
+        display: grid;
+        place-items: center;
+        border: 1px dashed #bbc4bf;
+        border-radius: 6px;
+        background: #ffffff;
+      }
+
+      .review-grid {
+        display: grid;
+        gap: 12px;
+      }
+
+      .lease-bar {
+        min-height: 70px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        border: 1px solid #cfd7d3;
+        border-radius: 6px;
+        padding: 10px 13px;
+        background: #ffffff;
+      }
+
+      .lease-meta {
+        min-width: 0;
+      }
+
+      .lease-meta p {
+        margin-top: 4px;
+        overflow-wrap: anywhere;
+      }
+
+      .route-strip {
+        min-height: 35px;
+      }
+
+      .comparison {
+        display: grid;
+        grid-template-columns: minmax(250px, 0.9fr) minmax(300px, 1.1fr);
+        gap: 12px;
+      }
+
+      .review-section {
+        border-radius: 6px;
+        overflow: hidden;
+      }
+
+      .section-body {
+        min-height: 250px;
+        padding: 12px;
+      }
+
+      .finding-list {
+        max-height: 390px;
+        overflow: auto;
+      }
+
+      .finding-row {
+        min-height: 57px;
+        display: grid;
+        grid-template-columns: 28px minmax(0, 1fr);
+        gap: 8px;
+        align-items: center;
+        border-bottom: 1px solid #e6eae8;
+      }
+
+      .finding-row:last-child {
+        border-bottom: 0;
+      }
+
+      .finding-row input {
+        width: 18px;
+        height: 18px;
+        margin: 0;
+      }
+
+      .finding-select {
+        width: 100%;
+        min-width: 0;
+        min-height: 49px;
+        border: 0;
+        padding: 6px 4px;
+        color: #1d2b25;
+        background: transparent;
+        text-align: left;
+      }
+
+      .finding-select:hover:not(:disabled),
+      .finding-select[aria-current="true"] {
+        color: #15553f;
+        background: #eef6f2;
+      }
+
+      .finding-select strong,
+      .finding-select span {
+        display: block;
+        overflow-wrap: anywhere;
+      }
+
+      .finding-select span {
+        margin-top: 3px;
+        color: #65706b;
+        font-size: 11px;
+        font-weight: 500;
+      }
+
+      .evidence-body {
+        min-height: 250px;
+      }
+
+      .finding-summary {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 9px;
+        margin-bottom: 12px;
+      }
+
+      .summary-cell,
+      .evidence-item {
+        min-width: 0;
+        border: 1px solid #dce2df;
+        padding: 9px 10px;
+        background: #f8faf9;
+      }
+
+      .summary-cell span,
+      .evidence-item dt {
+        display: block;
+        color: #65706b;
+        font-size: 10px;
+        text-transform: uppercase;
+      }
+
+      .summary-cell strong {
+        display: block;
+        margin-top: 4px;
+        font-size: 12px;
+        overflow-wrap: anywhere;
+      }
+
+      .evidence-item {
+        margin-top: 8px;
+      }
+
       dl {
         margin: 0;
         display: grid;
-        grid-template-columns: 150px minmax(0, 1fr);
-        gap: 9px 12px;
-        align-items: baseline;
+        grid-template-columns: 118px minmax(0, 1fr);
+        gap: 7px 10px;
       }
 
       dd {
         min-width: 0;
         margin: 0;
         color: #1d2a24;
-        font: 650 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 11px;
+        font-weight: 650;
         overflow-wrap: anywhere;
       }
 
-      .empty {
-        min-height: 156px;
+      .decision-layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1.05fr) minmax(260px, 0.95fr);
+        gap: 14px;
+        padding: 12px;
+      }
+
+      fieldset {
+        min-width: 0;
+        margin: 0;
+        border: 0;
+        padding: 0;
+      }
+
+      legend {
+        margin-bottom: 10px;
+      }
+
+      .form-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      label {
+        display: block;
+        color: #4c5953;
+        font-size: 11px;
+        font-weight: 700;
+      }
+
+      select,
+      textarea {
+        width: 100%;
+        min-width: 0;
+        margin-top: 4px;
+        border: 1px solid #9aa6a0;
+        border-radius: 4px;
+        padding: 8px 9px;
+        color: #18231e;
+        background: #ffffff;
+        font-size: 12px;
+      }
+
+      textarea {
+        min-height: 92px;
+        resize: vertical;
+      }
+
+      .note-field {
+        grid-column: 1 / -1;
+      }
+
+      .note-meta {
+        min-height: 20px;
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+        margin-top: 3px;
+        color: #65706b;
+        font-size: 10px;
+      }
+
+      .decision-result {
+        min-height: 182px;
+        border-left: 1px solid #dce2df;
+        padding-left: 14px;
+      }
+
+      .decision-result dl {
+        margin-top: 10px;
+      }
+
+      .batch-box {
+        border-top: 1px solid #e1e6e3;
+        padding: 11px 12px;
+      }
+
+      .batch-box p {
+        min-height: 20px;
+        margin-top: 8px;
+      }
+
+      .empty,
+      .loading {
+        min-height: 150px;
         display: grid;
         place-items: center;
+        padding: 14px;
         text-align: center;
       }
 
-      .error {
-        color: #a13a33;
+      .state-banner {
+        min-height: 34px;
+        display: flex;
+        align-items: center;
+        border-left: 3px solid #66736c;
+        padding: 7px 10px;
+        color: #34413b;
+        background: #edf0ee;
+        font-size: 12px;
       }
 
-      @media (max-width: 820px) {
+      .state-banner[data-state="error"],
+      .state-banner[data-state="stale"],
+      .state-banner[data-state="conflict"] {
+        border-left-color: #ad433b;
+        color: #842f29;
+        background: #fbeeed;
+      }
+
+      .state-banner[data-state="stopped"],
+      .state-banner[data-state="unavailable"] {
+        border-left-color: #b27118;
+        color: #6f470f;
+        background: #fff5e7;
+      }
+
+      .state-banner[data-state="success"] {
+        border-left-color: #277257;
+        color: #15553f;
+        background: #e8f3ee;
+      }
+
+      @media (max-width: 900px) {
         .header-inner,
         main {
-          width: min(100% - 24px, 680px);
+          width: min(100% - 24px, 720px);
         }
 
         .header-inner {
@@ -251,12 +571,51 @@
           justify-content: flex-start;
         }
 
-        .workbench {
+        .workbench,
+        .comparison,
+        .decision-layout {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        .queue-body {
+          min-height: 110px;
+          max-height: 220px;
+        }
+
+        .review-empty {
+          min-height: 240px;
+        }
+
+        .decision-result {
+          min-height: 130px;
+          border-top: 1px solid #dce2df;
+          border-left: 0;
+          padding-top: 12px;
+          padding-left: 0;
+        }
+      }
+
+      @media (max-width: 520px) {
+        .toolbar,
+        .lease-bar {
+          align-items: stretch;
+          flex-direction: column;
+        }
+
+        .toolbar button,
+        .lease-actions button,
+        .batch-actions button,
+        .actions button {
+          flex: 1 1 auto;
+        }
+
+        .form-grid,
+        .finding-summary {
           grid-template-columns: minmax(0, 1fr);
         }
 
         dl {
-          grid-template-columns: minmax(108px, 0.42fr) minmax(0, 1fr);
+          grid-template-columns: minmax(92px, 0.4fr) minmax(0, 1fr);
         }
       }
     </style>
@@ -265,41 +624,145 @@
     <header>
       <div class="header-inner">
         <div class="brand">
-          <h1>登记证证据工作台</h1>
-          <p>Reviewer workspace · read only</p>
+          <h1>人工核实工作台</h1>
+          <p class="subtle">Reviewer · current uncertain work items</p>
         </div>
-        <div class="badges" aria-label="证据声明">
+        <div class="badges" aria-label="工作台边界">
           <span class="badge track">R-OBSERVED</span>
-          <span class="badge">跨文档机会 0</span>
-          <span class="badge">性能 not estimable</span>
+          <span class="badge">masked evidence</span>
+          <span class="badge">no-store</span>
         </div>
       </div>
     </header>
 
     <main>
       <div class="toolbar">
-        <p class="status" id="status" role="status" aria-live="polite">正在同步</p>
-        <button type="button" id="refresh">刷新</button>
+        <p class="status" id="status" role="status" aria-live="polite">Loading queue</p>
+        <button type="button" id="refresh" aria-label="Refresh queue">Refresh</button>
       </div>
 
-      <div class="workbench">
-        <section class="panel" aria-labelledby="queue-title">
-          <div class="panel-header">
-            <h2 id="queue-title">Reviewer queue</h2>
+      <div id="state-banner" class="state-banner" data-state="loading" role="status" aria-live="polite" tabindex="-1">
+        Loading current queue
+      </div>
+
+      <div class="workbench" style="margin-top: 12px">
+        <aside class="queue-pane" data-layout-region="queue" aria-labelledby="queue-title">
+          <div class="pane-header">
+            <h2 id="queue-title">Current queue</h2>
             <span class="count" id="queue-count">0</span>
           </div>
-          <div class="panel-body" id="queue-body">
-            <p class="empty">暂无待审 observation</p>
+          <div class="queue-body" id="queue-body" aria-busy="true">
+            <p class="loading">Loading work items</p>
           </div>
-        </section>
+        </aside>
 
-        <section class="panel" aria-labelledby="trace-title">
-          <div class="panel-header">
-            <h2 id="trace-title">Finding trace</h2>
-            <span class="count" data-testid="claim-label">R-OBSERVED</span>
+        <section class="review-pane" aria-labelledby="review-title">
+          <div id="review-empty" class="review-empty">
+            <p class="empty">Select an uncertain work item</p>
           </div>
-          <div class="panel-body" id="trace-body">
-            <p class="empty">未选择 finding</p>
+
+          <div id="review-grid" class="review-grid" hidden>
+            <div class="lease-bar">
+              <div class="lease-meta">
+                <h2 id="review-title">Current work item</h2>
+                <p class="subtle mono" id="work-item-id">—</p>
+                <p class="subtle" data-testid="lease-state" id="lease-state">—</p>
+              </div>
+              <div class="lease-actions" aria-label="Lease controls">
+                <button type="button" id="claim">Claim work item</button>
+                <button type="button" id="renew" class="secondary">Renew lease</button>
+                <button type="button" id="release" class="secondary">Release claim</button>
+              </div>
+            </div>
+
+            <div class="route-strip" aria-label="Decision route">
+              <span class="route-chip" data-testid="machine-route">machine-uncertain</span>
+              <span class="route-chip human" data-testid="human-route" id="human-route">human-pending</span>
+            </div>
+
+            <div class="comparison">
+              <section class="review-section" data-layout-region="findings" aria-labelledby="findings-title">
+                <div class="section-header">
+                  <h2 id="findings-title">Machine findings</h2>
+                  <span class="count" id="finding-count">0</span>
+                </div>
+                <div class="section-body finding-list" id="finding-list"></div>
+              </section>
+
+              <section class="review-section" data-layout-region="evidence" aria-labelledby="evidence-title">
+                <div class="section-header">
+                  <h2 id="evidence-title">Masked source comparison</h2>
+                  <span class="count" id="selected-finding-label">—</span>
+                </div>
+                <div class="section-body evidence-body" id="evidence-body"></div>
+              </section>
+            </div>
+
+            <section class="review-section" data-layout-region="decision" aria-labelledby="decision-title">
+              <div class="section-header">
+                <h2 id="decision-title">Human decision</h2>
+                <span class="count" id="decision-state">pending</span>
+              </div>
+              <div class="decision-layout">
+                <form id="decision-form">
+                  <fieldset>
+                    <legend>Structured verification</legend>
+                    <div class="form-grid">
+                      <label>
+                        Outcome
+                        <select id="outcome" name="outcome">
+                          <option value="confirmed">confirmed</option>
+                          <option value="inconclusive">inconclusive</option>
+                        </select>
+                      </label>
+                      <label>
+                        Reason
+                        <select id="reason" name="reason">
+                          <option value="HUMAN_REVIEW_COMPLETED">HUMAN_REVIEW_COMPLETED</option>
+                        </select>
+                      </label>
+                      <label class="note-field">
+                        Reviewer note
+                        <textarea id="note" name="note" maxlength="2000" rows="4"></textarea>
+                      </label>
+                    </div>
+                    <div class="note-meta">
+                      <span data-testid="note-count" id="note-count">0 / 2000</span>
+                      <span id="note-bytes">0 bytes</span>
+                    </div>
+                    <div class="actions">
+                      <button type="submit" id="submit-decision">Submit decision</button>
+                    </div>
+                  </fieldset>
+                </form>
+
+                <div class="decision-result" id="decision-result" aria-live="polite">
+                  <h3>Immutable result</h3>
+                  <p class="empty" id="decision-empty">No human decision</p>
+                  <dl id="decision-details" hidden>
+                    <dt>Actor</dt>
+                    <dd data-testid="decision-actor" id="decision-actor">—</dd>
+                    <dt>Outcome</dt>
+                    <dd id="decision-outcome">—</dd>
+                    <dt>Reason</dt>
+                    <dd data-testid="decision-reason" id="decision-reason">—</dd>
+                    <dt>Note metadata</dt>
+                    <dd data-testid="note-metadata" id="note-metadata">—</dd>
+                  </dl>
+                </div>
+              </div>
+
+              <div class="batch-box">
+                <h3>Same-run batch shortcut</h3>
+                <div class="batch-actions" style="margin-top: 9px">
+                  <button type="button" id="select-run" class="secondary">Select current run</button>
+                  <button type="button" id="clear-batch" class="secondary">Clear selection</button>
+                  <button type="button" id="preview-batch" class="secondary">Preview batch</button>
+                  <button type="button" id="submit-batch" disabled>Submit batch</button>
+                </div>
+                <p class="subtle" data-testid="batch-status" id="batch-status" aria-live="polite">No batch plan</p>
+              </div>
+            </section>
           </div>
         </section>
       </div>
@@ -310,11 +773,71 @@
         "use strict";
 
         const apiRoot = "/controlled/s02/api";
-        const queueBody = document.getElementById("queue-body");
-        const traceBody = document.getElementById("trace-body");
-        const queueCount = document.getElementById("queue-count");
-        const status = document.getElementById("status");
-        const refresh = document.getElementById("refresh");
+        const maxNoteCharacters = 2000;
+        const elements = Object.fromEntries(
+          [
+            "status",
+            "refresh",
+            "state-banner",
+            "queue-count",
+            "queue-body",
+            "review-empty",
+            "review-grid",
+            "work-item-id",
+            "lease-state",
+            "claim",
+            "renew",
+            "release",
+            "human-route",
+            "finding-count",
+            "finding-list",
+            "selected-finding-label",
+            "evidence-body",
+            "decision-state",
+            "decision-form",
+            "outcome",
+            "reason",
+            "note",
+            "note-count",
+            "note-bytes",
+            "submit-decision",
+            "decision-empty",
+            "decision-details",
+            "decision-actor",
+            "decision-outcome",
+            "decision-reason",
+            "note-metadata",
+            "select-run",
+            "clear-batch",
+            "preview-batch",
+            "submit-batch",
+            "batch-status",
+          ].map((id) => [id, document.getElementById(id)]),
+        );
+
+        const state = {
+          queue: [],
+          selectedQueueItem: null,
+          workItem: null,
+          workspace: null,
+          selectedFindingId: null,
+          batchFindingIds: new Set(),
+          batchPlan: null,
+          pendingSingleCommand: null,
+          pendingBatchCommand: null,
+          pendingLifecycleCommand: null,
+          pendingClaimResponseLoss: false,
+          busy: false,
+        };
+
+        class ApiError extends Error {
+          constructor(response, detail) {
+            super(detail.reason_code || detail.error || `HTTP ${response.status}`);
+            this.status = response.status;
+            this.code = detail.error || "S03_REQUEST_FAILED";
+            this.reasonCode = detail.reason_code || "";
+          }
+        }
 
         function text(tag, value, testId) {
           const node = document.createElement(tag);
@@ -323,83 +846,638 @@
           return node;
         }
 
-        function traceRow(list, label, value, testId) {
-          list.append(text("dt", label));
-          list.append(text("dd", value, testId));
+        function setBanner(message, kind = "ready", focus = false) {
+          elements["state-banner"].textContent = message;
+          elements["state-banner"].dataset.state = kind;
+          if (focus) elements["state-banner"].focus();
         }
 
-        async function request(path) {
+        function setBusy(busy) {
+          state.busy = busy;
+          elements.refresh.disabled = busy;
+          updateControls();
+        }
+
+        async function request(path, options = {}) {
           const response = await fetch(path, {
+            method: options.method || "GET",
             credentials: "same-origin",
             cache: "no-store",
-            headers: { Accept: "application/json" },
+            headers: {
+              Accept: "application/json",
+              ...(options.body ? { "Content-Type": "application/json" } : {}),
+            },
+            ...(options.body ? { body: JSON.stringify(options.body) } : {}),
           });
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          return response.json();
+          const data = await response.json().catch(() => ({}));
+          if (response.headers.get("X-S02-Access-Ended") === "1") {
+            const error = new Error("Session expired");
+            error.code = "SESSION_EXPIRED";
+            throw error;
+          }
+          if (!response.ok) throw new ApiError(response, data.detail || {});
+          return data;
         }
 
-        async function loadTrace(item) {
-          const blocker = (item.blockers || [])[0];
-          const suffix = blocker
-            ? `?finding_id=${encodeURIComponent(blocker.finding_id)}`
-            : "";
-          const workspace = await request(
-            `${apiRoot}/queries/applications/${encodeURIComponent(item.application_id)}/workspace${suffix}`,
-          );
-          const finding = workspace.selected_finding;
-          const link = finding && (finding.evidence_links || [])[0];
-          traceBody.replaceChildren();
-          if (!finding || !link) {
-            traceBody.append(text("p", "未找到可审 evidence", "trace-empty"));
+        function resetReview() {
+          state.selectedQueueItem = null;
+          state.workItem = null;
+          state.workspace = null;
+          state.selectedFindingId = null;
+          state.batchFindingIds.clear();
+          state.batchPlan = null;
+          state.pendingSingleCommand = null;
+          state.pendingBatchCommand = null;
+          state.pendingLifecycleCommand = null;
+          state.pendingClaimResponseLoss = false;
+          elements["work-item-id"].textContent = "—";
+          elements["lease-state"].textContent = "—";
+          elements["human-route"].textContent = "human-pending";
+          elements["finding-count"].textContent = "0";
+          elements["finding-list"].replaceChildren();
+          elements["selected-finding-label"].textContent = "—";
+          elements["evidence-body"].replaceChildren();
+          elements["decision-state"].textContent = "pending";
+          elements["decision-actor"].textContent = "—";
+          elements["decision-outcome"].textContent = "—";
+          elements["decision-reason"].textContent = "—";
+          elements["note-metadata"].textContent = "—";
+          elements["decision-details"].hidden = true;
+          elements["decision-empty"].hidden = false;
+          elements.note.value = "";
+          elements["submit-decision"].textContent = "Submit decision";
+          elements["submit-batch"].textContent = "Submit batch";
+          elements["batch-status"].textContent = "No batch plan";
+          updateNoteCount();
+          elements["review-grid"].hidden = true;
+          elements["review-empty"].hidden = false;
+          elements["review-empty"].replaceChildren(text("p", "Select an uncertain work item", "review-empty"));
+          elements["review-empty"].firstChild.className = "empty";
+        }
+
+        function clearPrivateView(message, kind) {
+          state.queue = [];
+          elements["queue-count"].textContent = "0";
+          elements["queue-body"].replaceChildren(text("p", message, "queue-empty"));
+          elements["queue-body"].firstChild.className = "empty";
+          resetReview();
+          setBanner(message, kind, true);
+          elements.status.textContent = message;
+        }
+
+        function errorState(error) {
+          if (error.code === "SESSION_EXPIRED" || error.code === "S03_NOT_FOUND" || error.status === 404) {
+            clearPrivateView("Session expired or scope unavailable", "error");
             return;
           }
-          const list = document.createElement("dl");
-          traceRow(list, "Finding", finding.finding_id, "finding-id");
-          traceRow(list, "Field", link.field, "field");
-          traceRow(list, "Observation", link.observation_id, "observation-id");
-          traceRow(list, "Producer", `${link.producer_family} / ${link.producer_id}`);
-          traceRow(list, "Model", `${link.model_id} / ${link.model_version}`);
-          traceRow(list, "Run", link.producer_run_id, "producer-run-id");
-          traceRow(list, "Page", link.source_page);
-          traceRow(list, "Region", JSON.stringify(link.source_region));
-          traceRow(list, "Object SHA-256", link.source_sha256, "object-sha256");
-          traceRow(list, "Receipt", link.source_receipt_id, "source-receipt-id");
-          traceRow(list, "Eligibility", link.eligibility_reason, "eligibility-reason");
-          traceBody.append(list);
+          const mapping = {
+            S03_STALE: ["Work item changed; refresh before retry", "stale"],
+            S03_CONFLICT: [
+              error.reasonCode === "WORK_ITEM_ALREADY_CLAIMED"
+                ? "Work item already has a live claim"
+                : "Command conflicts with the current work item",
+              "conflict",
+            ],
+            S03_STOPPED: [
+              error.reasonCode === "SOURCE_EVIDENCE_UNAVAILABLE"
+                ? "Source evidence is unavailable"
+                : "Verification writes are stopped",
+              "stopped",
+            ],
+            S03_UNAVAILABLE: [
+              error.reasonCode === "SOURCE_EVIDENCE_UNAVAILABLE"
+                ? "Source evidence is unavailable"
+                : "Verification service is unavailable",
+              "unavailable",
+            ],
+            S03_INVALID_COMMAND: ["Decision input is invalid", "error"],
+            S03_COMMAND_TOO_LARGE: ["Decision input exceeds the allowed size", "error"],
+          };
+          const [message, kind] = mapping[error.code] || ["Workbench request failed", "error"];
+          setBanner(message, kind, true);
+          elements.status.textContent = message;
+        }
+
+        function renderQueue() {
+          elements["queue-count"].textContent = String(state.queue.length);
+          elements["queue-body"].ariaBusy = "false";
+          elements["queue-body"].replaceChildren();
+          if (!state.queue.length) {
+            const empty = text("p", "No current uncertain work items", "queue-empty");
+            empty.className = "empty";
+            elements["queue-body"].append(empty);
+            return;
+          }
+          for (const item of state.queue) {
+            const button = text("button", item.application_id, "queue-item");
+            button.type = "button";
+            button.className = "queue-item";
+            button.setAttribute(
+              "aria-current",
+              String(Boolean(state.selectedQueueItem && state.selectedQueueItem.work_item_id === item.work_item_id)),
+            );
+            button.append(text("span", `${item.phase} · ${item.route}`));
+            button.append(text("span", `${item.mandatory_blockers.length} findings · fence ${item.claim_fence}`));
+            button.addEventListener("click", () => selectWorkItem(item, true));
+            elements["queue-body"].append(button);
+          }
+        }
+
+        function currentFinding() {
+          const findings = state.workspace ? state.workspace.mandatory_blockers || [] : [];
+          return (
+            findings.find((finding) => finding.finding_id === state.selectedFindingId) ||
+            findings[0] ||
+            null
+          );
+        }
+
+        function invalidateBatchPlan() {
+          state.batchPlan = null;
+          state.pendingBatchCommand = null;
+          elements["batch-status"].textContent = state.batchFindingIds.size
+            ? `${state.batchFindingIds.size} selected; preview required`
+            : "No batch plan";
+          updateControls();
+        }
+
+        function renderFindings() {
+          const findings = state.workspace ? state.workspace.mandatory_blockers || [] : [];
+          elements["finding-count"].textContent = String(findings.length);
+          elements["finding-list"].replaceChildren();
+          if (!findings.length) {
+            elements["finding-list"].append(text("p", "No machine findings", "finding-empty"));
+            return;
+          }
+          for (const finding of findings) {
+            const row = document.createElement("div");
+            row.className = "finding-row";
+            row.dataset.testid = "finding-row";
+
+            const checkbox = document.createElement("input");
+            checkbox.type = "checkbox";
+            checkbox.checked = state.batchFindingIds.has(finding.finding_id);
+            checkbox.setAttribute("aria-label", `Select ${finding.rule_id} for batch`);
+            checkbox.addEventListener("change", () => {
+              if (checkbox.checked) state.batchFindingIds.add(finding.finding_id);
+              else state.batchFindingIds.delete(finding.finding_id);
+              invalidateBatchPlan();
+            });
+
+            const select = text("button", finding.rule_id);
+            select.type = "button";
+            select.className = "finding-select";
+            select.setAttribute("aria-current", String(finding.finding_id === state.selectedFindingId));
+            select.append(text("span", `${finding.verdict} · ${finding.reason_code} · ${finding.severity}`));
+            select.addEventListener("click", () => {
+              state.selectedFindingId = finding.finding_id;
+              renderFindings();
+              renderEvidence();
+            });
+            row.append(checkbox, select);
+            elements["finding-list"].append(row);
+          }
+        }
+
+        function summaryCell(label, value) {
+          const cell = document.createElement("div");
+          cell.className = "summary-cell";
+          cell.append(text("span", label), text("strong", value));
+          return cell;
+        }
+
+        function evidenceRow(list, label, value, testId) {
+          list.append(text("dt", label), text("dd", value, testId));
+        }
+
+        function shortDigest(value) {
+          return typeof value === "string" && value.length > 16 ? `${value.slice(0, 12)}…` : value;
+        }
+
+        function renderEvidence() {
+          const finding = currentFinding();
+          elements["evidence-body"].replaceChildren();
+          if (!finding) {
+            elements["selected-finding-label"].textContent = "—";
+            elements["evidence-body"].append(text("p", "No finding selected", "evidence-empty"));
+            return;
+          }
+          state.selectedFindingId = finding.finding_id;
+          elements["selected-finding-label"].textContent = finding.rule_id;
+          const summary = document.createElement("div");
+          summary.className = "finding-summary";
+          summary.append(
+            summaryCell("Machine verdict", finding.verdict),
+            summaryCell("Reason", finding.reason_code),
+            summaryCell("Severity", finding.severity),
+            summaryCell("Current run", shortDigest(finding.run_id)),
+          );
+          elements["evidence-body"].append(summary);
+
+          const links = Array.isArray(finding.evidence_links) ? finding.evidence_links : [];
+          if (!links.length) {
+            const empty = text("p", "No eligible source evidence for this finding", "evidence-empty");
+            empty.className = "empty";
+            elements["evidence-body"].append(empty);
+            return;
+          }
+          for (const link of links) {
+            const item = document.createElement("div");
+            item.className = "evidence-item";
+            item.dataset.testid = "evidence-item";
+            const list = document.createElement("dl");
+            evidenceRow(list, "Document role", link.document_role);
+            evidenceRow(list, "Field", link.field, "evidence-field");
+            evidenceRow(list, "Value state", link.value_state);
+            evidenceRow(list, "Masked value", link.raw_masked, "evidence-value");
+            evidenceRow(list, "Eligibility", link.eligibility_reason);
+            evidenceRow(list, "Source digest", shortDigest(link.source_sha256));
+            evidenceRow(list, "Page", link.source_page ?? "Unavailable", "evidence-page");
+            evidenceRow(list, "Region", link.source_region ?? "Unavailable", "evidence-region");
+            const producer = [link.producer_family, link.producer_id].filter(Boolean).join(" / ");
+            evidenceRow(list, "Producer", producer || "Unavailable", "evidence-producer");
+            const model = [link.model_id, link.model_version].filter(Boolean).join(" / ");
+            evidenceRow(list, "Model", model || "Unavailable", "evidence-model");
+            evidenceRow(list, "Producer run", link.producer_run_id ?? "Unavailable", "producer-run-id");
+            evidenceRow(list, "Receipt", link.source_receipt_id ?? "Unavailable", "source-receipt-id");
+            item.append(list);
+            elements["evidence-body"].append(item);
+          }
+        }
+
+        function renderDecision() {
+          const decisions = state.workItem && Array.isArray(state.workItem.decisions)
+            ? state.workItem.decisions
+            : [];
+          const decision = state.workItem && (state.workItem.decision || decisions[0]);
+          const completed = Boolean(
+            state.workItem && state.workItem.status === "completed" && decision,
+          );
+          elements["human-route"].textContent = completed ? "human-completed" : "human-pending";
+          elements["decision-state"].textContent = completed
+            ? `completed · ${decisions.length} decision${decisions.length === 1 ? "" : "s"}`
+            : state.workItem
+              ? state.workItem.status
+              : "pending";
+          elements["decision-empty"].hidden = completed;
+          elements["decision-details"].hidden = !completed;
+          if (completed) {
+            const metadata = decision.note_metadata || {};
+            elements["decision-actor"].textContent = decision.reviewer_subject;
+            elements["decision-outcome"].textContent = decision.outcome;
+            elements["decision-reason"].textContent = decision.reason_code;
+            elements["note-metadata"].textContent = metadata.present
+              ? `present · chars ${metadata.character_count} · bytes ${metadata.byte_count} · sha256 ${shortDigest(metadata.sha256)}`
+              : "not present";
+          }
+          updateControls();
+        }
+
+        function renderReview() {
+          if (!state.workItem || !state.workspace) {
+            resetReview();
+            return;
+          }
+          elements["review-empty"].hidden = true;
+          elements["review-grid"].hidden = false;
+          elements["work-item-id"].textContent = state.workItem.work_item_id;
+          elements["lease-state"].textContent = `${state.workItem.status} · fence ${state.workItem.claim_fence} · expires ${state.workItem.claim_expires_at}`;
+          if (!state.selectedFindingId) {
+            state.selectedFindingId = state.workspace.selected_finding
+              ? state.workspace.selected_finding.finding_id
+              : null;
+          }
+          renderFindings();
+          renderEvidence();
+          renderDecision();
+        }
+
+        function updateControls() {
+          const work = state.workItem;
+          const completed = !work || work.status === "completed";
+          const claimed = Boolean(work && work.status === "claimed");
+          elements.claim.disabled = state.busy || completed || claimed;
+          elements.renew.disabled = state.busy || !claimed || completed;
+          elements.release.disabled = state.busy || !claimed || completed;
+          elements["submit-decision"].disabled = state.busy || !claimed || completed;
+          elements["select-run"].disabled = state.busy || completed;
+          elements["clear-batch"].disabled = state.busy || completed;
+          elements["preview-batch"].disabled =
+            state.busy || !claimed || completed || state.batchFindingIds.size === 0;
+          elements["submit-batch"].disabled = state.busy || completed || !state.batchPlan;
+        }
+
+        function ownsLiveClaim() {
+          return Boolean(
+            state.workItem &&
+              state.workItem.status === "claimed" &&
+              state.workItem.claim_subject &&
+              state.selectedQueueItem &&
+              state.workItem.claim_subject === state.selectedQueueItem.assigned_subject,
+          );
+        }
+
+        async function selectWorkItem(item, focus = false) {
+          state.selectedQueueItem = item;
+          state.workItem = null;
+          state.workspace = null;
+          state.selectedFindingId = null;
+          state.batchFindingIds.clear();
+          invalidateBatchPlan();
+          renderQueue();
+          elements["review-empty"].hidden = false;
+          elements["review-grid"].hidden = true;
+          elements["review-empty"].replaceChildren(text("p", "Loading work item", "review-loading"));
+          setBusy(true);
+          try {
+            const [workItem, workspace] = await Promise.all([
+              request(`${apiRoot}/queries/review-work-items/${encodeURIComponent(item.work_item_id)}`),
+              request(
+                `${apiRoot}/queries/applications/${encodeURIComponent(item.application_id)}/workspace`,
+              ),
+            ]);
+            state.workItem = workItem;
+            state.workspace = workspace;
+            renderReview();
+            setBanner("Work item ready", "ready");
+            if (focus) document.getElementById("review-title").focus?.();
+          } catch (error) {
+            errorState(error);
+          } finally {
+            setBusy(false);
+          }
+        }
+
+        async function reloadSelected() {
+          if (!state.selectedQueueItem) return;
+          const item = state.selectedQueueItem;
+          const queryId = state.workItem ? state.workItem.work_item_id : item.work_item_id;
+          const workItem = await request(
+            `${apiRoot}/queries/review-work-items/${encodeURIComponent(queryId)}`,
+          );
+          let workspace = state.workspace;
+          if (workItem.status !== "completed") {
+            workspace = await request(
+              `${apiRoot}/queries/applications/${encodeURIComponent(item.application_id)}/workspace`,
+            );
+          }
+          state.workItem = workItem;
+          state.workspace = workspace;
+          renderReview();
         }
 
         async function loadQueue() {
-          refresh.disabled = true;
-          status.classList.remove("error");
-          status.textContent = "正在同步";
+          setBusy(true);
+          elements.status.textContent = "Loading queue";
+          setBanner("Loading current queue", "loading");
           try {
             const queue = await request(`${apiRoot}/queries/queue`);
-            const items = Array.isArray(queue.items) ? queue.items : [];
-            queueCount.textContent = String(items.length);
-            queueBody.replaceChildren();
-            if (!items.length) {
-              queueBody.append(text("p", "暂无待审 observation"));
-              traceBody.replaceChildren(text("p", "未选择 finding"));
-            } else {
-              const item = items[0];
-              const button = text("button", item.application_id, "queue-item");
-              button.type = "button";
-              button.className = "queue-item";
-              button.append(text("span", `${item.phase} · ${item.route}`));
-              button.addEventListener("click", () => loadTrace(item));
-              queueBody.append(button);
-              await loadTrace(item);
+            state.queue = Array.isArray(queue.items) ? queue.items : [];
+            const selectedId = state.selectedQueueItem && state.selectedQueueItem.work_item_id;
+            const selected = state.queue.find((item) => item.work_item_id === selectedId);
+            if (selected) state.selectedQueueItem = selected;
+            renderQueue();
+            elements.status.textContent = `Projection ${queue.projection_watermark}`;
+            setBanner(state.queue.length ? "Queue synchronized" : "Queue is empty", "ready");
+            if (!state.selectedQueueItem && state.queue.length) {
+              await selectWorkItem(state.queue[0]);
+            } else if (selected && state.workItem) {
+              await reloadSelected();
+            } else if (!state.queue.length && !(state.workItem && state.workItem.status === "completed")) {
+              resetReview();
             }
-            status.textContent = `Projection ${queue.projection_watermark}`;
           } catch (error) {
-            status.textContent = "工作台暂不可用";
-            status.classList.add("error");
+            errorState(error);
           } finally {
-            refresh.disabled = false;
+            setBusy(false);
           }
         }
 
-        refresh.addEventListener("click", loadQueue);
+        async function lifecycleCommand(action) {
+          if (!state.workItem) return;
+          if (action === "claim" && state.pendingClaimResponseLoss) {
+            setBusy(true);
+            try {
+              await loadQueue();
+              if (ownsLiveClaim()) {
+                state.pendingClaimResponseLoss = false;
+                setBanner(`${state.workItem.status} · fence ${state.workItem.claim_fence}`, "success");
+                return;
+              }
+              state.pendingClaimResponseLoss = false;
+            } catch (error) {
+              state.pendingClaimResponseLoss = false;
+              errorState(error);
+              return;
+            } finally {
+              setBusy(false);
+            }
+          }
+          const workItemId = state.workItem.work_item_id;
+          let body = { expected_context: state.workItem.command_context };
+          if (action !== "claim") {
+            if (
+              !state.pendingLifecycleCommand ||
+              state.pendingLifecycleCommand.action !== action ||
+              state.pendingLifecycleCommand.workItemId !== workItemId
+            ) {
+              state.pendingLifecycleCommand = {
+                action,
+                workItemId,
+                body: {
+                  ...body,
+                  expected_fence: state.workItem.claim_fence,
+                  idempotency_key: crypto.randomUUID(),
+                },
+              };
+            }
+            body = state.pendingLifecycleCommand.body;
+          }
+          setBusy(true);
+          setBanner(`${action} in progress`, "loading");
+          try {
+            const result = await request(
+              `${apiRoot}/commands/review-work-items/${encodeURIComponent(workItemId)}/${action}`,
+              { method: "POST", body },
+            );
+            if (action !== "claim") state.pendingLifecycleCommand = null;
+            await reloadSelected();
+            setBanner(`${result.status} · fence ${result.claim_fence}`, "success");
+          } catch (error) {
+            if (action === "claim" && !(error instanceof ApiError)) {
+              state.pendingClaimResponseLoss = true;
+              setBanner("Response lost; retry refreshes the claim", "unavailable", true);
+            } else if (action !== "claim" && !(error instanceof ApiError)) {
+              setBanner("Response lost; retry uses the same command key", "unavailable", true);
+            } else {
+              if (action !== "claim") state.pendingLifecycleCommand = null;
+              errorState(error);
+            }
+          } finally {
+            setBusy(false);
+          }
+        }
+
+        function noteCharacterCount() {
+          return Array.from(elements.note.value).length;
+        }
+
+        function updateNoteCount() {
+          const characters = noteCharacterCount();
+          const bytes = new TextEncoder().encode(elements.note.value).length;
+          elements["note-count"].textContent = `${characters} / ${maxNoteCharacters}`;
+          elements["note-bytes"].textContent = `${bytes} bytes`;
+          elements.note.setAttribute("aria-invalid", String(characters > maxNoteCharacters));
+        }
+
+        function verification() {
+          return {
+            schema_version: "human-decision/1",
+            outcome: elements.outcome.value,
+            reason_code: elements.reason.value,
+            finding_decisions: (state.workItem.automatic_findings || []).map((finding) => ({
+              finding_id: finding.finding_id,
+              outcome: elements.outcome.value,
+            })),
+            ...(elements.note.value ? { note: elements.note.value } : {}),
+          };
+        }
+
+        async function submitDecision(event) {
+          event.preventDefault();
+          if (!state.workItem || noteCharacterCount() > maxNoteCharacters) {
+            setBanner("Reviewer note exceeds 2000 characters", "error", true);
+            return;
+          }
+          if (!state.pendingSingleCommand) {
+            state.pendingSingleCommand = {
+              expected_fence: state.workItem.claim_fence,
+              expected_context: state.workItem.command_context,
+              idempotency_key: crypto.randomUUID(),
+              verification: verification(),
+            };
+          }
+          setBusy(true);
+          setBanner("Submitting human decision", "loading");
+          try {
+            const result = await request(
+              `${apiRoot}/commands/review-work-items/${encodeURIComponent(state.workItem.work_item_id)}/submit`,
+              { method: "POST", body: state.pendingSingleCommand },
+            );
+            state.pendingSingleCommand = null;
+            elements["submit-decision"].textContent = "Submit decision";
+            elements.note.value = "";
+            updateNoteCount();
+            await reloadSelected();
+            await loadQueue();
+            renderDecision();
+            setBanner(result.replayed ? "Decision replay confirmed" : "Decision accepted", "success");
+          } catch (error) {
+            if (!(error instanceof ApiError)) {
+              elements["submit-decision"].textContent = "Retry submit";
+              setBanner("Response lost; retry uses the same command key", "unavailable", true);
+            } else {
+              state.pendingSingleCommand = null;
+              errorState(error);
+            }
+          } finally {
+            setBusy(false);
+          }
+        }
+
+        function batchItems() {
+          const findings = state.workspace ? state.workspace.mandatory_blockers || [] : [];
+          return findings
+            .filter((finding) => state.batchFindingIds.has(finding.finding_id))
+            .map((finding) => ({
+              work_item_id: state.workItem.work_item_id,
+              finding_id: finding.finding_id,
+              outcome: elements.outcome.value,
+              reason_code: elements.reason.value,
+              expected_fence: state.workItem.claim_fence,
+              expected_context: state.workItem.command_context,
+            }));
+        }
+
+        async function previewBatch() {
+          setBusy(true);
+          setBanner("Previewing batch", "loading");
+          try {
+            state.batchPlan = await request(`${apiRoot}/commands/review-batches/preview`, {
+              method: "POST",
+              body: { items: batchItems() },
+            });
+            elements["batch-status"].textContent = `${state.batchPlan.items.length} findings ready to submit`;
+            setBanner("Batch preview ready; no state changed", "success");
+          } catch (error) {
+            state.batchPlan = null;
+            errorState(error);
+          } finally {
+            setBusy(false);
+          }
+        }
+
+        async function submitBatch() {
+          if (!state.batchPlan || !state.workItem) return;
+          if (!state.pendingBatchCommand) {
+            state.pendingBatchCommand = {
+              idempotency_key: crypto.randomUUID(),
+              plan: state.batchPlan,
+            };
+          }
+          setBusy(true);
+          setBanner("Submitting batch", "loading");
+          try {
+            const result = await request(`${apiRoot}/commands/review-batches/submit`, {
+              method: "POST",
+              body: state.pendingBatchCommand,
+            });
+            state.pendingBatchCommand = null;
+            elements["submit-batch"].textContent = "Submit batch";
+            state.batchPlan = null;
+            await reloadSelected();
+            await loadQueue();
+            elements["batch-status"].textContent = `${result.items.length} findings accepted`;
+            setBanner(result.replayed ? "Batch replay confirmed" : "Batch accepted", "success");
+          } catch (error) {
+            if (!(error instanceof ApiError)) {
+              elements["submit-batch"].textContent = "Retry batch";
+              setBanner("Batch response lost; retry uses the same command key", "unavailable", true);
+            } else {
+              state.pendingBatchCommand = null;
+              errorState(error);
+            }
+          } finally {
+            setBusy(false);
+          }
+        }
+
+        elements.refresh.addEventListener("click", loadQueue);
+        elements.claim.addEventListener("click", () => lifecycleCommand("claim"));
+        elements.renew.addEventListener("click", () => lifecycleCommand("renew"));
+        elements.release.addEventListener("click", () => lifecycleCommand("release"));
+        elements["decision-form"].addEventListener("submit", submitDecision);
+        elements.note.addEventListener("input", updateNoteCount);
+        elements.outcome.addEventListener("change", invalidateBatchPlan);
+        elements.reason.addEventListener("change", invalidateBatchPlan);
+        elements["select-run"].addEventListener("click", () => {
+          state.batchFindingIds = new Set(
+            (state.workspace.mandatory_blockers || [])
+              .filter((finding) => finding.run_id === state.workspace.current_run_id)
+              .map((finding) => finding.finding_id),
+          );
+          invalidateBatchPlan();
+          renderFindings();
+        });
+        elements["clear-batch"].addEventListener("click", () => {
+          state.batchFindingIds.clear();
+          invalidateBatchPlan();
+          renderFindings();
+        });
+        elements["preview-batch"].addEventListener("click", previewBatch);
+        elements["submit-batch"].addEventListener("click", submitBatch);
+
+        updateNoteCount();
         loadQueue();
       })();
     </script>

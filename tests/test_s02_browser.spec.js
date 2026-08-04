@@ -243,7 +243,7 @@ const test = base.extend({
   },
 });
 
-test("registered observation renders a minimized read-only trace on desktop and mobile", async ({
+test("registered observation renders a minimized Reviewer workspace on desktop and mobile", async ({
   page,
   s02Server,
 }) => {
@@ -255,7 +255,7 @@ test("registered observation renders a minimized read-only trace on desktop and 
   });
   expect(navigation.status()).toBe(200);
   expect(navigation.headers()["cache-control"]).toContain("no-store");
-  await expect(page.getByRole("heading", { name: "登记证证据工作台" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "人工核实工作台" })).toBeVisible();
 
   const receipt = await page.evaluate(async (submission) => {
     const response = await fetch("/controlled/s02/api/commands/submit", {
@@ -272,15 +272,30 @@ test("registered observation renders a minimized read-only trace on desktop and 
 
   await expect
     .poll(async () => {
-      await page.getByRole("button", { name: "刷新" }).click();
-      return page.getByTestId("source-receipt-id").count();
+      await page.getByRole("button", { name: "Refresh queue" }).click();
+      return page.getByTestId("evidence-value").count();
     })
     .toBe(1);
-  await expect(page.getByTestId("claim-label")).toHaveText("R-OBSERVED");
-  await expect(page.getByTestId("source-receipt-id")).toHaveText(receipt.receipt_id);
+  await expect(page.getByText("R-OBSERVED", { exact: true }).first()).toBeVisible();
+  await expect(page.getByTestId("evidence-field")).toHaveText("vin");
+  await expect(page.getByTestId("evidence-value")).toHaveText("[REDACTED]");
+  await expect(page.getByTestId("evidence-page")).toHaveText("1");
+  await expect(page.getByTestId("evidence-region")).toHaveText("region:1");
+  await expect(page.getByTestId("evidence-producer")).toHaveText("browser-ocr / browser-producer");
   await expect(page.getByTestId("producer-run-id")).toHaveText("browser-run-1");
-  await expect(page.getByTestId("object-sha256")).toHaveText(s02Server.pageHash);
-  expect(await page.locator("body").innerText()).not.toContain(RAW_VALUE);
+  await expect(page.getByTestId("source-receipt-id")).toHaveText(receipt.receipt_id);
+  const body = await page.locator("body").innerText();
+  for (const hiddenValue of [
+    RAW_VALUE,
+    s02Server.pageHash,
+    "browser-result-object",
+    "browser-page-object",
+    "result.json",
+    "page.jpg",
+    "bbox:[0,0,1,1]",
+  ]) {
+    expect(body).not.toContain(hiddenValue);
+  }
   expect(await page.locator("body").getAttribute("contenteditable")).not.toBe("true");
 
   await expectNoLayoutFaults(page);
@@ -291,7 +306,7 @@ test("registered observation renders a minimized read-only trace on desktop and 
   expect(desktop.length).toBeGreaterThan(10_000);
 
   await page.setViewportSize({ width: 390, height: 844 });
-  await expect(page.getByTestId("source-receipt-id")).toBeVisible();
+  await expect(page.getByTestId("evidence-value")).toBeVisible();
   await expectNoLayoutFaults(page);
   const mobile = await page.screenshot({
     path: path.join(ARTIFACT_ROOT, "s02-workbench-mobile.png"),

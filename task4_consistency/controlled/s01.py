@@ -174,6 +174,7 @@ class S01CommandPrincipal:
     role: str
     scope: str
     source_id: str
+    expires_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -210,6 +211,7 @@ class ControlledScenarioService:
         "Evidence Ready": frozenset({"Checking"}),
         "Checking": frozenset({"Routing Determination", "Assembly"}),
         "Routing Determination": frozenset({"Manual Review", "Verification Completed"}),
+        "Manual Review": frozenset({"Verification Completed"}),
     }
     _CAS_CONTEXT_FIELDS = (
         "cycle",
@@ -226,9 +228,15 @@ class ControlledScenarioService:
     _PINNED_RELEASE_FAILURE = "PINNED_RELEASE_UNAVAILABLE"
     _APPLICATION_STATE_FAILURE = "APPLICATION_STATE_AUTHORITY_UNAVAILABLE"
     _ADMISSION_JOB_RECOVERY_FAILURE = "ADMISSION_JOB_RECOVERY_UNAVAILABLE"
+    _REVIEW_SOURCE_FAILURE = "SOURCE_EVIDENCE_UNAVAILABLE"
     _RESUME_STOP_KEY = "_resume_stop"
     _SESSION_SCOPE_PREFIX = "C-DEMO/session/"
     _REVIEW_CLAIM_TTL_SECONDS = 900
+    _REVIEW_REASON_CODES = frozenset(
+        {"HUMAN_REVIEW_COMPLETED", "HUMAN_REVIEW_RECONSIDERED"}
+    )
+    _REVIEW_NOTE_MAX_CHARACTERS = 2000
+    _REVIEW_NOTE_MAX_BYTES = 4096
     _DEMO_RETENTION_SECONDS = 24 * 60 * 60
     _C_DEMO_PROVENANCE_SCHEMA = "c-demo-source-provenance/1"
     _C_DEMO_RECEIVED_AT = "2000-01-01T00:00:00Z"
@@ -999,6 +1007,25 @@ class ControlledScenarioService:
         }
 
     def _verify_runtime_repair(self, failure_reason_code: str) -> dict[str, Any] | None:
+        if failure_reason_code == self._REVIEW_SOURCE_FAILURE:
+            review_apps = [
+                app
+                for app in self._store.applications.values()
+                if app.get("phase") == "Manual Review"
+            ]
+            if not review_apps or any(
+                not self._review_source_evidence_readable(app) for app in review_apps
+            ):
+                return None
+            payload = {
+                "kind": "review_source_readability_probe",
+                "verified_applications": len(review_apps),
+            }
+            encoded = json.dumps(
+                payload, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+            return {**payload, "probe_digest": hashlib.sha256(encoded).hexdigest()}
+
         diagnostic_jobs = [
             job
             for job in self._store.jobs
@@ -1349,6 +1376,11 @@ class ControlledScenarioService:
                 for item in store.work_items
                 if item.get("application_id") in application_ids
             },
+            "review_records": {
+                str(record["record_id"])
+                for record in store.review_records
+                if record.get("application_id") in application_ids
+            },
             "outbox": {
                 str(event["event_id"])
                 for event in store.outbox
@@ -1591,8 +1623,9 @@ class ControlledScenarioService:
         spec = run.get("spec")
         if not isinstance(spec, dict):
             raise RuntimeError("projection RunSpec authority is invalid")
+        region_identities: dict[tuple[Any, Any], list[Any]] = {}
         blockers = [
-            self._finding_projection(finding)
+            self._finding_projection(finding, region_identities)
             for finding in self._store.findings
             if finding.get("application_id") == application_id
             and finding.get("run_id") == run_id
@@ -1624,7 +1657,11 @@ class ControlledScenarioService:
             ):
                 raise RuntimeError("projection review work authority is invalid")
         elif phase == "Verification Completed":
-            route = "auto_complete"
+            route = (
+                "human_complete"
+                if current_event.get("reason_code") == "HUMAN_REVIEW_COMPLETED"
+                else "auto_complete"
+            )
             work_item = None
         else:
             raise RuntimeError("published projection has no terminal lifecycle route")
@@ -1762,6 +1799,1632 @@ class ControlledScenarioService:
                 raise last_contention
             raise RuntimeError("projection publication retry exhausted")
 
+    @classmethod
+    def _valid_reviewer_principal(
+        cls, principal: S01CommandPrincipal, *, now: float
+    ) -> bool:
+        return (
+            isinstance(principal.subject, str)
+            and bool(principal.subject)
+            and principal.subject.strip() == principal.subject
+            and principal.role == "reviewer"
+            and cls.is_controlled_scope(principal.scope)
+            and isinstance(principal.source_id, str)
+            and bool(principal.source_id)
+            and principal.source_id.strip() == principal.source_id
+            and (
+                principal.expires_at is None
+                or not isinstance(principal.expires_at, bool)
+                and isinstance(principal.expires_at, (int, float))
+                and float(principal.expires_at) > now
+            )
+        )
+
+    def _review_work_item_authority(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        work_item_id: str,
+        now: float,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        if not self._valid_reviewer_principal(principal, now=now):
+            raise QueryNotFound(work_item_id)
+        visible_scopes = {principal.scope}
+        if principal.scope.startswith(self._SESSION_SCOPE_PREFIX):
+            visible_scopes.add("C-DEMO")
+        work_items = [
+            item
+            for item in self._store.work_items
+            if item.get("work_item_id") == work_item_id
+            and item.get("kind") == "manual_review"
+            and item.get("owner") == "Lifecycle"
+        ]
+        if (
+            len(work_items) != 1
+            or work_items[0].get("visibility_scope") not in visible_scopes
+            or work_items[0].get("assigned_subject") != principal.subject
+        ):
+            raise QueryNotFound(work_item_id)
+        work_item = work_items[0]
+        state = {
+            "status": "unclaimed",
+            "claim_subject": work_item.get("claim_subject"),
+            "claim_fence": int(work_item.get("claim_fence", 0)),
+            "claim_started_at": work_item.get("claim_started_at", 0),
+            "claim_expires_at": work_item.get("claim_expires_at", 0),
+            "decision_id": None,
+            "decision_ids": [],
+            "completed_finding_ids": [],
+        }
+        facts = sorted(
+            (
+                record
+                for record in self._store.review_records
+                if record.get("work_item_id") == work_item_id
+                and record.get("record_type")
+                in {
+                    "work_item_claimed",
+                    "work_item_renewed",
+                    "work_item_released",
+                    "work_item_completed",
+                    "work_item_finding_completed",
+                }
+            ),
+            key=lambda record: int(record["sequence"]),
+        )
+        if [fact.get("sequence") for fact in facts] != list(range(1, len(facts) + 1)):
+            raise RuntimeError("review work-item authority is not contiguous")
+        for fact in facts:
+            if fact["record_type"] == "work_item_claimed":
+                state.update(
+                    {
+                        "status": "claimed",
+                        "claim_subject": fact["claim_subject"],
+                        "claim_fence": fact["claim_fence"],
+                        "claim_started_at": fact["claim_started_at"],
+                        "claim_expires_at": fact["claim_expires_at"],
+                    }
+                )
+            elif fact["record_type"] == "work_item_renewed":
+                state["claim_expires_at"] = fact["claim_expires_at"]
+            elif fact["record_type"] == "work_item_released":
+                state.update(
+                    {
+                        "status": "released",
+                        "claim_subject": None,
+                        "claim_expires_at": fact["released_at"],
+                    }
+                )
+            elif fact["record_type"] == "work_item_completed":
+                state.update(
+                    {
+                        "status": "completed",
+                        "decision_id": fact["decision_id"],
+                        "decision_ids": [fact["decision_id"]],
+                        "completed_finding_ids": copy.deepcopy(
+                            work_item["finding_ids"]
+                        ),
+                    }
+                )
+            else:
+                finding_id = fact.get("finding_id")
+                if (
+                    finding_id not in work_item["finding_ids"]
+                    or finding_id in state["completed_finding_ids"]
+                ):
+                    raise RuntimeError("review work-item completion authority is invalid")
+                state["completed_finding_ids"].append(finding_id)
+                state["decision_ids"].append(fact["decision_id"])
+                if set(state["completed_finding_ids"]) == set(work_item["finding_ids"]):
+                    state.update(
+                        {
+                            "status": "completed",
+                            "decision_id": None,
+                        }
+                    )
+        return work_item, state
+
+    def _review_current_context(
+        self, work_item: dict[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        application_id = work_item["application_id"]
+        app = self._store.applications.get(application_id)
+        self._require_application_state_authority(app)
+        runs = [
+            run
+            for run in self._store.runs
+            if run.get("application_id") == application_id
+            and run.get("run_id") == work_item["run_id"]
+            and run.get("status") == "complete"
+        ]
+        projection = self._store.projections.get(application_id)
+        if app is None or len(runs) != 1 or not isinstance(projection, dict):
+            raise RuntimeError("review work-item current context is unavailable")
+        projection_watermark = projection.get("projection_watermark")
+        if (
+            projection.get("current_run_id") != work_item["run_id"]
+            or not isinstance(projection_watermark, int)
+            or isinstance(projection_watermark, bool)
+            or projection_watermark < 1
+        ):
+            raise RuntimeError("review work-item projection context is invalid")
+        run = runs[0]
+        run_bytes = json.dumps(
+            run,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        fixed = {
+            "application_id": application_id,
+            "work_item_id": work_item["work_item_id"],
+            "cycle": work_item["cycle"],
+            "run_id": work_item["run_id"],
+            "finding_ids": copy.deepcopy(work_item["finding_ids"]),
+            "evidence_snapshot_id": work_item["evidence_snapshot_id"],
+            "release_id": work_item["release_id"],
+            "assigned_subject": work_item["assigned_subject"],
+            "visibility_scope": work_item["visibility_scope"],
+            "phase": app["phase"],
+            "route": app["route"],
+            "lifecycle_revision": app["lifecycle_revision"],
+            "evidence_revision": app["evidence_revision"],
+            "current_run_id": app["current_run_id"],
+            "current_evidence_snapshot_id": app["current_evidence_snapshot_id"],
+            "projection_watermark": projection_watermark,
+            "run_authority": hashlib.sha256(run_bytes).hexdigest(),
+        }
+        fixed_bytes = json.dumps(
+            fixed,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return app, run, {
+            "lifecycle_revision": app["lifecycle_revision"],
+            "evidence_revision": app["evidence_revision"],
+            "run_id": work_item["run_id"],
+            "projection_watermark": projection_watermark,
+            "current_context": hashlib.sha256(fixed_bytes).hexdigest(),
+        }
+
+    @staticmethod
+    def _review_context_matches(
+        expected: dict[str, Any], actual: dict[str, Any]
+    ) -> bool:
+        return isinstance(expected, dict) and expected == actual
+
+    def _review_source_evidence_readable(self, app: dict[str, Any]) -> bool:
+        try:
+            if self._fault_injector is not None:
+                self._fault_injector("review.source_read")
+            self._admitted_evidence(app)
+        except Exception:
+            return False
+        return True
+
+    def _review_write_gate(
+        self,
+        *,
+        app: dict[str, Any],
+    ) -> tuple[str, str] | None:
+        if not self.audit_available:
+            return "unavailable", "AUDIT_UNAVAILABLE"
+        if not self.storage_available:
+            return "unavailable", "STORAGE_UNAVAILABLE"
+        cohort_stop = self._local_cohort_stop or self._store.cohort_stop
+        if (
+            cohort_stop is not None
+            and cohort_stop.get("reason_code") == self._RUNTIME_STOP_REASON
+        ):
+            return (
+                "stopped",
+                str(
+                    cohort_stop.get("failure_reason_code")
+                    or self._RUNTIME_STOP_REASON
+                ),
+            )
+        if self._review_source_evidence_readable(app):
+            return None
+        self.stop_new_cohort(
+            reason_code=self._RUNTIME_STOP_REASON,
+            failure_reason_code=self._REVIEW_SOURCE_FAILURE,
+            principal=S01CommandPrincipal(
+                subject="s03-review-gate",
+                role="operator",
+                scope="C-DEMO",
+                source_id="s03-review-gate",
+            ),
+        )
+        return "stopped", self._REVIEW_SOURCE_FAILURE
+
+    def claim_review_work_item(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        work_item_id: str,
+        expected_context: dict[str, Any],
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Claim one assigned manual-review work item with a fresh fence."""
+        claim_time = int(self._clock() if now is None else now)
+        with self._lock:
+            for attempt in range(2):
+                self._reload_store()
+                work_item, state = self._review_work_item_authority(
+                    principal=principal,
+                    work_item_id=work_item_id,
+                    now=claim_time,
+                )
+                app, _, actual_context = self._review_current_context(work_item)
+                if not self._review_context_matches(expected_context, actual_context):
+                    return {
+                        "status": "stale",
+                        "application_id": work_item["application_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": "STALE_REVIEW_CONTEXT",
+                    }
+                if state["status"] == "completed":
+                    return {
+                        "status": "completed",
+                        "application_id": work_item["application_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": "WORK_ITEM_COMPLETED",
+                    }
+                has_live_successor_claim = (
+                    state["status"] == "claimed"
+                    and float(state["claim_expires_at"]) > claim_time
+                    and any(
+                        record.get("work_item_id") == work_item_id
+                        and record.get("record_type") == "work_item_claimed"
+                        and record.get("claim_fence") == state["claim_fence"]
+                        for record in self._store.review_records
+                    )
+                )
+                if has_live_successor_claim or (
+                    state["claim_subject"] != principal.subject
+                    and float(state["claim_expires_at"]) > claim_time
+                ):
+                    return {
+                        "status": "conflict",
+                        "application_id": work_item["application_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": "WORK_ITEM_ALREADY_CLAIMED",
+                    }
+                gate = self._review_write_gate(app=app)
+                if gate is not None:
+                    status, reason_code = gate
+                    return {
+                        "status": status,
+                        "application_id": work_item["application_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": reason_code,
+                    }
+                staged = copy.deepcopy(self._store)
+                sequence = 1 + sum(
+                    record.get("work_item_id") == work_item_id
+                    and str(record.get("record_type", "")).startswith("work_item_")
+                    for record in staged.review_records
+                )
+                claim_fence = int(state["claim_fence"]) + 1
+                claim_expires_at = claim_time + self._REVIEW_CLAIM_TTL_SECONDS
+                staged.review_records.append(
+                    {
+                        "record_id": self._stable_id(
+                            "review_record", f"{work_item_id}:claim:{sequence}"
+                        ),
+                        "record_type": "work_item_claimed",
+                        "sequence": sequence,
+                        "work_item_id": work_item_id,
+                        "application_id": work_item["application_id"],
+                        "run_id": work_item["run_id"],
+                        "claim_subject": principal.subject,
+                        "claim_fence": claim_fence,
+                        "claim_started_at": claim_time,
+                        "claim_expires_at": claim_expires_at,
+                        "recorded_at": claim_time,
+                    }
+                )
+                try:
+                    self._before_write("review.audit")
+                    staged.audit_events.append(
+                        {
+                            "event_id": self._stable_id(
+                                "audit",
+                                f"review_work_item_claimed:{work_item_id}:{sequence}",
+                            ),
+                            "action": "review_work_item_claimed",
+                            "subject": principal.subject,
+                            "role": principal.role,
+                            "scope": work_item["visibility_scope"],
+                            "source_id": principal.source_id,
+                            "application_id": work_item["application_id"],
+                            "run_id": work_item["run_id"],
+                            "work_item_id": work_item_id,
+                            "claim_fence": claim_fence,
+                            "result": "accepted",
+                            **self._audit_time_fields(staged, now=claim_time),
+                        }
+                    )
+                    staged.persist()
+                except _StoreWriteFailure:
+                    return {
+                        "status": "unavailable",
+                        "application_id": work_item["application_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": "AUDIT_UNAVAILABLE",
+                    }
+                except StaleStoreRevision:
+                    if attempt == 0:
+                        continue
+                    raise
+                self._store = staged
+                return {
+                    "status": "claimed",
+                    "application_id": work_item["application_id"],
+                    "work_item_id": work_item_id,
+                    "claim_subject": principal.subject,
+                    "claim_fence": claim_fence,
+                    "claim_expires_at": claim_expires_at,
+                }
+            raise RuntimeError("review work-item claim retry exhausted")
+
+    def renew_review_work_item(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        work_item_id: str,
+        expected_fence: int,
+        expected_context: dict[str, Any],
+        idempotency_key: str,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Renew the caller's live work-item lease without changing its fence."""
+        renew_time = int(self._clock() if now is None else now)
+        with self._lock:
+            for attempt in range(2):
+                self._reload_store()
+                work_item, state = self._review_work_item_authority(
+                    principal=principal,
+                    work_item_id=work_item_id,
+                    now=renew_time,
+                )
+                app, _, actual_context = self._review_current_context(work_item)
+                command_key, command_fingerprint = self._review_lifecycle_idempotency(
+                    action="renew_review_work_item",
+                    work_item_id=work_item_id,
+                    expected_fence=expected_fence,
+                    expected_context=expected_context,
+                    idempotency_key=idempotency_key,
+                )
+                binding_key = self._review_idempotency_binding_key(
+                    principal,
+                    work_item_id,
+                    command_key,
+                    action="renew_review_work_item",
+                )
+                previous = self._store.idempotency.get(binding_key)
+                if previous is not None:
+                    previous_fingerprint, previous_result = previous
+                    if previous_fingerprint == command_fingerprint:
+                        return {**copy.deepcopy(previous_result), "replayed": True}
+                    return {
+                        "status": "conflict",
+                        "replayed": False,
+                        "application_id": work_item["application_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": "IDEMPOTENCY_KEY_CONFLICT",
+                    }
+                if not self._review_context_matches(expected_context, actual_context):
+                    return {
+                        "status": "stale",
+                        "application_id": work_item["application_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": "STALE_REVIEW_CONTEXT",
+                    }
+                if (
+                    state["status"] != "claimed"
+                    or state["claim_subject"] != principal.subject
+                    or state["claim_fence"] != expected_fence
+                    or float(state["claim_expires_at"]) <= renew_time
+                ):
+                    return {
+                        "status": "stale",
+                        "application_id": work_item["application_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": "STALE_WORK_ITEM_CLAIM",
+                    }
+                gate = self._review_write_gate(app=app)
+                if gate is not None:
+                    status, reason_code = gate
+                    return {
+                        "status": status,
+                        "application_id": work_item["application_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": reason_code,
+                    }
+                staged = copy.deepcopy(self._store)
+                sequence = 1 + sum(
+                    record.get("work_item_id") == work_item_id
+                    and str(record.get("record_type", "")).startswith("work_item_")
+                    for record in staged.review_records
+                )
+                claim_expires_at = renew_time + self._REVIEW_CLAIM_TTL_SECONDS
+                staged.review_records.append(
+                    {
+                        "record_id": self._stable_id(
+                            "review_record", f"{work_item_id}:renew:{sequence}"
+                        ),
+                        "record_type": "work_item_renewed",
+                        "sequence": sequence,
+                        "work_item_id": work_item_id,
+                        "application_id": work_item["application_id"],
+                        "run_id": work_item["run_id"],
+                        "claim_subject": principal.subject,
+                        "claim_fence": expected_fence,
+                        "claim_expires_at": claim_expires_at,
+                        "recorded_at": renew_time,
+                    }
+                )
+                result = {
+                    "status": "renewed",
+                    "application_id": work_item["application_id"],
+                    "work_item_id": work_item_id,
+                    "claim_subject": principal.subject,
+                    "claim_fence": expected_fence,
+                    "claim_expires_at": claim_expires_at,
+                    "replayed": False,
+                }
+                try:
+                    self._before_write("review.audit")
+                    staged.audit_events.append(
+                        {
+                            "event_id": self._stable_id(
+                                "audit",
+                                f"review_work_item_renewed:{work_item_id}:{sequence}",
+                            ),
+                            "action": "review_work_item_renewed",
+                            "subject": principal.subject,
+                            "role": principal.role,
+                            "scope": work_item["visibility_scope"],
+                            "source_id": principal.source_id,
+                            "application_id": work_item["application_id"],
+                            "run_id": work_item["run_id"],
+                            "work_item_id": work_item_id,
+                            "claim_fence": expected_fence,
+                            "result": "accepted",
+                            **self._audit_time_fields(staged, now=renew_time),
+                        }
+                    )
+                    self._before_write("review.idempotency")
+                    staged.idempotency[binding_key] = (
+                        command_fingerprint,
+                        copy.deepcopy(result),
+                    )
+                    staged.persist()
+                except _StoreWriteFailure as error:
+                    return {
+                        "status": "unavailable",
+                        "application_id": work_item["application_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": (
+                            "AUDIT_UNAVAILABLE"
+                            if str(error) == "review.audit"
+                            else "STORAGE_UNAVAILABLE"
+                        ),
+                    }
+                except StaleStoreRevision:
+                    if attempt == 0:
+                        continue
+                    return {
+                        "status": "unavailable",
+                        "application_id": work_item["application_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": "STORAGE_UNAVAILABLE",
+                    }
+                self._store = staged
+                return result
+            raise RuntimeError("review work-item renew retry exhausted")
+
+    def release_review_work_item(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        work_item_id: str,
+        expected_fence: int,
+        expected_context: dict[str, Any],
+        idempotency_key: str,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Release the caller's live claim while preserving its fence history."""
+        release_time = int(self._clock() if now is None else now)
+        with self._lock:
+            for attempt in range(2):
+                self._reload_store()
+                work_item, state = self._review_work_item_authority(
+                    principal=principal,
+                    work_item_id=work_item_id,
+                    now=release_time,
+                )
+                app, _, actual_context = self._review_current_context(work_item)
+                command_key, command_fingerprint = self._review_lifecycle_idempotency(
+                    action="release_review_work_item",
+                    work_item_id=work_item_id,
+                    expected_fence=expected_fence,
+                    expected_context=expected_context,
+                    idempotency_key=idempotency_key,
+                )
+                binding_key = self._review_idempotency_binding_key(
+                    principal,
+                    work_item_id,
+                    command_key,
+                    action="release_review_work_item",
+                )
+                previous = self._store.idempotency.get(binding_key)
+                if previous is not None:
+                    previous_fingerprint, previous_result = previous
+                    if previous_fingerprint == command_fingerprint:
+                        return {**copy.deepcopy(previous_result), "replayed": True}
+                    return {
+                        "status": "conflict",
+                        "replayed": False,
+                        "application_id": work_item["application_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": "IDEMPOTENCY_KEY_CONFLICT",
+                    }
+                if not self._review_context_matches(expected_context, actual_context):
+                    return {
+                        "status": "stale",
+                        "application_id": work_item["application_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": "STALE_REVIEW_CONTEXT",
+                    }
+                if (
+                    state["status"] != "claimed"
+                    or state["claim_subject"] != principal.subject
+                    or state["claim_fence"] != expected_fence
+                    or float(state["claim_expires_at"]) <= release_time
+                ):
+                    return {
+                        "status": "stale",
+                        "application_id": work_item["application_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": "STALE_WORK_ITEM_CLAIM",
+                    }
+                staged = copy.deepcopy(self._store)
+                sequence = 1 + sum(
+                    record.get("work_item_id") == work_item_id
+                    and str(record.get("record_type", "")).startswith("work_item_")
+                    for record in staged.review_records
+                )
+                staged.review_records.append(
+                    {
+                        "record_id": self._stable_id(
+                            "review_record", f"{work_item_id}:release:{sequence}"
+                        ),
+                        "record_type": "work_item_released",
+                        "sequence": sequence,
+                        "work_item_id": work_item_id,
+                        "application_id": work_item["application_id"],
+                        "run_id": work_item["run_id"],
+                        "claim_subject": principal.subject,
+                        "claim_fence": expected_fence,
+                        "released_at": release_time,
+                        "recorded_at": release_time,
+                    }
+                )
+                result = {
+                    "status": "released",
+                    "application_id": work_item["application_id"],
+                    "work_item_id": work_item_id,
+                    "claim_fence": expected_fence,
+                    "released_at": release_time,
+                    "replayed": False,
+                }
+                try:
+                    self._before_write("review.audit")
+                    staged.audit_events.append(
+                        {
+                            "event_id": self._stable_id(
+                                "audit",
+                                f"review_work_item_released:{work_item_id}:{sequence}",
+                            ),
+                            "action": "review_work_item_released",
+                            "subject": principal.subject,
+                            "role": principal.role,
+                            "scope": work_item["visibility_scope"],
+                            "source_id": principal.source_id,
+                            "application_id": work_item["application_id"],
+                            "run_id": work_item["run_id"],
+                            "work_item_id": work_item_id,
+                            "claim_fence": expected_fence,
+                            "result": "accepted",
+                            **self._audit_time_fields(staged, now=release_time),
+                        }
+                    )
+                    self._before_write("review.idempotency")
+                    staged.idempotency[binding_key] = (
+                        command_fingerprint,
+                        copy.deepcopy(result),
+                    )
+                    staged.persist()
+                except _StoreWriteFailure as error:
+                    return {
+                        "status": "unavailable",
+                        "application_id": work_item["application_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": (
+                            "AUDIT_UNAVAILABLE"
+                            if str(error) == "review.audit"
+                            else "STORAGE_UNAVAILABLE"
+                        ),
+                    }
+                except StaleStoreRevision:
+                    if attempt == 0:
+                        continue
+                    return {
+                        "status": "unavailable",
+                        "application_id": work_item["application_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": "STORAGE_UNAVAILABLE",
+                    }
+                self._store = staged
+                return result
+            raise RuntimeError("review work-item release retry exhausted")
+
+    def preview_review_work_item_batch(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        items: list[dict[str, Any]],
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Validate and normalize a same-application/current-run review shortcut."""
+        preview_time = int(self._clock() if now is None else now)
+        if not isinstance(items, list) or not 1 <= len(items) <= 100:
+            raise ValueError("review batch must contain between 1 and 100 findings")
+
+        with self._lock:
+            self._reload_store()
+            normalized_items: list[dict[str, Any]] = []
+            batch_authority: tuple[str, str] | None = None
+            findings_by_work_item: dict[str, set[str]] = {}
+            work_items_by_id: dict[str, dict[str, Any]] = {}
+            for item in items:
+                if not isinstance(item, dict) or set(item) != {
+                    "work_item_id",
+                    "finding_id",
+                    "outcome",
+                    "reason_code",
+                    "expected_fence",
+                    "expected_context",
+                }:
+                    raise ValueError("review batch item does not match the registered contract")
+                work_item_id = item.get("work_item_id")
+                finding_id = item.get("finding_id")
+                expected_fence = item.get("expected_fence")
+                if (
+                    not isinstance(work_item_id, str)
+                    or not work_item_id
+                    or not isinstance(finding_id, str)
+                    or not finding_id
+                    or not isinstance(expected_fence, int)
+                    or isinstance(expected_fence, bool)
+                ):
+                    raise ValueError("review batch item contains an invalid identifier")
+                normalized_verification = self._canonical_review_verification(
+                    {
+                        "schema_version": "human-decision/1",
+                        "outcome": item.get("outcome"),
+                        "reason_code": item.get("reason_code"),
+                        "finding_decisions": [
+                            {
+                                "finding_id": finding_id,
+                                "outcome": item.get("outcome"),
+                            }
+                        ],
+                    }
+                )
+                work_item, state = self._review_work_item_authority(
+                    principal=principal,
+                    work_item_id=work_item_id,
+                    now=preview_time,
+                )
+                _, _, actual_context = self._review_current_context(work_item)
+                if not self._review_context_matches(
+                    item.get("expected_context"), actual_context
+                ):
+                    return {
+                        "status": "stale",
+                        "application_id": work_item["application_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": "STALE_REVIEW_CONTEXT",
+                    }
+                if (
+                    state["status"] != "claimed"
+                    or state["claim_subject"] != principal.subject
+                    or state["claim_fence"] != expected_fence
+                    or float(state["claim_expires_at"]) <= preview_time
+                ):
+                    return {
+                        "status": "stale",
+                        "application_id": work_item["application_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": "STALE_WORK_ITEM_CLAIM",
+                    }
+                authority = (work_item["application_id"], work_item["run_id"])
+                if batch_authority is None:
+                    batch_authority = authority
+                elif batch_authority != authority:
+                    return {
+                        "status": "rejected",
+                        "reason_code": "MIXED_REVIEW_BATCH",
+                    }
+                selected = findings_by_work_item.setdefault(work_item_id, set())
+                if finding_id not in work_item["finding_ids"] or finding_id in selected:
+                    raise ValueError("review batch finding is not unique in its work item")
+                selected.add(finding_id)
+                work_items_by_id[work_item_id] = work_item
+                normalized_items.append(
+                    {
+                        "work_item_id": work_item_id,
+                        "finding_id": finding_id,
+                        "outcome": normalized_verification["outcome"],
+                        "reason_code": normalized_verification["reason_code"],
+                        "expected_fence": expected_fence,
+                        "expected_context": copy.deepcopy(actual_context),
+                    }
+                )
+            if any(
+                findings_by_work_item[work_item_id] != set(work_item["finding_ids"])
+                for work_item_id, work_item in work_items_by_id.items()
+            ):
+                raise ValueError("review batch must decide every work-item finding")
+            return {
+                "schema_version": "review-batch-plan/1",
+                "items": normalized_items,
+            }
+
+    def submit_review_work_item_batch(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        idempotency_key: str,
+        plan: dict[str, Any],
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Commit one validated review shortcut as per-finding immutable facts."""
+        submit_time = int(self._clock() if now is None else now)
+        target_id = "review-batch"
+        if isinstance(plan, dict) and isinstance(plan.get("items"), list):
+            first = next(
+                (
+                    item.get("work_item_id")
+                    for item in plan["items"]
+                    if isinstance(item, dict)
+                    and isinstance(item.get("work_item_id"), str)
+                ),
+                None,
+            )
+            if first:
+                target_id = first
+        if not self._valid_reviewer_principal(principal, now=submit_time):
+            raise QueryNotFound(target_id)
+        if not self._valid_idempotency_key(idempotency_key):
+            raise ValueError("review idempotency key is invalid")
+        if (
+            not isinstance(plan, dict)
+            or set(plan) != {"schema_version", "items"}
+            or plan.get("schema_version") != "review-batch-plan/1"
+        ):
+            raise ValueError("review batch plan does not match the registered contract")
+        try:
+            fingerprint_bytes = json.dumps(
+                plan,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        except (TypeError, ValueError) as error:
+            raise ValueError("review batch plan is not canonical JSON") from error
+        command_fingerprint = hashlib.sha256(fingerprint_bytes).hexdigest()
+        binding_bytes = json.dumps(
+            {
+                "action": "submit_review_work_item_batch",
+                "key": idempotency_key,
+                "role": principal.role,
+                "scope": principal.scope,
+                "source_id": principal.source_id,
+                "subject": principal.subject,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        binding_key = f"s03_idempotency_{hashlib.sha256(binding_bytes).hexdigest()}"
+
+        with self._lock:
+            self._reload_store()
+            previous = self._store.idempotency.get(binding_key)
+            if previous is not None:
+                previous_fingerprint, previous_result = previous
+                if previous_fingerprint == command_fingerprint:
+                    return {**copy.deepcopy(previous_result), "replayed": True}
+                return {
+                    "status": "conflict",
+                    "replayed": False,
+                    "application_id": previous_result["application_id"],
+                    "reason_code": "IDEMPOTENCY_KEY_CONFLICT",
+                }
+
+            validated = self.preview_review_work_item_batch(
+                principal=principal,
+                items=plan["items"],
+                now=submit_time,
+            )
+            if validated.get("schema_version") != "review-batch-plan/1":
+                return {**validated, "replayed": False}
+            if validated != plan:
+                raise ValueError("review batch plan is not canonical")
+
+            work_items: dict[str, dict[str, Any]] = {}
+            contexts: dict[str, dict[str, Any]] = {}
+            app: dict[str, Any] | None = None
+            run: dict[str, Any] | None = None
+            run_id: str | None = None
+            for item in plan["items"]:
+                work_item_id = item["work_item_id"]
+                if work_item_id in work_items:
+                    continue
+                work_item, _ = self._review_work_item_authority(
+                    principal=principal,
+                    work_item_id=work_item_id,
+                    now=submit_time,
+                )
+                current_app, current_run, actual_context = self._review_current_context(
+                    work_item
+                )
+                work_items[work_item_id] = work_item
+                contexts[work_item_id] = actual_context
+                if app is None:
+                    app = current_app
+                    run = current_run
+                    run_id = work_item["run_id"]
+            if app is None or run is None or run_id is None:
+                raise RuntimeError("review batch authority is unavailable")
+            if any(
+                work_item["application_id"] != app["application_id"]
+                or work_item["run_id"] != run_id
+                or work_item["lifecycle_revision"] != app["lifecycle_revision"]
+                or work_item["evidence_revision"] != app["evidence_revision"]
+                for work_item in work_items.values()
+            ) or app.get("phase") != "Manual Review" or app.get("current_run_id") != run_id:
+                return {
+                    "status": "stale",
+                    "replayed": False,
+                    "reason_code": "STALE_REVIEW_CONTEXT",
+                }
+            gate = self._review_write_gate(app=app)
+            if gate is not None:
+                status, reason_code = gate
+                return {
+                    "status": status,
+                    "replayed": False,
+                    "application_id": app["application_id"],
+                    "reason_code": reason_code,
+                }
+
+            staged = copy.deepcopy(self._store)
+            staged_app = staged.applications[app["application_id"]]
+            result_items: list[dict[str, str]] = []
+            sequences = {
+                work_item_id: 1
+                + sum(
+                    record.get("work_item_id") == work_item_id
+                    and str(record.get("record_type", "")).startswith("work_item_")
+                    for record in staged.review_records
+                )
+                for work_item_id in work_items
+            }
+            try:
+                self._before_write("review.lifecycle")
+                self._transition_lifecycle(
+                    staged_app,
+                    "Verification Completed",
+                    "HUMAN_REVIEW_COMPLETED",
+                    store=staged,
+                )
+                staged.lifecycle_events[-1]["run_id"] = run_id
+                staged_app["route"] = "human_complete"
+                for item in plan["items"]:
+                    work_item_id = item["work_item_id"]
+                    finding_id = item["finding_id"]
+                    work_item = work_items[work_item_id]
+                    sequence = sequences[work_item_id]
+                    sequences[work_item_id] += 1
+                    decision_id = self._stable_id(
+                        "decision",
+                        f"{binding_key}:{command_fingerprint}:{work_item_id}:{finding_id}",
+                    )
+                    compatibility = (
+                        self._review_compatibility_summary(
+                            app,
+                            run,
+                            work_item,
+                            reason_code=item["reason_code"],
+                        )
+                        if app.get("legacy_oracle_outcomes")
+                        else None
+                    )
+                    decision_record = {
+                        "record_id": decision_id,
+                        "record_type": "human_decision",
+                        "decision_id": decision_id,
+                        "work_item_id": work_item_id,
+                        "application_id": work_item["application_id"],
+                        "run_id": work_item["run_id"],
+                        "reviewer_subject": principal.subject,
+                        "reviewer_role": principal.role,
+                        "reviewer_source_id": principal.source_id,
+                        "assigned_subject": work_item["assigned_subject"],
+                        "cycle": work_item["cycle"],
+                        "finding_ids": [finding_id],
+                        "evidence_snapshot_id": work_item[
+                            "evidence_snapshot_id"
+                        ],
+                        "release_id": work_item["release_id"],
+                        "fixed_context": copy.deepcopy(contexts[work_item_id]),
+                        "claim_fence": item["expected_fence"],
+                        "lifecycle_revision": staged_app[
+                            "lifecycle_revision"
+                        ],
+                        "evidence_revision": staged_app["evidence_revision"],
+                        "submitted_at": submit_time,
+                        "schema_version": "human-decision/1",
+                        "outcome": item["outcome"],
+                        "reason_code": item["reason_code"],
+                        "finding_decisions": [
+                            {
+                                "finding_id": finding_id,
+                                "outcome": item["outcome"],
+                            }
+                        ],
+                    }
+                    if compatibility is not None:
+                        decision_record["compatibility"] = compatibility
+                    self._before_write("review.decision")
+                    staged.review_records.append(decision_record)
+                    self._before_write("review.work_item")
+                    staged.review_records.append(
+                        {
+                            "record_id": self._stable_id(
+                                "review_record",
+                                f"{work_item_id}:finding-complete:{sequence}:{finding_id}",
+                            ),
+                            "record_type": "work_item_finding_completed",
+                            "sequence": sequence,
+                            "work_item_id": work_item_id,
+                            "application_id": work_item["application_id"],
+                            "run_id": work_item["run_id"],
+                            "finding_id": finding_id,
+                            "claim_subject": principal.subject,
+                            "claim_fence": item["expected_fence"],
+                            "decision_id": decision_id,
+                            "completed_at": submit_time,
+                            "recorded_at": submit_time,
+                        }
+                    )
+                    self._before_write("review.audit")
+                    staged.audit_events.append(
+                        {
+                            "event_id": self._stable_id(
+                                "audit", f"human_decision_submitted:{decision_id}"
+                            ),
+                            "action": "human_decision_submitted",
+                            "subject": principal.subject,
+                            "role": principal.role,
+                            "scope": work_item["visibility_scope"],
+                            "source_id": principal.source_id,
+                            "application_id": work_item["application_id"],
+                            "run_id": work_item["run_id"],
+                            "route": "human_complete",
+                            "lifecycle_revision": staged_app[
+                                "lifecycle_revision"
+                            ],
+                            "evidence_revision": staged_app["evidence_revision"],
+                            "work_item_id": work_item_id,
+                            "finding_id": finding_id,
+                            "decision_id": decision_id,
+                            "outcome": item["outcome"],
+                            "reason_code": item["reason_code"],
+                            "claim_fence": item["expected_fence"],
+                            "result": "accepted",
+                            **self._audit_time_fields(staged, now=submit_time),
+                        }
+                    )
+                    result_items.append(
+                        {
+                            "work_item_id": work_item_id,
+                            "finding_id": finding_id,
+                            "decision_id": decision_id,
+                        }
+                    )
+                result = {
+                    "status": "accepted",
+                    "replayed": False,
+                    "application_id": app["application_id"],
+                    "run_id": run_id,
+                    "work_item_ids": list(work_items),
+                    "items": result_items,
+                    "lifecycle_revision": staged_app["lifecycle_revision"],
+                    "evidence_revision": staged_app["evidence_revision"],
+                    "route": "human_complete",
+                }
+                self._before_write("review.idempotency")
+                staged.idempotency[binding_key] = (
+                    command_fingerprint,
+                    copy.deepcopy(result),
+                )
+                staged.persist()
+            except (StaleStoreRevision, _StoreWriteFailure) as error:
+                return {
+                    "status": "unavailable",
+                    "replayed": False,
+                    "application_id": app["application_id"],
+                    "reason_code": (
+                        "AUDIT_UNAVAILABLE"
+                        if str(error) == "review.audit"
+                        else "STORAGE_UNAVAILABLE"
+                    ),
+                }
+            self._store = staged
+            return result
+
+    @staticmethod
+    def _review_compatibility_summary(
+        app: dict[str, Any],
+        run: dict[str, Any],
+        work_item: dict[str, Any],
+        *,
+        reason_code: str,
+    ) -> dict[str, Any]:
+        differential = run.get("semantic_differential")
+        source = app.get("source")
+        legacy_outcomes = app.get("legacy_oracle_outcomes")
+        finding_ids = run.get("finding_ids")
+        if (
+            not isinstance(differential, dict)
+            or differential.get("status") not in {"match", "mismatch"}
+            or not isinstance(differential.get("checks_compared"), int)
+            or not isinstance(differential.get("mismatches"), list)
+            or not isinstance(source, dict)
+            or not isinstance(legacy_outcomes, (list, tuple))
+            or not isinstance(finding_ids, list)
+        ):
+            raise RuntimeError("review compatibility authority is unavailable")
+        source_sha256 = source.get("source_sha256") or source.get(
+            "source_result_sha256"
+        )
+        if not isinstance(source_sha256, str) or not source_sha256:
+            raise RuntimeError("review compatibility source binding is unavailable")
+        differential_bytes = json.dumps(
+            differential,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return {
+            "schema_version": "human-review-compatibility/1",
+            "differential_source": "frozen_admission_oracle",
+            "intent": "manual_review",
+            "target_reason_code": reason_code,
+            "conformance": differential["status"],
+            "target_context": {
+                "run_id": work_item["run_id"],
+                "evidence_snapshot_id": work_item["evidence_snapshot_id"],
+                "release_id": work_item["release_id"],
+                "source_sha256": source_sha256,
+            },
+            "fact_counts": {
+                "legacy_checks": len(legacy_outcomes),
+                "target_findings": len(finding_ids),
+                "checks_compared": differential["checks_compared"],
+                "mismatches": len(differential["mismatches"]),
+            },
+            "semantic_differential_digest": hashlib.sha256(
+                differential_bytes
+            ).hexdigest(),
+        }
+
+    @classmethod
+    def _canonical_review_verification(
+        cls, verification: dict[str, Any]
+    ) -> dict[str, Any]:
+        required_fields = {
+            "schema_version",
+            "outcome",
+            "reason_code",
+            "finding_decisions",
+        }
+        if not isinstance(verification, dict) or set(verification) not in {
+            frozenset(required_fields),
+            frozenset(required_fields | {"note"}),
+        }:
+            raise ValueError("review verification does not match the registered contract")
+        allowed_outcomes = {"confirmed", "not_confirmed", "inconclusive"}
+        outcome = verification.get("outcome")
+        reason_code = verification.get("reason_code")
+        decisions = verification.get("finding_decisions")
+        note_present = "note" in verification
+        note = verification.get("note")
+        try:
+            note_bytes = note.encode("utf-8") if isinstance(note, str) else b""
+        except UnicodeEncodeError as error:
+            raise ValueError(
+                "review verification contains an invalid structured value"
+            ) from error
+        if (
+            verification.get("schema_version") != "human-decision/1"
+            or outcome not in allowed_outcomes
+            or reason_code not in cls._REVIEW_REASON_CODES
+            or note_present
+            and (
+                not isinstance(note, str)
+                or len(note) > cls._REVIEW_NOTE_MAX_CHARACTERS
+                or len(note_bytes) > cls._REVIEW_NOTE_MAX_BYTES
+            )
+            or not isinstance(decisions, list)
+            or not decisions
+            or len(decisions) > 100
+        ):
+            raise ValueError("review verification contains an invalid structured value")
+        normalized_decisions: list[dict[str, str]] = []
+        finding_ids: set[str] = set()
+        for decision in decisions:
+            if not isinstance(decision, dict) or set(decision) != {
+                "finding_id",
+                "outcome",
+            }:
+                raise ValueError("finding decision does not match the registered contract")
+            finding_id = decision.get("finding_id")
+            finding_outcome = decision.get("outcome")
+            if (
+                not isinstance(finding_id, str)
+                or not finding_id
+                or len(finding_id) > 200
+                or finding_id in finding_ids
+                or finding_outcome not in allowed_outcomes
+            ):
+                raise ValueError("finding decision contains an invalid structured value")
+            finding_ids.add(finding_id)
+            normalized_decisions.append(
+                {"finding_id": finding_id, "outcome": finding_outcome}
+            )
+        normalized = {
+            "schema_version": "human-decision/1",
+            "outcome": outcome,
+            "reason_code": reason_code,
+            "finding_decisions": normalized_decisions,
+        }
+        if note_present:
+            normalized["note_metadata"] = {
+                "present": True,
+                "character_count": len(note),
+                "byte_count": len(note_bytes),
+                "sha256": hashlib.sha256(note_bytes).hexdigest(),
+            }
+        return normalized
+
+    @classmethod
+    def _review_lifecycle_idempotency(
+        cls,
+        *,
+        action: str,
+        work_item_id: str,
+        expected_fence: int,
+        expected_context: dict[str, Any],
+        idempotency_key: str,
+    ) -> tuple[str, str]:
+        encoded = json.dumps(
+            {
+                "action": action,
+                "expected_context": expected_context,
+                "expected_fence": expected_fence,
+                "work_item_id": work_item_id,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        fingerprint = hashlib.sha256(encoded).hexdigest()
+        if not cls._valid_idempotency_key(idempotency_key):
+            raise ValueError("review idempotency key is invalid")
+        return idempotency_key, fingerprint
+
+    @staticmethod
+    def _review_idempotency_binding_key(
+        principal: S01CommandPrincipal,
+        work_item_id: str,
+        idempotency_key: str,
+        *,
+        action: str = "submit_review_work_item",
+    ) -> str:
+        encoded = json.dumps(
+            {
+                "action": action,
+                "key": idempotency_key,
+                "role": principal.role,
+                "scope": principal.scope,
+                "source_id": principal.source_id,
+                "subject": principal.subject,
+                "work_item_id": work_item_id,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return f"s03_idempotency_{hashlib.sha256(encoded).hexdigest()}"
+
+    def submit_review_work_item(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        work_item_id: str,
+        expected_fence: int,
+        expected_context: dict[str, Any],
+        idempotency_key: str,
+        verification: dict[str, Any],
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Atomically complete one claimed work item with an immutable decision."""
+        submit_time = int(self._clock() if now is None else now)
+        if not self._valid_reviewer_principal(principal, now=submit_time):
+            raise QueryNotFound(work_item_id)
+        if not self._valid_idempotency_key(idempotency_key):
+            raise ValueError("review idempotency key is invalid")
+        normalized = self._canonical_review_verification(verification)
+
+        with self._lock:
+            self._reload_store()
+            work_item, state = self._review_work_item_authority(
+                principal=principal,
+                work_item_id=work_item_id,
+                now=submit_time,
+            )
+            app, run, actual_context = self._review_current_context(work_item)
+            try:
+                fingerprint_bytes = json.dumps(
+                    {
+                        "expected_context": expected_context,
+                        "expected_fence": expected_fence,
+                        "verification": normalized,
+                        "work_item_id": work_item_id,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            except (TypeError, ValueError):
+                return {
+                    "status": "stale",
+                    "replayed": False,
+                    "application_id": work_item["application_id"],
+                    "work_item_id": work_item_id,
+                    "reason_code": "STALE_REVIEW_CONTEXT",
+                }
+            command_fingerprint = hashlib.sha256(fingerprint_bytes).hexdigest()
+            binding_key = self._review_idempotency_binding_key(
+                principal, work_item_id, idempotency_key
+            )
+            previous = self._store.idempotency.get(binding_key)
+            if previous is not None:
+                previous_fingerprint, previous_result = previous
+                if previous_fingerprint == command_fingerprint:
+                    return {**copy.deepcopy(previous_result), "replayed": True}
+                return {
+                    "status": "conflict",
+                    "replayed": False,
+                    "application_id": previous_result["application_id"],
+                    "work_item_id": previous_result["work_item_id"],
+                    "reason_code": "IDEMPOTENCY_KEY_CONFLICT",
+                }
+            if not self._review_context_matches(expected_context, actual_context):
+                return {
+                    "status": "stale",
+                    "replayed": False,
+                    "application_id": work_item["application_id"],
+                    "work_item_id": work_item_id,
+                    "reason_code": "STALE_REVIEW_CONTEXT",
+                }
+            if (
+                state["status"] != "claimed"
+                or state["claim_subject"] != principal.subject
+                or state["claim_fence"] != expected_fence
+                or float(state["claim_expires_at"]) <= submit_time
+            ):
+                return {
+                    "status": "stale",
+                    "replayed": False,
+                    "application_id": work_item["application_id"],
+                    "work_item_id": work_item_id,
+                    "reason_code": "STALE_WORK_ITEM_CLAIM",
+                }
+            if {
+                decision["finding_id"]
+                for decision in normalized["finding_decisions"]
+            } != set(work_item["finding_ids"]):
+                raise ValueError("review verification must decide every work-item finding")
+            if (
+                app.get("phase") != "Manual Review"
+                or app.get("current_run_id") != work_item["run_id"]
+                or app.get("lifecycle_revision") != work_item["lifecycle_revision"]
+                or app.get("evidence_revision") != work_item["evidence_revision"]
+            ):
+                return {
+                    "status": "stale",
+                    "replayed": False,
+                    "application_id": work_item["application_id"],
+                    "work_item_id": work_item_id,
+                    "reason_code": "STALE_REVIEW_CONTEXT",
+                }
+
+            gate = self._review_write_gate(app=app)
+            if gate is not None:
+                status, reason_code = gate
+                return {
+                    "status": status,
+                    "replayed": False,
+                    "application_id": work_item["application_id"],
+                    "work_item_id": work_item_id,
+                    "reason_code": reason_code,
+                }
+
+            staged = copy.deepcopy(self._store)
+            staged_app = staged.applications[work_item["application_id"]]
+            compatibility = (
+                self._review_compatibility_summary(
+                    app,
+                    run,
+                    work_item,
+                    reason_code=normalized["reason_code"],
+                )
+                if app.get("legacy_oracle_outcomes")
+                else None
+            )
+            decision_id = self._stable_id(
+                "decision", f"{binding_key}:{command_fingerprint}"
+            )
+            sequence = 1 + sum(
+                record.get("work_item_id") == work_item_id
+                and str(record.get("record_type", "")).startswith("work_item_")
+                for record in staged.review_records
+            )
+            try:
+                self._before_write("review.lifecycle")
+                self._transition_lifecycle(
+                    staged_app,
+                    "Verification Completed",
+                    "HUMAN_REVIEW_COMPLETED",
+                    store=staged,
+                )
+                staged.lifecycle_events[-1]["run_id"] = work_item["run_id"]
+                staged_app["route"] = "human_complete"
+                self._before_write("review.decision")
+                staged.review_records.append(
+                    {
+                        "record_id": decision_id,
+                        "record_type": "human_decision",
+                        "decision_id": decision_id,
+                        "work_item_id": work_item_id,
+                        "application_id": work_item["application_id"],
+                        "run_id": work_item["run_id"],
+                        "reviewer_subject": principal.subject,
+                        "reviewer_role": principal.role,
+                        "reviewer_source_id": principal.source_id,
+                        "assigned_subject": work_item["assigned_subject"],
+                        "cycle": work_item["cycle"],
+                        "finding_ids": copy.deepcopy(work_item["finding_ids"]),
+                        "evidence_snapshot_id": work_item["evidence_snapshot_id"],
+                        "release_id": work_item["release_id"],
+                        "fixed_context": copy.deepcopy(actual_context),
+                        "claim_fence": expected_fence,
+                        "lifecycle_revision": staged_app["lifecycle_revision"],
+                        "evidence_revision": staged_app["evidence_revision"],
+                        "submitted_at": submit_time,
+                        **(
+                            {"compatibility": compatibility}
+                            if compatibility is not None
+                            else {}
+                        ),
+                        **copy.deepcopy(normalized),
+                    }
+                )
+                self._before_write("review.work_item")
+                staged.review_records.append(
+                    {
+                        "record_id": self._stable_id(
+                            "review_record", f"{work_item_id}:complete:{sequence}"
+                        ),
+                        "record_type": "work_item_completed",
+                        "sequence": sequence,
+                        "work_item_id": work_item_id,
+                        "application_id": work_item["application_id"],
+                        "run_id": work_item["run_id"],
+                        "claim_subject": principal.subject,
+                        "claim_fence": expected_fence,
+                        "decision_id": decision_id,
+                        "completed_at": submit_time,
+                        "recorded_at": submit_time,
+                    }
+                )
+                self._before_write("review.audit")
+                staged.audit_events.append(
+                    {
+                        "event_id": self._stable_id(
+                            "audit", f"human_decision_submitted:{decision_id}"
+                        ),
+                        "action": "human_decision_submitted",
+                        "subject": principal.subject,
+                        "role": principal.role,
+                        "scope": work_item["visibility_scope"],
+                        "source_id": principal.source_id,
+                        "application_id": work_item["application_id"],
+                        "run_id": work_item["run_id"],
+                        "route": "human_complete",
+                        "lifecycle_revision": staged_app["lifecycle_revision"],
+                        "evidence_revision": staged_app["evidence_revision"],
+                        "work_item_id": work_item_id,
+                        "decision_id": decision_id,
+                        "outcome": normalized["outcome"],
+                        "reason_code": normalized["reason_code"],
+                        "claim_fence": expected_fence,
+                        "result": "accepted",
+                        **self._audit_time_fields(staged, now=submit_time),
+                    }
+                )
+                result = {
+                    "status": "accepted",
+                    "replayed": False,
+                    "application_id": work_item["application_id"],
+                    "work_item_id": work_item_id,
+                    "decision_id": decision_id,
+                    "claim_fence": expected_fence,
+                    "lifecycle_revision": staged_app["lifecycle_revision"],
+                    "evidence_revision": staged_app["evidence_revision"],
+                    "route": "human_complete",
+                }
+                self._before_write("review.idempotency")
+                staged.idempotency[binding_key] = (
+                    command_fingerprint,
+                    copy.deepcopy(result),
+                )
+                staged.persist()
+            except (StaleStoreRevision, _StoreWriteFailure) as error:
+                return {
+                    "status": "unavailable",
+                    "replayed": False,
+                    "application_id": work_item["application_id"],
+                    "work_item_id": work_item_id,
+                    "reason_code": (
+                        "AUDIT_UNAVAILABLE"
+                        if str(error) == "review.audit"
+                        else "STORAGE_UNAVAILABLE"
+                    ),
+                }
+            self._store = staged
+            return result
+
+    def review_work_item_view(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        work_item_id: str,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Return the immutable-authority view of one visible review work item."""
+        query_time = float(self._clock() if now is None else now)
+        with self._lock:
+            self._reload_store()
+            work_item, state = self._review_work_item_authority(
+                principal=principal,
+                work_item_id=work_item_id,
+                now=query_time,
+            )
+            status = state["status"]
+            if status == "claimed" and float(state["claim_expires_at"]) <= query_time:
+                status = "expired"
+            app, run, command_context = self._review_current_context(work_item)
+            run_bytes = json.dumps(
+                run,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            findings_by_id = {
+                finding["finding_id"]: finding
+                for finding in self._store.findings
+                if finding.get("application_id") == work_item["application_id"]
+                and finding.get("run_id") == work_item["run_id"]
+            }
+            if any(
+                finding_id not in findings_by_id
+                for finding_id in work_item["finding_ids"]
+            ):
+                raise RuntimeError("review work-item finding authority is unavailable")
+            automatic_findings = [
+                {
+                    key: findings_by_id[finding_id][key]
+                    for key in (
+                        "finding_id",
+                        "rule_id",
+                        "verdict",
+                        "severity",
+                        "reason_code",
+                    )
+                }
+                for finding_id in work_item["finding_ids"]
+            ]
+            decision_records = {
+                record["decision_id"]: record
+                for record in self._store.review_records
+                if record.get("record_type") == "human_decision"
+                and record.get("work_item_id") == work_item_id
+                and record.get("decision_id") in state["decision_ids"]
+            }
+            if len(decision_records) != len(state["decision_ids"]):
+                raise RuntimeError("human decision authority is unavailable")
+            decisions = [
+                {
+                    key: copy.deepcopy(decision_records[decision_id][key])
+                    for key in (
+                        "decision_id",
+                        "schema_version",
+                        "outcome",
+                        "reason_code",
+                        "finding_decisions",
+                        "reviewer_subject",
+                        "reviewer_role",
+                        "reviewer_source_id",
+                        "assigned_subject",
+                        "cycle",
+                        "finding_ids",
+                        "evidence_snapshot_id",
+                        "release_id",
+                        "compatibility",
+                        "note_metadata",
+                        "fixed_context",
+                        "claim_fence",
+                        "submitted_at",
+                    )
+                    if key not in {"compatibility", "note_metadata"}
+                    or key in decision_records[decision_id]
+                }
+                for decision_id in state["decision_ids"]
+            ]
+            decision = decisions[0] if len(decisions) == 1 else None
+            return {
+                "status": status,
+                "application_id": work_item["application_id"],
+                "work_item_id": work_item_id,
+                "claim_subject": state["claim_subject"],
+                "claim_fence": state["claim_fence"],
+                "claim_expires_at": state["claim_expires_at"],
+                "phase": app["phase"],
+                "route": app["route"],
+                "lifecycle_revision": app["lifecycle_revision"],
+                "evidence_revision": app["evidence_revision"],
+                "command_context": command_context,
+                "automatic_findings": automatic_findings,
+                "run_authority": {
+                    "run_id": run["run_id"],
+                    "status": run["status"],
+                    "authority_digest": hashlib.sha256(run_bytes).hexdigest(),
+                },
+                "decision": decision,
+                "decisions": decisions,
+                "completed_finding_ids": copy.deepcopy(
+                    state["completed_finding_ids"]
+                ),
+            }
+
     def queue_view(
         self,
         *,
@@ -1781,6 +3444,12 @@ class ControlledScenarioService:
             visible_scopes = {scope}
             if scope.startswith(self._SESSION_SCOPE_PREFIX):
                 visible_scopes.add("C-DEMO")
+            queue_principal = S01CommandPrincipal(
+                subject=query_subject,
+                role=role,
+                scope=scope,
+                source_id="review-queue",
+            )
             items: list[dict[str, Any]] = []
             visible_watermark = 0
             for projection in self._store.projections.values():
@@ -1788,10 +3457,20 @@ class ControlledScenarioService:
                     continue
                 if projection["phase"] != "Manual Review":
                     continue
+                try:
+                    _, review_state = self._review_work_item_authority(
+                        principal=queue_principal,
+                        work_item_id=projection.get("work_item_id", ""),
+                        now=query_time,
+                    )
+                except QueryNotFound:
+                    continue
+                if review_state["status"] == "completed":
+                    continue
                 if (
-                    projection.get("assigned_subject") != query_subject
-                    or projection.get("claim_subject") != query_subject
-                    or float(projection.get("claim_expires_at", 0)) <= query_time
+                    review_state["status"] == "claimed"
+                    and float(review_state["claim_expires_at"]) > query_time
+                    and review_state["claim_subject"] != query_subject
                 ):
                     continue
                 visible_watermark = max(
@@ -1802,8 +3481,8 @@ class ControlledScenarioService:
                         "application_id": projection["application_id"],
                         "work_item_id": projection["work_item_id"],
                         "assigned_subject": projection["assigned_subject"],
-                        "claim_fence": projection["claim_fence"],
-                        "claim_expires_at": projection["claim_expires_at"],
+                        "claim_fence": review_state["claim_fence"],
+                        "claim_expires_at": review_state["claim_expires_at"],
                         "phase": projection["phase"],
                         "route": projection["route"],
                         "evidence_ready": projection["evidence_ready"],
@@ -1835,7 +3514,7 @@ class ControlledScenarioService:
         """Return an authorized, minimized timeline from immutable audit facts."""
         if (
             principal.role != "auditor"
-            or principal.scope != "C-DEMO"
+            or not self.is_controlled_scope(principal.scope)
             or not principal.subject
             or principal.subject.strip() != principal.subject
             or not principal.source_id
@@ -1865,6 +3544,10 @@ class ControlledScenarioService:
             "finding_count",
             "mandatory_blocker_count",
             "work_item_id",
+            "finding_id",
+            "decision_id",
+            "outcome",
+            "claim_fence",
             "assigned_subject",
             "admission_after_stop",
             "requeued_jobs",
@@ -1873,6 +3556,16 @@ class ControlledScenarioService:
         with self._lock:
             self._reload_store()
             if application_id not in self._store.applications:
+                raise QueryNotFound(application_id)
+            application_scope = self._application_visibility_scope(application_id)
+            visible = application_scope == principal.scope
+            if principal.scope == "C-DEMO":
+                visible = visible or application_scope.startswith(
+                    self._SESSION_SCOPE_PREFIX
+                )
+            elif principal.scope.startswith(self._SESSION_SCOPE_PREFIX):
+                visible = visible or application_scope == "C-DEMO"
+            if not visible:
                 raise QueryNotFound(application_id)
 
             seen_keys: set[str] = set()
@@ -1948,14 +3641,23 @@ class ControlledScenarioService:
             visible_scopes = {scope}
             if scope.startswith(self._SESSION_SCOPE_PREFIX):
                 visible_scopes.add("C-DEMO")
-            if (
-                projection is None
-                or projection.get("visibility_scope") not in visible_scopes
-                or projection["phase"] != "Manual Review"
-                or projection.get("assigned_subject") != query_subject
-                or projection.get("claim_subject") != query_subject
-                or float(projection.get("claim_expires_at", 0)) <= query_time
-            ):
+            if projection is None or projection.get("visibility_scope") not in visible_scopes:
+                raise QueryNotFound(application_id)
+            workspace_principal = S01CommandPrincipal(
+                subject=query_subject,
+                role="reviewer",
+                scope=scope,
+                source_id="review-workspace",
+            )
+            try:
+                work_item, review_state = self._review_work_item_authority(
+                    principal=workspace_principal,
+                    work_item_id=str(projection.get("work_item_id") or ""),
+                    now=query_time,
+                )
+            except QueryNotFound:
+                raise QueryNotFound(application_id) from None
+            if projection["phase"] != "Manual Review" or review_state["status"] == "completed":
                 raise QueryNotFound(application_id)
             findings = copy.deepcopy(projection["mandatory_blockers"])
             selected = next((f for f in findings if f["finding_id"] == finding_id), None)
@@ -1965,8 +3667,8 @@ class ControlledScenarioService:
                 "application_id": application_id,
                 "work_item_id": projection["work_item_id"],
                 "assigned_subject": projection["assigned_subject"],
-                "claim_fence": projection["claim_fence"],
-                "claim_expires_at": projection["claim_expires_at"],
+                "claim_fence": review_state["claim_fence"],
+                "claim_expires_at": review_state["claim_expires_at"],
                 "track": projection["track"],
                 "phase": projection["phase"],
                 "route": projection["route"],
@@ -3693,9 +5395,17 @@ class ControlledScenarioService:
             phases = [event[2] for event in canonical_events]
             current_phase = phases[-1]
             expected_evidence_ready = current_phase not in {"Intake", "Assembly"}
+            current_lifecycle_event = max(
+                lifecycle, key=lambda event: int(event["revision"])
+            )
             expected_route = {
                 "Manual Review": "manual_review",
-                "Verification Completed": "auto_complete",
+                "Verification Completed": (
+                    "human_complete"
+                    if current_lifecycle_event.get("reason_code")
+                    == "HUMAN_REVIEW_COMPLETED"
+                    else "auto_complete"
+                ),
             }.get(current_phase, "pending_check")
             observed_cycle = app.get("cycle")
             observed_revision = app.get("lifecycle_revision")
@@ -4425,11 +6135,10 @@ class ControlledScenarioService:
                         ],
                         "visibility_scope": result_visibility_scope,
                         "assigned_subject": review_assignee,
-                        "claim_subject": review_assignee,
-                        "claim_fence": 1,
-                        "claim_started_at": claim_started_at,
-                        "claim_expires_at": claim_started_at
-                        + self._REVIEW_CLAIM_TTL_SECONDS,
+                        "claim_subject": None,
+                        "claim_fence": 0,
+                        "claim_started_at": 0,
+                        "claim_expires_at": 0,
                     }
                 )
             self._before_write("result.audit_event")
@@ -4840,7 +6549,55 @@ class ControlledScenarioService:
         }
 
     @staticmethod
-    def _finding_projection(finding: dict[str, Any]) -> dict[str, Any]:
+    def _finding_projection(
+        finding: dict[str, Any],
+        region_identities: dict[tuple[Any, Any], list[Any]],
+    ) -> dict[str, Any]:
+        trace_keys = (
+            "source_page",
+            "source_region",
+            "producer_id",
+            "producer_family",
+            "producer_run_id",
+            "model_id",
+            "model_version",
+            "source_receipt_id",
+        )
+        links = []
+        for link in finding["evidence_links"]:
+            projected = {
+                key: copy.deepcopy(link[key])
+                for key in (
+                    "document_id",
+                    "document_role",
+                    "field",
+                    "value_state",
+                    "raw_masked",
+                    "observation_id",
+                    "source_sha256",
+                    "provenance_manifest_digest",
+                    "evidence_eligible",
+                    "eligibility_reason",
+                )
+            }
+            if link.get("source_receipt_id") is not None:
+                projected.update(
+                    {
+                        key: copy.deepcopy(link[key])
+                        for key in trace_keys
+                        if link.get(key) is not None
+                    }
+                )
+                raw_region = link.get("source_region")
+                if raw_region is not None:
+                    scope = (link.get("source_sha256"), link.get("source_page"))
+                    regions = region_identities.setdefault(scope, [])
+                    if raw_region not in regions:
+                        regions.append(raw_region)
+                    projected["source_region"] = (
+                        f"region:{regions.index(raw_region) + 1}"
+                    )
+            links.append(projected)
         return {
             "finding_id": finding["finding_id"],
             "run_id": finding["run_id"],
@@ -4849,7 +6606,7 @@ class ControlledScenarioService:
             "severity": finding["severity"],
             "reason_code": finding["reason_code"],
             "mandatory": finding["mandatory"],
-            "evidence_links": copy.deepcopy(finding["evidence_links"]),
+            "evidence_links": links,
         }
 
     @staticmethod
@@ -4869,7 +6626,14 @@ class ControlledScenarioService:
             for key, result in self._store.receipts.items()
         }
         self._store.idempotency = {
-            key: (fingerprint, self._admission_from_payload(result))
+            key: (
+                fingerprint,
+                self._admission_from_payload(result)
+                if isinstance(result, AdmissionResult)
+                or isinstance(result, dict)
+                and "disposition" in result
+                else result,
+            )
             for key, (fingerprint, result) in self._store.idempotency.items()
         }
 

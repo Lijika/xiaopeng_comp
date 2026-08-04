@@ -424,12 +424,10 @@ def test_observed_finding_traces_immutable_snapshot_to_source_receipt(
         "value_state",
         "raw_masked",
         "observation_id",
-        "source_object_ref",
         "source_sha256",
         "provenance_manifest_digest",
         "source_page",
         "source_region",
-        "coordinate_system",
         "producer_id",
         "producer_family",
         "producer_run_id",
@@ -440,18 +438,90 @@ def test_observed_finding_traces_immutable_snapshot_to_source_receipt(
         "eligibility_reason",
     }
     assert link["raw_masked"] == "[REDACTED]"
-    assert link["source_receipt_id"] == receipt.receipt_id
+    assert link["source_sha256"] == submission["attachments"][0]["object"]["sha256"]
     assert link["source_page"] == 1
-    assert link["source_region"] == "bbox:[0,0,1,1]"
+    assert link["source_region"] == "region:1"
     assert link["producer_id"] == "registered-producer"
     assert link["producer_family"] == "registration-ocr"
     assert link["producer_run_id"] == "producer-run-1"
     assert link["model_id"] == "registered-model"
     assert link["model_version"] == "1"
-    assert link["source_sha256"] == submission["attachments"][0]["object"]["sha256"]
+    assert link["source_receipt_id"] == receipt.receipt_id
     assert link["evidence_eligible"] is True
     assert "raw" not in link
     assert "source_pointer" not in link
+    assert "bbox" not in json.dumps(workspace, sort_keys=True)
+    assert "[0,0,1,1]" not in json.dumps(workspace, sort_keys=True)
+
+
+def test_public_region_identity_distinguishes_same_page_regions_without_coordinates(
+    tmp_path: Path,
+) -> None:
+    raw_values = ("PRIVATE-VIN", "PRIVATE-BRAND", "PRIVATE-OWNER")
+    detections = [
+        {
+            "bbox": bbox,
+            "class_id": index,
+            "class_name": field,
+            "confidence": 0.97,
+            "field_key": field,
+            "ocr_text": raw,
+            "value": raw,
+        }
+        for index, (field, bbox, raw) in enumerate(
+            (
+                ("vin", [0, 0, 1, 1], raw_values[0]),
+                ("brand", [2, 2, 3, 3], raw_values[1]),
+                ("owner_name", [0, 0, 1, 1], raw_values[2]),
+            ),
+            start=1,
+        )
+    ]
+    service, submission = _registered_service(
+        tmp_path,
+        page_bytes=_png(10, 10),
+        result={
+            "per_image_results": [
+                {
+                    "image_path": "page.png",
+                    "image_size": {"width": 10, "height": 10},
+                    "detections": detections,
+                }
+            ]
+        },
+    )
+
+    receipt = service.submit_registered(
+        submission=submission,
+        idempotency_key="registered-distinct-regions",
+        principal=INTEGRATOR,
+    )
+    completed = service.process_next_job()
+    service.refresh_projection()
+    workspace = service.workspace_view(
+        receipt.application_id or "",
+        role="reviewer",
+        scope=TENANT_SCOPE,
+        subject=INTEGRATOR.subject,
+    )
+    finding = next(
+        item for item in workspace["mandatory_blockers"] if item["rule_id"] == "R-OBSERVED"
+    )
+
+    assert completed.status == "complete"
+    assert [
+        (link["field"], link["source_region"])
+        for link in finding["evidence_links"]
+    ] == [
+        ("vin", "region:1"),
+        ("brand", "region:2"),
+        ("owner_name", "region:1"),
+    ]
+    public_surface = json.dumps(workspace, sort_keys=True)
+    assert "bbox" not in public_surface
+    assert "[0,0,1,1]" not in public_surface
+    assert "[2,2,3,3]" not in public_surface
+    assert all(raw not in public_surface for raw in raw_values)
 
 
 def test_every_observed_shape_is_registered_without_sample_allowlisting(
@@ -820,10 +890,21 @@ def test_missing_producer_run_model_coordinate_and_confidence_stay_ineligible(
     assert receipt.disposition is AdmissionDisposition.ACCEPTED
     assert "provenance:ineligible" in receipt.gate_results
     assert completed.status == "complete"
-    assert link["producer_run_id"] is None
-    assert link["model_id"] is None
-    assert link["model_version"] is None
-    assert link["coordinate_system"] is None
+    assert link["source_page"] == 1
+    assert link["source_region"] == "region:1"
+    assert link["source_receipt_id"] == receipt.receipt_id
+    assert link["producer_id"] == "registered-producer"
+    assert link["producer_family"] == "registration-ocr"
+    assert all(
+        field not in link
+        for field in (
+            "source_object_ref",
+            "coordinate_system",
+            "producer_run_id",
+            "model_id",
+            "model_version",
+        )
+    )
     assert link["evidence_eligible"] is False
     assert link["eligibility_reason"] == "evidence.producer_metadata_incomplete"
 

@@ -30,6 +30,7 @@ _TABLES = (
     "runs",
     "findings",
     "work_items",
+    "review_records",
     "outbox",
     "projections",
     "sessions",
@@ -47,6 +48,7 @@ _IMMUTABLE_LIST_IDS = {
     "runs": "run_record_id",
     "findings": "finding_id",
     "work_items": "work_item_id",
+    "review_records": "record_id",
     "demo_sessions": "demo_session_id",
     "deletion_receipts": "deletion_receipt_id",
 }
@@ -70,6 +72,7 @@ _GOVERNED_DELETION_IDS = {
     "runs": "item_id",
     "findings": "item_id",
     "work_items": "item_id",
+    "review_records": "item_id",
     "outbox": "item_id",
     "projections": "item_id",
     "sessions": "item_id",
@@ -129,6 +132,7 @@ class SQLiteTargetStore:
         self.runs: list[dict[str, Any]] = []
         self.findings: list[dict[str, Any]] = []
         self.work_items: list[dict[str, Any]] = []
+        self.review_records: list[dict[str, Any]] = []
         self.outbox: list[dict[str, Any]] = []
         self.projections: dict[str, dict[str, Any]] = {}
         self.sessions: dict[str, dict[str, Any]] = {}
@@ -156,6 +160,7 @@ class SQLiteTargetStore:
             "runs",
             "findings",
             "work_items",
+            "review_records",
             "outbox",
             "projections",
             "sessions",
@@ -378,6 +383,8 @@ class SQLiteTargetStore:
                     self.findings = [payload for _, payload in values]
                 elif table == "work_items":
                     self.work_items = [payload for _, payload in values]
+                elif table == "review_records":
+                    self.review_records = [payload for _, payload in values]
                 elif table == "projections":
                     self.projections = {
                         key: json.loads(payload) for key, payload in values
@@ -435,6 +442,9 @@ class SQLiteTargetStore:
                 self._sync_immutable_list(connection, "runs", self.runs)
                 self._sync_immutable_list(connection, "findings", self.findings)
                 self._sync_immutable_list(connection, "work_items", self.work_items)
+                self._sync_immutable_list(
+                    connection, "review_records", self.review_records
+                )
                 self._sync_outbox(connection)
                 self._sync_mutable_map(connection, "projections", self.projections)
                 self._sync_mutable_map(connection, "sessions", self.sessions)

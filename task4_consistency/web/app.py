@@ -526,6 +526,35 @@ class S02SubmitBody(BaseModel):
     submission: dict[str, Any]
 
 
+class S03ClaimBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_context: dict[str, Any]
+
+
+class S03FencedBody(S03ClaimBody):
+    expected_fence: int = Field(ge=0, strict=True)
+    idempotency_key: str
+
+
+class S03SubmitBody(S03FencedBody):
+    idempotency_key: str
+    verification: dict[str, Any]
+
+
+class S03BatchPreviewBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[dict[str, Any]]
+
+
+class S03BatchSubmitBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: str
+    plan: dict[str, Any]
+
+
 def _s01_principal(request: Request) -> S01Principal | None:
     token = request.cookies.get(S01_SESSION_COOKIE, "")
     if not token:
@@ -766,6 +795,103 @@ def _s02_admission_json(result: Any) -> dict[str, Any]:
     }
 
 
+def _s03_reviewer_principal(request: Request) -> S01CommandPrincipal:
+    principal = _s02_principal(request)
+    if (
+        principal is None
+        or "reviewer" not in principal.roles
+        or not ControlledScenarioService.is_registered_scope(principal.scope)
+    ):
+        raise HTTPException(404, detail={"error": "S03_NOT_FOUND"})
+    return S01CommandPrincipal(
+        subject=principal.subject,
+        role="reviewer",
+        scope=principal.scope,
+        source_id=S02_SOURCE_SYSTEM_ID,
+        expires_at=principal.expires_at,
+    )
+
+
+async def _s03_command_body(request: Request, model: type[BaseModel]) -> BaseModel:
+    declared_length = request.headers.get("content-length")
+    try:
+        if declared_length is not None and (
+            int(declared_length) < 0 or int(declared_length) > S02_MAX_COMMAND_BYTES
+        ):
+            raise HTTPException(
+                413,
+                detail={
+                    "error": "S03_COMMAND_TOO_LARGE",
+                    "message": "S03 command exceeds the allowed size",
+                },
+            )
+    except ValueError as error:
+        raise HTTPException(
+            422,
+            detail={"error": "S03_INVALID_COMMAND", "message": "Invalid command"},
+        ) from error
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > S02_MAX_COMMAND_BYTES:
+            raise HTTPException(
+                413,
+                detail={
+                    "error": "S03_COMMAND_TOO_LARGE",
+                    "message": "S03 command exceeds the allowed size",
+                },
+            )
+        chunks.append(chunk)
+    try:
+        return model.model_validate_json(b"".join(chunks))
+    except ValidationError as error:
+        raise HTTPException(
+            422,
+            detail={
+                "error": "S03_INVALID_COMMAND",
+                "message": "S03 command does not match the registered contract",
+            },
+        ) from error
+
+
+def _s03_command_result(result: dict[str, Any]) -> dict[str, Any]:
+    status = result.get("status")
+    if status in {"claimed", "renewed", "released", "accepted"}:
+        return result
+    mapping = {
+        "stale": (409, "S03_STALE"),
+        "conflict": (409, "S03_CONFLICT"),
+        "completed": (409, "S03_COMPLETED"),
+        "rejected": (409, "S03_REJECTED"),
+        "stopped": (503, "S03_STOPPED"),
+        "unavailable": (503, "S03_UNAVAILABLE"),
+    }
+    mapped = mapping.get(status)
+    if mapped is None:
+        raise RuntimeError("S03 domain returned an unsupported status")
+    status_code, error_code = mapped
+    detail = {"error": error_code}
+    reason_code = result.get("reason_code")
+    if isinstance(reason_code, str):
+        detail["reason_code"] = reason_code
+    raise HTTPException(status_code, detail=detail)
+
+
+def _s03_not_found(error: QueryNotFound) -> HTTPException:
+    return HTTPException(404, detail={"error": "S03_NOT_FOUND"})
+
+
+def _s03_invalid_command(error: ValueError) -> HTTPException:
+    return HTTPException(
+        422,
+        detail={
+            "error": "S03_INVALID_COMMAND",
+            "message": "S03 command does not match the registered contract",
+        },
+    )
+
+
 @app.get("/controlled/s02", response_class=HTMLResponse)
 def controlled_s02_page(request: Request) -> HTMLResponse:
     _s02_service()
@@ -890,6 +1016,172 @@ def controlled_s02_workspace(
         )
     except QueryNotFound as error:
         raise HTTPException(404, detail={"error": "S02_NOT_FOUND"}) from error
+
+
+@app.get("/controlled/s02/api/queries/review-work-items/{work_item_id}")
+def controlled_s03_review_work_item(
+    work_item_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s03_reviewer_principal(request)
+    try:
+        return _s02_service().review_work_item_view(
+            principal=principal,
+            work_item_id=work_item_id,
+            now=S01_SESSION_CLOCK(),
+        )
+    except QueryNotFound as error:
+        raise _s03_not_found(error) from error
+
+
+@app.post("/controlled/s02/api/commands/review-work-items/{work_item_id}/claim")
+async def controlled_s03_claim_review_work_item(
+    work_item_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s03_reviewer_principal(request)
+    body = await _s03_command_body(request, S03ClaimBody)
+    assert isinstance(body, S03ClaimBody)
+    try:
+        result = _s02_service().claim_review_work_item(
+            principal=principal,
+            work_item_id=work_item_id,
+            expected_context=body.expected_context,
+            now=S01_SESSION_CLOCK(),
+        )
+    except QueryNotFound as error:
+        raise _s03_not_found(error) from error
+    return _s03_command_result(result)
+
+
+@app.post("/controlled/s02/api/commands/review-work-items/{work_item_id}/renew")
+async def controlled_s03_renew_review_work_item(
+    work_item_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s03_reviewer_principal(request)
+    body = await _s03_command_body(request, S03FencedBody)
+    assert isinstance(body, S03FencedBody)
+    try:
+        result = _s02_service().renew_review_work_item(
+            principal=principal,
+            work_item_id=work_item_id,
+            expected_fence=body.expected_fence,
+            expected_context=body.expected_context,
+            idempotency_key=body.idempotency_key,
+            now=S01_SESSION_CLOCK(),
+        )
+    except QueryNotFound as error:
+        raise _s03_not_found(error) from error
+    except ValueError as error:
+        raise _s03_invalid_command(error) from error
+    return _s03_command_result(result)
+
+
+@app.post("/controlled/s02/api/commands/review-work-items/{work_item_id}/release")
+async def controlled_s03_release_review_work_item(
+    work_item_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s03_reviewer_principal(request)
+    body = await _s03_command_body(request, S03FencedBody)
+    assert isinstance(body, S03FencedBody)
+    try:
+        result = _s02_service().release_review_work_item(
+            principal=principal,
+            work_item_id=work_item_id,
+            expected_fence=body.expected_fence,
+            expected_context=body.expected_context,
+            idempotency_key=body.idempotency_key,
+            now=S01_SESSION_CLOCK(),
+        )
+    except QueryNotFound as error:
+        raise _s03_not_found(error) from error
+    except ValueError as error:
+        raise _s03_invalid_command(error) from error
+    return _s03_command_result(result)
+
+
+@app.post("/controlled/s02/api/commands/review-work-items/{work_item_id}/submit")
+async def controlled_s03_submit_review_work_item(
+    work_item_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s03_reviewer_principal(request)
+    body = await _s03_command_body(request, S03SubmitBody)
+    assert isinstance(body, S03SubmitBody)
+    try:
+        result = _s02_service().submit_review_work_item(
+            principal=principal,
+            work_item_id=work_item_id,
+            expected_fence=body.expected_fence,
+            expected_context=body.expected_context,
+            idempotency_key=body.idempotency_key,
+            verification=body.verification,
+            now=S01_SESSION_CLOCK(),
+        )
+    except QueryNotFound as error:
+        raise _s03_not_found(error) from error
+    except ValueError as error:
+        raise _s03_invalid_command(error) from error
+    return _s03_command_result(result)
+
+
+@app.post("/controlled/s02/api/commands/review-batches/preview")
+async def controlled_s03_preview_review_batch(
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s03_reviewer_principal(request)
+    body = await _s03_command_body(request, S03BatchPreviewBody)
+    assert isinstance(body, S03BatchPreviewBody)
+    try:
+        result = _s02_service().preview_review_work_item_batch(
+            principal=principal,
+            items=body.items,
+            now=S01_SESSION_CLOCK(),
+        )
+    except QueryNotFound as error:
+        raise _s03_not_found(error) from error
+    except ValueError as error:
+        raise _s03_invalid_command(error) from error
+    if result.get("schema_version") == "review-batch-plan/1":
+        return result
+    return _s03_command_result(result)
+
+
+@app.post("/controlled/s02/api/commands/review-batches/submit")
+async def controlled_s03_submit_review_batch(
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s03_reviewer_principal(request)
+    body = await _s03_command_body(request, S03BatchSubmitBody)
+    assert isinstance(body, S03BatchSubmitBody)
+    try:
+        result = _s02_service().submit_review_work_item_batch(
+            principal=principal,
+            idempotency_key=body.idempotency_key,
+            plan=body.plan,
+            now=S01_SESSION_CLOCK(),
+        )
+    except QueryNotFound as error:
+        raise _s03_not_found(error) from error
+    except ValueError as error:
+        raise _s03_invalid_command(error) from error
+    return _s03_command_result(result)
 
 
 @app.get("/controlled/s01", response_class=HTMLResponse)
@@ -1737,6 +2029,14 @@ def create_s02_test_app() -> FastAPI:
         "TASK4_S02_TEST_BACKGROUND_ENABLED", default=True
     )
     S01_REQUIRE_CONFIGURED_STARTUP = False
+    s03_fault_point = os.environ.get("TASK4_S03_TEST_FAULT_POINT", "").strip()
+    if s03_fault_point not in {"review.audit", "review.source_read"}:
+        s03_fault_point = ""
+
+    def inject_s03_test_fault(write_point: str) -> None:
+        if write_point == s03_fault_point:
+            raise OSError("injected S03 test fault")
+
     try:
         S01_SERVICE = ControlledScenarioService(
             fixture_root=FIXTURES,
@@ -1744,6 +2044,7 @@ def create_s02_test_app() -> FastAPI:
             state_path=state_path,
             worker_identity="s02-test-server-worker",
             clock=lambda: int(S01_SESSION_CLOCK()),
+            fault_injector=inject_s03_test_fault if s03_fault_point else None,
             registered_sources=S02_REGISTERED_SOURCES,
             controlled_objects=S02_CONTROLLED_OBJECTS,
         )
