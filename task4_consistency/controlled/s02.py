@@ -470,6 +470,23 @@ class RegisteredSourceBoundary:
             ) from error
         return hashlib.sha256(encoded).hexdigest()
 
+    def read_object(
+        self,
+        *,
+        tenant_id: str,
+        source_system_id: str,
+        object_ref: str,
+    ) -> bytes:
+        """Read one currently configured object through its registered authority."""
+        item = self._objects.get(object_ref)
+        if (
+            item is None
+            or item.tenant_id != tenant_id
+            or item.source_system_id != source_system_id
+        ):
+            raise LookupError("controlled object is unavailable")
+        return item.content
+
     def canonicalize(
         self,
         submission: Any,

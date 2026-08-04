@@ -363,6 +363,142 @@
         font-weight: 700;
       }
 
+      .correction-box {
+        margin-top: 18px;
+        border-top: 1px solid #e2e7e4;
+        padding-top: 14px;
+      }
+
+      .correction-header {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .correction-header h3 {
+        margin: 0;
+        color: #28352f;
+        font-size: 13px;
+      }
+
+      .correction-form {
+        margin-top: 10px;
+        display: grid;
+        grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr) minmax(0, 0.9fr);
+        gap: 10px;
+      }
+
+      .correction-form label {
+        min-width: 0;
+        display: grid;
+        gap: 5px;
+        color: #65716b;
+        font-size: 11px;
+        font-weight: 700;
+      }
+
+      .correction-form input,
+      .correction-form select {
+        width: 100%;
+        min-height: 38px;
+        border: 1px solid #b8c3bd;
+        border-radius: 4px;
+        padding: 7px 9px;
+        color: #1f2d27;
+        background: #ffffff;
+        font: inherit;
+        font-size: 12px;
+      }
+
+      .correction-form input:focus-visible,
+      .correction-form select:focus-visible {
+        outline: 3px solid #f0a540;
+        outline-offset: 1px;
+      }
+
+      .correction-actions {
+        margin-top: 10px;
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        flex-wrap: wrap;
+      }
+
+      .correction-status {
+        color: #5b6761;
+        font-size: 12px;
+      }
+
+      .correction-status.success {
+        color: #176348;
+      }
+
+      .correction-status.error {
+        color: #a23932;
+      }
+
+      .history-summary {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        border-bottom: 1px solid #e4e8e6;
+      }
+
+      .history-fact {
+        min-width: 0;
+        padding: 11px 12px;
+        border-right: 1px solid #e4e8e6;
+      }
+
+      .history-fact:last-child {
+        border-right: 0;
+      }
+
+      .history-fact span {
+        display: block;
+        margin-bottom: 4px;
+        color: #707a75;
+        font-size: 11px;
+      }
+
+      .history-fact strong {
+        display: block;
+        min-width: 0;
+        color: #24312b;
+        font-size: 12px;
+        overflow-wrap: anywhere;
+      }
+
+      .history-list,
+      .correction-chain {
+        margin: 0;
+        padding: 0;
+        display: grid;
+        gap: 8px;
+        list-style: none;
+      }
+
+      .history-list li,
+      .correction-chain li {
+        min-width: 0;
+        border: 1px solid #dce2df;
+        border-radius: 5px;
+        padding: 9px 10px;
+        color: #46534c;
+        background: #f8faf9;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 11px;
+        overflow-wrap: anywhere;
+      }
+
+      .history-section-title {
+        margin: 15px 0 8px;
+        color: #4b5751;
+        font-size: 11px;
+        font-weight: 700;
+        text-transform: uppercase;
+      }
+
       @media (max-width: 760px) {
         .header-inner,
         main {
@@ -415,6 +551,22 @@
         .evidence-list {
           grid-template-columns: minmax(0, 1fr);
         }
+
+        .correction-form {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        .history-summary {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .history-fact:nth-child(2) {
+          border-right: 0;
+        }
+
+        .history-fact:nth-child(-n + 2) {
+          border-bottom: 1px solid #e4e8e6;
+        }
       }
 
       @media (max-width: 420px) {
@@ -451,7 +603,7 @@
     <main>
       <div class="status-line">
         <span><strong>受控路径</strong> · S01</span>
-        <span>Reviewer workspace · read only</span>
+        <span>Reviewer · Evidence correction</span>
       </div>
 
       <div class="workbench">
@@ -547,7 +699,7 @@
           >
             <div class="panel-header">
               <h2 id="blocker-title">Mandatory blocker</h2>
-              <span class="read-only">READ ONLY</span>
+              <span class="read-only">SOURCE BOUND</span>
             </div>
             <div class="panel-body">
               <div class="blocker-band">
@@ -559,6 +711,73 @@
               </div>
               <h3 class="evidence-heading">Linked evidence</h3>
               <ul class="evidence-list" data-testid="evidence-list"></ul>
+              <div class="correction-box" data-testid="correction-panel">
+                <div class="correction-header">
+                  <h3>Evidence correction</h3>
+                  <span class="correction-status" data-testid="correction-status" aria-live="polite">未认领</span>
+                </div>
+                <div class="correction-form">
+                  <label>
+                    来源观测
+                    <select id="correction-source" aria-label="来源观测"></select>
+                  </label>
+                  <label>
+                    修正值
+                    <input id="corrected-value" aria-label="修正值" type="text" maxlength="2000" autocomplete="off" />
+                  </label>
+                  <label>
+                    原因
+                    <select id="correction-reason" aria-label="原因">
+                      <option value="SOURCE_VALUE_MISREAD">SOURCE_VALUE_MISREAD</option>
+                      <option value="SOURCE_VALUE_MISSING">SOURCE_VALUE_MISSING</option>
+                    </select>
+                  </label>
+                </div>
+                <div class="correction-actions">
+                  <button type="button" id="claim-correction">认领修正</button>
+                  <button type="button" class="secondary" id="reveal-source" disabled>查看来源</button>
+                  <button type="button" id="submit-correction" disabled>提交修正</button>
+                  <span class="correction-status">Accepted route: <strong data-testid="correction-accepted-route">—</strong></span>
+                </div>
+                <output data-testid="revealed-source" aria-live="polite" hidden></output>
+              </div>
+            </div>
+          </section>
+
+          <section
+            class="panel"
+            data-testid="history-panel"
+            data-overlap-check
+            aria-labelledby="history-title"
+            hidden
+          >
+            <div class="panel-header">
+              <h2 id="history-title">Run history</h2>
+              <span class="boundary track" data-testid="current-route">pending_check</span>
+            </div>
+            <div class="history-summary">
+              <div class="history-fact">
+                <span>Phase</span>
+                <strong data-testid="current-phase"></strong>
+              </div>
+              <div class="history-fact">
+                <span>Evidence revision</span>
+                <strong data-testid="current-evidence-revision"></strong>
+              </div>
+              <div class="history-fact">
+                <span>Current run</span>
+                <strong data-testid="history-current-run" data-fit-text></strong>
+              </div>
+              <div class="history-fact">
+                <span>Snapshot</span>
+                <strong data-testid="history-current-snapshot" data-fit-text></strong>
+              </div>
+            </div>
+            <div class="panel-body">
+              <h3 class="history-section-title">Immutable runs</h3>
+              <ol class="history-list" data-testid="history-list"></ol>
+              <h3 class="history-section-title">Evidence successors</h3>
+              <ol class="correction-chain" data-testid="correction-chain"></ol>
             </div>
           </section>
         </div>
@@ -570,12 +789,27 @@
         "use strict";
 
         const API_ROOT = "/controlled/s01/api";
+        const requestedParameters = new URLSearchParams(window.location.search);
+        const requestedScenario = requestedParameters.get("scenario");
+        const requestedApplication = requestedParameters.get("application");
+        const SCENARIO_ID =
+          requestedScenario === "app_s04_bad_vin.json"
+            ? requestedScenario
+            : "app_r53_bad_engine.json";
         const state = {
-          applicationId: null,
+          applicationId: requestedApplication || null,
           receiptId: null,
           pendingSubmissionKey: null,
+          pendingCorrectionKey: null,
+          pendingRevealKey: null,
           queueRequest: null,
           hasProjectedResult: false,
+          selectedQueueItem: null,
+          workItem: null,
+          selectedFinding: null,
+          evidenceLinks: [],
+          claimFence: null,
+          correctionActive: false,
         };
 
         const byId = (id) => document.getElementById(id);
@@ -586,11 +820,31 @@
           element.className = `command-status${kind ? ` ${kind}` : ""}`;
         }
 
+        function setCorrectionStatus(text, kind = "") {
+          const element = byTestId("correction-status");
+          element.textContent = text;
+          element.className = `correction-status${kind ? ` ${kind}` : ""}`;
+        }
+
+        function clearRevealedSource() {
+          const output = byTestId("revealed-source");
+          output.textContent = "";
+          output.hidden = true;
+        }
+
         function clearSensitiveState() {
           state.applicationId = null;
           state.receiptId = null;
           state.pendingSubmissionKey = null;
+          state.pendingCorrectionKey = null;
+          state.pendingRevealKey = null;
           state.hasProjectedResult = false;
+          state.selectedQueueItem = null;
+          state.workItem = null;
+          state.selectedFinding = null;
+          state.evidenceLinks = [];
+          state.claimFence = null;
+          state.correctionActive = false;
           for (const testId of [
             "receipt-id",
             "application-id",
@@ -605,14 +859,33 @@
             "blocker-rule",
             "blocker-severity",
             "blocker-reason",
+            "current-route",
+            "current-phase",
+            "current-evidence-revision",
+            "history-current-run",
+            "history-current-snapshot",
           ]) {
             byTestId(testId).textContent = "";
           }
+          byTestId("correction-accepted-route").textContent = "—";
           byTestId("evidence-list").replaceChildren();
+          byTestId("history-list").replaceChildren();
+          byTestId("correction-chain").replaceChildren();
+          byId("correction-source").replaceChildren();
+          byId("corrected-value").value = "";
+          clearRevealedSource();
+          byId("reveal-source").disabled = true;
+          byId("submit-correction").disabled = true;
+          byId("claim-correction").disabled = false;
+          setCorrectionStatus("未认领");
           byTestId("receipt-panel").hidden = true;
           byTestId("blocker-panel").hidden = true;
+          byTestId("history-panel").hidden = true;
           byId("queue-summary").hidden = true;
           byId("queue-empty").hidden = false;
+          const url = new URL(window.location.href);
+          url.searchParams.delete("application");
+          window.history.replaceState(null, "", url);
         }
 
         async function request(path, options = {}) {
@@ -642,6 +915,9 @@
           byTestId("current-run-id").textContent = "Pending";
           byTestId("evidence-snapshot-id").textContent = "Pending";
           byTestId("receipt-panel").hidden = false;
+          const url = new URL(window.location.href);
+          url.searchParams.set("application", data.application_id);
+          window.history.replaceState(null, "", url);
         }
 
         function renderAuthorityRefs(data) {
@@ -656,12 +932,16 @@
         }
 
         function renderEvidence(finding) {
+          state.selectedFinding = finding;
+          state.evidenceLinks = [...(finding.evidence_links || [])];
           byTestId("blocker-rule").textContent = finding.rule_id;
           byTestId("blocker-severity").textContent = finding.severity;
           byTestId("blocker-reason").textContent = finding.reason_code;
           const list = byTestId("evidence-list");
+          const sourceSelect = byId("correction-source");
           list.replaceChildren();
-          for (const link of finding.evidence_links || []) {
+          sourceSelect.replaceChildren();
+          for (const link of state.evidenceLinks) {
             const item = document.createElement("li");
             item.className = "evidence-item";
             item.dataset.testid = "evidence-item";
@@ -689,8 +969,20 @@
             });
             item.append(identity, reference, ...provenance);
             list.append(item);
+
+            const option = document.createElement("option");
+            option.value = link.observation_id || "";
+            option.textContent = `${link.document_role} · ${link.field} · Page ${link.source_page ?? "Unavailable"} · ${link.source_region || "Unavailable"}`;
+            option.disabled = !(
+              link.observation_id &&
+              link.source_sha256 &&
+              Number.isInteger(link.source_page) &&
+              link.source_region
+            );
+            sourceSelect.append(option);
           }
           byTestId("blocker-panel").hidden = false;
+          updateCorrectionControls();
         }
 
         async function loadWorkspace(applicationId, findingId, signal) {
@@ -699,8 +991,195 @@
             `${API_ROOT}/queries/applications/${encodeURIComponent(applicationId)}/workspace${query}`,
             { signal },
           );
+          state.selectedFinding = data.selected_finding || null;
           renderAuthorityRefs(data);
           if (data.selected_finding) renderEvidence(data.selected_finding);
+        }
+
+        function selectedCorrectionSource() {
+          const observationId = byId("correction-source").value;
+          return state.evidenceLinks.find((link) => link.observation_id === observationId) || null;
+        }
+
+        function updateCorrectionControls() {
+          const source = selectedCorrectionSource();
+          const hasValue = byId("corrected-value").value.length > 0;
+          byId("claim-correction").disabled = !state.workItem || state.claimFence !== null;
+          byId("reveal-source").disabled = !(
+            state.workItem && state.claimFence !== null && source && !state.correctionActive
+          );
+          byId("submit-correction").disabled = !(
+            state.workItem &&
+            state.claimFence !== null &&
+            source &&
+            hasValue &&
+            !state.correctionActive
+          );
+        }
+
+        function renderHistory(history, current) {
+          byTestId("current-route").textContent = current.route;
+          byTestId("current-phase").textContent = current.phase;
+          byTestId("current-evidence-revision").textContent = String(
+            current.evidence_revision,
+          );
+          byTestId("history-current-run").textContent = current.current_run_id || "Pending";
+          byTestId("history-current-snapshot").textContent =
+            current.evidence_snapshot_id || "Pending";
+          renderAuthorityRefs(current);
+
+          const runs = byTestId("history-list");
+          runs.replaceChildren();
+          for (const run of history.runs || []) {
+            const item = document.createElement("li");
+            item.dataset.testid = "history-run";
+            item.textContent = `${run.status} · ${run.current ? "current" : "non-current"} · ${run.currentness_reason} · ${run.run_id} · cycle ${run.cycle} · lifecycle ${run.lifecycle_revision} · evidence ${run.evidence_revision} · ${run.evidence_snapshot_id} · release ${run.release_id} · ${run.release_digest} · ${run.checker_build}`;
+            runs.append(item);
+          }
+
+          const corrections = byTestId("correction-chain");
+          corrections.replaceChildren();
+          for (const correction of history.corrections || []) {
+            const item = document.createElement("li");
+            item.textContent = `${correction.successor_observation_id} supersedes ${correction.superseded_observation_id} · ${correction.document_role} · ${correction.field} · Page ${correction.source_location.source_page} · ${correction.source_location.source_region} · ${correction.reason_code} · ${correction.actor} · ${correction.recorded_at}`;
+            corrections.append(item);
+          }
+          byTestId("history-panel").hidden = false;
+        }
+
+        async function loadHistory() {
+          if (!state.applicationId) return null;
+          const encoded = encodeURIComponent(state.applicationId);
+          const [{ payload: history }, { payload: current }] = await Promise.all([
+            request(`${API_ROOT}/queries/applications/${encoded}/history`),
+            request(`${API_ROOT}/queries/applications/${encoded}/current-route`),
+          ]);
+          renderHistory(history, current);
+          return { history, current };
+        }
+
+        async function waitForSuccessor(expectedEvidenceRevision) {
+          const deadline = Date.now() + 8_000;
+          while (Date.now() < deadline) {
+            const observed = await loadHistory();
+            if (
+              observed &&
+              observed.current.current_run_id &&
+              observed.current.evidence_revision === expectedEvidenceRevision &&
+              (observed.history.runs || []).some((run) => run.current)
+            ) {
+              setCorrectionStatus("重跑完成", "success");
+              byTestId("queue-phase").textContent = observed.current.phase;
+              byTestId("queue-route").textContent = observed.current.route;
+              return;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 100));
+          }
+          throw new Error("successor result unavailable");
+        }
+
+        async function claimCorrection() {
+          if (!state.workItem) return;
+          byId("claim-correction").disabled = true;
+          setCorrectionStatus("认领中");
+          try {
+            const { payload } = await request(
+              `${API_ROOT}/commands/review-work-items/${encodeURIComponent(state.workItem.work_item_id)}/claim`,
+              {
+                method: "POST",
+                body: JSON.stringify({ expected_context: state.workItem.command_context }),
+              },
+            );
+            state.claimFence = payload.claim_fence;
+            setCorrectionStatus("已认领", "success");
+          } catch (error) {
+            setCorrectionStatus("认领未完成", "error");
+          }
+          updateCorrectionControls();
+        }
+
+        async function revealSource() {
+          const source = selectedCorrectionSource();
+          if (!state.workItem || state.claimFence === null || !source) return;
+          if (!state.pendingRevealKey) {
+            state.pendingRevealKey = `s04-browser-reveal-${crypto.randomUUID()}`;
+          }
+          byId("reveal-source").disabled = true;
+          clearRevealedSource();
+          setCorrectionStatus("来源读取中");
+          try {
+            const { payload } = await request(
+              `${API_ROOT}/commands/review-work-items/${encodeURIComponent(state.workItem.work_item_id)}/reveal-field-observation`,
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  application_id: state.applicationId,
+                  observation_id: source.observation_id,
+                  expected_fence: state.claimFence,
+                  expected_context: state.workItem.command_context,
+                  idempotency_key: state.pendingRevealKey,
+                }),
+              },
+            );
+            byTestId("revealed-source").textContent = payload.source_text;
+            byTestId("revealed-source").hidden = false;
+            setCorrectionStatus("来源已揭示", "success");
+          } catch (error) {
+            setCorrectionStatus("来源未揭示", "error");
+          }
+          updateCorrectionControls();
+        }
+
+        async function submitCorrection() {
+          const source = selectedCorrectionSource();
+          const raw = byId("corrected-value").value;
+          if (!state.workItem || !state.selectedFinding || !source || !raw) return;
+          if (!state.pendingCorrectionKey) {
+            state.pendingCorrectionKey = `s04-browser-${crypto.randomUUID()}`;
+          }
+          byId("submit-correction").disabled = true;
+          setCorrectionStatus("提交中");
+          try {
+            const { payload } = await request(
+              `${API_ROOT}/commands/review-work-items/${encodeURIComponent(state.workItem.work_item_id)}/correct-field-observation`,
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  application_id: state.applicationId,
+                  expected_fence: state.claimFence,
+                  expected_context: state.workItem.command_context,
+                  idempotency_key: state.pendingCorrectionKey,
+                  correction: {
+                    schema_version: "field-observation-correction/1",
+                    finding_id: state.selectedFinding.finding_id,
+                    observation_id: source.observation_id,
+                    document_id: source.document_id,
+                    document_role: source.document_role,
+                    field: source.field,
+                    raw,
+                    source_location: {
+                      source_sha256: source.source_sha256,
+                      source_page: source.source_page,
+                      source_region: source.source_region,
+                    },
+                    reason_code: byId("correction-reason").value,
+                  },
+                }),
+              },
+            );
+            state.pendingCorrectionKey = null;
+            state.correctionActive = true;
+            byId("corrected-value").value = "";
+            clearRevealedSource();
+            byTestId("correction-accepted-route").textContent = payload.route;
+            setCorrectionStatus("重跑等待中", "success");
+            await loadHistory();
+            await waitForSuccessor(payload.evidence_revision);
+          } catch (error) {
+            setCorrectionStatus("修正未完成", "error");
+            state.correctionActive = false;
+            updateCorrectionControls();
+          }
         }
 
         async function refreshQueue() {
@@ -722,6 +1201,10 @@
               (data.items || []).find((item) => item.application_id === state.applicationId) ||
               (data.items || [])[0];
             if (!selected) {
+              if (state.correctionActive) {
+                await loadHistory();
+                return true;
+              }
               if (state.hasProjectedResult) {
                 clearSensitiveState();
                 setStatus(byId("submit-status"), "访问已结束", "error");
@@ -731,6 +1214,7 @@
               byTestId("blocker-panel").hidden = true;
               return false;
             }
+            state.selectedQueueItem = selected;
             byTestId("queue-phase").textContent = selected.phase;
             byTestId("queue-route").textContent = selected.route;
             byTestId("queue-evidence").textContent = selected.evidence_ready ? "Ready" : "Pending";
@@ -739,6 +1223,11 @@
             byId("queue-empty").hidden = true;
             const blocker = (selected.mandatory_blockers || [])[0];
             if (blocker) {
+              const { payload: workItem } = await request(
+                `${API_ROOT}/queries/review-work-items/${encodeURIComponent(selected.work_item_id)}`,
+                { signal: controller.signal },
+              );
+              state.workItem = workItem;
               await loadWorkspace(selected.application_id, blocker.finding_id, controller.signal);
             }
             state.hasProjectedResult = true;
@@ -778,7 +1267,7 @@
             const { payload: data } = await request(`${API_ROOT}/workbench/commands/submit`, {
               method: "POST",
               body: JSON.stringify({
-                scenario_id: "app_r53_bad_engine.json",
+                scenario_id: SCENARIO_ID,
                 idempotency_key: state.pendingSubmissionKey,
               }),
             });
@@ -798,6 +1287,19 @@
         });
 
         byId("refresh-queue").addEventListener("click", refreshQueue);
+        byId("claim-correction").addEventListener("click", claimCorrection);
+        byId("reveal-source").addEventListener("click", revealSource);
+        byId("submit-correction").addEventListener("click", submitCorrection);
+        byId("correction-source").addEventListener("change", () => {
+          state.pendingRevealKey = null;
+          clearRevealedSource();
+          updateCorrectionControls();
+        });
+        byId("corrected-value").addEventListener("input", updateCorrectionControls);
+        if (state.applicationId) {
+          state.correctionActive = true;
+          loadHistory().catch(clearSensitiveState);
+        }
       })();
     </script>
   </body>

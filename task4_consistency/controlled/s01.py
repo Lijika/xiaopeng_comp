@@ -13,7 +13,7 @@ import secrets
 import tempfile
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
@@ -204,14 +204,16 @@ class ControlledScenarioService:
     SCHEMA_VERSION = "1"
     SEMANTIC_VERSION = "1"
     COMMAND_TYPE = "demo_scenario_submission"
-    _ALLOWED_SCENARIOS = frozenset({"app_r53_bad_engine.json"})
+    _ALLOWED_SCENARIOS = frozenset(
+        {"app_r53_bad_engine.json", "app_s04_bad_vin.json"}
+    )
     _ALLOWED_PHASE_SUCCESSORS = {
         "Intake": frozenset({"Assembly"}),
         "Assembly": frozenset({"Evidence Ready"}),
         "Evidence Ready": frozenset({"Checking"}),
         "Checking": frozenset({"Routing Determination", "Assembly"}),
         "Routing Determination": frozenset({"Manual Review", "Verification Completed"}),
-        "Manual Review": frozenset({"Verification Completed"}),
+        "Manual Review": frozenset({"Verification Completed", "Assembly"}),
     }
     _CAS_CONTEXT_FIELDS = (
         "cycle",
@@ -234,6 +236,9 @@ class ControlledScenarioService:
     _REVIEW_CLAIM_TTL_SECONDS = 900
     _REVIEW_REASON_CODES = frozenset(
         {"HUMAN_REVIEW_COMPLETED", "HUMAN_REVIEW_RECONSIDERED"}
+    )
+    _CORRECTION_REASON_CODES = frozenset(
+        {"SOURCE_VALUE_MISREAD", "SOURCE_VALUE_MISSING"}
     )
     _REVIEW_NOTE_MAX_CHARACTERS = 2000
     _REVIEW_NOTE_MAX_BYTES = 4096
@@ -295,11 +300,16 @@ class ControlledScenarioService:
         clock: Callable[[], int] | None = None,
         registered_sources: tuple[RegisteredSource, ...] = (),
         controlled_objects: tuple[ControlledObject, ...] = (),
+        scenario_id: str = "app_r53_bad_engine.json",
+        checker_build: str | None = None,
     ) -> None:
         if not worker_identity or worker_identity.strip() != worker_identity:
             raise ValueError("worker identity must be a non-empty canonical value")
+        if scenario_id not in self._ALLOWED_SCENARIOS:
+            raise ValueError("controlled scenario is not allowlisted")
         self.fixture_root = Path(fixture_root).resolve()
         self.rules_path = Path(rules_path).resolve()
+        self._scenario_id = scenario_id
         self.audit_available = audit_available
         self.storage_available = storage_available
         self._audit_writer = audit_writer
@@ -314,6 +324,9 @@ class ControlledScenarioService:
         self._registered_source_boundary = RegisteredSourceBoundary(
             registered_sources, controlled_objects
         )
+        self._registered_runtime_configured = bool(
+            registered_sources or controlled_objects
+        )
         if state_path is None:
             raise ValueError("state_path is required for the S01 target authority")
         self._store = _TargetStore(state_path)
@@ -324,7 +337,12 @@ class ControlledScenarioService:
         self._reconcile_admission_jobs()
         self._purge_expired_sessions(now=float(self._clock()))
         self._release = self._load_baseline_release()
-        self._target_checker = TargetChecker(self._release["target_release"])
+        self._run_release = (
+            self._release
+            if checker_build is None or checker_build == self._release["checker_build"]
+            else self._select_checker_release(self._release, checker_build)
+        )
+        self._target_checker = TargetChecker(self._run_release["target_release"])
         self._source_provenance_manifest = self._load_source_provenance_manifest()
         self._manifest = self._build_artifact_manifest()
 
@@ -367,7 +385,7 @@ class ControlledScenarioService:
                     binding_key=binding_key,
                     principal=command_principal,
                 )
-        if scenario_id not in self._ALLOWED_SCENARIOS:
+        if scenario_id != self._scenario_id:
             with self._lock:
                 self._reload_store()
                 return self._record_rejection(
@@ -980,7 +998,7 @@ class ControlledScenarioService:
         snapshot_digest = hashlib.sha256(snapshot_bytes).hexdigest()
         return {
             "run_id": self._stable_id(
-                "probe", f"runtime-repair:{probe_identity}:{self._release['digest']}"
+                "probe", f"runtime-repair:{probe_identity}:{self._run_release['digest']}"
             ),
             "application_id": application_id,
             "cycle": cycle,
@@ -993,17 +1011,17 @@ class ControlledScenarioService:
             "baseline_release": copy.deepcopy(
                 {
                     key: value
-                    for key, value in self._release.items()
+                    for key, value in self._run_release.items()
                     if key not in {"target_release", "legacy_oracle"}
                 }
             ),
-            "release_id": self._release["release_id"],
-            "release_digest": self._release["digest"],
-            "checker_build": self._release["checker_build"],
+            "release_id": self._run_release["release_id"],
+            "release_digest": self._run_release["digest"],
+            "checker_build": self._run_release["checker_build"],
             "fence": fence,
-            "limits": copy.deepcopy(self._release["limits"]),
-            "applicable_check_ids": self._release["applicable_check_ids"],
-            "applicable_check_count": self._release["applicable_check_count"],
+            "limits": copy.deepcopy(self._run_release["limits"]),
+            "applicable_check_ids": self._run_release["applicable_check_ids"],
+            "applicable_check_count": self._run_release["applicable_check_count"],
         }
 
     def _verify_runtime_repair(self, failure_reason_code: str) -> dict[str, Any] | None:
@@ -1059,8 +1077,8 @@ class ControlledScenarioService:
                 "projection_updated": projection_probe["updated"],
                 "projection_watermark": projection_probe["projection_watermark"],
                 "store_revision": self._store._store_revision,
-                "release_digest": self._release["digest"],
-                "checker_build": self._release["checker_build"],
+                "release_digest": self._run_release["digest"],
+                "checker_build": self._run_release["checker_build"],
             }
             encoded = json.dumps(
                 payload, sort_keys=True, separators=(",", ":")
@@ -1088,24 +1106,24 @@ class ControlledScenarioService:
                     {
                         "run_id": self._stable_id(
                             "probe",
-                            f"{job['job_id']}:{stopped_fence}:{self._release['digest']}",
+                            f"{job['job_id']}:{stopped_fence}:{self._run_release['digest']}",
                         ),
                         "baseline_release": copy.deepcopy(
                             {
                                 key: value
-                                for key, value in self._release.items()
+                                for key, value in self._run_release.items()
                                 if key not in {"target_release", "legacy_oracle"}
                             }
                         ),
-                        "release_id": self._release["release_id"],
-                        "release_digest": self._release["digest"],
-                        "checker_build": self._release["checker_build"],
+                        "release_id": self._run_release["release_id"],
+                        "release_digest": self._run_release["digest"],
+                        "checker_build": self._run_release["checker_build"],
                         "fence": stopped_fence + 1,
-                        "limits": copy.deepcopy(self._release["limits"]),
-                        "applicable_check_ids": self._release[
+                        "limits": copy.deepcopy(self._run_release["limits"]),
+                        "applicable_check_ids": self._run_release[
                             "applicable_check_ids"
                         ],
-                        "applicable_check_count": self._release[
+                        "applicable_check_count": self._run_release[
                             "applicable_check_count"
                         ],
                     }
@@ -1117,8 +1135,8 @@ class ControlledScenarioService:
                         "job_id": job["job_id"],
                         "stopped_fence": stopped_fence,
                         "probe_fence": stopped_fence + 1,
-                        "release_digest": self._release["digest"],
-                        "checker_build": self._release["checker_build"],
+                        "release_digest": self._run_release["digest"],
+                        "checker_build": self._run_release["checker_build"],
                         "check_signature": self._check_signature(run_result.checks),
                     }
                 )
@@ -1136,8 +1154,8 @@ class ControlledScenarioService:
         return {
             "kind": "frozen_checker_probe",
             "verified_targets": len(probes),
-            "release_digest": self._release["digest"],
-            "checker_build": self._release["checker_build"],
+            "release_digest": self._run_release["digest"],
+            "checker_build": self._run_release["checker_build"],
             "projection_updated": projection_probe["updated"],
             "projection_watermark": projection_probe["projection_watermark"],
             "probe_digest": hashlib.sha256(encoded).hexdigest(),
@@ -1868,6 +1886,7 @@ class ControlledScenarioService:
                     "work_item_released",
                     "work_item_completed",
                     "work_item_finding_completed",
+                    "work_item_invalidated",
                 }
             ),
             key=lambda record: int(record["sequence"]),
@@ -1906,6 +1925,14 @@ class ControlledScenarioService:
                         ),
                     }
                 )
+            elif fact["record_type"] == "work_item_invalidated":
+                state.update(
+                    {
+                        "status": "invalidated",
+                        "claim_subject": None,
+                        "claim_expires_at": fact["invalidated_at"],
+                    }
+                )
             else:
                 finding_id = fact.get("finding_id")
                 if (
@@ -1941,9 +1968,16 @@ class ControlledScenarioService:
         if app is None or len(runs) != 1 or not isinstance(projection, dict):
             raise RuntimeError("review work-item current context is unavailable")
         projection_watermark = projection.get("projection_watermark")
+        explicitly_invalidated = any(
+            record.get("record_type") == "work_item_invalidated"
+            and record.get("work_item_id") == work_item["work_item_id"]
+            for record in self._store.review_records
+        )
         if (
             projection.get("current_run_id") != work_item["run_id"]
-            or not isinstance(projection_watermark, int)
+            and not explicitly_invalidated
+        ) or (
+            not isinstance(projection_watermark, int)
             or isinstance(projection_watermark, bool)
             or projection_watermark < 1
         ):
@@ -1998,7 +2032,63 @@ class ControlledScenarioService:
         try:
             if self._fault_injector is not None:
                 self._fault_injector("review.source_read")
-            self._admitted_evidence(app)
+            evidence = self._admitted_evidence(app)
+            if app.get("track") == "C-DEMO":
+                source = app.get("source")
+                if not isinstance(source, dict):
+                    raise ValueError("controlled source authority is unavailable")
+                _, source_sha256 = self._read_fixed_scenario(source.get("scenario_id"))
+                if source_sha256 != source.get("source_sha256"):
+                    raise ValueError("controlled source authority does not match")
+            elif (
+                app.get("track") == "R-OBSERVED"
+                and self._registered_runtime_configured
+            ):
+                source = app.get("source")
+                envelope = app.get("envelope")
+                context = (
+                    envelope.get("authenticated_context")
+                    if isinstance(envelope, dict)
+                    else None
+                )
+                if not isinstance(source, dict) or not isinstance(context, dict):
+                    raise ValueError("registered source authority is unavailable")
+                tenant_id = context.get("tenant_id")
+                source_system_id = context.get("source_id")
+                result_content = self._registered_source_boundary.read_object(
+                    tenant_id=tenant_id,
+                    source_system_id=source_system_id,
+                    object_ref=source.get("source_result_object_ref"),
+                )
+                if (
+                    len(result_content) != source.get("source_result_size_bytes")
+                    or hashlib.sha256(result_content).hexdigest()
+                    != source.get("source_result_sha256")
+                ):
+                    raise ValueError("registered result object does not match")
+                checked: set[tuple[str, str]] = set()
+                for document in evidence:
+                    for observation in document.get("observations", []):
+                        object_ref = observation.get("source_object_ref")
+                        source_sha256 = observation.get("source_sha256")
+                        if object_ref is None and source_sha256 is None:
+                            continue
+                        if not isinstance(object_ref, str) or not isinstance(
+                            source_sha256, str
+                        ):
+                            raise ValueError("registered source location is invalid")
+                        binding = (object_ref, source_sha256)
+                        if binding in checked:
+                            continue
+                        content = self._registered_source_boundary.read_object(
+                            tenant_id=tenant_id,
+                            source_system_id=source_system_id,
+                            object_ref=object_ref,
+                        )
+                        if hashlib.sha256(content).hexdigest() != source_sha256:
+                            raise ValueError("registered source object does not match")
+                        checked.add(binding)
+            self._assemble_evidence(evidence)
         except Exception:
             return False
         return True
@@ -3063,6 +3153,784 @@ class ControlledScenarioService:
         ).encode("utf-8")
         return f"s03_idempotency_{hashlib.sha256(encoded).hexdigest()}"
 
+    def reveal_field_observation(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        application_id: str,
+        work_item_id: str,
+        observation_id: str,
+        expected_fence: int,
+        expected_context: dict[str, Any],
+        idempotency_key: str,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Reveal one claimed C-DEMO source region after recording its audit fact."""
+        reveal_time = int(self._clock() if now is None else now)
+        if not self._valid_reviewer_principal(principal, now=reveal_time):
+            raise QueryNotFound(work_item_id)
+        if (
+            not isinstance(application_id, str)
+            or not application_id
+            or not isinstance(observation_id, str)
+            or not observation_id
+            or isinstance(expected_fence, bool)
+            or not isinstance(expected_fence, int)
+            or expected_fence < 1
+        ):
+            raise ValueError("source reveal command is invalid")
+
+        with self._lock:
+            self._reload_store()
+            work_item, state = self._review_work_item_authority(
+                principal=principal,
+                work_item_id=work_item_id,
+                now=reveal_time,
+            )
+            if work_item["application_id"] != application_id:
+                raise QueryNotFound(work_item_id)
+            app, _, actual_context = self._review_current_context(work_item)
+            command_key, command_fingerprint = self._review_lifecycle_idempotency(
+                action=(
+                    f"reveal_field_observation:{application_id}:{observation_id}"
+                ),
+                work_item_id=work_item_id,
+                expected_fence=expected_fence,
+                expected_context=expected_context,
+                idempotency_key=idempotency_key,
+            )
+            binding_key = self._review_idempotency_binding_key(
+                principal,
+                work_item_id,
+                command_key,
+                action="reveal_field_observation",
+            )
+            previous = self._store.idempotency.get(binding_key)
+            if previous is not None and previous[0] != command_fingerprint:
+                return {
+                    "status": "conflict",
+                    "replayed": False,
+                    "application_id": application_id,
+                    "work_item_id": work_item_id,
+                    "reason_code": "IDEMPOTENCY_KEY_CONFLICT",
+                }
+            if not self._review_context_matches(expected_context, actual_context):
+                return {
+                    "status": "stale",
+                    "application_id": application_id,
+                    "work_item_id": work_item_id,
+                    "reason_code": "STALE_REVIEW_CONTEXT",
+                }
+            if (
+                state["status"] != "claimed"
+                or state["claim_subject"] != principal.subject
+                or state["claim_fence"] != expected_fence
+                or float(state["claim_expires_at"]) <= reveal_time
+            ):
+                return {
+                    "status": "stale",
+                    "application_id": application_id,
+                    "work_item_id": work_item_id,
+                    "reason_code": "STALE_WORK_ITEM_CLAIM",
+                }
+            if (
+                app.get("track") != "C-DEMO"
+                or app.get("phase") != "Manual Review"
+                or app.get("current_run_id") != work_item["run_id"]
+                or app.get("lifecycle_revision") != work_item["lifecycle_revision"]
+                or app.get("evidence_revision") != work_item["evidence_revision"]
+            ):
+                return {
+                    "status": "stale",
+                    "application_id": application_id,
+                    "work_item_id": work_item_id,
+                    "reason_code": "STALE_REVIEW_CONTEXT",
+                }
+            gate = self._review_write_gate(app=app)
+            if gate is not None:
+                status, reason_code = gate
+                return {
+                    "status": status,
+                    "application_id": application_id,
+                    "work_item_id": work_item_id,
+                    "reason_code": reason_code,
+                }
+
+            links = [
+                link
+                for finding in self._store.findings
+                if finding.get("application_id") == application_id
+                and finding.get("run_id") == work_item["run_id"]
+                and finding.get("finding_id") in work_item["finding_ids"]
+                for link in finding.get("evidence_links", [])
+                if link.get("observation_id") == observation_id
+            ]
+            if not links:
+                raise ValueError("source reveal observation is unavailable")
+            link = links[0]
+            binding = {
+                key: link.get(key)
+                for key in (
+                    "document_id",
+                    "document_role",
+                    "field",
+                    "source_sha256",
+                    "source_page",
+                    "source_region",
+                )
+            }
+            if any(
+                {
+                    key: candidate.get(key)
+                    for key in binding
+                }
+                != binding
+                for candidate in links[1:]
+            ):
+                raise RuntimeError("source reveal observation authority is ambiguous")
+            selected_documents = [
+                document
+                for document in self._assemble_evidence(self._admitted_evidence(app))
+                if document.get("document_id") == binding["document_id"]
+                and document.get("document_role") == binding["document_role"]
+            ]
+            selected = (
+                selected_documents[0].get("fields", {}).get(binding["field"])
+                if len(selected_documents) == 1
+                and isinstance(selected_documents[0].get("fields"), dict)
+                else None
+            )
+            if (
+                not isinstance(selected, dict)
+                or selected.get("observation_id") != observation_id
+                or any(selected.get(key) != binding[key] for key in (
+                    "source_sha256",
+                    "source_page",
+                    "source_region",
+                ))
+            ):
+                raise ValueError("source reveal observation is not current")
+
+            source = app.get("source")
+            if not isinstance(source, dict) or binding["source_sha256"] != source.get(
+                "source_sha256"
+            ):
+                raise RuntimeError("source reveal authority does not match")
+            payload, _ = self._read_fixed_scenario(source.get("scenario_id"))
+            source_documents = [
+                document
+                for document in payload["documents"]
+                if document.get("doc_id") == binding["document_id"]
+                and document.get("doc_type") == binding["document_role"]
+            ]
+            source_field = (
+                source_documents[0].get("fields", {}).get(binding["field"])
+                if len(source_documents) == 1
+                and isinstance(source_documents[0].get("fields"), dict)
+                else None
+            )
+            source_text = (
+                source_field.get("source_text")
+                if isinstance(source_field, dict)
+                else None
+            )
+            if (
+                not isinstance(source_text, str)
+                or not source_text
+                or len(source_text) > self._REVIEW_NOTE_MAX_CHARACTERS
+                or len(source_text.encode("utf-8")) > self._REVIEW_NOTE_MAX_BYTES
+            ):
+                return {
+                    "status": "rejected",
+                    "application_id": application_id,
+                    "work_item_id": work_item_id,
+                    "reason_code": "SOURCE_REVEAL_UNAVAILABLE",
+                }
+
+            if previous is not None:
+                return {
+                    **copy.deepcopy(previous[1]),
+                    "source_text": source_text,
+                    "replayed": True,
+                }
+            result = {
+                "status": "revealed",
+                "replayed": False,
+                "application_id": application_id,
+                "work_item_id": work_item_id,
+                "observation_id": observation_id,
+                "source_location": {
+                    "source_sha256": binding["source_sha256"],
+                    "source_page": binding["source_page"],
+                    "source_region": binding["source_region"],
+                },
+                "source_text": source_text,
+                "revealed_at": reveal_time,
+            }
+            staged = copy.deepcopy(self._store)
+            try:
+                self._before_write("reveal.audit")
+                staged.audit_events.append(
+                    {
+                        "event_id": self._stable_id(
+                            "audit",
+                            f"evidence_source_revealed:{work_item_id}:{observation_id}:{reveal_time}:{len(staged.audit_events) + 1}",
+                        ),
+                        "action": "evidence_source_revealed",
+                        "subject": principal.subject,
+                        "role": principal.role,
+                        "scope": work_item["visibility_scope"],
+                        "source_id": principal.source_id,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "observation_id": observation_id,
+                        "finding_id": next(
+                            finding["finding_id"]
+                            for finding in self._store.findings
+                            if finding.get("application_id") == application_id
+                            and finding.get("run_id") == work_item["run_id"]
+                            and finding.get("finding_id") in work_item["finding_ids"]
+                            and any(
+                                item.get("observation_id") == observation_id
+                                for item in finding.get("evidence_links", [])
+                            )
+                        ),
+                        "result": "revealed",
+                        "reason_code": "SOURCE_REVEAL_AUTHORIZED",
+                        **self._audit_time_fields(staged, now=reveal_time),
+                    }
+                )
+                self._before_write("reveal.idempotency")
+                staged.idempotency[binding_key] = (
+                    command_fingerprint,
+                    {
+                        key: copy.deepcopy(value)
+                        for key, value in result.items()
+                        if key != "source_text"
+                    },
+                )
+                staged.persist()
+            except _StoreWriteFailure as error:
+                return {
+                    "status": "unavailable",
+                    "application_id": application_id,
+                    "work_item_id": work_item_id,
+                    "reason_code": (
+                        "AUDIT_UNAVAILABLE"
+                        if str(error) == "reveal.audit"
+                        else "STORAGE_UNAVAILABLE"
+                    ),
+                }
+            except StaleStoreRevision:
+                self._reload_store()
+                return {
+                    "status": "stale",
+                    "application_id": application_id,
+                    "work_item_id": work_item_id,
+                    "reason_code": "STALE_REVIEW_CONTEXT",
+                }
+            except Exception:
+                return {
+                    "status": "unavailable",
+                    "application_id": application_id,
+                    "work_item_id": work_item_id,
+                    "reason_code": "STORAGE_UNAVAILABLE",
+                }
+            self._store = staged
+            return result
+
+    def correct_field_observation(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        application_id: str,
+        work_item_id: str,
+        expected_fence: int,
+        expected_context: dict[str, Any],
+        idempotency_key: str,
+        correction: dict[str, Any],
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Append one source-backed field successor and enqueue a new run."""
+        correction_time = int(self._clock() if now is None else now)
+        if not self._valid_reviewer_principal(principal, now=correction_time):
+            raise QueryNotFound(work_item_id)
+        if isinstance(expected_fence, bool) or not isinstance(expected_fence, int) or expected_fence < 1:
+            raise ValueError("correction claim fence is invalid")
+        if not self._valid_idempotency_key(idempotency_key):
+            raise ValueError("correction idempotency key is invalid")
+        required = {
+            "schema_version",
+            "finding_id",
+            "observation_id",
+            "document_id",
+            "document_role",
+            "field",
+            "raw",
+            "source_location",
+            "reason_code",
+        }
+        if not isinstance(correction, dict) or set(correction) != required:
+            raise ValueError("field correction does not match the registered contract")
+        if correction.get("schema_version") != "field-observation-correction/1":
+            raise ValueError("field correction schema version is unsupported")
+        for key in (
+            "finding_id",
+            "observation_id",
+            "document_id",
+            "document_role",
+            "field",
+        ):
+            value = correction.get(key)
+            if not isinstance(value, str) or not value or value.strip() != value:
+                raise ValueError(f"field correction {key} is invalid")
+        raw = correction.get("raw")
+        if (
+            not isinstance(raw, str)
+            or not raw
+            or len(raw) > self._REVIEW_NOTE_MAX_CHARACTERS
+            or len(raw.encode("utf-8")) > self._REVIEW_NOTE_MAX_BYTES
+        ):
+            raise ValueError("field correction raw value is invalid")
+        if correction.get("reason_code") not in self._CORRECTION_REASON_CODES:
+            raise ValueError("field correction reason is not registered")
+        source_location = correction.get("source_location")
+        if not isinstance(source_location, dict) or set(source_location) != {
+            "source_sha256",
+            "source_page",
+            "source_region",
+        }:
+            raise ValueError("field correction source location is invalid")
+        source_sha256 = source_location.get("source_sha256")
+        source_page = source_location.get("source_page")
+        source_region = source_location.get("source_region")
+        if (
+            not isinstance(source_sha256, str)
+            or len(source_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in source_sha256)
+            or isinstance(source_page, bool)
+            or not isinstance(source_page, int)
+            or source_page < 1
+            or not isinstance(source_region, str)
+            or not source_region.startswith("region:")
+            or not source_region[7:].isdigit()
+        ):
+            raise ValueError("field correction source location is invalid")
+        normalized = copy.deepcopy(correction)
+
+        with self._lock:
+            for attempt in range(2):
+                self._reload_store()
+                work_item, state = self._review_work_item_authority(
+                    principal=principal,
+                    work_item_id=work_item_id,
+                    now=correction_time,
+                )
+                if work_item["application_id"] != application_id:
+                    raise QueryNotFound(work_item_id)
+                app, _, actual_context = self._review_current_context(work_item)
+                fingerprint_bytes = json.dumps(
+                    {
+                        "application_id": application_id,
+                        "correction": normalized,
+                        "expected_context": expected_context,
+                        "expected_fence": expected_fence,
+                        "work_item_id": work_item_id,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                command_fingerprint = hashlib.sha256(fingerprint_bytes).hexdigest()
+                binding_key = self._review_idempotency_binding_key(
+                    principal,
+                    work_item_id,
+                    idempotency_key,
+                    action="correct_field_observation",
+                )
+                previous = self._store.idempotency.get(binding_key)
+                if previous is not None:
+                    previous_fingerprint, previous_result = previous
+                    if previous_fingerprint == command_fingerprint:
+                        return {**copy.deepcopy(previous_result), "replayed": True}
+                    return {
+                        "status": "conflict",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "IDEMPOTENCY_KEY_CONFLICT",
+                    }
+                if not self._review_context_matches(expected_context, actual_context):
+                    return {
+                        "status": "stale",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "STALE_REVIEW_CONTEXT",
+                    }
+                if (
+                    state["status"] != "claimed"
+                    or state["claim_subject"] != principal.subject
+                    or state["claim_fence"] != expected_fence
+                    or float(state["claim_expires_at"]) <= correction_time
+                ):
+                    return {
+                        "status": "stale",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "STALE_WORK_ITEM_CLAIM",
+                    }
+                if (
+                    app.get("phase") != "Manual Review"
+                    or app.get("current_run_id") != work_item["run_id"]
+                    or app.get("lifecycle_revision") != work_item["lifecycle_revision"]
+                    or app.get("evidence_revision") != work_item["evidence_revision"]
+                ):
+                    return {
+                        "status": "stale",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "STALE_REVIEW_CONTEXT",
+                    }
+
+                findings = [
+                    finding
+                    for finding in self._store.findings
+                    if finding.get("application_id") == application_id
+                    and finding.get("run_id") == work_item["run_id"]
+                    and finding.get("finding_id") == normalized["finding_id"]
+                ]
+                if (
+                    len(findings) != 1
+                    or normalized["finding_id"] not in work_item["finding_ids"]
+                    or findings[0].get("mandatory") is not True
+                    or findings[0].get("severity") != "critical"
+                    or findings[0].get("verdict") == "consistent"
+                ):
+                    raise ValueError("field correction finding is not correctable")
+                finding = findings[0]
+                links = [
+                    link
+                    for link in finding["evidence_links"]
+                    if link.get("observation_id") == normalized["observation_id"]
+                ]
+                if len(links) != 1:
+                    raise ValueError("field correction observation is not in the finding")
+                link = links[0]
+                if any(
+                    normalized[key] != link.get(key)
+                    for key in ("document_id", "document_role", "field")
+                ):
+                    raise ValueError("field correction semantic binding does not match")
+                projected = self._finding_projection(finding, {})
+                public_links = [
+                    item
+                    for item in projected["evidence_links"]
+                    if item.get("observation_id") == normalized["observation_id"]
+                ]
+                expected_source = (
+                    {
+                        key: public_links[0].get(key)
+                        for key in ("source_sha256", "source_page", "source_region")
+                    }
+                    if len(public_links) == 1
+                    else None
+                )
+                if expected_source != source_location:
+                    return {
+                        "status": "rejected",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "SOURCE_PROOF_MISMATCH",
+                    }
+                gate = self._review_write_gate(app=app)
+                if gate is not None:
+                    status, reason_code = gate
+                    return {
+                        "status": status,
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": reason_code,
+                    }
+
+                evidence = self._admitted_evidence(app)
+                graph_documents = [
+                    document
+                    for document in evidence
+                    if document.get("document_id") == normalized["document_id"]
+                    and document.get("document_role") == normalized["document_role"]
+                ]
+                selected_documents = [
+                    document
+                    for document in self._assemble_evidence(evidence)
+                    if document.get("document_id") == normalized["document_id"]
+                    and document.get("document_role") == normalized["document_role"]
+                ]
+                if len(graph_documents) != 1 or len(selected_documents) != 1:
+                    raise ValueError("field correction document is unavailable")
+                fields = selected_documents[0].get("fields")
+                old_observation = (
+                    fields.get(normalized["field"])
+                    if isinstance(fields, dict)
+                    else None
+                )
+                if (
+                    not isinstance(old_observation, dict)
+                    or old_observation.get("observation_id")
+                    != normalized["observation_id"]
+                    or old_observation.get("source_sha256") != link.get("source_sha256")
+                    or old_observation.get("source_page") != link.get("source_page")
+                    or old_observation.get("source_region") != link.get("source_region")
+                ):
+                    raise ValueError("field correction source observation is unavailable")
+
+                correction_id = self._stable_id(
+                    "correction", f"{binding_key}:{command_fingerprint}"
+                )
+                observation_id = self._stable_id(
+                    "observation", f"{correction_id}:{normalized['observation_id']}"
+                )
+                new_observation = {
+                    **copy.deepcopy(old_observation),
+                    "field": normalized["field"],
+                    "raw": normalized["raw"],
+                    "raw_type": "string",
+                    "raw_lexeme": normalized["raw"],
+                    "value_state": "present",
+                    "confidence": 1.0,
+                    "observation_id": observation_id,
+                    "producer_id": "human-reviewer",
+                    "producer_version": "1",
+                    "evidence_eligible": True,
+                    "eligibility_reason": "HUMAN_SOURCE_BACKED_CORRECTION",
+                    "supersedes_observation_id": normalized["observation_id"],
+                    "correction_id": correction_id,
+                    "actor": principal.subject,
+                    "recorded_at": correction_time,
+                }
+                observations = graph_documents[0].setdefault("observations", [])
+                if not any(
+                    item.get("observation_id") == normalized["observation_id"]
+                    for item in observations
+                    if isinstance(item, dict)
+                ):
+                    observations.append(
+                        {"field": normalized["field"], **copy.deepcopy(old_observation)}
+                    )
+                observations.append(copy.deepcopy(new_observation))
+
+                staged = copy.deepcopy(self._store)
+                staged_app = staged.applications[application_id]
+                next_evidence_revision = int(staged_app["evidence_revision"]) + 1
+                evidence_payload = {
+                    "schema_version": "s04-corrected-evidence/1",
+                    "evidence": evidence,
+                    "correction": {
+                        "correction_id": correction_id,
+                        "observation_id": observation_id,
+                        "supersedes_observation_id": normalized["observation_id"],
+                        "finding_id": normalized["finding_id"],
+                        "document_id": normalized["document_id"],
+                        "document_role": normalized["document_role"],
+                        "field": normalized["field"],
+                        "source_location": copy.deepcopy(source_location),
+                        "reason_code": normalized["reason_code"],
+                        "actor": principal.subject,
+                        "recorded_at": correction_time,
+                    },
+                }
+                evidence_bytes = json.dumps(
+                    evidence_payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                job_id = self._stable_id(
+                    "job", f"{application_id}:correction:{correction_id}"
+                )
+                sequence = 1 + sum(
+                    record.get("work_item_id") == work_item_id
+                    and str(record.get("record_type", "")).startswith("work_item_")
+                    for record in staged.review_records
+                )
+                old_route = staged_app["route"]
+                invalidated_decision_ids = sorted(
+                    {
+                        record["decision_id"]
+                        for record in staged.review_records
+                        if record.get("application_id") == application_id
+                        and record.get("run_id") == work_item["run_id"]
+                        and isinstance(record.get("decision_id"), str)
+                    }
+                )
+                invalidated_exception_ids = sorted(
+                    {
+                        record["exception_id"]
+                        for record in staged.review_records
+                        if record.get("application_id") == application_id
+                        and record.get("run_id") == work_item["run_id"]
+                        and isinstance(record.get("exception_id"), str)
+                    }
+                )
+                try:
+                    self._before_write("correction.evidence")
+                    staged.evidence_events.append(
+                        {
+                            "event_id": self._stable_id(
+                                "evidence", f"{application_id}:correction:{correction_id}"
+                            ),
+                            "application_id": application_id,
+                            "revision": next_evidence_revision,
+                            "kind": "field_correction",
+                            "content_sha256": hashlib.sha256(evidence_bytes).hexdigest(),
+                            "content_bytes": len(evidence_bytes),
+                            "payload": evidence_payload,
+                        }
+                    )
+                    staged_app["evidence_revision"] = next_evidence_revision
+                    staged_app["evidence_ready"] = False
+                    staged_app["route"] = "pending_check"
+                    staged_app["current_run_id"] = None
+                    staged_app["current_evidence_snapshot_id"] = None
+                    staged_app["current_evidence_snapshot_digest"] = None
+                    staged_app["projection_visible"] = False
+                    staged_app["projection_pending"] = False
+                    self._before_write("correction.lifecycle")
+                    self._transition_lifecycle(
+                        staged_app,
+                        "Assembly",
+                        "EVIDENCE_CORRECTION_ACCEPTED",
+                        store=staged,
+                    )
+                    staged.lifecycle_events[-1].update(
+                        {
+                            "correction_id": correction_id,
+                            "invalidated_run_id": work_item["run_id"],
+                            "invalidated_route": old_route,
+                            "invalidated_work_item_id": work_item_id,
+                            "invalidated_decision_ids": invalidated_decision_ids,
+                            "invalidated_exception_ids": invalidated_exception_ids,
+                        }
+                    )
+                    self._before_write("correction.work_item")
+                    staged.review_records.append(
+                        {
+                            "record_id": self._stable_id(
+                                "review_record", f"{work_item_id}:invalidate:{sequence}"
+                            ),
+                            "record_type": "work_item_invalidated",
+                            "sequence": sequence,
+                            "work_item_id": work_item_id,
+                            "application_id": application_id,
+                            "run_id": work_item["run_id"],
+                            "claim_subject": principal.subject,
+                            "claim_fence": expected_fence,
+                            "correction_id": correction_id,
+                            "invalidated_at": correction_time,
+                            "recorded_at": correction_time,
+                        }
+                    )
+                    self._before_write("correction.job")
+                    staged.jobs.append(
+                        self._admission_job_record(job_id, application_id, correction_id)
+                    )
+                    self._before_write("correction.outbox")
+                    staged.outbox.append(
+                        {
+                            "event_id": self._stable_id("outbox", job_id),
+                            "kind": "controlled_check_requested",
+                            "application_id": application_id,
+                            "job_id": job_id,
+                            "fingerprint": correction_id,
+                            "status": "pending",
+                        }
+                    )
+                    self._before_write("correction.audit")
+                    staged.audit_events.append(
+                        {
+                            "event_id": self._stable_id(
+                                "audit", f"evidence_correction:{correction_id}"
+                            ),
+                            "action": "evidence_correction",
+                            "subject": principal.subject,
+                            "role": principal.role,
+                            "scope": work_item["visibility_scope"],
+                            "source_id": principal.source_id,
+                            "application_id": application_id,
+                            "work_item_id": work_item_id,
+                            "finding_id": normalized["finding_id"],
+                            "old_observation_id": normalized["observation_id"],
+                            "new_observation_id": observation_id,
+                            "correction_id": correction_id,
+                            "invalidated_run_id": work_item["run_id"],
+                            "job_id": job_id,
+                            "reason_code": normalized["reason_code"],
+                            "claim_fence": expected_fence,
+                            "lifecycle_revision": staged_app["lifecycle_revision"],
+                            "evidence_revision": staged_app["evidence_revision"],
+                            "result": "accepted",
+                            **self._audit_time_fields(staged, now=correction_time),
+                        }
+                    )
+                    result = {
+                        "status": "accepted",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "correction_id": correction_id,
+                        "observation_id": observation_id,
+                        "invalidated_run_id": work_item["run_id"],
+                        "job_id": job_id,
+                        "phase": "Assembly",
+                        "route": "pending_check",
+                        "lifecycle_revision": staged_app["lifecycle_revision"],
+                        "evidence_revision": staged_app["evidence_revision"],
+                    }
+                    self._before_write("correction.idempotency")
+                    staged.idempotency[binding_key] = (
+                        command_fingerprint,
+                        copy.deepcopy(result),
+                    )
+                    self._before_write("correction.publish")
+                    staged.persist()
+                except _StoreWriteFailure as error:
+                    return {
+                        "status": "unavailable",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": (
+                            "AUDIT_UNAVAILABLE"
+                            if str(error) == "correction.audit"
+                            else "STORAGE_UNAVAILABLE"
+                        ),
+                    }
+                except StaleStoreRevision:
+                    if attempt == 0:
+                        continue
+                    return {
+                        "status": "unavailable",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "STORAGE_UNAVAILABLE",
+                    }
+                except Exception:
+                    return {
+                        "status": "unavailable",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "STORAGE_UNAVAILABLE",
+                    }
+                self._store = staged
+                return result
+            raise RuntimeError("field correction retry exhausted")
+
     def submit_review_work_item(
         self,
         *,
@@ -3546,6 +4414,11 @@ class ControlledScenarioService:
             "work_item_id",
             "finding_id",
             "decision_id",
+            "correction_id",
+            "observation_id",
+            "old_observation_id",
+            "new_observation_id",
+            "invalidated_run_id",
             "outcome",
             "claim_fence",
             "assigned_subject",
@@ -3694,6 +4567,256 @@ class ControlledScenarioService:
                     }
                 )
             return result
+
+    def _current_run_authority(
+        self, app: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        current_run_id = app.get("current_run_id")
+        if current_run_id is None:
+            if app.get("phase") in {
+                "Intake",
+                "Assembly",
+                "Evidence Ready",
+                "Checking",
+            } and app.get("route") == "pending_check":
+                return None
+            raise _ApplicationStateAuthorityUnavailable(self._APPLICATION_STATE_FAILURE)
+        lifecycle = [
+            event
+            for event in self._store.lifecycle_events
+            if event.get("application_id") == app.get("application_id")
+            and event.get("revision") == app.get("lifecycle_revision")
+            and event.get("run_id") == current_run_id
+        ]
+        matching = []
+        for run in self._store.runs:
+            spec = run.get("spec")
+            if not isinstance(spec, dict):
+                continue
+            try:
+                context_matches = run.get("completion_context") == self._completion_context(
+                    spec
+                )
+            except KeyError:
+                context_matches = False
+            if (
+                run.get("application_id") == app.get("application_id")
+                and run.get("run_id") == current_run_id
+                and run.get("status") == "complete"
+                and spec.get("cycle") == app.get("cycle")
+                and spec.get("evidence_revision") == app.get("evidence_revision")
+                and spec.get("evidence_snapshot_id")
+                == app.get("current_evidence_snapshot_id")
+                and spec.get("evidence_snapshot_digest")
+                == app.get("current_evidence_snapshot_digest")
+                and context_matches
+            ):
+                matching.append(run)
+        if len(lifecycle) != 1 or len(matching) != 1:
+            raise _ApplicationStateAuthorityUnavailable(self._APPLICATION_STATE_FAILURE)
+        return matching[0]
+
+    def current_route_view(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        application_id: str,
+    ) -> dict[str, Any]:
+        """Return the Lifecycle-owned route and its current immutable run."""
+        with self._lock:
+            self._reload_store()
+            app = self._reviewer_application_authority(principal, application_id)
+            current_run = self._current_run_authority(app)
+            spec = current_run.get("spec", {}) if current_run is not None else {}
+            return {
+                "schema_version": "s04-current-route/1",
+                "application_id": application_id,
+                "phase": app["phase"],
+                "route": app["route"],
+                "current_run_id": app.get("current_run_id"),
+                "cycle": app["cycle"],
+                "lifecycle_revision": app["lifecycle_revision"],
+                "evidence_revision": app["evidence_revision"],
+                "evidence_snapshot_id": app.get("current_evidence_snapshot_id"),
+                "evidence_snapshot_digest": app.get(
+                    "current_evidence_snapshot_digest"
+                ),
+                "release_id": spec.get("release_id"),
+                "release_digest": spec.get("release_digest"),
+                "checker_build": spec.get("checker_build"),
+                "currentness_reason": (
+                    "CURRENT_CONTEXT_MATCH" if current_run is not None else "NO_CURRENT_RUN"
+                ),
+            }
+
+    def application_history_view(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        application_id: str,
+    ) -> dict[str, Any]:
+        """Return minimized immutable correction and run history for a Reviewer."""
+        with self._lock:
+            self._reload_store()
+            app = self._reviewer_application_authority(principal, application_id)
+            current_run = self._current_run_authority(app)
+            invalidations = {
+                event.get("invalidated_run_id"): event
+                for event in self._store.lifecycle_events
+                if event.get("application_id") == application_id
+                and event.get("invalidated_run_id")
+            }
+            runs: list[dict[str, Any]] = []
+            for run in self._store.runs:
+                if run.get("application_id") != application_id:
+                    continue
+                spec = run.get("spec")
+                if not isinstance(spec, dict):
+                    raise RuntimeError("run history spec is unavailable")
+                is_current = run is current_run
+                run_id = str(run["run_id"])
+                invalidation = invalidations.get(run_id, {})
+                decision_ids = [
+                    record["decision_id"]
+                    for record in self._store.review_records
+                    if record.get("record_type") == "human_decision"
+                    and record.get("application_id") == application_id
+                    and record.get("run_id") == run_id
+                ]
+                exception_ids = sorted(
+                    {
+                        record["exception_id"]
+                        for record in self._store.review_records
+                        if record.get("application_id") == application_id
+                        and record.get("run_id") == run_id
+                        and isinstance(record.get("exception_id"), str)
+                    }
+                )
+                run_bytes = json.dumps(
+                    run,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                runs.append(
+                    {
+                        "run_id": run_id,
+                        "status": run["status"],
+                        "authority_digest": hashlib.sha256(run_bytes).hexdigest(),
+                        "current": is_current,
+                        "currentness_reason": (
+                            "CURRENT_CONTEXT_MATCH"
+                            if is_current
+                            else invalidation.get("reason_code")
+                            or (
+                                "STALE_COMPLETION_CONTEXT"
+                                if run.get("status") == "stale"
+                                else "CONTEXT_NOT_CURRENT"
+                            )
+                        ),
+                        "cycle": spec["cycle"],
+                        "lifecycle_revision": spec["lifecycle_revision"],
+                        "evidence_revision": spec["evidence_revision"],
+                        "evidence_snapshot_id": spec["evidence_snapshot_id"],
+                        "evidence_snapshot_digest": spec["evidence_snapshot_digest"],
+                        "release_id": spec["release_id"],
+                        "release_digest": spec["release_digest"],
+                        "checker_build": spec["checker_build"],
+                        "finding_ids": copy.deepcopy(run.get("finding_ids", [])),
+                        "cas_mismatches": list(run.get("cas_mismatches", ())),
+                        "selected_observation_ids": sorted(
+                            {
+                                outcome["observation_id"]
+                                for outcome in run.get("selection_outcomes", [])
+                                if outcome.get("selected") is True
+                                and isinstance(outcome.get("observation_id"), str)
+                            }
+                        ),
+                        "decision_ids": decision_ids,
+                        "exception_ids": exception_ids,
+                        "applicable_decision_ids": decision_ids if is_current else [],
+                        "applicable_exception_ids": exception_ids if is_current else [],
+                        "invalidated_decision_ids": copy.deepcopy(
+                            invalidation.get("invalidated_decision_ids", [])
+                        ),
+                        "invalidated_exception_ids": copy.deepcopy(
+                            invalidation.get("invalidated_exception_ids", [])
+                        ),
+                    }
+                )
+            corrections = []
+            for event in self._store.evidence_events:
+                if (
+                    event.get("application_id") != application_id
+                    or event.get("kind") != "field_correction"
+                ):
+                    continue
+                payload = event.get("payload")
+                correction = payload.get("correction") if isinstance(payload, dict) else None
+                if not isinstance(correction, dict):
+                    raise RuntimeError("correction history is unavailable")
+                lifecycle = [
+                    item
+                    for item in self._store.lifecycle_events
+                    if item.get("application_id") == application_id
+                    and item.get("correction_id") == correction.get("correction_id")
+                ]
+                if len(lifecycle) != 1:
+                    raise RuntimeError("correction lifecycle history is unavailable")
+                invalidation = lifecycle[0]
+                corrections.append(
+                    {
+                        "correction_id": correction["correction_id"],
+                        "superseded_observation_id": correction[
+                            "supersedes_observation_id"
+                        ],
+                        "successor_observation_id": correction["observation_id"],
+                        "document_id": correction["document_id"],
+                        "document_role": correction["document_role"],
+                        "field": correction["field"],
+                        "source_location": copy.deepcopy(
+                            correction["source_location"]
+                        ),
+                        "reason_code": correction["reason_code"],
+                        "actor": correction["actor"],
+                        "recorded_at": correction["recorded_at"],
+                        "invalidated_decision_ids": copy.deepcopy(
+                            invalidation.get("invalidated_decision_ids", [])
+                        ),
+                        "invalidated_exception_ids": copy.deepcopy(
+                            invalidation.get("invalidated_exception_ids", [])
+                        ),
+                        "evidence_revision": event["revision"],
+                    }
+                )
+            return {
+                "schema_version": "s04-application-history/1",
+                "application_id": application_id,
+                "current_run_id": app.get("current_run_id"),
+                "runs": runs,
+                "corrections": corrections,
+            }
+
+    def _reviewer_application_authority(
+        self,
+        principal: S01CommandPrincipal,
+        application_id: str,
+    ) -> dict[str, Any]:
+        if not self._valid_reviewer_principal(principal, now=float(self._clock())):
+            raise QueryNotFound(application_id)
+        app = self._store.applications.get(application_id)
+        if app is None:
+            raise QueryNotFound(application_id)
+        visible_scopes = {principal.scope}
+        if principal.scope.startswith(self._SESSION_SCOPE_PREFIX):
+            visible_scopes.add("C-DEMO")
+        if (
+            self._application_visibility_scope(application_id) not in visible_scopes
+            or self._application_review_assignee(application_id) != principal.subject
+        ):
+            raise QueryNotFound(application_id)
+        self._require_application_state_authority(app)
+        return app
 
     def _read_fixed_scenario(self, scenario_id: str) -> tuple[dict[str, Any], str]:
         source = (self.fixture_root / scenario_id).resolve()
@@ -4173,8 +5296,14 @@ class ControlledScenarioService:
         return hashlib.sha256(encoded).hexdigest()
 
     def _load_source_provenance_manifest(self) -> dict[str, Any]:
+        source_path = (self.fixture_root / self._scenario_id).resolve()
+        source_sha256 = (
+            self._C_DEMO_PROVENANCE_SOURCE_SHA256
+            if self._scenario_id == "app_r53_bad_engine.json"
+            else hashlib.sha256(source_path.read_bytes()).hexdigest()
+        )
         source_object_ref = (
-            "c-demo-object:sha256:" + self._C_DEMO_PROVENANCE_SOURCE_SHA256
+            "c-demo-object:sha256:" + source_sha256
         )
         entries: list[dict[str, Any]] = []
         for item in copy.deepcopy(self._C_DEMO_PROVENANCE_ENTRIES):
@@ -4185,7 +5314,7 @@ class ControlledScenarioService:
                         "document_id": document_id,
                         "field": field,
                         "source_object_ref": source_object_ref,
-                        "source_sha256": self._C_DEMO_PROVENANCE_SOURCE_SHA256,
+                        "source_sha256": source_sha256,
                         "source_page": source_page,
                         "source_region": source_region,
                         "producer_id": "c-demo-registered-source",
@@ -4196,9 +5325,9 @@ class ControlledScenarioService:
                 entries.append({"malformed_entry": item})
         values = {
             "schema_version": self._C_DEMO_PROVENANCE_SCHEMA,
-            "scenario_id": next(iter(self._ALLOWED_SCENARIOS)),
+            "scenario_id": self._scenario_id,
             "source_kind": "synthetic-json-pages/1",
-            "bound_source_sha256": self._C_DEMO_PROVENANCE_SOURCE_SHA256,
+            "bound_source_sha256": source_sha256,
             "source_object_ref": source_object_ref,
             "producer_id": "c-demo-registered-source",
             "producer_version": "1",
@@ -4213,7 +5342,7 @@ class ControlledScenarioService:
         return {**values, "digest": hashlib.sha256(encoded).hexdigest()}
 
     def _build_artifact_manifest(self) -> S01ArtifactManifest:
-        scenario_id = next(iter(self._ALLOWED_SCENARIOS))
+        scenario_id = self._scenario_id
         source = (self.fixture_root / scenario_id).resolve()
         if self.fixture_root not in source.parents or not source.is_file():
             raise FileNotFoundError("controlled scenario artifact is unavailable")
@@ -4964,13 +6093,50 @@ class ControlledScenarioService:
             "legacy_oracle": RuleEngine(cfg),
         }
 
+    @staticmethod
+    def _select_checker_release(
+        baseline: dict[str, Any], checker_build: str
+    ) -> dict[str, Any]:
+        if (
+            not isinstance(checker_build, str)
+            or not checker_build
+            or len(checker_build) > 200
+            or checker_build.strip() != checker_build
+        ):
+            raise ValueError("checker build must be a non-empty canonical value")
+        target = baseline["target_release"]
+        release_bytes = json.dumps(
+            {
+                "schema_version": "s01-target-release/5",
+                "release_id": target.release_id,
+                "rules_digest": target.rules_digest,
+                "knowledge_digest": target.knowledge_digest,
+                "normalizer_digest": target.normalizer_digest,
+                "checker_build": checker_build,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        selected = replace(
+            target,
+            release_digest=hashlib.sha256(release_bytes).hexdigest(),
+            checker_build=checker_build,
+        )
+        manifest = selected.public_manifest()
+        return {
+            **baseline,
+            "digest": manifest["digest"],
+            "checker_build": manifest["checker_build"],
+            "target_release": selected,
+        }
+
     def _admitted_evidence(self, app: dict[str, Any]) -> list[dict[str, Any]]:
         matching = [
             event
             for event in self._store.evidence_events
             if event.get("application_id") == app["application_id"]
             and event.get("revision") == app["evidence_revision"]
-            and event.get("kind") == "admitted_snapshot"
+            and event.get("kind") in {"admitted_snapshot", "field_correction"}
         ]
         if len(matching) != 1:
             raise RuntimeError("admitted evidence authority is unavailable")
@@ -4979,6 +6145,7 @@ class ControlledScenarioService:
         if not isinstance(payload, dict) or payload.get("schema_version") not in {
             "s01-admitted-evidence/1",
             "s02-admitted-evidence/1",
+            "s04-corrected-evidence/1",
         }:
             raise RuntimeError("admitted evidence authority is invalid")
         evidence = payload.get("evidence")
@@ -4993,6 +6160,47 @@ class ControlledScenarioService:
         if hashlib.sha256(encoded).hexdigest() != event.get("content_sha256"):
             raise RuntimeError("admitted evidence content digest does not match")
         return copy.deepcopy(evidence)
+
+    @staticmethod
+    def _assemble_evidence(evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        assembled = copy.deepcopy(evidence)
+        for document in assembled:
+            observations = document.get("observations")
+            fields = document.get("fields")
+            if not isinstance(observations, list) or not isinstance(fields, dict):
+                continue
+            corrected_fields = {
+                observation.get("field")
+                for observation in observations
+                if isinstance(observation, dict)
+                and observation.get("supersedes_observation_id") is not None
+            }
+            for field in corrected_fields:
+                candidates = [
+                    observation
+                    for observation in observations
+                    if isinstance(observation, dict)
+                    and observation.get("field") == field
+                    and isinstance(observation.get("observation_id"), str)
+                    and observation.get("observation_id")
+                ]
+                identities = {item["observation_id"] for item in candidates}
+                superseded = {
+                    item["supersedes_observation_id"]
+                    for item in candidates
+                    if item.get("supersedes_observation_id") is not None
+                }
+                successors = [
+                    item for item in candidates if item["observation_id"] not in superseded
+                ]
+                if (
+                    len(identities) != len(candidates)
+                    or not superseded.issubset(identities)
+                    or len(successors) != 1
+                ):
+                    raise RuntimeError("evidence supersession authority is unavailable")
+                fields[field] = copy.deepcopy(successors[0])
+        return assembled
 
     @classmethod
     def _verified_provenance_entries(
@@ -5431,18 +6639,29 @@ class ControlledScenarioService:
             ]
             if len(admitted_events) != 1:
                 raise ValueError("admitted evidence authority is unavailable")
-            evidence_revision = admitted_events[0].get("revision")
+            correction_events = sorted(
+                (
+                    event
+                    for event in self._store.evidence_events
+                    if event.get("application_id") == application_id
+                    and event.get("kind") == "field_correction"
+                ),
+                key=lambda event: int(event["revision"]),
+            )
+            graph_revisions = [
+                admitted_events[0].get("revision"),
+                *(event.get("revision") for event in correction_events),
+            ]
             observed_evidence_revision = app.get("evidence_revision")
             if (
-                isinstance(evidence_revision, bool)
-                or not isinstance(evidence_revision, int)
-                or evidence_revision != 1
+                graph_revisions != list(range(1, len(graph_revisions) + 1))
                 or isinstance(observed_evidence_revision, bool)
                 or not isinstance(observed_evidence_revision, int)
-                or observed_evidence_revision != evidence_revision
+                or observed_evidence_revision != graph_revisions[-1]
                 or any(
                     isinstance(event.get("revision"), bool)
-                    or event.get("revision") != evidence_revision
+                    or not isinstance(event.get("revision"), int)
+                    or not 1 <= event["revision"] <= observed_evidence_revision
                     for event in self._store.evidence_events
                     if event.get("application_id") == application_id
                 )
@@ -5484,7 +6703,7 @@ class ControlledScenarioService:
         self._transition_lifecycle(app, "Checking", "CHECK_JOB_STARTED", store=owner)
         snapshot_payload = {
             "schema_version": "s01-evidence-snapshot/1",
-            "evidence": self._admitted_evidence(app),
+            "evidence": self._assemble_evidence(self._admitted_evidence(app)),
         }
         snapshot_bytes = json.dumps(
             snapshot_payload,
@@ -5501,8 +6720,8 @@ class ControlledScenarioService:
                     job["job_id"],
                     str(app["cycle"]),
                     snapshot_id,
-                    self._release["digest"],
-                    self._release["checker_build"],
+                    self._run_release["digest"],
+                    self._run_release["checker_build"],
                 )
             ),
         )
@@ -5534,17 +6753,17 @@ class ControlledScenarioService:
             "baseline_release": copy.deepcopy(
                 {
                     key: value
-                    for key, value in self._release.items()
+                    for key, value in self._run_release.items()
                     if key not in {"target_release", "legacy_oracle"}
                 }
             ),
-            "release_id": self._release["release_id"],
-            "release_digest": self._release["digest"],
-            "checker_build": self._release["checker_build"],
+            "release_id": self._run_release["release_id"],
+            "release_digest": self._run_release["digest"],
+            "checker_build": self._run_release["checker_build"],
             "fence": job["fence"],
-            "limits": copy.deepcopy(self._release["limits"]),
-            "applicable_check_ids": self._release["applicable_check_ids"],
-            "applicable_check_count": self._release["applicable_check_count"],
+            "limits": copy.deepcopy(self._run_release["limits"]),
+            "applicable_check_ids": self._run_release["applicable_check_ids"],
+            "applicable_check_count": self._run_release["applicable_check_count"],
         }
 
     def _run_checker(self, run_spec: dict[str, Any]):
@@ -5707,6 +6926,8 @@ class ControlledScenarioService:
         stage: Callable[
             [dict[str, Any], dict[str, Any], dict[str, Any]], WorkerResult
         ],
+        *,
+        retry_superseded: bool = False,
     ) -> WorkerResult:
         attempt_template = copy.deepcopy(attempt)
         for _ in range(3):
@@ -5732,6 +6953,16 @@ class ControlledScenarioService:
                     ),
                     None,
                 )
+                active_lease = (
+                    current_job is not None
+                    and current_job.get("status") == "leased"
+                    and current_job.get("worker_id") == attempt_template.get("worker_id")
+                    and current_job.get("fence") == run_spec["fence"]
+                )
+                superseded = current_job is not None and (
+                    int(current_job.get("fence", 0)) > int(run_spec["fence"])
+                    or current_job.get("status") in {"complete", "diagnostic"}
+                )
                 if (
                     current_app is None
                     or current_job is None
@@ -5747,9 +6978,7 @@ class ControlledScenarioService:
                         sort_keys=True,
                         separators=(",", ":"),
                     )
-                    or current_job.get("status") != "leased"
-                    or current_job.get("worker_id") != attempt_template.get("worker_id")
-                    or current_job.get("fence") != run_spec["fence"]
+                    or not (active_lease or (retry_superseded and superseded))
                 ):
                     break
                 app = current_app
@@ -5977,9 +7206,9 @@ class ControlledScenarioService:
             "cycle": app["cycle"],
             "lifecycle_revision": app["lifecycle_revision"],
             "evidence_revision": app["evidence_revision"],
-            "release_id": self._release["release_id"],
-            "release_digest": self._release["digest"],
-            "checker_build": self._release["checker_build"],
+            "release_id": self._run_release["release_id"],
+            "release_digest": self._run_release["digest"],
+            "checker_build": self._run_release["checker_build"],
             "fence": job["fence"],
         }
         mismatches = tuple(
@@ -6408,7 +7637,14 @@ class ControlledScenarioService:
                 evidence_snapshot_digest=run_spec["evidence_snapshot_digest"],
             )
 
-        return self._publish_run_diagnostic(app, job, attempt, run_spec, stage)
+        return self._publish_run_diagnostic(
+            app,
+            job,
+            attempt,
+            run_spec,
+            stage,
+            retry_superseded=True,
+        )
 
     def _prepare_retry(self, app: dict[str, Any], reason_code: str) -> None:
         app["evidence_ready"] = False
@@ -6580,23 +7816,22 @@ class ControlledScenarioService:
                     "eligibility_reason",
                 )
             }
-            if link.get("source_receipt_id") is not None:
-                projected.update(
-                    {
-                        key: copy.deepcopy(link[key])
-                        for key in trace_keys
-                        if link.get(key) is not None
-                    }
+            projected.update(
+                {
+                    key: copy.deepcopy(link[key])
+                    for key in trace_keys
+                    if key != "source_region" and link.get(key) is not None
+                }
+            )
+            raw_region = link.get("source_region")
+            if raw_region is not None:
+                scope = (link.get("source_sha256"), link.get("source_page"))
+                regions = region_identities.setdefault(scope, [])
+                if raw_region not in regions:
+                    regions.append(raw_region)
+                projected["source_region"] = (
+                    f"region:{regions.index(raw_region) + 1}"
                 )
-                raw_region = link.get("source_region")
-                if raw_region is not None:
-                    scope = (link.get("source_sha256"), link.get("source_page"))
-                    regions = region_identities.setdefault(scope, [])
-                    if raw_region not in regions:
-                        regions.append(raw_region)
-                    projected["source_region"] = (
-                        f"region:{regions.index(raw_region) + 1}"
-                    )
             links.append(projected)
         return {
             "finding_id": finding["finding_id"],

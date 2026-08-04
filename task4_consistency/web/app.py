@@ -542,6 +542,18 @@ class S03SubmitBody(S03FencedBody):
     verification: dict[str, Any]
 
 
+class S04CorrectionBody(S03FencedBody):
+    application_id: str = Field(min_length=1, max_length=200, strict=True)
+    correction: dict[str, Any]
+
+
+class S04RevealBody(S03ClaimBody):
+    application_id: str = Field(min_length=1, max_length=200, strict=True)
+    observation_id: str = Field(min_length=1, max_length=200, strict=True)
+    expected_fence: int = Field(ge=1, strict=True)
+    idempotency_key: str
+
+
 class S03BatchPreviewBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -592,6 +604,18 @@ def _issue_s01_session(request: Request, response: Response) -> None:
             403,
             detail={"error": "S01_FORBIDDEN", "message": "Registered demo identity required"},
         )
+    existing_token = request.cookies.get(S01_SESSION_COOKIE, "")
+    existing = (
+        _s01_service().resolve_session(existing_token, now=S01_SESSION_CLOCK())
+        if existing_token
+        else None
+    )
+    if (
+        existing is not None
+        and existing.get("subject") == S01_DEMO_SUBJECT
+        and {"integrator", "reviewer"}.issubset(existing.get("roles", ()))
+    ):
+        return
     token, _ = _s01_service().issue_session(
         now=S01_SESSION_CLOCK(),
         ttl_seconds=S01_SESSION_TTL_SECONDS,
@@ -808,6 +832,23 @@ def _s03_reviewer_principal(request: Request) -> S01CommandPrincipal:
         role="reviewer",
         scope=principal.scope,
         source_id=S02_SOURCE_SYSTEM_ID,
+        expires_at=principal.expires_at,
+    )
+
+
+def _s04_demo_reviewer_principal(request: Request) -> S01CommandPrincipal:
+    principal = _s01_principal(request)
+    if (
+        principal is None
+        or "reviewer" not in principal.roles
+        or not ControlledScenarioService.is_c_demo_scope(principal.scope)
+    ):
+        raise HTTPException(404, detail={"error": "S03_NOT_FOUND"})
+    return S01CommandPrincipal(
+        subject=principal.subject,
+        role="reviewer",
+        scope=principal.scope,
+        source_id="c-demo-review-console",
         expires_at=principal.expires_at,
     )
 
@@ -1036,6 +1077,40 @@ def controlled_s03_review_work_item(
         raise _s03_not_found(error) from error
 
 
+@app.get("/controlled/s02/api/queries/applications/{application_id}/current-route")
+def controlled_s04_current_route(
+    application_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s03_reviewer_principal(request)
+    try:
+        return _s02_service().current_route_view(
+            principal=principal,
+            application_id=application_id,
+        )
+    except QueryNotFound as error:
+        raise _s03_not_found(error) from error
+
+
+@app.get("/controlled/s02/api/queries/applications/{application_id}/history")
+def controlled_s04_application_history(
+    application_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s03_reviewer_principal(request)
+    try:
+        return _s02_service().application_history_view(
+            principal=principal,
+            application_id=application_id,
+        )
+    except QueryNotFound as error:
+        raise _s03_not_found(error) from error
+
+
 @app.post("/controlled/s02/api/commands/review-work-items/{work_item_id}/claim")
 async def controlled_s03_claim_review_work_item(
     work_item_id: str,
@@ -1128,6 +1203,37 @@ async def controlled_s03_submit_review_work_item(
             expected_context=body.expected_context,
             idempotency_key=body.idempotency_key,
             verification=body.verification,
+            now=S01_SESSION_CLOCK(),
+        )
+    except QueryNotFound as error:
+        raise _s03_not_found(error) from error
+    except ValueError as error:
+        raise _s03_invalid_command(error) from error
+    return _s03_command_result(result)
+
+
+@app.post(
+    "/controlled/s02/api/commands/review-work-items/"
+    "{work_item_id}/correct-field-observation"
+)
+async def controlled_s04_correct_field_observation(
+    work_item_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s03_reviewer_principal(request)
+    body = await _s03_command_body(request, S04CorrectionBody)
+    assert isinstance(body, S04CorrectionBody)
+    try:
+        result = _s02_service().correct_field_observation(
+            principal=principal,
+            application_id=body.application_id,
+            work_item_id=work_item_id,
+            expected_fence=body.expected_fence,
+            expected_context=body.expected_context,
+            idempotency_key=body.idempotency_key,
+            correction=body.correction,
             now=S01_SESSION_CLOCK(),
         )
     except QueryNotFound as error:
@@ -1345,6 +1451,144 @@ def controlled_s01_workspace(
         )
     except QueryNotFound as error:
         raise HTTPException(404, detail={"error": "S01_NOT_FOUND"}) from error
+
+
+@app.get("/controlled/s01/api/queries/review-work-items/{work_item_id}")
+def controlled_s04_demo_review_work_item(
+    work_item_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s04_demo_reviewer_principal(request)
+    try:
+        return _s01_service().review_work_item_view(
+            principal=principal,
+            work_item_id=work_item_id,
+            now=S01_SESSION_CLOCK(),
+        )
+    except QueryNotFound as error:
+        raise _s03_not_found(error) from error
+
+
+@app.post("/controlled/s01/api/commands/review-work-items/{work_item_id}/claim")
+async def controlled_s04_demo_claim_review_work_item(
+    work_item_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s04_demo_reviewer_principal(request)
+    body = await _s03_command_body(request, S03ClaimBody)
+    assert isinstance(body, S03ClaimBody)
+    try:
+        result = _s01_service().claim_review_work_item(
+            principal=principal,
+            work_item_id=work_item_id,
+            expected_context=body.expected_context,
+            now=S01_SESSION_CLOCK(),
+        )
+    except QueryNotFound as error:
+        raise _s03_not_found(error) from error
+    return _s03_command_result(result)
+
+
+@app.post(
+    "/controlled/s01/api/commands/review-work-items/"
+    "{work_item_id}/reveal-field-observation"
+)
+async def controlled_s04_demo_reveal_field_observation(
+    work_item_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s04_demo_reviewer_principal(request)
+    body = await _s03_command_body(request, S04RevealBody)
+    assert isinstance(body, S04RevealBody)
+    try:
+        result = _s01_service().reveal_field_observation(
+            principal=principal,
+            application_id=body.application_id,
+            work_item_id=work_item_id,
+            observation_id=body.observation_id,
+            expected_fence=body.expected_fence,
+            expected_context=body.expected_context,
+            idempotency_key=body.idempotency_key,
+            now=S01_SESSION_CLOCK(),
+        )
+    except QueryNotFound as error:
+        raise _s03_not_found(error) from error
+    except ValueError as error:
+        raise _s03_invalid_command(error) from error
+    if result.get("status") == "revealed":
+        return result
+    return _s03_command_result(result)
+
+
+@app.post(
+    "/controlled/s01/api/commands/review-work-items/"
+    "{work_item_id}/correct-field-observation"
+)
+async def controlled_s04_demo_correct_field_observation(
+    work_item_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s04_demo_reviewer_principal(request)
+    body = await _s03_command_body(request, S04CorrectionBody)
+    assert isinstance(body, S04CorrectionBody)
+    try:
+        result = _s01_service().correct_field_observation(
+            principal=principal,
+            application_id=body.application_id,
+            work_item_id=work_item_id,
+            expected_fence=body.expected_fence,
+            expected_context=body.expected_context,
+            idempotency_key=body.idempotency_key,
+            correction=body.correction,
+            now=S01_SESSION_CLOCK(),
+        )
+    except QueryNotFound as error:
+        raise _s03_not_found(error) from error
+    except ValueError as error:
+        raise _s03_invalid_command(error) from error
+    return _s03_command_result(result)
+
+
+@app.get("/controlled/s01/api/queries/applications/{application_id}/current-route")
+def controlled_s04_demo_current_route(
+    application_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s04_demo_reviewer_principal(request)
+    try:
+        return _s01_service().current_route_view(
+            principal=principal,
+            application_id=application_id,
+        )
+    except QueryNotFound as error:
+        raise _s03_not_found(error) from error
+
+
+@app.get("/controlled/s01/api/queries/applications/{application_id}/history")
+def controlled_s04_demo_application_history(
+    application_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s04_demo_reviewer_principal(request)
+    try:
+        return _s01_service().application_history_view(
+            principal=principal,
+            application_id=application_id,
+        )
+    except QueryNotFound as error:
+        raise _s03_not_found(error) from error
 
 
 @app.get(
@@ -1952,6 +2196,7 @@ def create_s01_test_app() -> FastAPI:
     fixture_value = os.environ.get("TASK4_S01_TEST_FIXTURE_ROOT", "").strip()
     rules_value = os.environ.get("TASK4_S01_TEST_RULES_PATH", "").strip()
     state_value = os.environ.get("TASK4_S01_TEST_STATE_PATH", "").strip()
+    scenario_value = os.environ.get("TASK4_S01_TEST_SCENARIO_ID", "").strip()
     S01_BACKGROUND_ENABLED = _s01_demo_flag(
         "TASK4_S01_TEST_BACKGROUND_ENABLED", default=True
     )
@@ -1976,6 +2221,7 @@ def create_s01_test_app() -> FastAPI:
             clock=lambda: int(S01_SESSION_CLOCK()),
             registered_sources=S02_REGISTERED_SOURCES,
             controlled_objects=S02_CONTROLLED_OBJECTS,
+            scenario_id=scenario_value or "app_r53_bad_engine.json",
         )
         S01_TEST_DRIVER = ControlledScenarioTestDriver(S01_SERVICE)
     except Exception:

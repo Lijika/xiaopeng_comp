@@ -9,6 +9,7 @@ const { expect, test: base } = require("@playwright/test");
 const ROOT = path.resolve(__dirname, "..");
 const PYTHON = path.join(ROOT, ".venv", "bin", "python");
 const SCENARIO = "app_r53_bad_engine.json";
+const S04_VIN_SCENARIO = "app_s04_bad_vin.json";
 const DEMO_CREDENTIAL = "s01-registered-demo-test-credential";
 const OPERATOR_CREDENTIAL = "s01-registered-operator-test-credential";
 const ARTIFACT_ROOT = "/tmp/xiaopeng-task4-s01-browser";
@@ -158,6 +159,18 @@ const test = base.extend({
   },
   s01PendingExpiringServer: async ({}, use) => {
     const server = await startExpiringS01Server({ backgroundEnabled: false });
+    try {
+      await use(server);
+    } finally {
+      await stopUvicorn(server);
+    }
+  },
+  s04Server: async ({}, use) => {
+    const server = await startUvicorn({
+      appTarget: "task4_consistency.web.app:create_s01_test_app",
+      appFactory: true,
+      extraEnv: { TASK4_S01_TEST_SCENARIO_ID: S04_VIN_SCENARIO },
+    });
     try {
       await use(server);
     } finally {
@@ -812,4 +825,75 @@ test("a queue network interruption clears rendered sensitive state", async ({
   const bodyText = await page.locator("body").innerText();
   expect(bodyText).not.toContain(receipt);
   expect(bodyText).not.toContain(applicationId);
+});
+
+test("a reviewer corrects a source-backed VIN and sees immutable rerun history", async ({
+  page,
+  s04Server,
+}) => {
+  const browserErrors = [];
+  page.on("pageerror", (error) => browserErrors.push(error.message));
+  await page.setExtraHTTPHeaders({ Authorization: `Bearer ${DEMO_CREDENTIAL}` });
+  const navigation = await page.goto(
+    `${s04Server.baseURL}/controlled/s01?scenario=${encodeURIComponent(S04_VIN_SCENARIO)}`,
+    { waitUntil: "networkidle" },
+  );
+  expect(navigation.status()).toBe(200);
+
+  await page.getByRole("button", { name: "提交受控场景" }).click();
+  await expect(page.getByTestId("process-status")).toHaveText("检查完成");
+  await expect(page.getByTestId("blocker-rule")).toHaveText("R_VIN_CROSS");
+  await expect(page.getByTestId("correction-panel")).toBeVisible();
+  await page.getByRole("button", { name: "认领修正" }).click();
+  await expect(page.getByTestId("correction-status")).toHaveText("已认领");
+  const vinSource = page
+    .getByLabel("来源观测")
+    .locator("option")
+    .filter({ hasText: /发票.*vin.*Page 4/ });
+  await page.getByLabel("来源观测").selectOption(await vinSource.getAttribute("value"));
+  await page.getByRole("button", { name: "查看来源" }).click();
+  await expect(page.getByTestId("revealed-source")).toHaveText("LSVAA4182N5000054");
+  const correctedVin = await page.getByTestId("revealed-source").textContent();
+  await page.getByLabel("修正值").fill(correctedVin);
+  await page.getByRole("button", { name: "提交修正" }).click();
+
+  await expect(page.getByTestId("correction-accepted-route")).toHaveText("pending_check");
+  await expect(page.getByTestId("history-panel")).toBeVisible();
+  await expect(page.getByTestId("current-route")).toHaveText("auto_complete");
+  await expect(page.getByTestId("history-run")).toHaveCount(2);
+  await expect(page.getByTestId("history-run").nth(0)).toContainText("non-current");
+  await expect(page.getByTestId("history-run").nth(0)).toContainText(
+    "EVIDENCE_CORRECTION_ACCEPTED",
+  );
+  await expect(page.getByTestId("history-run").nth(0)).toContainText("snapshot_sha256_");
+  await expect(page.getByTestId("history-run").nth(1)).toContainText("current");
+  await expect(page.getByTestId("history-run").nth(1)).toContainText(
+    "CURRENT_CONTEXT_MATCH",
+  );
+  await expect(page.getByTestId("history-run").nth(1)).toContainText(
+    "s01-target-checker/6",
+  );
+  await expect(page.getByTestId("correction-chain")).toContainText("supersedes");
+  await expect(page.getByTestId("correction-chain")).toContainText(
+    "c-demo-browser-user",
+  );
+  await expect(page.getByTestId("correction-chain")).toContainText("SOURCE_VALUE_MISREAD");
+  await expect(page.getByTestId("current-evidence-revision")).toHaveText("2");
+  await expect(page.getByTestId("revealed-source")).toBeHidden();
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(page.getByTestId("history-panel")).toBeVisible();
+  await expect(page.getByTestId("history-run")).toHaveCount(2);
+  await expect(page.getByTestId("history-run").nth(0)).toContainText(
+    "EVIDENCE_CORRECTION_ACCEPTED",
+  );
+  await expect(page.getByTestId("history-run").nth(1)).toContainText(
+    "CURRENT_CONTEXT_MATCH",
+  );
+
+  const bodyText = await page.locator("body").innerText();
+  expect(bodyText).not.toContain("LSVAA4182N500005Z");
+  expect(bodyText).not.toContain("LSVAA4182N5000054");
+  expect(browserErrors).toEqual([]);
+  await expectNoLayoutFaults(page);
 });

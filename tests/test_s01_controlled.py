@@ -3923,10 +3923,14 @@ def test_fixed_adapter_exposes_minimized_eligible_synthetic_provenance() -> None
         "model_version",
         "source_receipt_id",
     }
+    correction_trace_keys = {"source_page", "source_region"}
     assert all(
-        registered_trace_keys.isdisjoint(link) and "source_object_ref" not in link
+        (registered_trace_keys - correction_trace_keys).isdisjoint(link)
+        and "source_object_ref" not in link
         for link in links
     )
+    assert all(type(link["source_page"]) is int for link in links)
+    assert all(str(link["source_region"]).startswith("region:") for link in links)
     public_surface = json.dumps(workspace, sort_keys=True)
     assert "/documents/" not in public_surface
     assert "c-demo-object:" not in public_surface
