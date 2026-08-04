@@ -1641,15 +1641,7 @@ class ControlledScenarioService:
         spec = run.get("spec")
         if not isinstance(spec, dict):
             raise RuntimeError("projection RunSpec authority is invalid")
-        region_identities: dict[tuple[Any, Any], list[Any]] = {}
-        blockers = [
-            self._finding_projection(finding, region_identities)
-            for finding in self._store.findings
-            if finding.get("application_id") == application_id
-            and finding.get("run_id") == run_id
-            and finding.get("mandatory") is True
-            and finding.get("verdict") != "consistent"
-        ]
+        blockers = self._mandatory_blocker_projections(application_id, str(run_id))
         phase = str(current_event["phase"])
         if phase == "Manual Review":
             route = "manual_review"
@@ -1725,12 +1717,36 @@ class ControlledScenarioService:
         }
 
     def _repair_published_projections(self) -> None:
-        published = {
-            str(event["application_id"]): event
-            for event in self._store.outbox
-            if event.get("kind") == "review_projection_requested"
-            and event.get("status") == "published"
-        }
+        publication_history: dict[str, list[dict[str, Any]]] = {}
+        for event in self._store.outbox:
+            if (
+                event.get("kind") != "review_projection_requested"
+                or event.get("status") != "published"
+            ):
+                continue
+            application_id = str(event["application_id"])
+            application = self._store.applications.get(application_id)
+            if not isinstance(application, dict):
+                raise RuntimeError("projection application authority is unavailable")
+            publication_history.setdefault(application_id, []).append(event)
+        published: dict[str, dict[str, Any]] = {}
+        for application_id, events in publication_history.items():
+            application = self._store.applications[application_id]
+            if application.get("phase") not in {
+                "Manual Review",
+                "Verification Completed",
+            }:
+                continue
+            current = [
+                event
+                for event in events
+                if event.get("run_id") == application.get("current_run_id")
+            ]
+            if not current and application.get("projection_pending") is True:
+                continue
+            if len(current) != 1:
+                raise RuntimeError("projection current run binding is invalid")
+            published[application_id] = current[0]
         repaired = False
         orphaned = set(self._store.projections).difference(published)
         for application_id in sorted(orphaned):
@@ -1964,19 +1980,36 @@ class ControlledScenarioService:
             and run.get("run_id") == work_item["run_id"]
             and run.get("status") == "complete"
         ]
-        projection = self._store.projections.get(application_id)
-        if app is None or len(runs) != 1 or not isinstance(projection, dict):
+        if app is None or len(runs) != 1:
             raise RuntimeError("review work-item current context is unavailable")
-        projection_watermark = projection.get("projection_watermark")
         explicitly_invalidated = any(
             record.get("record_type") == "work_item_invalidated"
             and record.get("work_item_id") == work_item["work_item_id"]
             for record in self._store.review_records
         )
+        projection = self._store.projections.get(application_id)
+        if isinstance(projection, dict):
+            projection_watermark = projection.get("projection_watermark")
+            if (
+                projection.get("current_run_id") != work_item["run_id"]
+                and not explicitly_invalidated
+            ):
+                raise RuntimeError("review work-item projection context is invalid")
+        elif explicitly_invalidated:
+            publications = [
+                event
+                for event in self._store.outbox
+                if event.get("kind") == "review_projection_requested"
+                and event.get("status") == "published"
+                and event.get("application_id") == application_id
+                and event.get("run_id") == work_item["run_id"]
+            ]
+            if len(publications) != 1:
+                raise RuntimeError("review work-item projection context is invalid")
+            projection_watermark = publications[0].get("projection_watermark")
+        else:
+            raise RuntimeError("review work-item current context is unavailable")
         if (
-            projection.get("current_run_id") != work_item["run_id"]
-            and not explicitly_invalidated
-        ) or (
             not isinstance(projection_watermark, int)
             or isinstance(projection_watermark, bool)
             or projection_watermark < 1
@@ -3606,7 +3639,6 @@ class ControlledScenarioService:
                     len(findings) != 1
                     or normalized["finding_id"] not in work_item["finding_ids"]
                     or findings[0].get("mandatory") is not True
-                    or findings[0].get("severity") != "critical"
                     or findings[0].get("verdict") == "consistent"
                 ):
                     raise ValueError("field correction finding is not correctable")
@@ -3624,7 +3656,13 @@ class ControlledScenarioService:
                     for key in ("document_id", "document_role", "field")
                 ):
                     raise ValueError("field correction semantic binding does not match")
-                projected = self._finding_projection(finding, {})
+                projected = next(
+                    item
+                    for item in self._mandatory_blocker_projections(
+                        application_id, work_item["run_id"]
+                    )
+                    if item["finding_id"] == normalized["finding_id"]
+                )
                 public_links = [
                     item
                     for item in projected["evidence_links"]
@@ -3672,12 +3710,22 @@ class ControlledScenarioService:
                 ]
                 if len(graph_documents) != 1 or len(selected_documents) != 1:
                     raise ValueError("field correction document is unavailable")
+                graph_observations = [
+                    observation
+                    for observation in graph_documents[0].get("observations", [])
+                    if isinstance(observation, dict)
+                    and observation.get("observation_id")
+                    == normalized["observation_id"]
+                ]
                 fields = selected_documents[0].get("fields")
-                old_observation = (
-                    fields.get(normalized["field"])
-                    if isinstance(fields, dict)
-                    else None
-                )
+                if len(graph_observations) == 1:
+                    old_observation = graph_observations[0]
+                else:
+                    old_observation = (
+                        fields.get(normalized["field"])
+                        if not graph_observations and isinstance(fields, dict)
+                        else None
+                    )
                 if (
                     not isinstance(old_observation, dict)
                     or old_observation.get("observation_id")
@@ -7734,7 +7782,15 @@ class ControlledScenarioService:
     ) -> dict[str, Any]:
         links: list[dict[str, Any]] = []
         for document in run_spec["evidence_snapshot"]["evidence"]:
-            for observation in document.get("observations", []):
+            observations = document.get("observations", [])
+            superseded = {
+                observation.get("supersedes_observation_id")
+                for observation in observations
+                if observation.get("supersedes_observation_id") is not None
+            }
+            for observation in observations:
+                if observation["observation_id"] in superseded:
+                    continue
                 links.append(
                     {
                         "document_id": document["document_id"],
@@ -7843,6 +7899,41 @@ class ControlledScenarioService:
             "mandatory": finding["mandatory"],
             "evidence_links": links,
         }
+
+    def _mandatory_blocker_projections(
+        self, application_id: str, run_id: str
+    ) -> list[dict[str, Any]]:
+        findings = [
+            finding
+            for finding in self._store.findings
+            if finding.get("application_id") == application_id
+            and finding.get("run_id") == run_id
+            and finding.get("mandatory") is True
+            and finding.get("verdict") != "consistent"
+        ]
+        region_identities: dict[tuple[Any, Any], list[Any]] = {}
+        for finding in findings:
+            for link in finding["evidence_links"]:
+                raw_region = link.get("source_region")
+                if raw_region is None:
+                    continue
+                scope = (link.get("source_sha256"), link.get("source_page"))
+                regions = region_identities.setdefault(scope, [])
+                if raw_region not in regions:
+                    regions.append(raw_region)
+        for regions in region_identities.values():
+            regions.sort(
+                key=lambda region: json.dumps(
+                    region,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+        return [
+            self._finding_projection(finding, region_identities)
+            for finding in findings
+        ]
 
     @staticmethod
     def _admission_from_payload(payload: Any) -> AdmissionResult:

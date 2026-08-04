@@ -18,7 +18,7 @@ from task4_consistency.controlled.s01 import (
 from task4_consistency.controlled.s02 import ControlledObject
 from task4_consistency.rules.engine import RuleEngine
 from task4_consistency.rules.loader import load_rules
-from tests.test_s03_controlled import ready_review_work_item
+from tests.test_s03_controlled import ready_review_work_item, review_batch_items
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -154,6 +154,406 @@ def test_source_backed_correction_appends_successor_and_invalidates_old_context(
     assert accepted["observation_id"] != correction["observation_id"]
     assert invalidated["status"] == "invalidated"
     assert invalidated["run_authority"]["run_id"] == accepted["invalidated_run_id"]
+
+
+def test_correction_window_queries_hide_invalidated_work_after_checker_failure(
+    tmp_path: Path,
+) -> None:
+    service, application_id, work_item_id, claimed, correction = (
+        _ready_engine_correction(tmp_path)
+    )
+    before = service.review_work_item_view(
+        principal=REVIEWER,
+        work_item_id=work_item_id,
+        now=100,
+    )
+    accepted = service.correct_field_observation(
+        principal=REVIEWER,
+        application_id=application_id,
+        work_item_id=work_item_id,
+        expected_fence=claimed["claim_fence"],
+        expected_context=before["command_context"],
+        idempotency_key="s04-queryable-correction-window",
+        correction=correction,
+        now=101,
+    )
+
+    def assert_pending_non_actionable(current: ControlledScenarioService) -> None:
+        assert current.queue_view(
+            role="reviewer",
+            scope=REVIEWER.scope,
+            subject=REVIEWER.subject,
+            now=102,
+        ) == {"items": [], "projection_watermark": 0}
+        with pytest.raises(QueryNotFound):
+            current.workspace_view(
+                application_id,
+                role="reviewer",
+                scope=REVIEWER.scope,
+                subject=REVIEWER.subject,
+                now=102,
+            )
+        route = current.current_route_view(
+            principal=REVIEWER,
+            application_id=application_id,
+        )
+        assert route["phase"] in {"Assembly", "Checking"}
+        assert route["route"] == "pending_check"
+        assert route["current_run_id"] is None
+        assert current.review_work_item_view(
+            principal=REVIEWER,
+            work_item_id=work_item_id,
+            now=102,
+        )["status"] == "invalidated"
+
+    assert accepted["status"] == "accepted"
+    assert_pending_non_actionable(service)
+
+    def broken_checker(application: object) -> object:
+        raise RuntimeError("successor checker is unavailable")
+
+    failed_worker = ControlledScenarioService(
+        fixture_root=ROOT / "fixtures" / "applications",
+        rules_path=ROOT / "configs" / "rules_auto_lease.yaml",
+        state_path=tmp_path / "target.sqlite3",
+        checker_runner=broken_checker,
+        clock=lambda: 102,
+    )
+    failed = failed_worker.process_next_job()
+
+    assert failed.status == "failed"
+    assert_pending_non_actionable(failed_worker)
+
+
+def test_multi_blocker_region_identity_matches_the_workspace_correction_gate(
+    tmp_path: Path,
+) -> None:
+    fixture_root = tmp_path / "fixtures"
+    fixture_root.mkdir()
+    scenario = json.loads(
+        (ROOT / "fixtures" / "applications" / "app_s04_bad_vin.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    invoice = next(
+        document for document in scenario["documents"] if document["doc_id"] == "inv"
+    )
+    invoice["fields"]["engine_no"] = {
+        "raw": "S2ENG54X",
+        "source_text": "S2ENG54A",
+        "confidence": 0.99,
+    }
+    scenario["expected_verdicts"]["R_ENGINE_CROSS"] = "inconsistent"
+    (fixture_root / "app_s04_bad_vin.json").write_text(
+        json.dumps(scenario, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    service = ControlledScenarioService(
+        fixture_root=fixture_root,
+        rules_path=ROOT / "configs" / "rules_auto_lease.yaml",
+        state_path=tmp_path / "target.sqlite3",
+        scenario_id="app_s04_bad_vin.json",
+    )
+    admitted = service.submit_demo(
+        scenario_id="app_s04_bad_vin.json",
+        idempotency_key="s04-multi-blocker-intake",
+        principal=INTEGRATOR,
+    )
+    completed = service.process_next_job()
+    service.refresh_projection()
+    queue = service.queue_view(
+        role="reviewer",
+        scope=REVIEWER.scope,
+        subject=REVIEWER.subject,
+        now=100,
+    )
+    work_item_id = queue["items"][0]["work_item_id"]
+    work_item = service.review_work_item_view(
+        principal=REVIEWER,
+        work_item_id=work_item_id,
+        now=100,
+    )
+    claimed = service.claim_review_work_item(
+        principal=REVIEWER,
+        work_item_id=work_item_id,
+        expected_context=work_item["command_context"],
+        now=100,
+    )
+    workspace = service.workspace_view(
+        admitted.application_id or "",
+        role="reviewer",
+        scope=REVIEWER.scope,
+        subject=REVIEWER.subject,
+        now=100,
+    )
+    vin = next(
+        finding
+        for finding in workspace["mandatory_blockers"]
+        if finding["rule_id"] == "R_VIN_CROSS"
+    )
+    engine = next(
+        finding
+        for finding in workspace["mandatory_blockers"]
+        if finding["rule_id"] == "R_ENGINE_CROSS"
+    )
+    vin_source = next(
+        link for link in vin["evidence_links"] if link["document_id"] == "inv"
+    )
+    engine_source = next(
+        link for link in engine["evidence_links"] if link["document_id"] == "inv"
+    )
+
+    assert completed.status == "complete"
+    assert len(workspace["mandatory_blockers"]) == 2
+    assert engine_source["source_sha256"] == vin_source["source_sha256"]
+    assert engine_source["source_page"] == vin_source["source_page"]
+    assert engine_source["source_region"] != vin_source["source_region"]
+
+    corrected = service.correct_field_observation(
+        principal=REVIEWER,
+        application_id=admitted.application_id or "",
+        work_item_id=work_item_id,
+        expected_fence=claimed["claim_fence"],
+        expected_context=work_item["command_context"],
+        idempotency_key="s04-multi-blocker-correction",
+        correction={
+            "schema_version": "field-observation-correction/1",
+            "finding_id": engine["finding_id"],
+            "observation_id": engine_source["observation_id"],
+            "document_id": engine_source["document_id"],
+            "document_role": engine_source["document_role"],
+            "field": engine_source["field"],
+            "raw": "S2ENG54A",
+            "source_location": {
+                "source_sha256": engine_source["source_sha256"],
+                "source_page": engine_source["source_page"],
+                "source_region": engine_source["source_region"],
+            },
+            "reason_code": "SOURCE_VALUE_MISREAD",
+        },
+        now=101,
+    )
+
+    assert corrected["status"] == "accepted"
+
+
+def test_late_single_and_batch_review_submits_have_zero_effect_after_correction(
+    tmp_path: Path,
+) -> None:
+    service, application_id, work_item_id, claimed, correction = (
+        _ready_engine_correction(tmp_path)
+    )
+    before = service.review_work_item_view(
+        principal=REVIEWER,
+        work_item_id=work_item_id,
+        now=100,
+    )
+    verification = {
+        "schema_version": "human-decision/1",
+        "outcome": "confirmed",
+        "reason_code": "HUMAN_REVIEW_COMPLETED",
+        "finding_decisions": [
+            {
+                "finding_id": finding["finding_id"],
+                "outcome": (
+                    "confirmed"
+                    if finding["verdict"] == "uncertain"
+                    else "inconclusive"
+                ),
+            }
+            for finding in before["automatic_findings"]
+        ],
+    }
+    batch_plan = service.preview_review_work_item_batch(
+        principal=REVIEWER,
+        items=review_batch_items(
+            before,
+            expected_fence=claimed["claim_fence"],
+        ),
+        now=100,
+    )
+    accepted = service.correct_field_observation(
+        principal=REVIEWER,
+        application_id=application_id,
+        work_item_id=work_item_id,
+        expected_fence=claimed["claim_fence"],
+        expected_context=before["command_context"],
+        idempotency_key="s04-invalidate-late-review",
+        correction=correction,
+        now=101,
+    )
+    auditor = S01CommandPrincipal(
+        subject="s04-auditor",
+        role="auditor",
+        scope=REVIEWER.scope,
+        source_id="s04-audit-console",
+    )
+
+    def public_state() -> dict[str, object]:
+        return {
+            "history": service.application_history_view(
+                principal=REVIEWER,
+                application_id=application_id,
+            ),
+            "route": service.current_route_view(
+                principal=REVIEWER,
+                application_id=application_id,
+            ),
+            "work_item": service.review_work_item_view(
+                principal=REVIEWER,
+                work_item_id=work_item_id,
+                now=102,
+            ),
+            "audit": service.audit_timeline(
+                principal=auditor,
+                application_id=application_id,
+            ),
+        }
+
+    state_after_correction = public_state()
+    late_single = service.submit_review_work_item(
+        principal=REVIEWER,
+        work_item_id=work_item_id,
+        expected_fence=claimed["claim_fence"],
+        expected_context=before["command_context"],
+        idempotency_key="s04-late-single-submit",
+        verification=verification,
+        now=102,
+    )
+    late_batch = service.submit_review_work_item_batch(
+        principal=REVIEWER,
+        idempotency_key="s04-late-batch-submit",
+        plan=batch_plan,
+        now=102,
+    )
+
+    assert accepted["status"] == "accepted"
+    assert late_single == {
+        "status": "stale",
+        "replayed": False,
+        "application_id": application_id,
+        "work_item_id": work_item_id,
+        "reason_code": "STALE_REVIEW_CONTEXT",
+    }
+    assert late_batch == {
+        "status": "stale",
+        "replayed": False,
+        "application_id": application_id,
+        "work_item_id": work_item_id,
+        "reason_code": "STALE_REVIEW_CONTEXT",
+    }
+    assert public_state() == state_after_correction
+
+
+def test_inconsistent_successor_creates_fresh_work_for_a_second_correction(
+    tmp_path: Path,
+) -> None:
+    service, application_id, old_work_item_id, claimed, correction = (
+        _ready_engine_correction(tmp_path)
+    )
+    old_work_item = service.review_work_item_view(
+        principal=REVIEWER,
+        work_item_id=old_work_item_id,
+        now=100,
+    )
+    first = service.correct_field_observation(
+        principal=REVIEWER,
+        application_id=application_id,
+        work_item_id=old_work_item_id,
+        expected_fence=claimed["claim_fence"],
+        expected_context=old_work_item["command_context"],
+        idempotency_key="s04-still-inconsistent",
+        correction={**correction, "raw": "S2ENG54Z"},
+        now=101,
+    )
+    first_successor = service.process_next_job()
+    service.refresh_projection()
+    queue = service.queue_view(
+        role="reviewer",
+        scope=REVIEWER.scope,
+        subject=REVIEWER.subject,
+        now=103,
+    )
+    fresh_item = queue["items"][0]
+    fresh_work_item_id = fresh_item["work_item_id"]
+    fresh_work_item = service.review_work_item_view(
+        principal=REVIEWER,
+        work_item_id=fresh_work_item_id,
+        now=103,
+    )
+    fresh_claim = service.claim_review_work_item(
+        principal=REVIEWER,
+        work_item_id=fresh_work_item_id,
+        expected_context=fresh_work_item["command_context"],
+        now=103,
+    )
+    fresh_workspace = service.workspace_view(
+        application_id,
+        role="reviewer",
+        scope=REVIEWER.scope,
+        subject=REVIEWER.subject,
+        now=103,
+    )
+    fresh_finding = next(
+        finding
+        for finding in fresh_workspace["mandatory_blockers"]
+        if finding["rule_id"] == "R_ENGINE_CROSS"
+    )
+    fresh_source = next(
+        link
+        for link in fresh_finding["evidence_links"]
+        if link["document_id"] == "inv"
+    )
+    second = service.correct_field_observation(
+        principal=REVIEWER,
+        application_id=application_id,
+        work_item_id=fresh_work_item_id,
+        expected_fence=fresh_claim["claim_fence"],
+        expected_context=fresh_work_item["command_context"],
+        idempotency_key="s04-second-correction",
+        correction={
+            "schema_version": "field-observation-correction/1",
+            "finding_id": fresh_finding["finding_id"],
+            "observation_id": fresh_source["observation_id"],
+            "document_id": fresh_source["document_id"],
+            "document_role": fresh_source["document_role"],
+            "field": fresh_source["field"],
+            "raw": "S2ENG54A",
+            "source_location": {
+                "source_sha256": fresh_source["source_sha256"],
+                "source_page": fresh_source["source_page"],
+                "source_region": fresh_source["source_region"],
+            },
+            "reason_code": "SOURCE_VALUE_MISREAD",
+        },
+        now=104,
+    )
+    final = service.process_next_job()
+    history = service.application_history_view(
+        principal=REVIEWER,
+        application_id=application_id,
+    )
+    current = service.current_route_view(
+        principal=REVIEWER,
+        application_id=application_id,
+    )
+
+    assert first["status"] == "accepted"
+    assert first_successor.status == "complete"
+    assert fresh_item["route"] == "manual_review"
+    assert fresh_work_item_id != old_work_item_id
+    assert fresh_work_item["run_authority"]["run_id"] == first_successor.run_id
+    assert fresh_source["observation_id"] == first["observation_id"]
+    assert second["status"] == "accepted"
+    assert second["observation_id"] != first["observation_id"]
+    assert final.status == "complete"
+    assert current["route"] == "auto_complete"
+    assert current["current_run_id"] == final.run_id
+    assert len(history["corrections"]) == 2
+    assert history["corrections"][1]["superseded_observation_id"] == first[
+        "observation_id"
+    ]
+    assert sum(run["current"] for run in history["runs"]) == 1
 
 
 def test_safe_rerun_keeps_old_run_non_current_and_publishes_successor_route(

@@ -169,7 +169,10 @@ const test = base.extend({
     const server = await startUvicorn({
       appTarget: "task4_consistency.web.app:create_s01_test_app",
       appFactory: true,
-      extraEnv: { TASK4_S01_TEST_SCENARIO_ID: S04_VIN_SCENARIO },
+      extraEnv: {
+        TASK4_S01_TEST_BACKGROUND_ENABLED: "0",
+        TASK4_S01_TEST_SCENARIO_ID: S04_VIN_SCENARIO,
+      },
     });
     try {
       await use(server);
@@ -841,6 +844,16 @@ test("a reviewer corrects a source-backed VIN and sees immutable rerun history",
   expect(navigation.status()).toBe(200);
 
   await page.getByRole("button", { name: "提交受控场景" }).click();
+  const initialRun = await page.request.post(
+    `${s04Server.baseURL}/controlled/s01/api/_test/commands/process`,
+    { data: { worker_id: "s04-browser-initial", now: 0 } },
+  );
+  expect(initialRun.ok()).toBeTruthy();
+  expect((await initialRun.json()).status).toBe("complete");
+  const initialProjection = await page.request.post(
+    `${s04Server.baseURL}/controlled/s01/api/_test/commands/project`,
+  );
+  expect(initialProjection.ok()).toBeTruthy();
   await expect(page.getByTestId("process-status")).toHaveText("检查完成");
   await expect(page.getByTestId("blocker-rule")).toHaveText("R_VIN_CROSS");
   await expect(page.getByTestId("correction-panel")).toBeVisible();
@@ -855,10 +868,57 @@ test("a reviewer corrects a source-backed VIN and sees immutable rerun history",
   await expect(page.getByTestId("revealed-source")).toHaveText("LSVAA4182N5000054");
   const correctedVin = await page.getByTestId("revealed-source").textContent();
   await page.getByLabel("修正值").fill(correctedVin);
+  const correctionWindowResponses = [];
+  page.on("response", (response) => {
+    const url = new URL(response.url());
+    if (
+      response.request().method() === "GET" &&
+      (url.pathname === "/controlled/s01/api/queries/queue" ||
+        url.pathname.endsWith("/workspace"))
+    ) {
+      correctionWindowResponses.push(response);
+    }
+  });
   await page.getByRole("button", { name: "提交修正" }).click();
 
   await expect(page.getByTestId("correction-accepted-route")).toHaveText("pending_check");
   await expect(page.getByTestId("history-panel")).toBeVisible();
+  await expect(page.getByTestId("current-route")).toHaveText("pending_check");
+  await expect
+    .poll(
+      () =>
+        correctionWindowResponses.filter(
+          (response) => new URL(response.url()).pathname === "/controlled/s01/api/queries/queue",
+        ).length,
+    )
+    .toBeGreaterThan(0);
+  await expect
+    .poll(
+      () =>
+        correctionWindowResponses.filter((response) =>
+          new URL(response.url()).pathname.endsWith("/workspace"),
+        ).length,
+    )
+    .toBeGreaterThan(0);
+  const correctionQueue = correctionWindowResponses.find(
+    (response) => new URL(response.url()).pathname === "/controlled/s01/api/queries/queue",
+  );
+  const correctionWorkspace = correctionWindowResponses.find((response) =>
+    new URL(response.url()).pathname.endsWith("/workspace"),
+  );
+  expect((await correctionQueue.json()).items).toEqual([]);
+  expect(correctionWorkspace.status()).toBe(404);
+
+  const successorRun = await page.request.post(
+    `${s04Server.baseURL}/controlled/s01/api/_test/commands/process`,
+    { data: { worker_id: "s04-browser-successor", now: 1 } },
+  );
+  expect(successorRun.ok()).toBeTruthy();
+  expect((await successorRun.json()).status).toBe("complete");
+  const successorProjection = await page.request.post(
+    `${s04Server.baseURL}/controlled/s01/api/_test/commands/project`,
+  );
+  expect(successorProjection.ok()).toBeTruthy();
   await expect(page.getByTestId("current-route")).toHaveText("auto_complete");
   await expect(page.getByTestId("history-run")).toHaveCount(2);
   await expect(page.getByTestId("history-run").nth(0)).toContainText("non-current");

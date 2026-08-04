@@ -7,11 +7,14 @@ from pathlib import Path
 import time
 
 from tests.test_s01_http import (
+    UvicornLoopback,
     headers,
     s01_test_loopback,
     submit,
     wait_for_projected_queue_item,
 )
+from tests.test_s02_http import _configured_http_source, _open_session
+from tests.test_s03_http import _ready_review
 
 
 def test_correction_rerun_history_and_current_route_over_http(tmp_path: Path) -> None:
@@ -154,3 +157,143 @@ def test_correction_rerun_history_and_current_route_over_http(tmp_path: Path) ->
     )
     assert "S2ENG54Z" not in public
     assert "S2ENG54A" not in public
+
+
+def test_registered_source_correction_reruns_to_fresh_review_work_over_http(
+    tmp_path: Path,
+) -> None:
+    environment, submission = _configured_http_source(tmp_path)
+    with UvicornLoopback(
+        environment,
+        app_target="task4_consistency.web.app:create_s02_test_app",
+        app_factory=True,
+    ) as server:
+        cookie = _open_session(server)
+        request_headers = {"Cookie": cookie}
+        application_id, queue_item = _ready_review(server, submission, cookie)
+        work_item_id = queue_item["work_item_id"]
+        work_item = server.request(
+            "GET",
+            f"/controlled/s02/api/queries/review-work-items/{work_item_id}",
+            headers=request_headers,
+            use_session=False,
+        ).json()
+        claimed = server.request(
+            "POST",
+            f"/controlled/s02/api/commands/review-work-items/{work_item_id}/claim",
+            body={"expected_context": work_item["command_context"]},
+            headers=request_headers,
+            use_session=False,
+        ).json()
+        workspace = server.request(
+            "GET",
+            f"/controlled/s02/api/queries/applications/{application_id}/workspace",
+            headers=request_headers,
+            use_session=False,
+        ).json()
+        finding = workspace["selected_finding"]
+        source = finding["evidence_links"][0]
+
+        corrected = server.request(
+            "POST",
+            f"/controlled/s02/api/commands/review-work-items/{work_item_id}/correct-field-observation",
+            body={
+                "application_id": application_id,
+                "expected_fence": claimed["claim_fence"],
+                "expected_context": work_item["command_context"],
+                "idempotency_key": "s04-http-registered-correction",
+                "correction": {
+                    "schema_version": "field-observation-correction/1",
+                    "finding_id": finding["finding_id"],
+                    "observation_id": source["observation_id"],
+                    "document_id": source["document_id"],
+                    "document_role": source["document_role"],
+                    "field": source["field"],
+                    "raw": "SAFE-VIN-B",
+                    "source_location": {
+                        key: source[key]
+                        for key in (
+                            "source_sha256",
+                            "source_page",
+                            "source_region",
+                        )
+                    },
+                    "reason_code": "SOURCE_VALUE_MISREAD",
+                },
+            },
+            headers=request_headers,
+            use_session=False,
+        )
+        assert corrected.status == 200, corrected.text
+        old_context = server.request(
+            "GET",
+            f"/controlled/s02/api/queries/review-work-items/{work_item_id}",
+            headers=request_headers,
+            use_session=False,
+        )
+
+        deadline = time.monotonic() + 8
+        while True:
+            history = server.request(
+                "GET",
+                f"/controlled/s02/api/queries/applications/{application_id}/history",
+                headers=request_headers,
+                use_session=False,
+            )
+            current = server.request(
+                "GET",
+                f"/controlled/s02/api/queries/applications/{application_id}/current-route",
+                headers=request_headers,
+                use_session=False,
+            )
+            queue = server.request(
+                "GET",
+                "/controlled/s02/api/queries/queue",
+                headers=request_headers,
+                use_session=False,
+            )
+            fresh_item = next(
+                (
+                    item
+                    for item in queue.json()["items"]
+                    if item["application_id"] == application_id
+                    and item["work_item_id"] != work_item_id
+                ),
+                None,
+            )
+            if len(history.json()["runs"]) == 2 and fresh_item is not None:
+                break
+            if time.monotonic() >= deadline:
+                raise AssertionError((history.text, current.text, queue.text))
+            time.sleep(0.05)
+        fresh_workspace = server.request(
+            "GET",
+            f"/controlled/s02/api/queries/applications/{application_id}/workspace",
+            headers=request_headers,
+            use_session=False,
+        )
+
+    assert corrected.json()["status"] == "accepted"
+    assert corrected.json()["route"] == "pending_check"
+    assert old_context.json()["status"] == "invalidated"
+    assert [run["current"] for run in history.json()["runs"]] == [False, True]
+    assert current.json()["route"] == "manual_review"
+    assert current.json()["current_run_id"] == history.json()["runs"][1]["run_id"]
+    assert fresh_item["route"] == "manual_review"
+    assert [
+        link["observation_id"]
+        for link in fresh_workspace.json()["selected_finding"]["evidence_links"]
+    ] == [corrected.json()["observation_id"]]
+    public = json.dumps(
+        [
+            corrected.json(),
+            old_context.json(),
+            history.json(),
+            current.json(),
+            queue.json(),
+            fresh_workspace.json(),
+        ],
+        ensure_ascii=False,
+    )
+    assert "SAFE-VIN-A" not in public
+    assert "SAFE-VIN-B" not in public

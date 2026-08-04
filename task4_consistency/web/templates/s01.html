@@ -890,19 +890,24 @@
 
         async function request(path, options = {}) {
           if (!path.startsWith(`${API_ROOT}/`)) throw new Error("controlled route required");
+          const { allowNotFound = false, ...requestOptions } = options;
           const response = await fetch(path, {
-            ...options,
+            ...requestOptions,
             cache: "no-store",
             credentials: "same-origin",
             headers: {
               "Content-Type": "application/json",
-              ...(options.headers || {}),
+              ...(requestOptions.headers || {}),
             },
           });
+          if (allowNotFound && response.status === 404) {
+            return { payload: null, accessEnded: false, notFound: true };
+          }
           if (!response.ok) throw new Error(`request failed (${response.status})`);
           return {
             payload: await response.json(),
             accessEnded: response.headers.get("X-S01-Access-Ended") === "1",
+            notFound: false,
           };
         }
 
@@ -1173,7 +1178,13 @@
             clearRevealedSource();
             byTestId("correction-accepted-route").textContent = payload.route;
             setCorrectionStatus("重跑等待中", "success");
-            await loadHistory();
+            const encodedApplication = encodeURIComponent(state.applicationId);
+            await Promise.all([
+              refreshQueue(),
+              request(`${API_ROOT}/queries/applications/${encodedApplication}/workspace`, {
+                allowNotFound: true,
+              }),
+            ]);
             await waitForSuccessor(payload.evidence_revision);
           } catch (error) {
             setCorrectionStatus("修正未完成", "error");
