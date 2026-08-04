@@ -6,7 +6,7 @@ import hashlib
 import inspect
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +48,14 @@ _TARGET_NORMALIZER_BUILDS = {
     "reg_cert_no": "normalize-reg-cert-no/1",
     "vin": "normalize-vin-ex/1",
 }
+
+_C_DEMO_WAIVER_POLICY_ID = "c-demo-brand-exception/1"
+_C_DEMO_WAIVER_SCOPE = "one_application_cycle_run_finding"
+_C_DEMO_WAIVER_REASON = "DOCUMENTED_BRAND_VARIANCE"
+_C_DEMO_WAIVER_TTL_SECONDS = 900
+_PROTECTED_WAIVER_CHECKS = frozenset(
+    {"R_VIN_CROSS", "R_ENGINE_CROSS", "R_ID_EXACT"}
+)
 
 
 @dataclass(frozen=True)
@@ -129,6 +137,12 @@ class TargetRule:
     transfer_name_policy: str | None
     transfer_old_roles: tuple[str, ...]
     transfer_new_roles: tuple[str, ...]
+    waivable: bool = False
+    waiver_policy_id: str | None = None
+    waiver_policy_digest: str | None = None
+    waiver_reasons: tuple[str, ...] = ()
+    waiver_scope: str | None = None
+    waiver_ttl_seconds: int = 0
 
     @classmethod
     def compile(cls, source: RuleDef, default_require_all: bool | None) -> "TargetRule":
@@ -175,6 +189,8 @@ class TargetRelease:
     rules_digest: str
     knowledge_digest: str
     normalizer_digest: str
+    waiver_policy_id: str
+    waiver_policy_digest: str
     knowledge: tuple[tuple[str, tuple[tuple[str, str], ...]], ...]
     aliases: tuple[tuple[str, tuple[str, ...]], ...]
     field_types: tuple[tuple[str, str], ...]
@@ -228,6 +244,55 @@ class TargetRelease:
             TargetRule.compile(rule, config.default_require_all_docs)
             for rule in config.rules
         )
+        waiver_policy = {
+            "schema_version": "c-demo-waiver-policy/1",
+            "policy_id": _C_DEMO_WAIVER_POLICY_ID,
+            "checks": [
+                {
+                    "rule_id": rule.rule_id,
+                    "waivable": rule.rule_id == "R_BRAND_CROSS",
+                    "allowed_reasons": (
+                        [_C_DEMO_WAIVER_REASON]
+                        if rule.rule_id == "R_BRAND_CROSS"
+                        else []
+                    ),
+                    "scope": (
+                        _C_DEMO_WAIVER_SCOPE
+                        if rule.rule_id == "R_BRAND_CROSS"
+                        else None
+                    ),
+                    "maximum_ttl_seconds": (
+                        _C_DEMO_WAIVER_TTL_SECONDS
+                        if rule.rule_id == "R_BRAND_CROSS"
+                        else 0
+                    ),
+                }
+                for rule in compiled_rules
+            ],
+        }
+        waiver_bytes = json.dumps(
+            waiver_policy,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        waiver_policy_digest = hashlib.sha256(waiver_bytes).hexdigest()
+        compiled_rules = tuple(
+            replace(
+                rule,
+                waivable=entry["waivable"],
+                waiver_policy_id=_C_DEMO_WAIVER_POLICY_ID,
+                waiver_policy_digest=waiver_policy_digest,
+                waiver_reasons=tuple(entry["allowed_reasons"]),
+                waiver_scope=entry["scope"],
+                waiver_ttl_seconds=entry["maximum_ttl_seconds"],
+            )
+            for rule, entry in zip(compiled_rules, waiver_policy["checks"], strict=True)
+        )
+        if any(
+            rule.waivable and rule.rule_id in _PROTECTED_WAIVER_CHECKS
+            for rule in compiled_rules
+        ):
+            raise ValueError("protected-baseline checks cannot be waivable")
         governed_fields = {
             field
             for rule in compiled_rules
@@ -268,11 +333,13 @@ class TargetRelease:
         checker_build = "s01-target-checker/6"
         release_bytes = json.dumps(
             {
-                "schema_version": "s01-target-release/5",
+                "schema_version": "s01-target-release/6",
                 "release_id": f"{config.package or 'rules'}@{config.version}",
                 "rules_digest": digest,
                 "knowledge_digest": knowledge_digest,
                 "normalizer_digest": normalizer_digest,
+                "waiver_policy_id": _C_DEMO_WAIVER_POLICY_ID,
+                "waiver_policy_digest": waiver_policy_digest,
                 "checker_build": checker_build,
             },
             sort_keys=True,
@@ -285,6 +352,8 @@ class TargetRelease:
             rules_digest=digest,
             knowledge_digest=knowledge_digest,
             normalizer_digest=normalizer_digest,
+            waiver_policy_id=_C_DEMO_WAIVER_POLICY_ID,
+            waiver_policy_digest=waiver_policy_digest,
             knowledge=frozen_knowledge,
             aliases=tuple(
                 (canonical, tuple(names))
@@ -314,6 +383,8 @@ class TargetRelease:
             "rules_digest": self.rules_digest,
             "knowledge_digest": self.knowledge_digest,
             "normalizer_digest": self.normalizer_digest,
+            "waiver_policy_id": self.waiver_policy_id,
+            "waiver_policy_digest": self.waiver_policy_digest,
             "limits": limits,
             "applicable_check_ids": tuple(rule.rule_id for rule in self.rules),
             "applicable_check_count": len(self.rules),
@@ -507,6 +578,8 @@ class TargetChecker:
             "rules_digest": manifest["rules_digest"],
             "knowledge_digest": manifest["knowledge_digest"],
             "normalizer_digest": manifest["normalizer_digest"],
+            "waiver_policy_id": manifest["waiver_policy_id"],
+            "waiver_policy_digest": manifest["waiver_policy_digest"],
             "limits": manifest["limits"],
             "applicable_check_count": manifest["applicable_check_count"],
         }

@@ -924,7 +924,7 @@ def test_loopback_cas_fault_propagates_and_recovers(
         assert stale_body["cas_mismatches"] == [cas_fault]
         assert stale_body["release_id"] == "auto_lease@1.9.0"
         assert stale_body["release_digest"] == (
-            "21d6fe9e4bbd3c3cd8625e774cdf8aaafe08852aff85cfc65730da6548ab8aef"
+                "a463ddb219bc90b9c444711c0921f61fb3fb9c7895b1ccb3b86cddf59938e122"
         )
         assert stale_body["checker_build"] == "s01-target-checker/6"
         assert stale_body["fence"] == 1

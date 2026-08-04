@@ -205,7 +205,14 @@ class ControlledScenarioService:
     SEMANTIC_VERSION = "1"
     COMMAND_TYPE = "demo_scenario_submission"
     _ALLOWED_SCENARIOS = frozenset(
-        {"app_r53_bad_engine.json", "app_s04_bad_vin.json"}
+        {
+            "app_r53_bad_engine.json",
+            "app_s04_bad_vin.json",
+            "app_bad_brand.json",
+            "app_bad_model.json",
+            "app_uncertain_ocr_noise.json",
+            "app_inconsistent_vin.json",
+        }
     )
     _ALLOWED_PHASE_SUCCESSORS = {
         "Intake": frozenset({"Assembly"}),
@@ -213,7 +220,17 @@ class ControlledScenarioService:
         "Evidence Ready": frozenset({"Checking"}),
         "Checking": frozenset({"Routing Determination", "Assembly"}),
         "Routing Determination": frozenset({"Manual Review", "Verification Completed"}),
-        "Manual Review": frozenset({"Verification Completed", "Assembly"}),
+        "Manual Review": frozenset(
+            {
+                "Manual Review",
+                "Verification Completed",
+                "Assembly",
+                "Pending Exception Approval",
+            }
+        ),
+        "Pending Exception Approval": frozenset(
+            {"Routing Determination", "Manual Review", "Assembly"}
+        ),
     }
     _CAS_CONTEXT_FIELDS = (
         "cycle",
@@ -234,11 +251,27 @@ class ControlledScenarioService:
     _RESUME_STOP_KEY = "_resume_stop"
     _SESSION_SCOPE_PREFIX = "C-DEMO/session/"
     _REVIEW_CLAIM_TTL_SECONDS = 900
+    _EXCEPTION_CLAIM_TTL_SECONDS = 300
     _REVIEW_REASON_CODES = frozenset(
         {"HUMAN_REVIEW_COMPLETED", "HUMAN_REVIEW_RECONSIDERED"}
     )
     _CORRECTION_REASON_CODES = frozenset(
         {"SOURCE_VALUE_MISREAD", "SOURCE_VALUE_MISSING"}
+    )
+    _EXCEPTION_REQUEST_REASON = "DOCUMENTED_BRAND_VARIANCE"
+    _EXCEPTION_APPROVAL_REASONS = frozenset(
+        {"DOCUMENTED_VARIANCE_ACCEPTED", "DOCUMENTED_VARIANCE_REJECTED"}
+    )
+    _EXCEPTION_INVALIDATION_REASONS = frozenset(
+        {"POLICY_REVOKED", "BUSINESS_EXCEPTION_OPERATIONS_CLOSED"}
+    )
+    _EXCEPTION_OPERATIONS_CLOSED = "BUSINESS_EXCEPTION_OPERATIONS_CLOSED"
+    _EXCEPTION_OPERATIONS_RESUMED = "BUSINESS_EXCEPTION_OPERATIONS_RESUMED"
+    _EXCEPTION_POLICY_ID = "c-demo-brand-exception/1"
+    _EXCEPTION_SCOPE = "one_application_cycle_run_finding"
+    _EXCEPTION_TTL_SECONDS = 900
+    _PROTECTED_EXCEPTION_CHECKS = frozenset(
+        {"R_VIN_CROSS", "R_ENGINE_CROSS", "R_ID_EXACT"}
     )
     _REVIEW_NOTE_MAX_CHARACTERS = 2000
     _REVIEW_NOTE_MAX_BYTES = 4096
@@ -302,14 +335,23 @@ class ControlledScenarioService:
         controlled_objects: tuple[ControlledObject, ...] = (),
         scenario_id: str = "app_r53_bad_engine.json",
         checker_build: str | None = None,
+        exception_approver_subject: str = "c-demo-exception-approver",
     ) -> None:
         if not worker_identity or worker_identity.strip() != worker_identity:
             raise ValueError("worker identity must be a non-empty canonical value")
         if scenario_id not in self._ALLOWED_SCENARIOS:
             raise ValueError("controlled scenario is not allowlisted")
+        if (
+            not isinstance(exception_approver_subject, str)
+            or not exception_approver_subject
+            or exception_approver_subject.strip() != exception_approver_subject
+            or len(exception_approver_subject) > 200
+        ):
+            raise ValueError("exception approver subject must be canonical")
         self.fixture_root = Path(fixture_root).resolve()
         self.rules_path = Path(rules_path).resolve()
         self._scenario_id = scenario_id
+        self._exception_approver_subject = exception_approver_subject
         self.audit_available = audit_available
         self.storage_available = storage_available
         self._audit_writer = audit_writer
@@ -1641,7 +1683,8 @@ class ControlledScenarioService:
         spec = run.get("spec")
         if not isinstance(spec, dict):
             raise RuntimeError("projection RunSpec authority is invalid")
-        blockers = self._mandatory_blocker_projections(application_id, str(run_id))
+        all_blockers = self._mandatory_blocker_projections(application_id, str(run_id))
+        blockers = all_blockers
         phase = str(current_event["phase"])
         if phase == "Manual Review":
             route = "manual_review"
@@ -1650,10 +1693,24 @@ class ControlledScenarioService:
                 for item in self._store.work_items
                 if item.get("application_id") == application_id
                 and item.get("run_id") == run_id
+                and item.get("kind") == "manual_review"
+                and item.get("lifecycle_revision") == int(current_event["revision"])
             ]
             if len(work_items) != 1:
                 raise RuntimeError("projection review work authority is unavailable")
             work_item = work_items[0]
+            blockers_by_id = {
+                finding["finding_id"]: finding for finding in all_blockers
+            }
+            if any(
+                finding_id not in blockers_by_id
+                for finding_id in work_item.get("finding_ids", [])
+            ):
+                raise RuntimeError("projection review findings are invalid")
+            blockers = [
+                blockers_by_id[finding_id]
+                for finding_id in work_item["finding_ids"]
+            ]
             if (
                 work_item.get("owner") != "Lifecycle"
                 or work_item.get("status") != "active"
@@ -1662,14 +1719,14 @@ class ControlledScenarioService:
                 or work_item.get("evidence_revision") != int(spec["evidence_revision"])
                 or work_item.get("evidence_snapshot_id")
                 != spec["evidence_snapshot_id"]
-                or work_item.get("finding_ids")
-                != [finding["finding_id"] for finding in blockers]
+                or not work_item.get("finding_ids")
             ):
                 raise RuntimeError("projection review work authority is invalid")
         elif phase == "Verification Completed":
             route = (
                 "human_complete"
-                if current_event.get("reason_code") == "HUMAN_REVIEW_COMPLETED"
+                if current_event.get("reason_code")
+                in {"HUMAN_REVIEW_COMPLETED", "BUSINESS_EXCEPTION_COMPLETED"}
                 else "auto_complete"
             )
             work_item = None
@@ -1742,6 +1799,14 @@ class ControlledScenarioService:
                 for event in events
                 if event.get("run_id") == application.get("current_run_id")
             ]
+            current_revision = [
+                event
+                for event in current
+                if event.get("lifecycle_revision")
+                == application.get("lifecycle_revision")
+            ]
+            if current_revision:
+                current = current_revision
             if not current and application.get("projection_pending") is True:
                 continue
             if len(current) != 1:
@@ -1902,6 +1967,7 @@ class ControlledScenarioService:
                     "work_item_released",
                     "work_item_completed",
                     "work_item_finding_completed",
+                    "work_item_finding_exception_requested",
                     "work_item_invalidated",
                 }
             ),
@@ -1949,6 +2015,15 @@ class ControlledScenarioService:
                         "claim_expires_at": fact["invalidated_at"],
                     }
                 )
+            elif fact["record_type"] == "work_item_finding_exception_requested":
+                state.update(
+                    {
+                        "status": "exception_requested",
+                        "claim_subject": None,
+                        "claim_expires_at": fact["requested_at"],
+                    }
+                )
+                state["completed_finding_ids"].append(fact["finding_id"])
             else:
                 finding_id = fact.get("finding_id")
                 if (
@@ -3815,14 +3890,33 @@ class ControlledScenarioService:
                         and isinstance(record.get("decision_id"), str)
                     }
                 )
-                invalidated_exception_ids = sorted(
-                    {
-                        record["exception_id"]
-                        for record in staged.review_records
-                        if record.get("application_id") == application_id
-                        and record.get("run_id") == work_item["run_id"]
-                        and isinstance(record.get("exception_id"), str)
+                inactive_exception_ids = {
+                    record["request_id"]
+                    for record in staged.review_records
+                    if record.get("record_type")
+                    in {
+                        "business_exception_expired",
+                        "business_exception_invalidated",
                     }
+                    and isinstance(record.get("request_id"), str)
+                }
+                inactive_exception_ids.update(
+                    record["request_id"]
+                    for record in staged.review_records
+                    if record.get("record_type") == "business_exception_decision"
+                    and record.get("decision") == "rejected"
+                    and isinstance(record.get("request_id"), str)
+                )
+                active_exception_requests = [
+                    record
+                    for record in staged.review_records
+                    if record.get("record_type") == "business_exception_request"
+                    and record.get("application_id") == application_id
+                    and record.get("run_id") == work_item["run_id"]
+                    and record.get("request_id") not in inactive_exception_ids
+                ]
+                invalidated_exception_ids = sorted(
+                    request["request_id"] for request in active_exception_requests
                 )
                 try:
                     self._before_write("correction.evidence")
@@ -3861,9 +3955,69 @@ class ControlledScenarioService:
                             "invalidated_route": old_route,
                             "invalidated_work_item_id": work_item_id,
                             "invalidated_decision_ids": invalidated_decision_ids,
-                            "invalidated_exception_ids": invalidated_exception_ids,
                         }
                     )
+                    if invalidated_exception_ids:
+                        staged.lifecycle_events[-1]["invalidated_exception_ids"] = (
+                            invalidated_exception_ids
+                        )
+                    self._before_write("correction.exception_invalidation")
+                    for exception_request in active_exception_requests:
+                        exception_id = exception_request["request_id"]
+                        staged.review_records.append(
+                            {
+                                "record_id": self._stable_id(
+                                    "exception_invalidation",
+                                    f"{exception_id}:correction:{correction_id}",
+                                ),
+                                "record_type": "business_exception_invalidated",
+                                "schema_version": "business-exception-invalidation/1",
+                                "request_id": exception_id,
+                                "exception_id": exception_id,
+                                "work_item_id": exception_request["work_item_id"],
+                                "application_id": application_id,
+                                "run_id": work_item["run_id"],
+                                "finding_id": exception_request["finding_id"],
+                                "status": "invalidated",
+                                "reason_code": "EVIDENCE_CORRECTION_ACCEPTED",
+                                "correction_id": correction_id,
+                                "invalidated_at": correction_time,
+                                "lifecycle_revision": staged_app[
+                                    "lifecycle_revision"
+                                ],
+                                "evidence_revision": staged_app[
+                                    "evidence_revision"
+                                ],
+                            }
+                        )
+                        exception_sequence = 1 + sum(
+                            record.get("work_item_id")
+                            == exception_request["work_item_id"]
+                            and str(record.get("record_type", "")).startswith(
+                                "exception_work_item_"
+                            )
+                            for record in staged.review_records
+                        )
+                        staged.review_records.append(
+                            {
+                                "record_id": self._stable_id(
+                                    "review_record",
+                                    f"{exception_request['work_item_id']}:correction:"
+                                    f"{exception_sequence}",
+                                ),
+                                "record_type": "exception_work_item_invalidated",
+                                "sequence": exception_sequence,
+                                "work_item_id": exception_request["work_item_id"],
+                                "request_id": exception_id,
+                                "exception_id": exception_id,
+                                "application_id": application_id,
+                                "run_id": work_item["run_id"],
+                                "correction_id": correction_id,
+                                "invalidated_at": correction_time,
+                                "reason_code": "EVIDENCE_CORRECTION_ACCEPTED",
+                                "recorded_at": correction_time,
+                            }
+                        )
                     self._before_write("correction.work_item")
                     staged.review_records.append(
                         {
@@ -3898,8 +4052,41 @@ class ControlledScenarioService:
                         }
                     )
                     self._before_write("correction.audit")
-                    staged.audit_events.append(
-                        {
+                    for exception_request in active_exception_requests:
+                        exception_id = exception_request["request_id"]
+                        staged.audit_events.append(
+                            {
+                                "event_id": self._stable_id(
+                                    "audit",
+                                    f"business_exception_invalidated:"
+                                    f"{exception_id}:{correction_id}",
+                                ),
+                                "action": "business_exception_invalidated",
+                                "subject": principal.subject,
+                                "role": principal.role,
+                                "scope": work_item["visibility_scope"],
+                                "source_id": principal.source_id,
+                                "application_id": application_id,
+                                "run_id": work_item["run_id"],
+                                "finding_id": exception_request["finding_id"],
+                                "request_id": exception_id,
+                                "exception_id": exception_id,
+                                "work_item_id": exception_request["work_item_id"],
+                                "correction_id": correction_id,
+                                "reason_code": "EVIDENCE_CORRECTION_ACCEPTED",
+                                "lifecycle_revision": staged_app[
+                                    "lifecycle_revision"
+                                ],
+                                "evidence_revision": staged_app[
+                                    "evidence_revision"
+                                ],
+                                "result": "accepted",
+                                **self._audit_time_fields(
+                                    staged, now=correction_time
+                                ),
+                            }
+                        )
+                    correction_audit = {
                             "event_id": self._stable_id(
                                 "audit", f"evidence_correction:{correction_id}"
                             ),
@@ -3922,8 +4109,12 @@ class ControlledScenarioService:
                             "evidence_revision": staged_app["evidence_revision"],
                             "result": "accepted",
                             **self._audit_time_fields(staged, now=correction_time),
-                        }
-                    )
+                    }
+                    if invalidated_exception_ids:
+                        correction_audit["invalidated_exception_ids"] = (
+                            invalidated_exception_ids
+                        )
+                    staged.audit_events.append(correction_audit)
                     result = {
                         "status": "accepted",
                         "replayed": False,
@@ -3938,6 +4129,8 @@ class ControlledScenarioService:
                         "lifecycle_revision": staged_app["lifecycle_revision"],
                         "evidence_revision": staged_app["evidence_revision"],
                     }
+                    if invalidated_exception_ids:
+                        result["invalidated_exception_ids"] = invalidated_exception_ids
                     self._before_write("correction.idempotency")
                     staged.idempotency[binding_key] = (
                         command_fingerprint,
@@ -3978,6 +4171,2332 @@ class ControlledScenarioService:
                 self._store = staged
                 return result
             raise RuntimeError("field correction retry exhausted")
+
+    @classmethod
+    def _valid_exception_approver_principal(
+        cls, principal: S01CommandPrincipal, *, now: float
+    ) -> bool:
+        return (
+            isinstance(principal.subject, str)
+            and bool(principal.subject)
+            and principal.subject.strip() == principal.subject
+            and principal.role == "exception_approver"
+            and cls.is_c_demo_scope(principal.scope)
+            and isinstance(principal.source_id, str)
+            and bool(principal.source_id)
+            and principal.source_id.strip() == principal.source_id
+            and (
+                principal.expires_at is None
+                or not isinstance(principal.expires_at, bool)
+                and isinstance(principal.expires_at, (int, float))
+                and float(principal.expires_at) > now
+            )
+        )
+
+    @classmethod
+    def _valid_exception_router_principal(
+        cls, principal: S01CommandPrincipal, *, now: float
+    ) -> bool:
+        return (
+            isinstance(principal.subject, str)
+            and bool(principal.subject)
+            and principal.subject.strip() == principal.subject
+            and principal.role == "operator"
+            and cls.is_c_demo_scope(principal.scope)
+            and isinstance(principal.source_id, str)
+            and bool(principal.source_id)
+            and principal.source_id.strip() == principal.source_id
+            and (
+                principal.expires_at is None
+                or not isinstance(principal.expires_at, bool)
+                and isinstance(principal.expires_at, (int, float))
+                and float(principal.expires_at) > now
+            )
+        )
+
+    @staticmethod
+    def _exception_idempotency_binding_key(
+        principal: S01CommandPrincipal,
+        target_id: str,
+        idempotency_key: str,
+        *,
+        action: str,
+    ) -> str:
+        encoded = json.dumps(
+            {
+                "action": action,
+                "key": idempotency_key,
+                "role": principal.role,
+                "scope": principal.scope,
+                "source_id": principal.source_id,
+                "subject": principal.subject,
+                "target_id": target_id,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return f"s05_idempotency_{hashlib.sha256(encoded).hexdigest()}"
+
+    def _business_exception_request_authority(
+        self, request_id: str
+    ) -> dict[str, Any]:
+        requests = [
+            record
+            for record in self._store.review_records
+            if record.get("record_type") == "business_exception_request"
+            and record.get("request_id") == request_id
+        ]
+        if len(requests) != 1:
+            raise QueryNotFound(request_id)
+        return requests[0]
+
+    def _business_exception_operations_state(
+        self, store: _TargetStore | None = None
+    ) -> dict[str, Any]:
+        owner = self._store if store is None else store
+        facts = sorted(
+            (
+                record
+                for record in owner.review_records
+                if record.get("record_type")
+                == "business_exception_operations_changed"
+            ),
+            key=lambda record: int(record["sequence"]),
+        )
+        if [fact.get("sequence") for fact in facts] != list(
+            range(1, len(facts) + 1)
+        ):
+            raise RuntimeError("business exception operations authority is not contiguous")
+        if not facts:
+            return {
+                "operations": "open",
+                "revision": 0,
+                "reason_code": self._EXCEPTION_OPERATIONS_RESUMED,
+                "changed_at": None,
+            }
+        latest = facts[-1]
+        if (
+            latest.get("operations") not in {"open", "closed"}
+            or latest.get("revision") != latest.get("sequence")
+            or not isinstance(latest.get("changed_at"), (int, float))
+            or isinstance(latest.get("changed_at"), bool)
+        ):
+            raise RuntimeError("business exception operations authority is invalid")
+        return {
+            "operations": latest["operations"],
+            "revision": latest["revision"],
+            "reason_code": latest["reason_code"],
+            "changed_at": latest["changed_at"],
+        }
+
+    def _unresolved_business_exception_ids(
+        self, store: _TargetStore | None = None
+    ) -> list[str]:
+        owner = self._store if store is None else store
+        inactive = {
+            str(record["request_id"])
+            for record in owner.review_records
+            if record.get("record_type")
+            in {
+                "business_exception_expired",
+                "business_exception_invalidated",
+            }
+            and isinstance(record.get("request_id"), str)
+        }
+        inactive.update(
+            str(record["request_id"])
+            for record in owner.review_records
+            if record.get("record_type") == "business_exception_decision"
+            and record.get("decision") == "rejected"
+            and isinstance(record.get("request_id"), str)
+        )
+        return sorted(
+            str(request["request_id"])
+            for request in owner.review_records
+            if request.get("record_type") == "business_exception_request"
+            and request.get("request_id") not in inactive
+            and owner.applications.get(str(request.get("application_id")), {}).get(
+                "phase"
+            )
+            != "Verification Completed"
+        )
+
+    def business_exception_operations_status(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        query_time = int(self._clock() if now is None else now)
+        if not self._valid_exception_router_principal(principal, now=query_time):
+            raise QueryNotFound("business_exception_operations")
+        with self._lock:
+            self._reload_store()
+            state = self._business_exception_operations_state()
+            return {
+                **state,
+                "unresolved_request_count": len(
+                    self._unresolved_business_exception_ids()
+                ),
+            }
+
+    def close_business_exception_operations(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        idempotency_key: str,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        return self._change_business_exception_operations(
+            principal=principal,
+            operations="closed",
+            idempotency_key=idempotency_key,
+            event_time=int(self._clock() if now is None else now),
+        )
+
+    def resume_business_exception_operations(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        idempotency_key: str,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        return self._change_business_exception_operations(
+            principal=principal,
+            operations="open",
+            idempotency_key=idempotency_key,
+            event_time=int(self._clock() if now is None else now),
+        )
+
+    def _change_business_exception_operations(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        operations: str,
+        idempotency_key: str,
+        event_time: int,
+    ) -> dict[str, Any]:
+        if not self._valid_exception_router_principal(principal, now=event_time):
+            raise QueryNotFound("business_exception_operations")
+        if operations not in {"open", "closed"} or not self._valid_idempotency_key(
+            idempotency_key
+        ):
+            raise ValueError("business exception operations command is invalid")
+        reason_code = (
+            self._EXCEPTION_OPERATIONS_CLOSED
+            if operations == "closed"
+            else self._EXCEPTION_OPERATIONS_RESUMED
+        )
+        command_fingerprint = hashlib.sha256(
+            json.dumps(
+                {"operations": operations},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        binding_key = self._exception_idempotency_binding_key(
+            principal,
+            "business_exception_operations",
+            idempotency_key,
+            action=f"{operations}_business_exception_operations",
+        )
+        with self._lock:
+            for attempt in range(2):
+                self._reload_store()
+                previous = self._store.idempotency.get(binding_key)
+                if previous is not None:
+                    if previous[0] == command_fingerprint:
+                        return {**copy.deepcopy(previous[1]), "replayed": True}
+                    return {
+                        "status": "conflict",
+                        "replayed": False,
+                        "reason_code": "IDEMPOTENCY_KEY_CONFLICT",
+                    }
+                current = self._business_exception_operations_state()
+                unresolved = self._unresolved_business_exception_ids()
+                if operations == "open" and unresolved:
+                    return {
+                        "status": "stopped",
+                        "replayed": False,
+                        "operations": "closed",
+                        "revision": current["revision"],
+                        "unresolved_request_count": len(unresolved),
+                        "reason_code": "BUSINESS_EXCEPTION_DRAIN_INCOMPLETE",
+                    }
+                if current["operations"] == operations:
+                    return {
+                        "status": "accepted",
+                        "replayed": False,
+                        "operations": operations,
+                        "revision": current["revision"],
+                        "changed_at": current["changed_at"],
+                        "unresolved_request_count": len(unresolved),
+                        "reason_code": current["reason_code"],
+                        "unchanged": True,
+                    }
+                if not self.audit_available:
+                    return {
+                        "status": "unavailable",
+                        "replayed": False,
+                        "reason_code": "AUDIT_UNAVAILABLE",
+                    }
+                if not self.storage_available:
+                    return {
+                        "status": "unavailable",
+                        "replayed": False,
+                        "reason_code": "STORAGE_UNAVAILABLE",
+                    }
+                staged = copy.deepcopy(self._store)
+                sequence = int(current["revision"]) + 1
+                record_id = self._stable_id(
+                    "exception_operations",
+                    f"{sequence}:{operations}:{event_time}",
+                )
+                try:
+                    self._before_write("exception_operations.record")
+                    staged.review_records.append(
+                        {
+                            "record_id": record_id,
+                            "record_type": "business_exception_operations_changed",
+                            "schema_version": "business-exception-operations/1",
+                            "sequence": sequence,
+                            "revision": sequence,
+                            "operations": operations,
+                            "reason_code": reason_code,
+                            "changed_at": event_time,
+                        }
+                    )
+                    self._before_write("exception_operations.audit")
+                    staged.audit_events.append(
+                        {
+                            "event_id": self._stable_id(
+                                "audit", f"business_exception_operations:{record_id}"
+                            ),
+                            "action": f"business_exception_operations_{operations}",
+                            "subject": principal.subject,
+                            "role": principal.role,
+                            "scope": principal.scope,
+                            "source_id": principal.source_id,
+                            "operations": operations,
+                            "operations_revision": sequence,
+                            "unresolved_request_count": len(unresolved),
+                            "reason_code": reason_code,
+                            "result": "accepted",
+                            **self._audit_time_fields(staged, now=event_time),
+                        }
+                    )
+                    result = {
+                        "status": "accepted",
+                        "replayed": False,
+                        "operations": operations,
+                        "revision": sequence,
+                        "changed_at": event_time,
+                        "unresolved_request_count": len(unresolved),
+                        "reason_code": reason_code,
+                        "unchanged": False,
+                    }
+                    self._before_write("exception_operations.idempotency")
+                    staged.idempotency[binding_key] = (
+                        command_fingerprint,
+                        copy.deepcopy(result),
+                    )
+                    self._before_write("exception_operations.publish")
+                    staged.persist()
+                except _StoreWriteFailure as error:
+                    return {
+                        "status": "unavailable",
+                        "replayed": False,
+                        "reason_code": (
+                            "AUDIT_UNAVAILABLE"
+                            if str(error) == "exception_operations.audit"
+                            else "STORAGE_UNAVAILABLE"
+                        ),
+                    }
+                except StaleStoreRevision:
+                    if attempt == 0:
+                        continue
+                    return {
+                        "status": "unavailable",
+                        "replayed": False,
+                        "reason_code": "STORAGE_UNAVAILABLE",
+                    }
+                self._store = staged
+                return result
+            raise RuntimeError("business exception operations retry exhausted")
+
+    def _exception_work_item_authority(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        work_item_id: str,
+        now: float,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        if not self._valid_exception_approver_principal(principal, now=now):
+            raise QueryNotFound(work_item_id)
+        work_items = [
+            item
+            for item in self._store.work_items
+            if item.get("work_item_id") == work_item_id
+            and item.get("kind") == "exception_approval"
+            and item.get("owner") == "Lifecycle"
+            and (
+                item.get("visibility_scope") == principal.scope
+                or principal.scope == "C-DEMO"
+                and isinstance(item.get("visibility_scope"), str)
+                and item["visibility_scope"].startswith(self._SESSION_SCOPE_PREFIX)
+            )
+            and item.get("assigned_subject") == principal.subject
+        ]
+        if len(work_items) != 1:
+            raise QueryNotFound(work_item_id)
+        work_item = work_items[0]
+        state = {
+            "status": "unclaimed",
+            "claim_subject": None,
+            "claim_fence": 0,
+            "claim_expires_at": 0,
+            "decision_id": None,
+        }
+        facts = sorted(
+            (
+                record
+                for record in self._store.review_records
+                if record.get("work_item_id") == work_item_id
+                and record.get("record_type")
+                in {
+                    "exception_work_item_claimed",
+                    "exception_work_item_completed",
+                    "exception_work_item_invalidated",
+                }
+            ),
+            key=lambda record: int(record["sequence"]),
+        )
+        if [fact.get("sequence") for fact in facts] != list(range(1, len(facts) + 1)):
+            raise RuntimeError("exception work-item authority is not contiguous")
+        for fact in facts:
+            if fact["record_type"] == "exception_work_item_claimed":
+                state.update(
+                    {
+                        "status": "claimed",
+                        "claim_subject": fact["claim_subject"],
+                        "claim_fence": fact["claim_fence"],
+                        "claim_expires_at": fact["claim_expires_at"],
+                    }
+                )
+            elif fact["record_type"] == "exception_work_item_completed":
+                state.update(
+                    {
+                        "status": "completed",
+                        "decision_id": fact["decision_id"],
+                    }
+                )
+            else:
+                state.update(
+                    {
+                        "status": "invalidated",
+                        "claim_subject": None,
+                        "claim_expires_at": fact["invalidated_at"],
+                    }
+                )
+        return work_item, state
+
+    def _exception_policy_rule(
+        self, app: dict[str, Any], run: dict[str, Any], finding: dict[str, Any]
+    ) -> Any | None:
+        try:
+            self._require_admitted_release(app)
+        except _PinnedReleaseUnavailable:
+            return None
+        spec = run.get("spec")
+        baseline = spec.get("baseline_release") if isinstance(spec, dict) else None
+        release = self._release["target_release"]
+        if (
+            not isinstance(spec, dict)
+            or not isinstance(baseline, dict)
+            or spec.get("release_id") != release.release_id
+            or spec.get("release_digest") != release.release_digest
+            or spec.get("checker_build") != release.checker_build
+            or baseline.get("waiver_policy_id") != release.waiver_policy_id
+            or baseline.get("waiver_policy_digest") != release.waiver_policy_digest
+        ):
+            return None
+        rules = [rule for rule in release.rules if rule.rule_id == finding.get("rule_id")]
+        return rules[0] if len(rules) == 1 else None
+
+    def _business_exception_current_context(
+        self, request: dict[str, Any], *, now: float
+    ) -> tuple[
+        dict[str, Any],
+        dict[str, Any],
+        dict[str, Any],
+        str,
+        bool,
+        dict[str, Any],
+    ]:
+        application_id = request["application_id"]
+        app = self._store.applications.get(application_id)
+        self._require_application_state_authority(app)
+        assert app is not None
+        runs = [
+            run
+            for run in self._store.runs
+            if run.get("application_id") == application_id
+            and run.get("run_id") == request["run_id"]
+            and run.get("status") == "complete"
+        ]
+        if len(runs) != 1:
+            raise RuntimeError("business exception run authority is unavailable")
+        run = runs[0]
+        findings = [
+            finding
+            for finding in self._store.findings
+            if finding.get("application_id") == application_id
+            and finding.get("run_id") == request["run_id"]
+            and finding.get("finding_id") == request["finding_id"]
+        ]
+        if len(findings) != 1:
+            raise RuntimeError("business exception finding authority is unavailable")
+        finding = findings[0]
+        decisions = [
+            record
+            for record in self._store.review_records
+            if record.get("record_type") == "business_exception_decision"
+            and record.get("request_id") == request["request_id"]
+        ]
+        invalidations = [
+            record
+            for record in self._store.review_records
+            if record.get("record_type")
+            in {"business_exception_expired", "business_exception_invalidated"}
+            and record.get("request_id") == request["request_id"]
+        ]
+        if len(decisions) > 1:
+            raise RuntimeError("business exception decision authority is not unique")
+        status = "pending"
+        if invalidations:
+            status = str(invalidations[-1]["status"])
+        elif decisions:
+            status = str(decisions[0]["decision"])
+        spec = run["spec"]
+        live_release = self._release["target_release"]
+        exact_context = (
+            app.get("cycle") == request["cycle"]
+            and app.get("current_run_id") == request["run_id"]
+            and app.get("evidence_revision") == request["evidence_revision"]
+            and app.get("current_evidence_snapshot_id")
+            == request["evidence_snapshot_id"]
+            and app.get("current_evidence_snapshot_digest")
+            == request["evidence_snapshot_digest"]
+            and spec.get("release_id") == request["release_id"]
+            and spec.get("release_digest") == request["release_digest"]
+            and spec.get("checker_build") == request["checker_build"]
+            and spec.get("baseline_release", {}).get("waiver_policy_id")
+            == request["waiver_policy_id"]
+            and spec.get("baseline_release", {}).get("waiver_policy_digest")
+            == request["waiver_policy_digest"]
+            and self._release.get("release_id") == request["release_id"]
+            and self._release.get("digest") == request["release_digest"]
+            and self._release.get("checker_build") == request["checker_build"]
+            and live_release.waiver_policy_id == request["waiver_policy_id"]
+            and live_release.waiver_policy_digest
+            == request["waiver_policy_digest"]
+            and finding.get("verdict") == "inconsistent"
+        )
+        current = (
+            exact_context
+            and not invalidations
+            and status != "rejected"
+            and float(now) < float(request["expires_at"])
+            and app.get("phase")
+            in {
+                "Pending Exception Approval",
+                "Routing Determination",
+                "Manual Review",
+                "Verification Completed",
+            }
+        )
+        fixed = {
+            "application_id": application_id,
+            "request_id": request["request_id"],
+            "work_item_id": request["work_item_id"],
+            "cycle": app["cycle"],
+            "lifecycle_revision": app["lifecycle_revision"],
+            "evidence_revision": app["evidence_revision"],
+            "run_id": app["current_run_id"],
+            "evidence_snapshot_id": app["current_evidence_snapshot_id"],
+            "release_id": spec["release_id"],
+            "release_digest": spec["release_digest"],
+            "checker_build": spec["checker_build"],
+            "waiver_policy_id": request["waiver_policy_id"],
+            "waiver_policy_digest": request["waiver_policy_digest"],
+            "phase": app["phase"],
+            "route": app["route"],
+            "projection_watermark": request["projection_watermark"],
+            "status": status,
+        }
+        encoded = json.dumps(
+            fixed, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        command_context = {
+            "cycle": app["cycle"],
+            "lifecycle_revision": app["lifecycle_revision"],
+            "evidence_revision": app["evidence_revision"],
+            "run_id": app["current_run_id"],
+            "projection_watermark": request["projection_watermark"],
+            "current_context": hashlib.sha256(encoded).hexdigest(),
+        }
+        return app, run, finding, status, current, command_context
+
+    def request_business_exception(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        work_item_id: str,
+        finding_id: str,
+        reason_code: str,
+        expected_fence: int,
+        expected_context: dict[str, Any],
+        idempotency_key: str,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        request_time = int(self._clock() if now is None else now)
+        if not self._valid_reviewer_principal(
+            principal, now=request_time
+        ) or not self.is_c_demo_scope(principal.scope):
+            raise QueryNotFound(work_item_id)
+        if (
+            not isinstance(finding_id, str)
+            or not finding_id
+            or len(finding_id) > 200
+            or finding_id.strip() != finding_id
+            or reason_code != self._EXCEPTION_REQUEST_REASON
+            or isinstance(expected_fence, bool)
+            or not isinstance(expected_fence, int)
+            or expected_fence < 1
+            or not self._valid_idempotency_key(idempotency_key)
+        ):
+            raise ValueError("business exception request is invalid")
+        fingerprint_bytes = json.dumps(
+            {
+                "expected_context": expected_context,
+                "expected_fence": expected_fence,
+                "finding_id": finding_id,
+                "reason_code": reason_code,
+                "work_item_id": work_item_id,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        command_fingerprint = hashlib.sha256(fingerprint_bytes).hexdigest()
+        binding_key = self._exception_idempotency_binding_key(
+            principal,
+            work_item_id,
+            idempotency_key,
+            action="request_business_exception",
+        )
+        with self._lock:
+            self._reload_store()
+            work_item, state = self._review_work_item_authority(
+                principal=principal,
+                work_item_id=work_item_id,
+                now=request_time,
+            )
+            previous = self._store.idempotency.get(binding_key)
+            if previous is not None:
+                if previous[0] == command_fingerprint:
+                    return {**copy.deepcopy(previous[1]), "replayed": True}
+                return {
+                    "status": "conflict",
+                    "replayed": False,
+                    "application_id": work_item["application_id"],
+                    "work_item_id": work_item_id,
+                    "reason_code": "IDEMPOTENCY_KEY_CONFLICT",
+                }
+            if self._business_exception_operations_state()["operations"] != "open":
+                return {
+                    "status": "stopped",
+                    "replayed": False,
+                    "application_id": work_item["application_id"],
+                    "work_item_id": work_item_id,
+                    "reason_code": self._EXCEPTION_OPERATIONS_CLOSED,
+                }
+            app, run, actual_context = self._review_current_context(work_item)
+            if not self._review_context_matches(expected_context, actual_context):
+                return {
+                    "status": "stale",
+                    "replayed": False,
+                    "application_id": work_item["application_id"],
+                    "work_item_id": work_item_id,
+                    "reason_code": "STALE_REVIEW_CONTEXT",
+                }
+            if (
+                state["status"] != "claimed"
+                or state["claim_subject"] != principal.subject
+                or state["claim_fence"] != expected_fence
+                or float(state["claim_expires_at"]) <= request_time
+                or app.get("phase") != "Manual Review"
+                or app.get("current_run_id") != work_item["run_id"]
+                or app.get("lifecycle_revision") != work_item["lifecycle_revision"]
+                or app.get("evidence_revision") != work_item["evidence_revision"]
+            ):
+                return {
+                    "status": "stale",
+                    "replayed": False,
+                    "application_id": work_item["application_id"],
+                    "work_item_id": work_item_id,
+                    "reason_code": "STALE_REVIEW_CONTEXT",
+                }
+            findings = [
+                finding
+                for finding in self._store.findings
+                if finding.get("application_id") == work_item["application_id"]
+                and finding.get("run_id") == work_item["run_id"]
+                and finding.get("finding_id") == finding_id
+            ]
+            finding = findings[0] if len(findings) == 1 else None
+            if (
+                finding is None
+                or finding_id not in work_item["finding_ids"]
+                or finding.get("mandatory") is not True
+                or finding.get("verdict") != "inconsistent"
+            ):
+                return {
+                    "status": "rejected",
+                    "replayed": False,
+                    "application_id": work_item["application_id"],
+                    "work_item_id": work_item_id,
+                    "reason_code": "FINDING_NOT_EXCEPTION_ELIGIBLE",
+                }
+            rule = self._exception_policy_rule(app, run, finding)
+            if finding.get("rule_id") in self._PROTECTED_EXCEPTION_CHECKS:
+                return {
+                    "status": "rejected",
+                    "replayed": False,
+                    "application_id": work_item["application_id"],
+                    "work_item_id": work_item_id,
+                    "reason_code": "PROTECTED_CHECK_NOT_WAIVABLE",
+                }
+            if (
+                rule is None
+                or rule.waivable is not True
+                or rule.waiver_policy_id != self._EXCEPTION_POLICY_ID
+                or rule.waiver_policy_digest
+                != run["spec"]["baseline_release"].get("waiver_policy_digest")
+                or rule.waiver_reasons != (self._EXCEPTION_REQUEST_REASON,)
+                or rule.waiver_scope != self._EXCEPTION_SCOPE
+                or rule.waiver_ttl_seconds != self._EXCEPTION_TTL_SECONDS
+            ):
+                return {
+                    "status": "rejected",
+                    "replayed": False,
+                    "application_id": work_item["application_id"],
+                    "work_item_id": work_item_id,
+                    "reason_code": "CHECK_NOT_WAIVABLE_BY_PINNED_RELEASE",
+                }
+            duplicates = [
+                record
+                for record in self._store.review_records
+                if record.get("record_type") == "business_exception_request"
+                and record.get("application_id") == work_item["application_id"]
+                and record.get("cycle") == work_item["cycle"]
+                and record.get("run_id") == work_item["run_id"]
+                and record.get("finding_id") == finding_id
+            ]
+            if duplicates:
+                return {
+                    "status": "conflict",
+                    "replayed": False,
+                    "application_id": work_item["application_id"],
+                    "work_item_id": work_item_id,
+                    "reason_code": "ACTIVE_EXCEPTION_REQUEST_EXISTS",
+                }
+            gate = self._review_write_gate(app=app)
+            if gate is not None:
+                status, failure = gate
+                return {
+                    "status": status,
+                    "replayed": False,
+                    "application_id": work_item["application_id"],
+                    "work_item_id": work_item_id,
+                    "reason_code": failure,
+                }
+            request_id = self._stable_id(
+                "exception_request", f"{binding_key}:{command_fingerprint}"
+            )
+            exception_work_item_id = self._stable_id(
+                "work", f"exception_approval:{request_id}"
+            )
+            expires_at = request_time + rule.waiver_ttl_seconds
+            staged = copy.deepcopy(self._store)
+            staged_app = staged.applications[work_item["application_id"]]
+            source_sequence = 1 + sum(
+                record.get("work_item_id") == work_item_id
+                and str(record.get("record_type", "")).startswith("work_item_")
+                for record in staged.review_records
+            )
+            try:
+                self._before_write("exception_request.lifecycle")
+                staged_app["route"] = "pending_exception_approval"
+                staged_app["projection_visible"] = False
+                staged_app["projection_pending"] = False
+                self._transition_lifecycle(
+                    staged_app,
+                    "Pending Exception Approval",
+                    "BUSINESS_EXCEPTION_REQUESTED",
+                    store=staged,
+                )
+                staged.lifecycle_events[-1].update(
+                    {
+                        "run_id": work_item["run_id"],
+                        "request_id": request_id,
+                        "finding_id": finding_id,
+                    }
+                )
+                spec = run["spec"]
+                request_record = {
+                    "record_id": request_id,
+                    "record_type": "business_exception_request",
+                    "schema_version": "business-exception-request/1",
+                    "request_id": request_id,
+                    "exception_id": request_id,
+                    "work_item_id": exception_work_item_id,
+                    "source_work_item_id": work_item_id,
+                    "application_id": work_item["application_id"],
+                    "visibility_scope": work_item["visibility_scope"],
+                    "cycle": work_item["cycle"],
+                    "run_id": work_item["run_id"],
+                    "finding_id": finding_id,
+                    "rule_id": finding["rule_id"],
+                    "verdict": "inconsistent",
+                    "severity": finding["severity"],
+                    "evidence_revision": work_item["evidence_revision"],
+                    "evidence_snapshot_id": spec["evidence_snapshot_id"],
+                    "evidence_snapshot_digest": spec["evidence_snapshot_digest"],
+                    "release_id": spec["release_id"],
+                    "release_digest": spec["release_digest"],
+                    "checker_build": spec["checker_build"],
+                    "waiver_policy_id": rule.waiver_policy_id,
+                    "waiver_policy_digest": rule.waiver_policy_digest,
+                    "requester_subject": principal.subject,
+                    "requester_role": principal.role,
+                    "requester_source_id": principal.source_id,
+                    "assigned_approver_subject": self._exception_approver_subject,
+                    "reason_code": reason_code,
+                    "scope": rule.waiver_scope,
+                    "requester_claim_fence": expected_fence,
+                    "pre_request_lifecycle_revision": work_item[
+                        "lifecycle_revision"
+                    ],
+                    "post_request_lifecycle_revision": staged_app[
+                        "lifecycle_revision"
+                    ],
+                    "projection_watermark": actual_context[
+                        "projection_watermark"
+                    ],
+                    "fixed_context": copy.deepcopy(actual_context),
+                    "requested_at": request_time,
+                    "expires_at": expires_at,
+                    "idempotency_fingerprint": command_fingerprint,
+                }
+                fixed_bytes = json.dumps(
+                    request_record,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                request_record["context_digest"] = hashlib.sha256(
+                    fixed_bytes
+                ).hexdigest()
+                self._before_write("exception_request.request")
+                staged.review_records.append(request_record)
+                self._before_write("exception_request.review_responsibility")
+                staged.review_records.append(
+                    {
+                        "record_id": self._stable_id(
+                            "review_record",
+                            f"{work_item_id}:exception_requested:{source_sequence}",
+                        ),
+                        "record_type": "work_item_finding_exception_requested",
+                        "sequence": source_sequence,
+                        "work_item_id": work_item_id,
+                        "application_id": work_item["application_id"],
+                        "run_id": work_item["run_id"],
+                        "finding_id": finding_id,
+                        "request_id": request_id,
+                        "exception_id": request_id,
+                        "claim_subject": principal.subject,
+                        "claim_fence": expected_fence,
+                        "requested_at": request_time,
+                        "recorded_at": request_time,
+                    }
+                )
+                self._before_write("exception_request.work_item")
+                staged.work_items.append(
+                    {
+                        "work_item_id": exception_work_item_id,
+                        "owner": "Lifecycle",
+                        "kind": "exception_approval",
+                        "status": "active",
+                        "request_id": request_id,
+                        "application_id": work_item["application_id"],
+                        "cycle": work_item["cycle"],
+                        "run_id": work_item["run_id"],
+                        "finding_ids": [finding_id],
+                        "lifecycle_revision": staged_app["lifecycle_revision"],
+                        "evidence_revision": work_item["evidence_revision"],
+                        "evidence_snapshot_id": spec["evidence_snapshot_id"],
+                        "release_id": spec["release_id"],
+                        "waiver_policy_id": rule.waiver_policy_id,
+                        "visibility_scope": work_item["visibility_scope"],
+                        "assigned_subject": self._exception_approver_subject,
+                    }
+                )
+                self._before_write("exception_request.audit")
+                staged.audit_events.append(
+                    {
+                        "event_id": self._stable_id(
+                            "audit", f"business_exception_requested:{request_id}"
+                        ),
+                        "action": "business_exception_requested",
+                        "subject": principal.subject,
+                        "role": principal.role,
+                        "scope": work_item["visibility_scope"],
+                        "source_id": principal.source_id,
+                        "application_id": work_item["application_id"],
+                        "run_id": work_item["run_id"],
+                        "finding_id": finding_id,
+                        "work_item_id": exception_work_item_id,
+                        "request_id": request_id,
+                        "exception_id": request_id,
+                        "reason_code": reason_code,
+                        "waiver_policy_id": rule.waiver_policy_id,
+                        "waiver_policy_digest": rule.waiver_policy_digest,
+                        "claim_fence": expected_fence,
+                        "expires_at": expires_at,
+                        "lifecycle_revision": staged_app["lifecycle_revision"],
+                        "evidence_revision": staged_app["evidence_revision"],
+                        "result": "accepted",
+                        **self._audit_time_fields(staged, now=request_time),
+                    }
+                )
+                result = {
+                    "status": "accepted",
+                    "replayed": False,
+                    "application_id": work_item["application_id"],
+                    "request_id": request_id,
+                    "work_item_id": exception_work_item_id,
+                    "finding_id": finding_id,
+                    "phase": "Pending Exception Approval",
+                    "route": "pending_exception_approval",
+                    "expires_at": expires_at,
+                    "lifecycle_revision": staged_app["lifecycle_revision"],
+                    "evidence_revision": staged_app["evidence_revision"],
+                }
+                self._before_write("exception_request.idempotency")
+                staged.idempotency[binding_key] = (
+                    command_fingerprint,
+                    copy.deepcopy(result),
+                )
+                self._before_write("exception_request.publish")
+                staged.persist()
+            except StaleStoreRevision:
+                self._reload_store()
+                previous = self._store.idempotency.get(binding_key)
+                if previous is not None and previous[0] == command_fingerprint:
+                    return {**copy.deepcopy(previous[1]), "replayed": True}
+                duplicate_winner = any(
+                    record.get("record_type") == "business_exception_request"
+                    and record.get("application_id") == work_item["application_id"]
+                    and record.get("cycle") == work_item["cycle"]
+                    and record.get("run_id") == work_item["run_id"]
+                    and record.get("finding_id") == finding_id
+                    for record in self._store.review_records
+                )
+                return {
+                    "status": "conflict" if duplicate_winner else "unavailable",
+                    "replayed": False,
+                    "application_id": work_item["application_id"],
+                    "work_item_id": work_item_id,
+                    "reason_code": (
+                        "ACTIVE_EXCEPTION_REQUEST_EXISTS"
+                        if duplicate_winner
+                        else "STORAGE_UNAVAILABLE"
+                    ),
+                }
+            except _StoreWriteFailure as error:
+                return {
+                    "status": "unavailable",
+                    "replayed": False,
+                    "application_id": work_item["application_id"],
+                    "work_item_id": work_item_id,
+                    "reason_code": (
+                        "AUDIT_UNAVAILABLE"
+                        if str(error) == "exception_request.audit"
+                        else "STORAGE_UNAVAILABLE"
+                    ),
+                }
+            self._store = staged
+            return result
+
+    def business_exception_view(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        request_id: str,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        query_time = float(self._clock() if now is None else now)
+        with self._lock:
+            self._reload_store()
+            request = self._business_exception_request_authority(request_id)
+            work_item, work_state = self._exception_work_item_authority(
+                principal=principal,
+                work_item_id=request["work_item_id"],
+                now=query_time,
+            )
+            if work_item.get("request_id") != request_id:
+                raise RuntimeError("exception request work authority does not match")
+            app, _, finding, status, current, command_context = (
+                self._business_exception_current_context(request, now=query_time)
+            )
+            claim_status = work_state["status"]
+            if (
+                claim_status == "claimed"
+                and float(work_state["claim_expires_at"]) <= query_time
+            ):
+                claim_status = "expired"
+            operations_open = (
+                self._business_exception_operations_state()["operations"] == "open"
+            )
+            actions: list[str] = []
+            if status == "pending" and current and operations_open:
+                if claim_status in {"unclaimed", "expired"}:
+                    actions.append("claim")
+                elif work_state["claim_subject"] == principal.subject:
+                    actions.append("decide")
+            evidence_references = [
+                {
+                    key: copy.deepcopy(link[key])
+                    for key in (
+                        "observation_id",
+                        "document_role",
+                        "field",
+                        "source_page",
+                        "source_region",
+                    )
+                    if link.get(key) is not None
+                }
+                for link in finding["evidence_links"]
+            ]
+            application_hash = hashlib.sha256(
+                str(app["application_id"]).encode("utf-8")
+            ).hexdigest()[:12]
+            return {
+                "schema_version": "business-exception-approver-view/1",
+                "request_id": request_id,
+                "work_item_id": request["work_item_id"],
+                "status": status,
+                "current": current,
+                "currentness_reason": (
+                    "CURRENT_FIXED_CONTEXT"
+                    if current
+                    else "EXPIRED"
+                    if status == "expired"
+                    or query_time >= float(request["expires_at"])
+                    else "INVALIDATED"
+                    if status == "invalidated"
+                    else "REJECTED"
+                    if status == "rejected"
+                    else "CONTEXT_NOT_CURRENT"
+                ),
+                "application_reference": f"application:{application_hash}",
+                "finding": {
+                    key: finding[key]
+                    for key in (
+                        "finding_id",
+                        "rule_id",
+                        "verdict",
+                        "severity",
+                        "reason_code",
+                    )
+                },
+                "evidence_references": evidence_references,
+                "requester": {
+                    "subject": request["requester_subject"],
+                    "role": request["requester_role"],
+                    "source_id": request["requester_source_id"],
+                },
+                "request_reason": request["reason_code"],
+                "scope": request["scope"],
+                "requested_at": request["requested_at"],
+                "expires_at": request["expires_at"],
+                "run_id": request["run_id"],
+                "evidence_snapshot_id": request["evidence_snapshot_id"],
+                "evidence_snapshot_digest": request["evidence_snapshot_digest"],
+                "release_id": request["release_id"],
+                "release_digest": request["release_digest"],
+                "checker_build": request["checker_build"],
+                "waiver_policy_id": request["waiver_policy_id"],
+                "waiver_policy_digest": request["waiver_policy_digest"],
+                "claim_status": claim_status,
+                "claim_subject": work_state["claim_subject"],
+                "claim_fence": work_state["claim_fence"],
+                "claim_expires_at": work_state["claim_expires_at"],
+                "command_context": command_context,
+                "projection_watermark": request["projection_watermark"],
+                "actions": actions,
+            }
+
+    def claim_exception_work_item(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        work_item_id: str,
+        expected_context: dict[str, Any],
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        claim_time = int(self._clock() if now is None else now)
+        with self._lock:
+            for attempt in range(2):
+                self._reload_store()
+                work_item, state = self._exception_work_item_authority(
+                    principal=principal,
+                    work_item_id=work_item_id,
+                    now=claim_time,
+                )
+                request = self._business_exception_request_authority(
+                    str(work_item["request_id"])
+                )
+                if (
+                    self._business_exception_operations_state()["operations"]
+                    != "open"
+                ):
+                    return {
+                        "status": "stopped",
+                        "request_id": request["request_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": self._EXCEPTION_OPERATIONS_CLOSED,
+                    }
+                app, _, _, status, current, actual_context = (
+                    self._business_exception_current_context(request, now=claim_time)
+                )
+                if expected_context != actual_context:
+                    return {
+                        "status": "stale",
+                        "request_id": request["request_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": "STALE_EXCEPTION_CONTEXT",
+                    }
+                if status != "pending" or not current:
+                    return {
+                        "status": "stale",
+                        "request_id": request["request_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": (
+                            "BUSINESS_EXCEPTION_EXPIRED"
+                            if claim_time >= request["expires_at"]
+                            else "STALE_EXCEPTION_CONTEXT"
+                        ),
+                    }
+                if (
+                    state["status"] == "claimed"
+                    and float(state["claim_expires_at"]) > claim_time
+                ):
+                    return {
+                        "status": "conflict",
+                        "request_id": request["request_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": "EXCEPTION_WORK_ITEM_ALREADY_CLAIMED",
+                    }
+                gate = self._review_write_gate(app=app)
+                if gate is not None:
+                    failure_status, reason_code = gate
+                    return {
+                        "status": failure_status,
+                        "request_id": request["request_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": reason_code,
+                    }
+                staged = copy.deepcopy(self._store)
+                sequence = 1 + sum(
+                    record.get("work_item_id") == work_item_id
+                    and str(record.get("record_type", "")).startswith(
+                        "exception_work_item_"
+                    )
+                    for record in staged.review_records
+                )
+                claim_fence = int(state["claim_fence"]) + 1
+                claim_expires_at = claim_time + self._EXCEPTION_CLAIM_TTL_SECONDS
+                staged.review_records.append(
+                    {
+                        "record_id": self._stable_id(
+                            "review_record",
+                            f"{work_item_id}:exception_claim:{sequence}",
+                        ),
+                        "record_type": "exception_work_item_claimed",
+                        "sequence": sequence,
+                        "work_item_id": work_item_id,
+                        "request_id": request["request_id"],
+                        "exception_id": request["request_id"],
+                        "application_id": request["application_id"],
+                        "run_id": request["run_id"],
+                        "claim_subject": principal.subject,
+                        "claim_fence": claim_fence,
+                        "claim_started_at": claim_time,
+                        "claim_expires_at": claim_expires_at,
+                        "recorded_at": claim_time,
+                    }
+                )
+                try:
+                    self._before_write("exception_claim.audit")
+                    staged.audit_events.append(
+                        {
+                            "event_id": self._stable_id(
+                                "audit",
+                                f"exception_work_item_claimed:{work_item_id}:{sequence}",
+                            ),
+                            "action": "exception_work_item_claimed",
+                            "subject": principal.subject,
+                            "role": principal.role,
+                            "scope": work_item["visibility_scope"],
+                            "source_id": principal.source_id,
+                            "application_id": request["application_id"],
+                            "run_id": request["run_id"],
+                            "request_id": request["request_id"],
+                            "exception_id": request["request_id"],
+                            "work_item_id": work_item_id,
+                            "claim_fence": claim_fence,
+                            "result": "accepted",
+                            **self._audit_time_fields(staged, now=claim_time),
+                        }
+                    )
+                    staged.persist()
+                except _StoreWriteFailure:
+                    return {
+                        "status": "unavailable",
+                        "request_id": request["request_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": "AUDIT_UNAVAILABLE",
+                    }
+                except StaleStoreRevision:
+                    if attempt == 0:
+                        continue
+                    return {
+                        "status": "unavailable",
+                        "request_id": request["request_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": "STORAGE_UNAVAILABLE",
+                    }
+                self._store = staged
+                return {
+                    "status": "claimed",
+                    "request_id": request["request_id"],
+                    "work_item_id": work_item_id,
+                    "claim_subject": principal.subject,
+                    "claim_fence": claim_fence,
+                    "claim_expires_at": claim_expires_at,
+                }
+            raise RuntimeError("exception work-item claim retry exhausted")
+
+    @staticmethod
+    def _business_exception_routing_context(
+        request: dict[str, Any], decision: dict[str, Any], app: dict[str, Any]
+    ) -> dict[str, Any]:
+        fixed = {
+            "application_id": request["application_id"],
+            "request_id": request["request_id"],
+            "decision_id": decision["decision_id"],
+            "cycle": app["cycle"],
+            "lifecycle_revision": app["lifecycle_revision"],
+            "evidence_revision": app["evidence_revision"],
+            "run_id": app["current_run_id"],
+            "evidence_snapshot_id": app["current_evidence_snapshot_id"],
+            "release_id": request["release_id"],
+            "release_digest": request["release_digest"],
+            "checker_build": request["checker_build"],
+            "waiver_policy_id": request["waiver_policy_id"],
+            "waiver_policy_digest": request["waiver_policy_digest"],
+            "expires_at": request["expires_at"],
+            "phase": app["phase"],
+            "route": app["route"],
+        }
+        encoded = json.dumps(
+            fixed, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        return {
+            "cycle": app["cycle"],
+            "lifecycle_revision": app["lifecycle_revision"],
+            "evidence_revision": app["evidence_revision"],
+            "run_id": app["current_run_id"],
+            "request_id": request["request_id"],
+            "decision_id": decision["decision_id"],
+            "current_context": hashlib.sha256(encoded).hexdigest(),
+        }
+
+    def _create_manual_review_successor(
+        self,
+        store: _TargetStore,
+        app: dict[str, Any],
+        run: dict[str, Any],
+        *,
+        finding_ids: list[str],
+        predecessor_request_id: str,
+    ) -> str:
+        work_item_id = self._stable_id(
+            "work",
+            ":".join(
+                (
+                    app["application_id"],
+                    str(app["cycle"]),
+                    str(run["run_id"]),
+                    str(app["lifecycle_revision"]),
+                    predecessor_request_id,
+                )
+            ),
+        )
+        spec = run["spec"]
+        visibility_scope = self._application_visibility_scope(app["application_id"])
+        store.work_items.append(
+            {
+                "work_item_id": work_item_id,
+                "owner": "Lifecycle",
+                "kind": "manual_review",
+                "status": "active",
+                "application_id": app["application_id"],
+                "cycle": app["cycle"],
+                "run_id": run["run_id"],
+                "lifecycle_revision": app["lifecycle_revision"],
+                "evidence_revision": app["evidence_revision"],
+                "evidence_snapshot_id": spec["evidence_snapshot_id"],
+                "release_id": spec["release_id"],
+                "finding_ids": copy.deepcopy(finding_ids),
+                "visibility_scope": visibility_scope,
+                "assigned_subject": self._application_review_assignee(
+                    app["application_id"]
+                ),
+                "claim_subject": None,
+                "claim_fence": 0,
+                "claim_started_at": 0,
+                "claim_expires_at": 0,
+                "predecessor_request_id": predecessor_request_id,
+            }
+        )
+        app["projection_pending"] = True
+        app["projection_visible"] = False
+        store.outbox.append(
+            {
+                "event_id": self._stable_id(
+                    "outbox",
+                    f"projection:{run['run_id']}:{app['lifecycle_revision']}",
+                ),
+                "kind": "review_projection_requested",
+                "application_id": app["application_id"],
+                "run_id": run["run_id"],
+                "lifecycle_revision": app["lifecycle_revision"],
+                "visibility_scope": visibility_scope,
+                "projection_watermark": 1
+                + sum(
+                    event.get("kind") == "review_projection_requested"
+                    and event.get("visibility_scope", "C-DEMO") == visibility_scope
+                    for event in store.outbox
+                ),
+                "status": "pending",
+            }
+        )
+        return work_item_id
+
+    def decide_business_exception(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        request_id: str,
+        work_item_id: str,
+        decision: str,
+        reason_code: str,
+        expected_fence: int,
+        expected_context: dict[str, Any],
+        idempotency_key: str,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        decision_time = int(self._clock() if now is None else now)
+        expected_reason = {
+            "approved": "DOCUMENTED_VARIANCE_ACCEPTED",
+            "rejected": "DOCUMENTED_VARIANCE_REJECTED",
+        }.get(decision)
+        if (
+            expected_reason is None
+            or reason_code != expected_reason
+            or isinstance(expected_fence, bool)
+            or not isinstance(expected_fence, int)
+            or expected_fence < 1
+            or not self._valid_idempotency_key(idempotency_key)
+        ):
+            raise ValueError("business exception decision is invalid")
+        if not self._valid_exception_approver_principal(
+            principal, now=decision_time
+        ):
+            raise QueryNotFound(request_id)
+        fingerprint_bytes = json.dumps(
+            {
+                "decision": decision,
+                "expected_context": expected_context,
+                "expected_fence": expected_fence,
+                "reason_code": reason_code,
+                "request_id": request_id,
+                "work_item_id": work_item_id,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        command_fingerprint = hashlib.sha256(fingerprint_bytes).hexdigest()
+        binding_key = self._exception_idempotency_binding_key(
+            principal,
+            request_id,
+            idempotency_key,
+            action="decide_business_exception",
+        )
+        with self._lock:
+            for attempt in range(2):
+                self._reload_store()
+                request = self._business_exception_request_authority(request_id)
+                work_item, work_state = self._exception_work_item_authority(
+                    principal=principal,
+                    work_item_id=work_item_id,
+                    now=decision_time,
+                )
+                if work_item.get("request_id") != request_id:
+                    raise QueryNotFound(request_id)
+                previous = self._store.idempotency.get(binding_key)
+                if previous is not None:
+                    if previous[0] == command_fingerprint:
+                        return {**copy.deepcopy(previous[1]), "replayed": True}
+                    return {
+                        "status": "conflict",
+                        "replayed": False,
+                        "request_id": request_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "IDEMPOTENCY_KEY_CONFLICT",
+                    }
+                if (
+                    self._business_exception_operations_state()["operations"]
+                    != "open"
+                ):
+                    return {
+                        "status": "stopped",
+                        "replayed": False,
+                        "request_id": request_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": self._EXCEPTION_OPERATIONS_CLOSED,
+                    }
+                winners = [
+                    record
+                    for record in self._store.review_records
+                    if record.get("record_type") == "business_exception_decision"
+                    and record.get("request_id") == request_id
+                ]
+                if winners:
+                    return {
+                        "status": "already_decided",
+                        "replayed": False,
+                        "request_id": request_id,
+                        "work_item_id": work_item_id,
+                        "decision_id": winners[0]["decision_id"],
+                        "decision": winners[0]["decision"],
+                        "reason_code": "BUSINESS_EXCEPTION_ALREADY_DECIDED",
+                    }
+                app, run, finding, status, current, actual_context = (
+                    self._business_exception_current_context(
+                        request, now=decision_time
+                    )
+                )
+                if expected_context != actual_context:
+                    return {
+                        "status": "stale",
+                        "replayed": False,
+                        "request_id": request_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "STALE_EXCEPTION_CONTEXT",
+                    }
+                if (
+                    status != "pending"
+                    or not current
+                    or app.get("phase") != "Pending Exception Approval"
+                    or app.get("route") != "pending_exception_approval"
+                ):
+                    return {
+                        "status": "stale",
+                        "replayed": False,
+                        "request_id": request_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": (
+                            "BUSINESS_EXCEPTION_EXPIRED"
+                            if decision_time >= request["expires_at"]
+                            else "STALE_EXCEPTION_CONTEXT"
+                        ),
+                    }
+                if (
+                    work_state["status"] != "claimed"
+                    or work_state["claim_subject"] != principal.subject
+                    or work_state["claim_fence"] != expected_fence
+                    or float(work_state["claim_expires_at"]) <= decision_time
+                ):
+                    return {
+                        "status": "stale",
+                        "replayed": False,
+                        "request_id": request_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "STALE_EXCEPTION_WORK_ITEM_CLAIM",
+                    }
+                if principal.subject == request["requester_subject"]:
+                    return {
+                        "status": "rejected",
+                        "replayed": False,
+                        "request_id": request_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "SEPARATION_OF_DUTIES_REQUIRED",
+                    }
+                rule = self._exception_policy_rule(app, run, finding)
+                if (
+                    finding.get("rule_id") in self._PROTECTED_EXCEPTION_CHECKS
+                    or rule is None
+                    or rule.waivable is not True
+                    or rule.waiver_policy_digest != request["waiver_policy_digest"]
+                ):
+                    return {
+                        "status": "stale",
+                        "replayed": False,
+                        "request_id": request_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "WAIVER_POLICY_NOT_CURRENT",
+                    }
+                gate = self._review_write_gate(app=app)
+                if gate is not None:
+                    failure_status, failure_reason = gate
+                    return {
+                        "status": failure_status,
+                        "replayed": False,
+                        "request_id": request_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": failure_reason,
+                    }
+                decision_id = self._stable_id(
+                    "exception_decision", f"{binding_key}:{command_fingerprint}"
+                )
+                staged = copy.deepcopy(self._store)
+                staged_app = staged.applications[request["application_id"]]
+                staged_run = next(
+                    item
+                    for item in staged.runs
+                    if item.get("run_record_id") == run.get("run_record_id")
+                )
+                try:
+                    self._before_write("exception_decision.lifecycle")
+                    if decision == "approved":
+                        staged_app["route"] = "routing_determination"
+                        self._transition_lifecycle(
+                            staged_app,
+                            "Routing Determination",
+                            "BUSINESS_EXCEPTION_APPROVED",
+                            store=staged,
+                        )
+                    else:
+                        staged_app["route"] = "manual_review"
+                        self._transition_lifecycle(
+                            staged_app,
+                            "Manual Review",
+                            "BUSINESS_EXCEPTION_REJECTED",
+                            store=staged,
+                        )
+                    staged.lifecycle_events[-1].update(
+                        {
+                            "run_id": request["run_id"],
+                            "request_id": request_id,
+                            "decision_id": decision_id,
+                            "exception_id": request_id,
+                            "expires_at": request["expires_at"],
+                        }
+                    )
+                    decision_record = {
+                        "record_id": decision_id,
+                        "record_type": "business_exception_decision",
+                        "schema_version": "business-exception-decision/1",
+                        "decision_id": decision_id,
+                        "request_id": request_id,
+                        "exception_id": request_id,
+                        "work_item_id": work_item_id,
+                        "application_id": request["application_id"],
+                        "cycle": request["cycle"],
+                        "run_id": request["run_id"],
+                        "finding_id": request["finding_id"],
+                        "decision": decision,
+                        "reason_code": reason_code,
+                        "approver_subject": principal.subject,
+                        "approver_role": principal.role,
+                        "approver_source_id": principal.source_id,
+                        "requester_subject": request["requester_subject"],
+                        "claim_fence": expected_fence,
+                        "fixed_context": copy.deepcopy(actual_context),
+                        "lifecycle_revision": staged_app["lifecycle_revision"],
+                        "evidence_revision": staged_app["evidence_revision"],
+                        "decided_at": decision_time,
+                        "expires_at": request["expires_at"],
+                    }
+                    self._before_write("exception_decision.decision")
+                    staged.review_records.append(decision_record)
+                    sequence = 1 + sum(
+                        record.get("work_item_id") == work_item_id
+                        and str(record.get("record_type", "")).startswith(
+                            "exception_work_item_"
+                        )
+                        for record in staged.review_records
+                    )
+                    self._before_write("exception_decision.work_item")
+                    staged.review_records.append(
+                        {
+                            "record_id": self._stable_id(
+                                "review_record",
+                                f"{work_item_id}:exception_complete:{sequence}",
+                            ),
+                            "record_type": "exception_work_item_completed",
+                            "sequence": sequence,
+                            "work_item_id": work_item_id,
+                            "request_id": request_id,
+                            "exception_id": request_id,
+                            "application_id": request["application_id"],
+                            "run_id": request["run_id"],
+                            "claim_subject": principal.subject,
+                            "claim_fence": expected_fence,
+                            "decision_id": decision_id,
+                            "completed_at": decision_time,
+                            "recorded_at": decision_time,
+                        }
+                    )
+                    successor_work_item_id = None
+                    if decision == "rejected":
+                        blocker_ids = [
+                            item["finding_id"]
+                            for item in staged.findings
+                            if item.get("application_id") == request["application_id"]
+                            and item.get("run_id") == request["run_id"]
+                            and item.get("mandatory") is True
+                            and item.get("verdict") != "consistent"
+                        ]
+                        self._before_write("exception_decision.review_successor")
+                        successor_work_item_id = self._create_manual_review_successor(
+                            staged,
+                            staged_app,
+                            staged_run,
+                            finding_ids=blocker_ids,
+                            predecessor_request_id=request_id,
+                        )
+                    self._before_write("exception_decision.audit")
+                    staged.audit_events.append(
+                        {
+                            "event_id": self._stable_id(
+                                "audit", f"business_exception_decided:{decision_id}"
+                            ),
+                            "action": "business_exception_decided",
+                            "subject": principal.subject,
+                            "role": principal.role,
+                            "scope": work_item["visibility_scope"],
+                            "source_id": principal.source_id,
+                            "application_id": request["application_id"],
+                            "run_id": request["run_id"],
+                            "finding_id": request["finding_id"],
+                            "request_id": request_id,
+                            "exception_id": request_id,
+                            "decision_id": decision_id,
+                            "work_item_id": work_item_id,
+                            "successor_work_item_id": successor_work_item_id,
+                            "outcome": decision,
+                            "reason_code": reason_code,
+                            "claim_fence": expected_fence,
+                            "expires_at": request["expires_at"],
+                            "lifecycle_revision": staged_app[
+                                "lifecycle_revision"
+                            ],
+                            "evidence_revision": staged_app["evidence_revision"],
+                            "result": "accepted",
+                            **self._audit_time_fields(staged, now=decision_time),
+                        }
+                    )
+                    result = {
+                        "status": "accepted",
+                        "replayed": False,
+                        "request_id": request_id,
+                        "work_item_id": work_item_id,
+                        "decision_id": decision_id,
+                        "decision": decision,
+                        "phase": staged_app["phase"],
+                        "route": staged_app["route"],
+                        "successor_work_item_id": successor_work_item_id,
+                        "lifecycle_revision": staged_app[
+                            "lifecycle_revision"
+                        ],
+                        "evidence_revision": staged_app["evidence_revision"],
+                    }
+                    if decision == "approved":
+                        result["routing_context"] = (
+                            self._business_exception_routing_context(
+                                request, decision_record, staged_app
+                            )
+                        )
+                    self._before_write("exception_decision.idempotency")
+                    staged.idempotency[binding_key] = (
+                        command_fingerprint,
+                        copy.deepcopy(result),
+                    )
+                    self._before_write("exception_decision.publish")
+                    staged.persist()
+                except _StoreWriteFailure as error:
+                    return {
+                        "status": "unavailable",
+                        "replayed": False,
+                        "request_id": request_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": (
+                            "AUDIT_UNAVAILABLE"
+                            if str(error) == "exception_decision.audit"
+                            else "STORAGE_UNAVAILABLE"
+                        ),
+                    }
+                except StaleStoreRevision:
+                    if attempt == 0:
+                        continue
+                    return {
+                        "status": "unavailable",
+                        "replayed": False,
+                        "request_id": request_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "STORAGE_UNAVAILABLE",
+                    }
+                self._store = staged
+                return result
+            raise RuntimeError("business exception decision retry exhausted")
+
+    def expire_business_exception(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        request_id: str,
+        expected_context: dict[str, Any],
+        idempotency_key: str,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        event_time = int(self._clock() if now is None else now)
+        return self._deactivate_business_exception(
+            principal=principal,
+            request_id=request_id,
+            reason_code="BUSINESS_EXCEPTION_EXPIRED",
+            expected_context=expected_context,
+            idempotency_key=idempotency_key,
+            event_time=event_time,
+            require_expiry=True,
+        )
+
+    def invalidate_business_exception(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        request_id: str,
+        reason_code: str,
+        expected_context: dict[str, Any],
+        idempotency_key: str,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        event_time = int(self._clock() if now is None else now)
+        if reason_code not in self._EXCEPTION_INVALIDATION_REASONS:
+            raise ValueError("business exception invalidation reason is invalid")
+        return self._deactivate_business_exception(
+            principal=principal,
+            request_id=request_id,
+            reason_code=reason_code,
+            expected_context=expected_context,
+            idempotency_key=idempotency_key,
+            event_time=event_time,
+            require_expiry=False,
+        )
+
+    def _deactivate_business_exception(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        request_id: str,
+        reason_code: str,
+        expected_context: dict[str, Any],
+        idempotency_key: str,
+        event_time: int,
+        require_expiry: bool,
+    ) -> dict[str, Any]:
+        if not self._valid_exception_router_principal(principal, now=event_time):
+            raise QueryNotFound(request_id)
+        if not self._valid_idempotency_key(idempotency_key):
+            raise ValueError("business exception deactivation key is invalid")
+        mode = "expiry" if require_expiry else "invalidation"
+        prefix = f"exception_{mode}"
+        status_value = "expired" if require_expiry else "invalidated"
+        record_type = f"business_exception_{status_value}"
+        action = f"business_exception_{status_value}"
+        schema = f"business-exception-{mode}/1"
+        fingerprint_bytes = json.dumps(
+            {
+                "expected_context": expected_context,
+                "reason_code": reason_code,
+                "request_id": request_id,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        command_fingerprint = hashlib.sha256(fingerprint_bytes).hexdigest()
+        binding_key = self._exception_idempotency_binding_key(
+            principal,
+            request_id,
+            idempotency_key,
+            action=action,
+        )
+        with self._lock:
+            for attempt in range(2):
+                self._reload_store()
+                request = self._business_exception_request_authority(request_id)
+                previous = self._store.idempotency.get(binding_key)
+                if previous is not None:
+                    if previous[0] == command_fingerprint:
+                        return {**copy.deepcopy(previous[1]), "replayed": True}
+                    return {
+                        "status": "conflict",
+                        "replayed": False,
+                        "request_id": request_id,
+                        "reason_code": "IDEMPOTENCY_KEY_CONFLICT",
+                    }
+                app, run, _, status, _, actual_context = (
+                    self._business_exception_current_context(request, now=event_time)
+                )
+                if expected_context != actual_context:
+                    return {
+                        "status": "stale",
+                        "replayed": False,
+                        "request_id": request_id,
+                        "reason_code": "STALE_EXCEPTION_CONTEXT",
+                    }
+                if require_expiry and event_time < request["expires_at"]:
+                    return {
+                        "status": "not_due",
+                        "replayed": False,
+                        "request_id": request_id,
+                        "expires_at": request["expires_at"],
+                        "reason_code": "BUSINESS_EXCEPTION_NOT_EXPIRED",
+                    }
+                if status in {"expired", "invalidated", "rejected"}:
+                    return {
+                        "status": "already_inactive",
+                        "replayed": False,
+                        "request_id": request_id,
+                        "reason_code": "BUSINESS_EXCEPTION_ALREADY_INACTIVE",
+                    }
+                if app.get("phase") == "Verification Completed":
+                    return {
+                        "status": "sealed",
+                        "replayed": False,
+                        "request_id": request_id,
+                        "reason_code": "PROCESSING_CYCLE_ALREADY_SEALED",
+                    }
+                if app.get("phase") not in {
+                    "Pending Exception Approval",
+                    "Routing Determination",
+                    "Manual Review",
+                }:
+                    return {
+                        "status": "stale",
+                        "replayed": False,
+                        "request_id": request_id,
+                        "reason_code": "STALE_EXCEPTION_CONTEXT",
+                    }
+                gate = self._review_write_gate(app=app)
+                if gate is not None:
+                    failure_status, failure_reason = gate
+                    return {
+                        "status": failure_status,
+                        "replayed": False,
+                        "request_id": request_id,
+                        "reason_code": failure_reason,
+                    }
+                staged = copy.deepcopy(self._store)
+                staged_app = staged.applications[request["application_id"]]
+                staged_run = next(
+                    item
+                    for item in staged.runs
+                    if item.get("run_record_id") == run.get("run_record_id")
+                )
+                current_manual_work = [
+                    item
+                    for item in staged.work_items
+                    if item.get("application_id") == request["application_id"]
+                    and item.get("run_id") == request["run_id"]
+                    and item.get("kind") == "manual_review"
+                    and item.get("lifecycle_revision")
+                    == staged_app.get("lifecycle_revision")
+                ]
+                try:
+                    self._before_write(f"{prefix}.lifecycle")
+                    staged_app["route"] = "manual_review"
+                    self._transition_lifecycle(
+                        staged_app,
+                        "Manual Review",
+                        (
+                            "BUSINESS_EXCEPTION_EXPIRED"
+                            if require_expiry
+                            else "BUSINESS_EXCEPTION_INVALIDATED"
+                        ),
+                        store=staged,
+                    )
+                    staged.lifecycle_events[-1].update(
+                        {
+                            "run_id": request["run_id"],
+                            "request_id": request_id,
+                            "exception_id": request_id,
+                            "expires_at": request["expires_at"],
+                            "invalidation_reason_code": reason_code,
+                        }
+                    )
+                    record_id = self._stable_id(
+                        prefix,
+                        f"{request_id}:{reason_code}:{event_time}",
+                    )
+                    self._before_write(f"{prefix}.record")
+                    deactivation_record = {
+                        "record_id": record_id,
+                        "record_type": record_type,
+                        "schema_version": schema,
+                        "request_id": request_id,
+                        "exception_id": request_id,
+                        "work_item_id": request["work_item_id"],
+                        "application_id": request["application_id"],
+                        "run_id": request["run_id"],
+                        "finding_id": request["finding_id"],
+                        "status": status_value,
+                        "reason_code": reason_code,
+                        "expires_at": request["expires_at"],
+                        "lifecycle_revision": staged_app["lifecycle_revision"],
+                    }
+                    deactivation_record[
+                        "expired_at" if require_expiry else "invalidated_at"
+                    ] = event_time
+                    staged.review_records.append(deactivation_record)
+                    sequence = 1 + sum(
+                        record.get("work_item_id") == request["work_item_id"]
+                        and str(record.get("record_type", "")).startswith(
+                            "exception_work_item_"
+                        )
+                        for record in staged.review_records
+                    )
+                    self._before_write(f"{prefix}.work_item")
+                    staged.review_records.append(
+                        {
+                            "record_id": self._stable_id(
+                                "review_record",
+                                f"{request['work_item_id']}:{mode}:{sequence}",
+                            ),
+                            "record_type": "exception_work_item_invalidated",
+                            "sequence": sequence,
+                            "work_item_id": request["work_item_id"],
+                            "request_id": request_id,
+                            "exception_id": request_id,
+                            "application_id": request["application_id"],
+                            "run_id": request["run_id"],
+                            "invalidated_at": event_time,
+                            "reason_code": reason_code,
+                            "recorded_at": event_time,
+                        }
+                    )
+                    for manual_work in current_manual_work:
+                        manual_sequence = 1 + sum(
+                            record.get("work_item_id")
+                            == manual_work["work_item_id"]
+                            and str(record.get("record_type", "")).startswith(
+                                "work_item_"
+                            )
+                            for record in staged.review_records
+                        )
+                        staged.review_records.append(
+                            {
+                                "record_id": self._stable_id(
+                                    "review_record",
+                                    f"{manual_work['work_item_id']}:{mode}:"
+                                    f"{manual_sequence}",
+                                ),
+                                "record_type": "work_item_invalidated",
+                                "sequence": manual_sequence,
+                                "work_item_id": manual_work["work_item_id"],
+                                "application_id": request["application_id"],
+                                "run_id": request["run_id"],
+                                "request_id": request_id,
+                                "exception_id": request_id,
+                                "invalidated_at": event_time,
+                                "reason_code": reason_code,
+                                "recorded_at": event_time,
+                            }
+                        )
+                    blocker_ids = [
+                        item["finding_id"]
+                        for item in staged.findings
+                        if item.get("application_id") == request["application_id"]
+                        and item.get("run_id") == request["run_id"]
+                        and item.get("mandatory") is True
+                        and item.get("verdict") != "consistent"
+                    ]
+                    self._before_write(f"{prefix}.review_successor")
+                    successor_work_item_id = self._create_manual_review_successor(
+                        staged,
+                        staged_app,
+                        staged_run,
+                        finding_ids=blocker_ids,
+                        predecessor_request_id=request_id,
+                    )
+                    self._before_write(f"{prefix}.audit")
+                    staged.audit_events.append(
+                        {
+                            "event_id": self._stable_id("audit", f"{action}:{record_id}"),
+                            "action": action,
+                            "subject": principal.subject,
+                            "role": principal.role,
+                            "scope": self._application_visibility_scope(
+                                request["application_id"]
+                            ),
+                            "source_id": principal.source_id,
+                            "application_id": request["application_id"],
+                            "run_id": request["run_id"],
+                            "finding_id": request["finding_id"],
+                            "request_id": request_id,
+                            "exception_id": request_id,
+                            "work_item_id": request["work_item_id"],
+                            "successor_work_item_id": successor_work_item_id,
+                            "expires_at": request["expires_at"],
+                            "reason_code": reason_code,
+                            "lifecycle_revision": staged_app[
+                                "lifecycle_revision"
+                            ],
+                            "evidence_revision": staged_app["evidence_revision"],
+                            "result": "accepted",
+                            **self._audit_time_fields(staged, now=event_time),
+                        }
+                    )
+                    result = {
+                        "status": "accepted",
+                        "replayed": False,
+                        "application_id": request["application_id"],
+                        "request_id": request_id,
+                        "phase": "Manual Review",
+                        "route": "manual_review",
+                        "expires_at": request["expires_at"],
+                        "reason_code": reason_code,
+                        "successor_work_item_id": successor_work_item_id,
+                        "lifecycle_revision": staged_app[
+                            "lifecycle_revision"
+                        ],
+                        "evidence_revision": staged_app["evidence_revision"],
+                    }
+                    self._before_write(f"{prefix}.idempotency")
+                    staged.idempotency[binding_key] = (
+                        command_fingerprint,
+                        copy.deepcopy(result),
+                    )
+                    self._before_write(f"{prefix}.publish")
+                    staged.persist()
+                except _StoreWriteFailure as error:
+                    return {
+                        "status": "unavailable",
+                        "replayed": False,
+                        "request_id": request_id,
+                        "reason_code": (
+                            "AUDIT_UNAVAILABLE"
+                            if str(error) == f"{prefix}.audit"
+                            else "STORAGE_UNAVAILABLE"
+                        ),
+                    }
+                except StaleStoreRevision:
+                    if attempt == 0:
+                        continue
+                    return {
+                        "status": "unavailable",
+                        "replayed": False,
+                        "request_id": request_id,
+                        "reason_code": "STORAGE_UNAVAILABLE",
+                    }
+                self._store = staged
+                return result
+            raise RuntimeError("business exception deactivation retry exhausted")
+
+    def determine_business_exception_route(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        request_id: str,
+        expected_context: dict[str, Any],
+        idempotency_key: str,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        route_time = int(self._clock() if now is None else now)
+        if not self._valid_exception_router_principal(principal, now=route_time):
+            raise QueryNotFound(request_id)
+        if not self._valid_idempotency_key(idempotency_key):
+            raise ValueError("business exception route idempotency key is invalid")
+        fingerprint_bytes = json.dumps(
+            {
+                "expected_context": expected_context,
+                "request_id": request_id,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        command_fingerprint = hashlib.sha256(fingerprint_bytes).hexdigest()
+        binding_key = self._exception_idempotency_binding_key(
+            principal,
+            request_id,
+            idempotency_key,
+            action="determine_business_exception_route",
+        )
+        with self._lock:
+            for attempt in range(2):
+                self._reload_store()
+                request = self._business_exception_request_authority(request_id)
+                previous = self._store.idempotency.get(binding_key)
+                if previous is not None:
+                    if previous[0] == command_fingerprint:
+                        return {**copy.deepcopy(previous[1]), "replayed": True}
+                    return {
+                        "status": "conflict",
+                        "replayed": False,
+                        "request_id": request_id,
+                        "reason_code": "IDEMPOTENCY_KEY_CONFLICT",
+                    }
+                if (
+                    self._business_exception_operations_state()["operations"]
+                    != "open"
+                ):
+                    return {
+                        "status": "stopped",
+                        "replayed": False,
+                        "request_id": request_id,
+                        "reason_code": self._EXCEPTION_OPERATIONS_CLOSED,
+                    }
+                decisions = [
+                    record
+                    for record in self._store.review_records
+                    if record.get("record_type") == "business_exception_decision"
+                    and record.get("request_id") == request_id
+                ]
+                if len(decisions) != 1 or decisions[0].get("decision") != "approved":
+                    return {
+                        "status": "stale",
+                        "replayed": False,
+                        "request_id": request_id,
+                        "reason_code": "APPROVED_EXCEPTION_DECISION_REQUIRED",
+                    }
+                decision = decisions[0]
+                app, run, finding, status, current, _ = (
+                    self._business_exception_current_context(request, now=route_time)
+                )
+                actual_context = self._business_exception_routing_context(
+                    request, decision, app
+                )
+                if expected_context != actual_context:
+                    return {
+                        "status": "stale",
+                        "replayed": False,
+                        "request_id": request_id,
+                        "reason_code": "STALE_ROUTING_CONTEXT",
+                    }
+                rule = self._exception_policy_rule(app, run, finding)
+                if (
+                    status != "approved"
+                    or not current
+                    or route_time >= request["expires_at"]
+                    or app.get("phase") != "Routing Determination"
+                    or app.get("route") != "routing_determination"
+                    or finding.get("rule_id") in self._PROTECTED_EXCEPTION_CHECKS
+                    or rule is None
+                    or rule.waivable is not True
+                    or rule.waiver_policy_digest != request["waiver_policy_digest"]
+                ):
+                    return {
+                        "status": "stale",
+                        "replayed": False,
+                        "request_id": request_id,
+                        "reason_code": (
+                            "BUSINESS_EXCEPTION_EXPIRED"
+                            if route_time >= request["expires_at"]
+                            else "STALE_ROUTING_CONTEXT"
+                        ),
+                    }
+                gate = self._review_write_gate(app=app)
+                if gate is not None:
+                    failure_status, failure_reason = gate
+                    return {
+                        "status": failure_status,
+                        "replayed": False,
+                        "request_id": request_id,
+                        "reason_code": failure_reason,
+                    }
+                outstanding = [
+                    item
+                    for item in self._store.findings
+                    if item.get("application_id") == request["application_id"]
+                    and item.get("run_id") == request["run_id"]
+                    and item.get("mandatory") is True
+                    and item.get("verdict") != "consistent"
+                    and item.get("finding_id") != request["finding_id"]
+                ]
+                staged = copy.deepcopy(self._store)
+                staged_app = staged.applications[request["application_id"]]
+                staged_run = next(
+                    item
+                    for item in staged.runs
+                    if item.get("run_record_id") == run.get("run_record_id")
+                )
+                try:
+                    self._before_write("exception_route.lifecycle")
+                    if outstanding:
+                        staged_app["route"] = "manual_review"
+                        self._transition_lifecycle(
+                            staged_app,
+                            "Manual Review",
+                            "MANDATORY_BLOCKER_REMAINS_AFTER_EXCEPTION",
+                            store=staged,
+                        )
+                    else:
+                        staged_app["route"] = "human_complete"
+                        self._transition_lifecycle(
+                            staged_app,
+                            "Verification Completed",
+                            "BUSINESS_EXCEPTION_COMPLETED",
+                            store=staged,
+                        )
+                    staged.lifecycle_events[-1].update(
+                        {
+                            "run_id": request["run_id"],
+                            "request_id": request_id,
+                            "exception_id": request_id,
+                            "decision_id": decision["decision_id"],
+                            "expires_at": request["expires_at"],
+                            "completion_basis": "business_exception",
+                        }
+                    )
+                    successor_work_item_id = None
+                    if outstanding:
+                        self._before_write("exception_route.review_successor")
+                        successor_work_item_id = self._create_manual_review_successor(
+                            staged,
+                            staged_app,
+                            staged_run,
+                            finding_ids=[item["finding_id"] for item in outstanding],
+                            predecessor_request_id=request_id,
+                        )
+                    route_record_id = self._stable_id(
+                        "exception_route",
+                        f"{request_id}:{decision['decision_id']}:{staged_app['lifecycle_revision']}",
+                    )
+                    self._before_write("exception_route.record")
+                    staged.review_records.append(
+                        {
+                            "record_id": route_record_id,
+                            "record_type": "business_exception_route",
+                            "schema_version": "business-exception-route/1",
+                            "request_id": request_id,
+                            "exception_id": request_id,
+                            "decision_id": decision["decision_id"],
+                            "application_id": request["application_id"],
+                            "run_id": request["run_id"],
+                            "finding_id": request["finding_id"],
+                            "route": staged_app["route"],
+                            "completion_basis": "business_exception",
+                            "expires_at": request["expires_at"],
+                            "lifecycle_revision": staged_app[
+                                "lifecycle_revision"
+                            ],
+                            "routed_at": route_time,
+                        }
+                    )
+                    self._before_write("exception_route.audit")
+                    staged.audit_events.append(
+                        {
+                            "event_id": self._stable_id(
+                                "audit", f"business_exception_routed:{route_record_id}"
+                            ),
+                            "action": "business_exception_routed",
+                            "subject": principal.subject,
+                            "role": principal.role,
+                            "scope": self._application_visibility_scope(
+                                request["application_id"]
+                            ),
+                            "source_id": principal.source_id,
+                            "application_id": request["application_id"],
+                            "run_id": request["run_id"],
+                            "finding_id": request["finding_id"],
+                            "request_id": request_id,
+                            "exception_id": request_id,
+                            "decision_id": decision["decision_id"],
+                            "route": staged_app["route"],
+                            "completion_basis": "business_exception",
+                            "expires_at": request["expires_at"],
+                            "successor_work_item_id": successor_work_item_id,
+                            "mandatory_blocker_count": len(outstanding),
+                            "lifecycle_revision": staged_app[
+                                "lifecycle_revision"
+                            ],
+                            "evidence_revision": staged_app["evidence_revision"],
+                            "result": "accepted",
+                            **self._audit_time_fields(staged, now=route_time),
+                        }
+                    )
+                    result = {
+                        "status": "accepted",
+                        "replayed": False,
+                        "application_id": request["application_id"],
+                        "request_id": request_id,
+                        "decision_id": decision["decision_id"],
+                        "phase": staged_app["phase"],
+                        "route": staged_app["route"],
+                        "completion_basis": "business_exception",
+                        "successor_work_item_id": successor_work_item_id,
+                        "lifecycle_revision": staged_app[
+                            "lifecycle_revision"
+                        ],
+                        "evidence_revision": staged_app["evidence_revision"],
+                    }
+                    self._before_write("exception_route.idempotency")
+                    staged.idempotency[binding_key] = (
+                        command_fingerprint,
+                        copy.deepcopy(result),
+                    )
+                    self._before_write("exception_route.publish")
+                    staged.persist()
+                except _StoreWriteFailure as error:
+                    return {
+                        "status": "unavailable",
+                        "replayed": False,
+                        "request_id": request_id,
+                        "reason_code": (
+                            "AUDIT_UNAVAILABLE"
+                            if str(error) == "exception_route.audit"
+                            else "STORAGE_UNAVAILABLE"
+                        ),
+                    }
+                except StaleStoreRevision:
+                    if attempt == 0:
+                        continue
+                    return {
+                        "status": "unavailable",
+                        "replayed": False,
+                        "request_id": request_id,
+                        "reason_code": "STORAGE_UNAVAILABLE",
+                    }
+                self._store = staged
+                return result
+            raise RuntimeError("business exception routing retry exhausted")
 
     def submit_review_work_item(
         self,
@@ -4470,6 +6989,14 @@ class ControlledScenarioService:
             "outcome",
             "claim_fence",
             "assigned_subject",
+            "request_id",
+            "exception_id",
+            "successor_work_item_id",
+            "expires_at",
+            "completion_basis",
+            "waiver_policy_id",
+            "waiver_policy_digest",
+            "invalidated_exception_ids",
             "admission_after_stop",
             "requeued_jobs",
             "admission_after_recovery",
@@ -4676,7 +7203,16 @@ class ControlledScenarioService:
             app = self._reviewer_application_authority(principal, application_id)
             current_run = self._current_run_authority(app)
             spec = current_run.get("spec", {}) if current_run is not None else {}
-            return {
+            lifecycle_events = [
+                event
+                for event in self._store.lifecycle_events
+                if event.get("application_id") == application_id
+                and event.get("revision") == app["lifecycle_revision"]
+            ]
+            if len(lifecycle_events) != 1:
+                raise RuntimeError("current lifecycle route authority is unavailable")
+            lifecycle = lifecycle_events[0]
+            result = {
                 "schema_version": "s04-current-route/1",
                 "application_id": application_id,
                 "phase": app["phase"],
@@ -4696,6 +7232,16 @@ class ControlledScenarioService:
                     "CURRENT_CONTEXT_MATCH" if current_run is not None else "NO_CURRENT_RUN"
                 ),
             }
+            if lifecycle.get("exception_id") is not None:
+                result.update(
+                    {
+                        "completion_basis": lifecycle.get("completion_basis"),
+                        "exception_id": lifecycle["exception_id"],
+                        "exception_decision_id": lifecycle.get("decision_id"),
+                        "exception_expires_at": lifecycle.get("expires_at"),
+                    }
+                )
+            return result
 
     def application_history_view(
         self,
@@ -4708,6 +7254,62 @@ class ControlledScenarioService:
             self._reload_store()
             app = self._reviewer_application_authority(principal, application_id)
             current_run = self._current_run_authority(app)
+            exception_requests = [
+                record
+                for record in self._store.review_records
+                if record.get("record_type") == "business_exception_request"
+                and record.get("application_id") == application_id
+            ]
+            business_exceptions = []
+            applicable_exception_ids: set[str] = set()
+            for request in exception_requests:
+                _, _, _, status, current, _ = self._business_exception_current_context(
+                    request, now=float(self._clock())
+                )
+                decisions = [
+                    record
+                    for record in self._store.review_records
+                    if record.get("record_type") == "business_exception_decision"
+                    and record.get("request_id") == request["request_id"]
+                ]
+                routes = [
+                    record
+                    for record in self._store.review_records
+                    if record.get("record_type") == "business_exception_route"
+                    and record.get("request_id") == request["request_id"]
+                ]
+                if len(decisions) > 1 or len(routes) > 1:
+                    raise RuntimeError("business exception history is not unique")
+                decision = decisions[0] if decisions else None
+                route = routes[0] if routes else None
+                if status == "approved" and current:
+                    applicable_exception_ids.add(request["request_id"])
+                business_exceptions.append(
+                    {
+                        "request_id": request["request_id"],
+                        "run_id": request["run_id"],
+                        "finding_id": request["finding_id"],
+                        "rule_id": request["rule_id"],
+                        "machine_verdict": request["verdict"],
+                        "status": status,
+                        "current": current,
+                        "request_reason": request["reason_code"],
+                        "scope": request["scope"],
+                        "requested_at": request["requested_at"],
+                        "expires_at": request["expires_at"],
+                        "decision_id": (
+                            decision.get("decision_id") if decision is not None else None
+                        ),
+                        "decision": (
+                            decision.get("decision") if decision is not None else None
+                        ),
+                        "routed": route is not None,
+                        "route": route.get("route") if route is not None else None,
+                        "completion_basis": (
+                            route.get("completion_basis") if route is not None else None
+                        ),
+                    }
+                )
             invalidations = {
                 event.get("invalidated_run_id"): event
                 for event in self._store.lifecycle_events
@@ -4783,7 +7385,11 @@ class ControlledScenarioService:
                         "decision_ids": decision_ids,
                         "exception_ids": exception_ids,
                         "applicable_decision_ids": decision_ids if is_current else [],
-                        "applicable_exception_ids": exception_ids if is_current else [],
+                        "applicable_exception_ids": (
+                            sorted(set(exception_ids) & applicable_exception_ids)
+                            if is_current
+                            else []
+                        ),
                         "invalidated_decision_ids": copy.deepcopy(
                             invalidation.get("invalidated_decision_ids", [])
                         ),
@@ -4843,6 +7449,7 @@ class ControlledScenarioService:
                 "current_run_id": app.get("current_run_id"),
                 "runs": runs,
                 "corrections": corrections,
+                "business_exceptions": business_exceptions,
             }
 
     def _reviewer_application_authority(
@@ -6133,6 +8740,8 @@ class ControlledScenarioService:
             "rules_digest": manifest["rules_digest"],
             "knowledge_digest": manifest["knowledge_digest"],
             "normalizer_digest": manifest["normalizer_digest"],
+            "waiver_policy_id": manifest["waiver_policy_id"],
+            "waiver_policy_digest": manifest["waiver_policy_digest"],
             "checker_build": manifest["checker_build"],
             "limits": manifest["limits"],
             "applicable_check_ids": manifest["applicable_check_ids"],
@@ -6155,11 +8764,13 @@ class ControlledScenarioService:
         target = baseline["target_release"]
         release_bytes = json.dumps(
             {
-                "schema_version": "s01-target-release/5",
+                "schema_version": "s01-target-release/6",
                 "release_id": target.release_id,
                 "rules_digest": target.rules_digest,
                 "knowledge_digest": target.knowledge_digest,
                 "normalizer_digest": target.normalizer_digest,
+                "waiver_policy_id": target.waiver_policy_id,
+                "waiver_policy_digest": target.waiver_policy_digest,
                 "checker_build": checker_build,
             },
             sort_keys=True,
@@ -6656,10 +9267,12 @@ class ControlledScenarioService:
             )
             expected_route = {
                 "Manual Review": "manual_review",
+                "Pending Exception Approval": "pending_exception_approval",
+                "Routing Determination": "routing_determination",
                 "Verification Completed": (
                     "human_complete"
                     if current_lifecycle_event.get("reason_code")
-                    == "HUMAN_REVIEW_COMPLETED"
+                    in {"HUMAN_REVIEW_COMPLETED", "BUSINESS_EXCEPTION_COMPLETED"}
                     else "auto_complete"
                 ),
             }.get(current_phase, "pending_check")
@@ -7465,6 +10078,7 @@ class ControlledScenarioService:
                     "kind": "review_projection_requested",
                     "application_id": staged_app["application_id"],
                     "run_id": run_id,
+                    "lifecycle_revision": staged_app["lifecycle_revision"],
                     "visibility_scope": result_visibility_scope,
                     "projection_watermark": 1
                     + sum(

@@ -88,6 +88,13 @@ except Exception:
     S02_CONFIGURATION_ERROR = "S02 source registry configuration is invalid"
 
 S01_CONFIGURATION_ERROR: str | None = None
+S05_EXCEPTION_APPROVER_CREDENTIAL = os.environ.get(
+    "TASK4_S05_EXCEPTION_APPROVER_CREDENTIAL", ""
+).strip()
+S05_EXCEPTION_APPROVER_SUBJECT = (
+    os.environ.get("TASK4_S05_EXCEPTION_APPROVER_SUBJECT", "").strip()
+    or "c-demo-exception-approver"
+)
 try:
     _s01_state_value = os.environ.get("TASK4_S01_STATE_PATH", "").strip()
     if not _s01_state_value:
@@ -103,6 +110,7 @@ try:
         storage_available=_s01_demo_flag("TASK4_S01_STORAGE_AVAILABLE", default=True),
         registered_sources=S02_REGISTERED_SOURCES,
         controlled_objects=S02_CONTROLLED_OBJECTS,
+        exception_approver_subject=S05_EXCEPTION_APPROVER_SUBJECT,
     )
 except Exception as error:
     S01_SERVICE = None
@@ -554,6 +562,36 @@ class S04RevealBody(S03ClaimBody):
     idempotency_key: str
 
 
+class S05RequestBody(S03FencedBody):
+    finding_id: str = Field(min_length=1, max_length=200, strict=True)
+    reason_code: str = Field(min_length=1, max_length=100, strict=True)
+    expected_fence: int = Field(ge=1, strict=True)
+
+
+class S05DecisionBody(S03FencedBody):
+    work_item_id: str = Field(min_length=1, max_length=200, strict=True)
+    decision: str = Field(min_length=1, max_length=20, strict=True)
+    reason_code: str = Field(min_length=1, max_length=100, strict=True)
+    expected_fence: int = Field(ge=1, strict=True)
+
+
+class S05ContextBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_context: dict[str, Any]
+    idempotency_key: str
+
+
+class S05InvalidationBody(S05ContextBody):
+    reason_code: str = Field(min_length=1, max_length=100, strict=True)
+
+
+class S05OperationsBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: str = Field(min_length=1, max_length=200, strict=True)
+
+
 class S03BatchPreviewBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -853,6 +891,29 @@ def _s04_demo_reviewer_principal(request: Request) -> S01CommandPrincipal:
     )
 
 
+def _s05_exception_approver_principal(request: Request) -> S01CommandPrincipal:
+    if not S05_EXCEPTION_APPROVER_SUBJECT or not _s01_has_credential(
+        request, S05_EXCEPTION_APPROVER_CREDENTIAL
+    ):
+        raise HTTPException(404, detail={"error": "S05_NOT_FOUND"})
+    return S01CommandPrincipal(
+        subject=S05_EXCEPTION_APPROVER_SUBJECT,
+        role="exception_approver",
+        scope="C-DEMO",
+        source_id="c-demo-exception-approver",
+    )
+
+
+def _s05_router_principal(request: Request) -> S01CommandPrincipal:
+    principal = _s01_require_operator(request)
+    return S01CommandPrincipal(
+        subject=principal.subject,
+        role="operator",
+        scope=principal.scope,
+        source_id="c-demo-exception-router",
+    )
+
+
 async def _s03_command_body(request: Request, model: type[BaseModel]) -> BaseModel:
     declared_length = request.headers.get("content-length")
     try:
@@ -929,6 +990,46 @@ def _s03_invalid_command(error: ValueError) -> HTTPException:
         detail={
             "error": "S03_INVALID_COMMAND",
             "message": "S03 command does not match the registered contract",
+        },
+    )
+
+
+def _s05_command_result(result: dict[str, Any]) -> dict[str, Any]:
+    status = result.get("status")
+    if status in {"accepted", "claimed"}:
+        return result
+    mapping = {
+        "stale": (409, "S05_STALE"),
+        "conflict": (409, "S05_CONFLICT"),
+        "already_decided": (409, "S05_ALREADY_DECIDED"),
+        "already_inactive": (409, "S05_ALREADY_INACTIVE"),
+        "not_due": (409, "S05_NOT_DUE"),
+        "sealed": (409, "S05_SEALED"),
+        "rejected": (409, "S05_REJECTED"),
+        "stopped": (503, "S05_STOPPED"),
+        "unavailable": (503, "S05_UNAVAILABLE"),
+    }
+    mapped = mapping.get(status)
+    if mapped is None:
+        raise RuntimeError("S05 domain returned an unsupported status")
+    status_code, error_code = mapped
+    detail = {"error": error_code}
+    reason_code = result.get("reason_code")
+    if isinstance(reason_code, str):
+        detail["reason_code"] = reason_code
+    raise HTTPException(status_code, detail=detail)
+
+
+def _s05_not_found(error: QueryNotFound) -> HTTPException:
+    return HTTPException(404, detail={"error": "S05_NOT_FOUND"})
+
+
+def _s05_invalid_command(error: ValueError) -> HTTPException:
+    return HTTPException(
+        422,
+        detail={
+            "error": "S05_INVALID_COMMAND",
+            "message": "S05 command does not match the registered contract",
         },
     )
 
@@ -1555,6 +1656,260 @@ async def controlled_s04_demo_correct_field_observation(
     except ValueError as error:
         raise _s03_invalid_command(error) from error
     return _s03_command_result(result)
+
+
+@app.post(
+    "/controlled/s01/api/commands/review-work-items/"
+    "{work_item_id}/business-exceptions"
+)
+async def controlled_s05_request_business_exception(
+    work_item_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s04_demo_reviewer_principal(request)
+    body = await _s03_command_body(request, S05RequestBody)
+    assert isinstance(body, S05RequestBody)
+    try:
+        result = _s01_service().request_business_exception(
+            principal=principal,
+            work_item_id=work_item_id,
+            finding_id=body.finding_id,
+            reason_code=body.reason_code,
+            expected_fence=body.expected_fence,
+            expected_context=body.expected_context,
+            idempotency_key=body.idempotency_key,
+            now=S01_SESSION_CLOCK(),
+        )
+    except QueryNotFound as error:
+        raise _s05_not_found(error) from error
+    except ValueError as error:
+        raise _s05_invalid_command(error) from error
+    return _s05_command_result(result)
+
+
+@app.get(
+    "/controlled/s01/api/queries/business-exceptions/{request_id}"
+)
+def controlled_s05_business_exception_view(
+    request_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s05_exception_approver_principal(request)
+    try:
+        return _s01_service().business_exception_view(
+            principal=principal,
+            request_id=request_id,
+            now=S01_SESSION_CLOCK(),
+        )
+    except QueryNotFound as error:
+        raise _s05_not_found(error) from error
+
+
+@app.post(
+    "/controlled/s01/api/commands/exception-work-items/{work_item_id}/claim"
+)
+async def controlled_s05_claim_exception_work_item(
+    work_item_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s05_exception_approver_principal(request)
+    body = await _s03_command_body(request, S03ClaimBody)
+    assert isinstance(body, S03ClaimBody)
+    try:
+        result = _s01_service().claim_exception_work_item(
+            principal=principal,
+            work_item_id=work_item_id,
+            expected_context=body.expected_context,
+            now=S01_SESSION_CLOCK(),
+        )
+    except QueryNotFound as error:
+        raise _s05_not_found(error) from error
+    return _s05_command_result(result)
+
+
+@app.post(
+    "/controlled/s01/api/commands/business-exceptions/{request_id}/decide"
+)
+async def controlled_s05_decide_business_exception(
+    request_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s05_exception_approver_principal(request)
+    body = await _s03_command_body(request, S05DecisionBody)
+    assert isinstance(body, S05DecisionBody)
+    try:
+        result = _s01_service().decide_business_exception(
+            principal=principal,
+            request_id=request_id,
+            work_item_id=body.work_item_id,
+            decision=body.decision,
+            reason_code=body.reason_code,
+            expected_fence=body.expected_fence,
+            expected_context=body.expected_context,
+            idempotency_key=body.idempotency_key,
+            now=S01_SESSION_CLOCK(),
+        )
+    except QueryNotFound as error:
+        raise _s05_not_found(error) from error
+    except ValueError as error:
+        raise _s05_invalid_command(error) from error
+    return _s05_command_result(result)
+
+
+@app.post(
+    "/controlled/s01/api/commands/business-exceptions/{request_id}/route"
+)
+async def controlled_s05_route_business_exception(
+    request_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s05_router_principal(request)
+    body = await _s03_command_body(request, S05ContextBody)
+    assert isinstance(body, S05ContextBody)
+    try:
+        result = _s01_service().determine_business_exception_route(
+            principal=principal,
+            request_id=request_id,
+            expected_context=body.expected_context,
+            idempotency_key=body.idempotency_key,
+            now=S01_SESSION_CLOCK(),
+        )
+    except QueryNotFound as error:
+        raise _s05_not_found(error) from error
+    except ValueError as error:
+        raise _s05_invalid_command(error) from error
+    return _s05_command_result(result)
+
+
+@app.post(
+    "/controlled/s01/api/commands/business-exceptions/{request_id}/expire"
+)
+async def controlled_s05_expire_business_exception(
+    request_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s05_router_principal(request)
+    body = await _s03_command_body(request, S05ContextBody)
+    assert isinstance(body, S05ContextBody)
+    try:
+        result = _s01_service().expire_business_exception(
+            principal=principal,
+            request_id=request_id,
+            expected_context=body.expected_context,
+            idempotency_key=body.idempotency_key,
+            now=S01_SESSION_CLOCK(),
+        )
+    except QueryNotFound as error:
+        raise _s05_not_found(error) from error
+    except ValueError as error:
+        raise _s05_invalid_command(error) from error
+    return _s05_command_result(result)
+
+
+@app.post(
+    "/controlled/s01/api/commands/business-exceptions/{request_id}/invalidate"
+)
+async def controlled_s05_invalidate_business_exception(
+    request_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s05_router_principal(request)
+    body = await _s03_command_body(request, S05InvalidationBody)
+    assert isinstance(body, S05InvalidationBody)
+    try:
+        result = _s01_service().invalidate_business_exception(
+            principal=principal,
+            request_id=request_id,
+            reason_code=body.reason_code,
+            expected_context=body.expected_context,
+            idempotency_key=body.idempotency_key,
+            now=S01_SESSION_CLOCK(),
+        )
+    except QueryNotFound as error:
+        raise _s05_not_found(error) from error
+    except ValueError as error:
+        raise _s05_invalid_command(error) from error
+    return _s05_command_result(result)
+
+
+@app.get(
+    "/controlled/s01/api/queries/business-exception-operations"
+)
+def controlled_s05_business_exception_operations_status(
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s05_router_principal(request)
+    try:
+        return _s01_service().business_exception_operations_status(
+            principal=principal,
+            now=S01_SESSION_CLOCK(),
+        )
+    except QueryNotFound as error:
+        raise _s05_not_found(error) from error
+
+
+@app.post(
+    "/controlled/s01/api/commands/business-exception-operations/close"
+)
+async def controlled_s05_close_business_exception_operations(
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s05_router_principal(request)
+    body = await _s03_command_body(request, S05OperationsBody)
+    assert isinstance(body, S05OperationsBody)
+    try:
+        result = _s01_service().close_business_exception_operations(
+            principal=principal,
+            idempotency_key=body.idempotency_key,
+            now=S01_SESSION_CLOCK(),
+        )
+    except QueryNotFound as error:
+        raise _s05_not_found(error) from error
+    except ValueError as error:
+        raise _s05_invalid_command(error) from error
+    return _s05_command_result(result)
+
+
+@app.post(
+    "/controlled/s01/api/commands/business-exception-operations/resume"
+)
+async def controlled_s05_resume_business_exception_operations(
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s05_router_principal(request)
+    body = await _s03_command_body(request, S05OperationsBody)
+    assert isinstance(body, S05OperationsBody)
+    try:
+        result = _s01_service().resume_business_exception_operations(
+            principal=principal,
+            idempotency_key=body.idempotency_key,
+            now=S01_SESSION_CLOCK(),
+        )
+    except QueryNotFound as error:
+        raise _s05_not_found(error) from error
+    except ValueError as error:
+        raise _s05_invalid_command(error) from error
+    return _s05_command_result(result)
 
 
 @app.get("/controlled/s01/api/queries/applications/{application_id}/current-route")
@@ -2222,6 +2577,7 @@ def create_s01_test_app() -> FastAPI:
             registered_sources=S02_REGISTERED_SOURCES,
             controlled_objects=S02_CONTROLLED_OBJECTS,
             scenario_id=scenario_value or "app_r53_bad_engine.json",
+            exception_approver_subject=S05_EXCEPTION_APPROVER_SUBJECT,
         )
         S01_TEST_DRIVER = ControlledScenarioTestDriver(S01_SERVICE)
     except Exception:

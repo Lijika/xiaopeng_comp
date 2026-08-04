@@ -4174,7 +4174,7 @@ def test_worker_executes_frozen_release_after_rules_path_changes(
     assert result.status == "complete"
     assert result.release_id == "auto_lease@1.9.0"
     assert result.release_digest == (
-        "21d6fe9e4bbd3c3cd8625e774cdf8aaafe08852aff85cfc65730da6548ab8aef"
+            "a463ddb219bc90b9c444711c0921f61fb3fb9c7895b1ccb3b86cddf59938e122"
     )
     assert result.checker_build == "s01-target-checker/6"
     assert result.fence == 1
@@ -4231,7 +4231,7 @@ def test_startup_binds_release_identity_and_policy_to_one_rules_snapshot(
     assert result.status == "complete"
     assert result.release_id == "auto_lease@1.9.0"
     assert result.release_digest == (
-        "21d6fe9e4bbd3c3cd8625e774cdf8aaafe08852aff85cfc65730da6548ab8aef"
+            "a463ddb219bc90b9c444711c0921f61fb3fb9c7895b1ccb3b86cddf59938e122"
     )
 
 
@@ -4302,7 +4302,7 @@ def test_restart_fails_closed_until_the_admitted_release_is_available(
     assert recovery["recovery"] == "scheduled"
     assert completed.status == "complete"
     assert completed.release_digest == (
-        "21d6fe9e4bbd3c3cd8625e774cdf8aaafe08852aff85cfc65730da6548ab8aef"
+            "a463ddb219bc90b9c444711c0921f61fb3fb9c7895b1ccb3b86cddf59938e122"
     )
 
 
@@ -4416,7 +4416,7 @@ def test_adapter_public_evidence_preserves_source_and_excludes_evaluation_labels
         "8f3bf94619690887fbbb3a5c4fa3bfdb815f178874e0b0dda2469b69454b2a58"
     )
     assert admitted.envelope_fingerprint == (
-        "890c61b3d211c13b9eb839a67395b67f9818cf7e7432a60ccb36cbbd533b64f4"
+            "bd8aa392f4f88874de2f1fd6afd73909c9668a9fd80498c25f5b3e9d9bfb1fab"
     )
     assert replay.replayed is True
     assert stale.status == "stale"

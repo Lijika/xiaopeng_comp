@@ -6,6 +6,7 @@ module.exports = defineConfig({
     "test_s01_browser.spec.js",
     "test_s02_browser.spec.js",
     "test_s03_browser.spec.js",
+    "test_s05_browser.spec.js",
   ],
   fullyParallel: false,
   workers: 1,

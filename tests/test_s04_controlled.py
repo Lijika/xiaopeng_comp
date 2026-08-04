@@ -880,6 +880,7 @@ def test_unauthorized_correction_hides_the_work_item(
     (
         "correction.evidence",
         "correction.lifecycle",
+        "correction.exception_invalidation",
         "correction.work_item",
         "correction.job",
         "correction.outbox",
