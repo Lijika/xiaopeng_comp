@@ -97,6 +97,17 @@ class AdmissionResult:
     performance_status: str | None = None
     source_registration_digest: str | None = None
     source_revision: int | None = None
+    request_id: str | None = None
+    request_status: str | None = None
+    batch_closed: bool | None = None
+    request_progress_revision: int | None = None
+    attachment_id: str | None = None
+    attachment_version: int | None = None
+    supersedes_attachment_id: str | None = None
+    fulfilled: bool | None = None
+    phase: str | None = None
+    route: str | None = None
+    recovery_target: dict[str, Any] | None = None
 
     @property
     def claim_label(self) -> str | None:
@@ -212,11 +223,12 @@ class ControlledScenarioService:
             "app_bad_model.json",
             "app_uncertain_ocr_noise.json",
             "app_inconsistent_vin.json",
+            "app_missing_vin_docs.json",
         }
     )
     _ALLOWED_PHASE_SUCCESSORS = {
         "Intake": frozenset({"Assembly"}),
-        "Assembly": frozenset({"Evidence Ready"}),
+        "Assembly": frozenset({"Awaiting Evidence", "Evidence Ready", "Unprocessable"}),
         "Evidence Ready": frozenset({"Checking"}),
         "Checking": frozenset({"Routing Determination", "Assembly"}),
         "Routing Determination": frozenset({"Manual Review", "Verification Completed"}),
@@ -226,8 +238,12 @@ class ControlledScenarioService:
                 "Verification Completed",
                 "Assembly",
                 "Pending Exception Approval",
+                "Supplement",
             }
         ),
+        "Supplement": frozenset({"Assembly", "Unprocessable"}),
+        "Awaiting Evidence": frozenset({"Assembly", "Unprocessable"}),
+        "Unprocessable": frozenset(),
         "Pending Exception Approval": frozenset(
             {"Routing Determination", "Manual Review", "Assembly"}
         ),
@@ -270,6 +286,11 @@ class ControlledScenarioService:
     _EXCEPTION_POLICY_ID = "c-demo-brand-exception/1"
     _EXCEPTION_SCOPE = "one_application_cycle_run_finding"
     _EXCEPTION_TTL_SECONDS = 900
+    _SUPPLEMENT_REQUEST_REASON = "MISSING_REQUIRED_MATERIAL"
+    _SUPPLEMENT_TTL_SECONDS = 3600
+    _SUPPLEMENT_REQUIREMENT_ID = "c-demo-financing-lease-vin/1"
+    _SUPPLEMENT_SATISFACTION_POLICY_ID = "c-demo-supplement/1"
+    _SUPPLEMENT_TARGET_DOCUMENT_ROLE = "\u878d\u8d44\u79df\u8d41\u5408\u540c"
     _PROTECTED_EXCEPTION_CHECKS = frozenset(
         {"R_VIN_CROSS", "R_ENGINE_CROSS", "R_ID_EXACT"}
     )
@@ -314,6 +335,32 @@ class ControlledScenarioService:
         ("id", "address", 5, "/documents/4/fields/address"),
         ("id", "id_number", 5, "/documents/4/fields/id_number"),
         ("id", "owner_name", 5, "/documents/4/fields/owner_name"),
+    )
+    _C_DEMO_MISSING_VIN_PROVENANCE_ENTRIES = (
+        ("reg_cert", "address", 1, "/documents/0/fields/address"),
+        ("reg_cert", "engine_no", 1, "/documents/0/fields/engine_no"),
+        ("reg_cert", "owner_name", 1, "/documents/0/fields/owner_name"),
+        ("reg_cert", "plate_no", 1, "/documents/0/fields/plate_no"),
+        ("reg_cert", "reg_cert_no", 1, "/documents/0/fields/reg_cert_no"),
+        ("reg_cert", "reg_date", 1, "/documents/0/fields/reg_date"),
+        ("reg_cert", "vin", 1, "/documents/0/fields/vin"),
+        ("policy", "engine_no", 2, "/documents/1/fields/engine_no"),
+        ("policy", "insured_name", 2, "/documents/1/fields/insured_name"),
+        ("policy", "plate_list", 2, "/documents/1/fields/plate_list"),
+        ("policy", "plate_no", 2, "/documents/1/fields/plate_no"),
+        ("policy", "vin", 2, "/documents/1/fields/vin"),
+        ("lease", "contract_date", 3, "/documents/2/fields/contract_date"),
+        ("lease", "financed_amount", 3, "/documents/2/fields/financed_amount"),
+        ("lease", "id_number", 3, "/documents/2/fields/id_number"),
+        ("lease", "lessee_name", 3, "/documents/2/fields/lessee_name"),
+        ("lease", "reg_cert_no", 3, "/documents/2/fields/reg_cert_no"),
+        ("lease", "reg_date", 3, "/documents/2/fields/reg_date"),
+        ("invoice", "engine_no", 4, "/documents/3/fields/engine_no"),
+        ("invoice", "invoice_amount", 4, "/documents/3/fields/invoice_amount"),
+        ("invoice", "vin", 4, "/documents/3/fields/vin"),
+        ("id_card", "address", 5, "/documents/4/fields/address"),
+        ("id_card", "id_number", 5, "/documents/4/fields/id_number"),
+        ("id_card", "owner_name", 5, "/documents/4/fields/owner_name"),
     )
 
     def __init__(
@@ -562,28 +609,16 @@ class ControlledScenarioService:
                     return self._registered_replay(previous_result)
                 return self._registered_idempotency_conflict(previous_result)
 
-            accepted = [
-                event
-                for event in self._store.audit_events
-                if event.get("action") == "controlled_admission"
-                and event.get("result") == "accepted"
-                and event.get("scope") == principal.scope
-                and isinstance(event.get("envelope"), dict)
-                and event["envelope"].get("track") == "R-OBSERVED"
-            ]
+            accepted = self._accepted_source_stream_receipts(envelope)
             same_revision = [
-                event
-                for event in accepted
-                if event["envelope"].get("stream_id") == envelope.stream_id
-                and event["envelope"].get("source_revision")
-                == envelope.source_revision
+                receipt
+                for receipt in accepted
+                if receipt.source_revision == envelope.source_revision
             ]
             if same_revision:
-                event = same_revision[0]
-                if event.get("envelope_fingerprint") == envelope.fingerprint:
-                    existing = self._store.receipts.get(str(event.get("receipt_id")))
-                    if isinstance(existing, AdmissionResult):
-                        return self._registered_replay(existing)
+                existing = same_revision[0]
+                if existing.envelope_fingerprint == envelope.fingerprint:
+                    return self._registered_replay(existing)
                 conflict = S02IntakeError(
                     "quarantined",
                     "intake.source_revision_conflict",
@@ -609,10 +644,8 @@ class ControlledScenarioService:
                 )
             if envelope.source_revision != 1:
                 predecessor_exists = any(
-                    event["envelope"].get("stream_id") == envelope.stream_id
-                    and event["envelope"].get("source_revision")
-                    == envelope.predecessor_revision
-                    for event in accepted
+                    receipt.source_revision == envelope.predecessor_revision
+                    for receipt in accepted
                 )
                 error = S02IntakeError(
                     "rejected" if predecessor_exists else "awaiting_predecessor",
@@ -657,6 +690,1884 @@ class ControlledScenarioService:
                 binding_key=binding_key,
                 command_fingerprint=command_fingerprint,
             )
+
+    def submit_attachment_version(
+        self,
+        *,
+        submission: dict[str, Any],
+        idempotency_key: str,
+        principal: S01CommandPrincipal | None = None,
+        now: float | None = None,
+    ) -> AdmissionResult:
+        """Verify and append one attachment version for an open supplement request."""
+        receipt_time = int(self._clock() if now is None else now)
+        if principal is None or not self._valid_registered_principal(principal):
+            return self._registered_rejected("intake.forbidden")
+        if not self._valid_idempotency_key(idempotency_key):
+            return self._registered_rejected("intake.idempotency_key_invalid")
+        try:
+            command_fingerprint = self._registered_source_boundary.command_fingerprint(
+                submission
+            )
+        except S02IntakeError as error:
+            return self._registered_failure_result(error)
+        workload_id = str(submission.get("workload_identity_id") or "")
+        binding_key = self._registered_idempotency_binding_key(
+            principal,
+            idempotency_key,
+            workload_id,
+            action="submit_attachment_version",
+        )
+        with self._lock:
+            self._reload_store()
+            previous = self._store.idempotency.get(binding_key)
+            if previous is not None:
+                if previous[0] == command_fingerprint:
+                    return self._registered_replay(previous[1])
+                return self._registered_idempotency_conflict(previous[1])
+            if self._supplement_operations_state()["intake"] == "closed":
+                return self._registered_rejected("supplement.intake_stopped")
+        try:
+            envelope = self._registered_source_boundary.canonicalize_attachment_version(
+                submission,
+                scope=principal.scope,
+                source_system_id=principal.source_id,
+            )
+        except S02IntakeError as error:
+            with self._lock:
+                self._reload_store()
+                return self._record_registered_disposition(
+                    error=error,
+                    command_fingerprint=command_fingerprint,
+                    binding_key=binding_key,
+                    principal=principal,
+                    submission=submission,
+                    command_type="submit_attachment_version",
+                )
+
+        request_binding = envelope.payload["request_binding"]
+        request_id = request_binding["supplement_request_id"]
+        with self._lock:
+            for attempt in range(2):
+                self._reload_store()
+                previous = self._store.idempotency.get(binding_key)
+                if previous is not None:
+                    if previous[0] == command_fingerprint:
+                        return self._registered_replay(previous[1])
+                    return self._registered_idempotency_conflict(previous[1])
+                if self._supplement_operations_state()["intake"] == "closed":
+                    return self._registered_rejected("supplement.intake_stopped")
+                requests = [
+                    record
+                    for record in self._store.review_records
+                    if record.get("record_type") == "supplement_request"
+                    and record.get("request_id") == request_id
+                ]
+                if len(requests) != 1:
+                    error = S02IntakeError(
+                        "rejected",
+                        "intake.request_not_found",
+                        responsible_party="integrator",
+                        recovery_action="use_a_visible_open_supplement_request",
+                        gate_results=(
+                            "identity:verified",
+                            "contract:verified",
+                            "request_binding:failed",
+                        ),
+                        adapter_id=envelope.adapter_id,
+                        adapter_version=envelope.adapter_version,
+                        registration_digest=envelope.registration_digest,
+                    )
+                    return self._record_registered_disposition(
+                        error=error,
+                        command_fingerprint=command_fingerprint,
+                        binding_key=binding_key,
+                        principal=principal,
+                        submission=submission,
+                        envelope=envelope,
+                        command_type="submit_attachment_version",
+                    )
+                request = requests[0]
+                application_id = request["application_id"]
+                app = self._store.applications.get(application_id)
+                self._require_application_state_authority(app)
+                assert app is not None
+
+                def reject(
+                    reason_code: str,
+                    *,
+                    disposition: str = "rejected",
+                    responsible_party: str = "integrator",
+                    recovery_action: str = "repair_and_resubmit",
+                    retryable: bool = False,
+                ) -> AdmissionResult:
+                    error = S02IntakeError(
+                        disposition,
+                        reason_code,
+                        responsible_party=responsible_party,
+                        recovery_action=recovery_action,
+                        retryable=retryable,
+                        gate_results=(
+                            "identity:verified",
+                            "contract:verified",
+                            "object:verified",
+                            "request_binding:failed",
+                        ),
+                        adapter_id=envelope.adapter_id,
+                        adapter_version=envelope.adapter_version,
+                        registration_digest=envelope.registration_digest,
+                    )
+                    return self._record_registered_disposition(
+                        error=error,
+                        command_fingerprint=command_fingerprint,
+                        binding_key=binding_key,
+                        principal=principal,
+                        submission=submission,
+                        envelope=envelope,
+                        command_type="submit_attachment_version",
+                        application_id=application_id,
+                        request_id=request_id,
+                    )
+
+                terminal = [
+                    record
+                    for record in self._store.review_records
+                    if record.get("request_id") == request_id
+                    and record.get("record_type")
+                    in {
+                        "supplement_request_fulfilled",
+                        "supplement_request_expired",
+                        "supplement_request_invalidated",
+                    }
+                ]
+                if terminal:
+                    matching_terminal = next(
+                        (
+                            record
+                            for record in terminal
+                            if record.get("stream_id") == envelope.stream_id
+                            and record.get("source_revision")
+                            == envelope.source_revision
+                            and record.get("envelope_fingerprint")
+                            == envelope.fingerprint
+                        ),
+                        None,
+                    )
+                    if matching_terminal is not None:
+                        existing = self._store.receipts.get(
+                            str(matching_terminal.get("receipt_id"))
+                        )
+                        if isinstance(existing, AdmissionResult):
+                            return self._registered_replay(existing)
+                    return reject(
+                        "evidence.late_input_requires_reopen",
+                        responsible_party="lifecycle_owner",
+                        recovery_action="use_the_later_reopen_contract",
+                    )
+                authenticated = envelope.payload["envelope"]["authenticated_context"]
+                allowed = request["allowed_source_policy"]
+                document = envelope.payload["application"]["evidence"][0]
+                lineage = envelope.payload["attachment_lineage"]
+                batch = envelope.payload["batch"]
+                if (
+                    authenticated.get("tenant_id") != allowed["tenant_id"]
+                    or authenticated.get("source_id")
+                    not in allowed["source_system_ids"]
+                    or authenticated.get("workload_identity_id")
+                    not in allowed["workload_identity_ids"]
+                    or envelope.upstream_application_reference
+                    != app["upstream_application_reference"]
+                    or request_binding.get("request_context_digest")
+                    != request["context_digest"]
+                    or request_binding.get("material_requirement_id")
+                    != request["material_requirement_id"]
+                    or batch.get("item_count") != request["batch_item_count"]
+                    or document.get("document_role") != request["document_role"]
+                    or document.get("document_type") != request["material_kind"]
+                    or lineage.get("operation") != request["operation"]
+                    or lineage.get("predecessor_attachment_id")
+                    != request["expected_predecessor_attachment_id"]
+                    or lineage.get("predecessor_attachment_version")
+                    != request["expected_predecessor_attachment_version"]
+                    or lineage.get("attachment_version")
+                    != request["expected_predecessor_attachment_version"] + 1
+                ):
+                    return reject("intake.request_context_mismatch")
+                progress = sorted(
+                    (
+                        record
+                        for record in self._store.review_records
+                        if record.get("record_type")
+                        == "supplement_request_progress"
+                        and record.get("request_id") == request_id
+                    ),
+                    key=lambda record: int(record["request_progress_revision"]),
+                )
+                expected_progress_revision = len(progress) + 1
+                expected_source_revision = len(progress) + 1
+                expected_predecessor = (
+                    progress[-1]["source_revision"] if progress else None
+                )
+                same_source_revision = [
+                    receipt
+                    for receipt in self._accepted_source_stream_receipts(envelope)
+                    if receipt.source_revision == envelope.source_revision
+                ]
+                if any(
+                    receipt.envelope_fingerprint == envelope.fingerprint
+                    for receipt in same_source_revision
+                ):
+                    existing = next(
+                        receipt
+                        for receipt in same_source_revision
+                        if receipt.envelope_fingerprint == envelope.fingerprint
+                    )
+                    return self._registered_replay(existing)
+                if same_source_revision:
+                    return reject(
+                        "intake.source_revision_conflict",
+                        disposition="quarantined",
+                        responsible_party="source_owner",
+                        recovery_action="reconcile_the_source_revision_history",
+                    )
+                if (
+                    request_binding.get("request_progress_revision")
+                    != expected_progress_revision
+                    or envelope.source_revision != expected_source_revision
+                    or envelope.predecessor_revision != expected_predecessor
+                    or batch["item_sequence"] != expected_progress_revision
+                    or progress
+                    and (
+                        progress[0]["batch_id"] != batch["batch_id"]
+                        or progress[0]["batch_manifest_digest"]
+                        != batch["manifest_digest"]
+                    )
+                ):
+                    return reject(
+                        "intake.sequence_gap",
+                        disposition="awaiting_predecessor",
+                        responsible_party="source_owner",
+                        recovery_action="submit_and_reconcile_the_declared_predecessor",
+                        retryable=True,
+                    )
+                if receipt_time >= int(request["due_at"]):
+                    if not self.audit_available:
+                        return self._registered_rejected("intake.audit_unavailable")
+                    if not self.storage_available:
+                        return self._registered_rejected("intake.storage_unavailable")
+                    receipt_id = self._stable_id(
+                        "receipt",
+                        f"supplement:expired:{binding_key}:{envelope.fingerprint}",
+                    )
+                    staged = copy.deepcopy(self._store)
+                    staged_app = staged.applications[application_id]
+                    try:
+                        recovery_target = self._stage_supplement_expiry(
+                            staged,
+                            request=request,
+                            event_time=receipt_time,
+                        )
+                        result = AdmissionResult(
+                            disposition=AdmissionDisposition.REJECTED,
+                            application_id=application_id,
+                            receipt_id=receipt_id,
+                            reason_code="supplement.deadline_reached",
+                            lifecycle_revision=staged_app[
+                                "lifecycle_revision"
+                            ],
+                            evidence_revision=staged_app["evidence_revision"],
+                            audit_recorded=True,
+                            envelope_version=envelope.envelope_version,
+                            schema_version=envelope.schema_version,
+                            semantic_version=envelope.semantic_version,
+                            envelope_id=envelope.envelope_id,
+                            stream_id=envelope.stream_id,
+                            source_revision_id=self._stable_id(
+                                "source_revision",
+                                f"{envelope.stream_id}:{envelope.source_revision}:"
+                                f"{envelope.fingerprint}",
+                            ),
+                            batch_id=batch["batch_id"],
+                            envelope_fingerprint=envelope.fingerprint,
+                            idempotency_identity=binding_key,
+                            idempotency_key_digest=hashlib.sha256(
+                                idempotency_key.encode("utf-8")
+                            ).hexdigest(),
+                            adapter_id=envelope.adapter_id,
+                            adapter_version=envelope.adapter_version,
+                            artifact_manifest_digest=self._manifest.digest,
+                            responsible_party=request["responsible_party"],
+                            recovery_action=(
+                                "create_a_new_current_supplement_request"
+                            ),
+                            gate_results=(
+                                "identity:verified",
+                                "contract:verified",
+                                "object:verified",
+                                "request_binding:verified",
+                                "deadline:expired",
+                                "idempotency:bound",
+                            ),
+                            fact_counts={
+                                "applications": 0,
+                                "receipts": 1,
+                                "idempotency_bindings": 1,
+                                "lifecycle_events": 1,
+                                "evidence_events": 0,
+                                "audit_events": 1,
+                                "jobs": 0,
+                                "outbox_events": 0,
+                                "attachments": 0,
+                                "pages": 0,
+                                "producer_results": 0,
+                                "observations": 0,
+                            },
+                            real_cross_document_opportunities=0,
+                            performance_status="not_estimable",
+                            source_registration_digest=(
+                                envelope.registration_digest
+                            ),
+                            source_revision=envelope.source_revision,
+                            request_id=request_id,
+                            request_status="expired",
+                            batch_closed=batch["closed"],
+                            request_progress_revision=(
+                                expected_progress_revision
+                            ),
+                            attachment_id=(
+                                progress[-1]["attachment_id"]
+                                if progress
+                                else None
+                            ),
+                            attachment_version=(
+                                progress[-1]["attachment_version"]
+                                if progress
+                                else None
+                            ),
+                            supersedes_attachment_id=(
+                                progress[-1]["supersedes_attachment_id"]
+                                if progress
+                                else None
+                            ),
+                            fulfilled=False,
+                            phase="Unprocessable",
+                            route="unprocessable",
+                            recovery_target=recovery_target,
+                        )
+                        self._before_write("supplement_expiry.receipt")
+                        staged.receipts[receipt_id] = result
+                        self._append_supplement_expiry_audit(
+                            staged,
+                            request=request,
+                            principal=principal,
+                            event_time=receipt_time,
+                            recovery_target=recovery_target,
+                            receipt_id=receipt_id,
+                        )
+                        self._before_write("supplement_expiry.idempotency")
+                        staged.idempotency[binding_key] = (
+                            command_fingerprint,
+                            result,
+                        )
+                        self._before_write("supplement_expiry.publish")
+                        staged.persist()
+                    except StaleStoreRevision:
+                        if attempt == 0:
+                            continue
+                        return self._registered_rejected(
+                            "intake.storage_unavailable"
+                        )
+                    except _StoreWriteFailure as error:
+                        return self._registered_rejected(
+                            "intake.audit_unavailable"
+                            if str(error) == "supplement_expiry.audit"
+                            else "intake.storage_unavailable"
+                        )
+                    self._store = staged
+                    return result
+                if (
+                    app.get("cycle") != request["cycle"]
+                    or app.get("phase") not in {"Supplement", "Awaiting Evidence"}
+                    or app.get("evidence_revision")
+                    != (
+                        request["expected_evidence_revision"]
+                        if not progress
+                        else progress[-1]["evidence_revision"]
+                    )
+                    or app.get("current_run_id")
+                    not in {request["run_id"], None}
+                    or progress
+                    and app.get("current_run_id") is not None
+                ):
+                    return reject(
+                        "intake.request_context_stale",
+                        responsible_party="lifecycle_owner",
+                        recovery_action="request_a_new_current_material_assessment",
+                    )
+                observations = document.get("observations")
+                eligible_vin = [
+                    observation
+                    for observation in observations
+                    if observation.get("field") == "vin"
+                    and observation.get("evidence_eligible") is True
+                    and observation.get("raw") not in {None, ""}
+                ] if isinstance(observations, list) else []
+                if (
+                    not envelope.provenance_eligible
+                    or envelope.attachment_count < 1
+                    or len(eligible_vin) != 1
+                ):
+                    return reject(
+                        "evidence.satisfaction_policy_failed",
+                        disposition="quarantined",
+                        responsible_party="source_owner",
+                        recovery_action="submit_verified_required_material",
+                    )
+                gate = self._review_write_gate(app=app)
+                if gate is not None:
+                    _, failure = gate
+                    if failure == self._REVIEW_SOURCE_FAILURE:
+                        try:
+                            return self._invalidate_supplement_source_dependency(
+                                request=request,
+                                progress=progress,
+                                envelope=envelope,
+                                batch=batch,
+                                binding_key=binding_key,
+                                command_fingerprint=command_fingerprint,
+                                idempotency_key=idempotency_key,
+                                principal=principal,
+                                event_time=receipt_time,
+                            )
+                        except StaleStoreRevision:
+                            if attempt == 0:
+                                continue
+                            return self._registered_rejected(
+                                "intake.storage_unavailable"
+                            )
+                        except _StoreWriteFailure as error:
+                            return self._registered_rejected(
+                                "intake.audit_unavailable"
+                                if str(error) == "supplement_invalidation.audit"
+                                else "intake.storage_unavailable"
+                            )
+                    return reject(
+                        failure,
+                        responsible_party="platform_owner",
+                        recovery_action="restore_the_protected_write_dependency",
+                        retryable=True,
+                    )
+
+                evidence = self._admitted_evidence(app)
+                predecessor_documents = [
+                    candidate
+                    for candidate in evidence
+                    if isinstance(candidate.get("attachment"), dict)
+                    and candidate["attachment"].get("attachment_id")
+                    == request["expected_predecessor_attachment_id"]
+                    and candidate["attachment"].get("version")
+                    == request["expected_predecessor_attachment_version"]
+                ]
+                if len(predecessor_documents) != 1:
+                    return reject(
+                        "evidence.predecessor_unavailable",
+                        disposition="quarantined",
+                        responsible_party="lifecycle_owner",
+                        recovery_action="reconcile_the_attachment_lineage",
+                    )
+                if batch["closed"]:
+                    if not progress:
+                        return reject(
+                            "intake.sequence_gap",
+                            disposition="awaiting_predecessor",
+                            responsible_party="source_owner",
+                            recovery_action="submit_the_declared_request_progress",
+                            retryable=True,
+                        )
+                    current_documents = [
+                        candidate
+                        for candidate in self._assemble_evidence(evidence)
+                        if isinstance(candidate.get("attachment"), dict)
+                        and candidate["attachment"].get("attachment_id")
+                        == progress[-1]["attachment_id"]
+                    ]
+                    incoming_pages = envelope.payload["application"]["graph"][
+                        "attachments"
+                    ]
+                    current_vin = [
+                        observation
+                        for observation in current_documents[0].get(
+                            "observations", []
+                        )
+                        if observation.get("field") == "vin"
+                        and observation.get("evidence_eligible") is True
+                        and observation.get("raw") not in {None, ""}
+                    ] if len(current_documents) == 1 else []
+                    current_attachment = (
+                        current_documents[0]["attachment"]
+                        if len(current_documents) == 1
+                        else None
+                    )
+                    if (
+                        not isinstance(current_attachment, dict)
+                        or current_attachment.get("version")
+                        != lineage["attachment_version"]
+                        or not current_attachment.get("page_ids")
+                        or not current_attachment.get("producer_result_id")
+                        or len(incoming_pages) != 1
+                        or current_attachment.get("source_sha256")
+                        != incoming_pages[0].get("source_sha256")
+                        or len(current_vin) != 1
+                        or current_vin[0].get("raw") != eligible_vin[0].get("raw")
+                    ):
+                        return reject(
+                            "evidence.satisfaction_policy_failed",
+                            disposition="quarantined",
+                            responsible_party="source_owner",
+                            recovery_action="submit_verified_required_material",
+                        )
+                    job_id = self._stable_id(
+                        "job", f"{application_id}:supplement:{request_id}"
+                    )
+                    receipt_id = self._stable_id(
+                        "receipt",
+                        f"supplement:{binding_key}:{envelope.fingerprint}",
+                    )
+                    source_revision_id = self._stable_id(
+                        "source_revision",
+                        f"{envelope.stream_id}:{envelope.source_revision}:"
+                        f"{envelope.fingerprint}",
+                    )
+                    staged = copy.deepcopy(self._store)
+                    staged_app = staged.applications[application_id]
+                    try:
+                        self._before_write("supplement_fulfillment.lifecycle")
+                        staged_app["route"] = "pending_check"
+                        staged_app["evidence_ready"] = False
+                        staged_app["projection_visible"] = False
+                        staged_app["projection_pending"] = False
+                        self._transition_lifecycle(
+                            staged_app,
+                            "Assembly",
+                            "SUPPLEMENT_REQUEST_FULFILLED",
+                            store=staged,
+                        )
+                        staged.lifecycle_events[-1].update(
+                            {
+                                "request_id": request_id,
+                                "receipt_id": receipt_id,
+                                "attachment_id": progress[-1]["attachment_id"],
+                                "work_item_id": request["work_item_id"],
+                                "job_id": job_id,
+                            }
+                        )
+                        self._before_write("supplement_fulfillment.request")
+                        staged.review_records.append(
+                            {
+                                "record_id": self._stable_id(
+                                    "supplement_fulfillment",
+                                    f"{request_id}:{envelope.fingerprint}",
+                                ),
+                                "record_type": "supplement_request_fulfilled",
+                                "schema_version": "supplement-request-fulfillment/1",
+                                "request_id": request_id,
+                                "work_item_id": request["work_item_id"],
+                                "application_id": application_id,
+                                "cycle": request["cycle"],
+                                "status": "fulfilled",
+                                "request_progress_revision": (
+                                    expected_progress_revision
+                                ),
+                                "stream_id": envelope.stream_id,
+                                "source_revision": envelope.source_revision,
+                                "predecessor_revision": envelope.predecessor_revision,
+                                "batch_id": batch["batch_id"],
+                                "batch_manifest_digest": batch[
+                                    "manifest_digest"
+                                ],
+                                "batch_closed": True,
+                                "attachment_id": progress[-1]["attachment_id"],
+                                "attachment_version": progress[-1][
+                                    "attachment_version"
+                                ],
+                                "receipt_id": receipt_id,
+                                "envelope_id": envelope.envelope_id,
+                                "envelope_fingerprint": envelope.fingerprint,
+                                "evidence_revision": staged_app[
+                                    "evidence_revision"
+                                ],
+                                "lifecycle_revision": staged_app[
+                                    "lifecycle_revision"
+                                ],
+                                "fulfilled_at": receipt_time,
+                            }
+                        )
+                        self._before_write("supplement_fulfillment.work_item")
+                        staged.review_records.append(
+                            {
+                                "record_id": self._stable_id(
+                                    "review_record",
+                                    f"{request['work_item_id']}:fulfilled:1",
+                                ),
+                                "record_type": "supplement_work_item_fulfilled",
+                                "sequence": 1,
+                                "request_id": request_id,
+                                "work_item_id": request["work_item_id"],
+                                "application_id": application_id,
+                                "attachment_id": progress[-1]["attachment_id"],
+                                "fulfilled_at": receipt_time,
+                                "recorded_at": receipt_time,
+                            }
+                        )
+                        self._before_write("supplement_fulfillment.job")
+                        supplement_job = self._admission_job_record(
+                            job_id, application_id, envelope.fingerprint
+                        )
+                        supplement_job.update(
+                            {
+                                "kind": "supplement_check",
+                                "request_id": request_id,
+                            }
+                        )
+                        staged.jobs.append(supplement_job)
+                        self._before_write("supplement_fulfillment.outbox")
+                        staged.outbox.append(
+                            {
+                                "event_id": self._stable_id("outbox", job_id),
+                                "kind": "controlled_check_requested",
+                                "application_id": application_id,
+                                "job_id": job_id,
+                                "fingerprint": envelope.fingerprint,
+                                "request_id": request_id,
+                                "status": "pending",
+                            }
+                        )
+                        result = AdmissionResult(
+                            disposition=AdmissionDisposition.ACCEPTED,
+                            application_id=application_id,
+                            receipt_id=receipt_id,
+                            job_id=job_id,
+                            reason_code="request_fulfilled",
+                            replayed=False,
+                            lifecycle_revision=staged_app[
+                                "lifecycle_revision"
+                            ],
+                            evidence_revision=staged_app["evidence_revision"],
+                            audit_recorded=True,
+                            envelope_version=envelope.envelope_version,
+                            schema_version=envelope.schema_version,
+                            semantic_version=envelope.semantic_version,
+                            envelope_id=envelope.envelope_id,
+                            stream_id=envelope.stream_id,
+                            source_revision_id=source_revision_id,
+                            batch_id=batch["batch_id"],
+                            envelope_fingerprint=envelope.fingerprint,
+                            idempotency_identity=binding_key,
+                            idempotency_key_digest=hashlib.sha256(
+                                idempotency_key.encode("utf-8")
+                            ).hexdigest(),
+                            adapter_id=envelope.adapter_id,
+                            adapter_version=envelope.adapter_version,
+                            artifact_manifest_digest=self._manifest.digest,
+                            gate_results=(
+                                "identity:verified",
+                                "contract:verified",
+                                "object:verified",
+                                "provenance:verified",
+                                "request_binding:verified",
+                                "batch:closed",
+                                "idempotency:bound",
+                            ),
+                            fact_counts={
+                                "applications": 0,
+                                "receipts": 1,
+                                "idempotency_bindings": 1,
+                                "lifecycle_events": 1,
+                                "evidence_events": 0,
+                                "audit_events": 1,
+                                "jobs": 1,
+                                "outbox_events": 1,
+                                "attachments": 0,
+                                "pages": 0,
+                                "producer_results": 0,
+                                "observations": 0,
+                            },
+                            real_cross_document_opportunities=0,
+                            performance_status="not_estimable",
+                            source_registration_digest=(
+                                envelope.registration_digest
+                            ),
+                            source_revision=envelope.source_revision,
+                            request_id=request_id,
+                            request_status="fulfilled",
+                            batch_closed=True,
+                            request_progress_revision=(
+                                expected_progress_revision
+                            ),
+                            attachment_id=progress[-1]["attachment_id"],
+                            attachment_version=progress[-1][
+                                "attachment_version"
+                            ],
+                            supersedes_attachment_id=progress[-1][
+                                "supersedes_attachment_id"
+                            ],
+                            fulfilled=True,
+                            phase="Assembly",
+                            route="pending_check",
+                        )
+                        self._before_write("supplement_fulfillment.receipt")
+                        staged.receipts[receipt_id] = result
+                        self._before_write("supplement_fulfillment.audit")
+                        staged.audit_events.append(
+                            {
+                                "event_id": self._stable_id(
+                                    "audit", f"supplement_fulfilled:{receipt_id}"
+                                ),
+                                "action": "supplement_request_fulfilled",
+                                "subject": principal.subject,
+                                "role": principal.role,
+                                "scope": principal.scope,
+                                "source_id": principal.source_id,
+                                "application_id": application_id,
+                                "request_id": request_id,
+                                "receipt_id": receipt_id,
+                                "attachment_id": progress[-1][
+                                    "attachment_id"
+                                ],
+                                "batch_id": batch["batch_id"],
+                                "batch_closed": True,
+                                "job_id": job_id,
+                                "lifecycle_revision": staged_app[
+                                    "lifecycle_revision"
+                                ],
+                                "evidence_revision": staged_app[
+                                    "evidence_revision"
+                                ],
+                                "result": "accepted",
+                                **self._audit_time_fields(
+                                    staged, now=receipt_time
+                                ),
+                            }
+                        )
+                        self._before_write("supplement_fulfillment.idempotency")
+                        staged.idempotency[binding_key] = (
+                            command_fingerprint,
+                            result,
+                        )
+                        self._before_write("supplement_fulfillment.publish")
+                        staged.persist()
+                    except StaleStoreRevision:
+                        if attempt == 0:
+                            continue
+                        return self._registered_rejected(
+                            "intake.storage_unavailable"
+                        )
+                    except _StoreWriteFailure as error:
+                        return self._registered_rejected(
+                            "intake.audit_unavailable"
+                            if str(error) == "supplement_fulfillment.audit"
+                            else "intake.storage_unavailable"
+                        )
+                    except Exception:
+                        return self._registered_rejected(
+                            "intake.storage_unavailable"
+                        )
+                    self._store = staged
+                    return result
+                attachment_id = self._stable_id(
+                    "attachment", f"{request_id}:{envelope.fingerprint}"
+                )
+                producer_result = copy.deepcopy(
+                    envelope.payload["application"]["graph"]["producer_result"]
+                )
+                producer_result_id = self._stable_id(
+                    "producer_result", f"{request_id}:{envelope.fingerprint}"
+                )
+                producer_result.update(
+                    {
+                        "producer_result_id": producer_result_id,
+                        "version": 1,
+                    }
+                )
+                pages = []
+                for page in envelope.payload["application"]["graph"]["attachments"]:
+                    pages.append(
+                        {
+                            **copy.deepcopy(page),
+                            "page_id": self._stable_id(
+                                "page",
+                                f"{attachment_id}:{page['page_ref']}:{page['source_sha256']}",
+                            ),
+                            "version": 1,
+                        }
+                    )
+                document_id = self._stable_id(
+                    "document", f"{request_id}:{attachment_id}"
+                )
+                successor_observations = []
+                successor_fields: dict[str, dict[str, Any]] = {}
+                for observation in observations:
+                    successor = {
+                        **copy.deepcopy(observation),
+                        "document_id": document_id,
+                        "document_role": request["target_document_role"],
+                        "version": 1,
+                        "producer_result_id": producer_result_id,
+                    }
+                    field_name = successor.get("field")
+                    if (
+                        not isinstance(field_name, str)
+                        or not field_name
+                        or field_name in successor_fields
+                    ):
+                        return reject(
+                            "evidence.satisfaction_policy_failed",
+                            disposition="quarantined",
+                            responsible_party="source_owner",
+                            recovery_action="submit_unambiguous_field_observations",
+                        )
+                    successor_observations.append(successor)
+                    successor_fields[field_name] = copy.deepcopy(successor)
+                successor_document = {
+                    "document_id": document_id,
+                    "document_type": request["material_kind"],
+                    "document_role": request["target_document_role"],
+                    "fields": successor_fields,
+                    "observations": successor_observations,
+                    "attachment": {
+                        "attachment_id": attachment_id,
+                        "version": lineage["attachment_version"],
+                        "supersedes_attachment_id": lineage[
+                            "predecessor_attachment_id"
+                        ],
+                        "supersedes_attachment_version": lineage[
+                            "predecessor_attachment_version"
+                        ],
+                        "source_attachment_ref": pages[0]["attachment_ref"],
+                        "source_object_ref": pages[0]["source_object_ref"],
+                        "source_sha256": pages[0]["source_sha256"],
+                        "media_type": pages[0]["media_type"],
+                        "producer_result_id": producer_result_id,
+                        "page_ids": [page["page_id"] for page in pages],
+                    },
+                    "pages": pages,
+                    "producer_result": producer_result,
+                }
+                evidence.append(successor_document)
+                next_evidence_revision = int(app["evidence_revision"]) + 1
+                evidence_payload = {
+                    "schema_version": "s06-supplement-evidence/1",
+                    "evidence": evidence,
+                    "request_id": request_id,
+                    "request_progress_revision": expected_progress_revision,
+                    "attachment_id": attachment_id,
+                    "supersedes_attachment_id": lineage[
+                        "predecessor_attachment_id"
+                    ],
+                    "batch": copy.deepcopy(batch),
+                }
+                evidence_bytes = json.dumps(
+                    evidence_payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                receipt_id = self._stable_id(
+                    "receipt", f"supplement:{binding_key}:{envelope.fingerprint}"
+                )
+                source_revision_id = self._stable_id(
+                    "source_revision",
+                    f"{envelope.stream_id}:{envelope.source_revision}:{envelope.fingerprint}",
+                )
+                staged = copy.deepcopy(self._store)
+                staged_app = staged.applications[application_id]
+                old_route = staged_app["route"]
+                try:
+                    self._before_write("supplement_progress.evidence")
+                    staged.evidence_events.append(
+                        {
+                            "event_id": self._stable_id(
+                                "evidence",
+                                f"{application_id}:supplement:{request_id}:"
+                                f"{expected_progress_revision}",
+                            ),
+                            "application_id": application_id,
+                            "revision": next_evidence_revision,
+                            "kind": "supplement_attachment_version",
+                            "content_sha256": hashlib.sha256(
+                                evidence_bytes
+                            ).hexdigest(),
+                            "content_bytes": len(evidence_bytes),
+                            "payload": evidence_payload,
+                        }
+                    )
+                    staged_app["evidence_revision"] = next_evidence_revision
+                    staged_app["evidence_ready"] = False
+                    staged_app["route"] = "awaiting_evidence"
+                    staged_app["current_run_id"] = None
+                    staged_app["current_evidence_snapshot_id"] = None
+                    staged_app["current_evidence_snapshot_digest"] = None
+                    staged_app["projection_visible"] = False
+                    staged_app["projection_pending"] = False
+                    self._before_write("supplement_progress.lifecycle")
+                    self._transition_lifecycle(
+                        staged_app,
+                        "Assembly",
+                        "SUPPLEMENT_PROGRESS_ACCEPTED",
+                        store=staged,
+                    )
+                    staged.lifecycle_events[-1].update(
+                        {
+                            "request_id": request_id,
+                            "receipt_id": receipt_id,
+                            "attachment_id": attachment_id,
+                            "invalidated_run_id": request["run_id"],
+                            "invalidated_route": old_route,
+                            "invalidated_work_item_id": request[
+                                "source_work_item_id"
+                            ],
+                        }
+                    )
+                    self._transition_lifecycle(
+                        staged_app,
+                        "Awaiting Evidence",
+                        "SUPPLEMENT_BATCH_OPEN",
+                        store=staged,
+                    )
+                    staged.lifecycle_events[-1].update(
+                        {
+                            "request_id": request_id,
+                            "receipt_id": receipt_id,
+                            "batch_id": batch["batch_id"],
+                        }
+                    )
+                    result = AdmissionResult(
+                        disposition=AdmissionDisposition.ACCEPTED,
+                        application_id=application_id,
+                        receipt_id=receipt_id,
+                        reason_code="request_progress_accepted",
+                        replayed=False,
+                        lifecycle_revision=staged_app["lifecycle_revision"],
+                        evidence_revision=next_evidence_revision,
+                        audit_recorded=True,
+                        envelope_version=envelope.envelope_version,
+                        schema_version=envelope.schema_version,
+                        semantic_version=envelope.semantic_version,
+                        envelope_id=envelope.envelope_id,
+                        stream_id=envelope.stream_id,
+                        source_revision_id=source_revision_id,
+                        batch_id=batch["batch_id"],
+                        envelope_fingerprint=envelope.fingerprint,
+                        idempotency_identity=binding_key,
+                        idempotency_key_digest=hashlib.sha256(
+                            idempotency_key.encode("utf-8")
+                        ).hexdigest(),
+                        adapter_id=envelope.adapter_id,
+                        adapter_version=envelope.adapter_version,
+                        artifact_manifest_digest=self._manifest.digest,
+                        gate_results=(
+                            "identity:verified",
+                            "contract:verified",
+                            "object:verified",
+                            "provenance:verified",
+                            "request_binding:verified",
+                            "idempotency:bound",
+                        ),
+                        fact_counts={
+                            "applications": 0,
+                            "receipts": 1,
+                            "idempotency_bindings": 1,
+                            "lifecycle_events": 2,
+                            "evidence_events": 1,
+                            "audit_events": 1,
+                            "jobs": 0,
+                            "outbox_events": 0,
+                            "attachments": 1,
+                            "pages": len(pages),
+                            "producer_results": 1,
+                            "observations": len(successor_observations),
+                        },
+                        real_cross_document_opportunities=0,
+                        performance_status="not_estimable",
+                        source_registration_digest=envelope.registration_digest,
+                        source_revision=envelope.source_revision,
+                        request_id=request_id,
+                        request_status="open",
+                        batch_closed=False,
+                        request_progress_revision=expected_progress_revision,
+                        attachment_id=attachment_id,
+                        attachment_version=lineage["attachment_version"],
+                        supersedes_attachment_id=lineage[
+                            "predecessor_attachment_id"
+                        ],
+                        fulfilled=False,
+                        phase="Awaiting Evidence",
+                        route="awaiting_evidence",
+                    )
+                    self._before_write("supplement_progress.request")
+                    staged.review_records.append(
+                        {
+                            "record_id": self._stable_id(
+                                "supplement_progress",
+                                f"{request_id}:{expected_progress_revision}:"
+                                f"{envelope.fingerprint}",
+                            ),
+                            "record_type": "supplement_request_progress",
+                            "schema_version": "supplement-request-progress/1",
+                            "request_id": request_id,
+                            "work_item_id": request["work_item_id"],
+                            "application_id": application_id,
+                            "cycle": request["cycle"],
+                            "request_progress_revision": expected_progress_revision,
+                            "stream_id": envelope.stream_id,
+                            "source_revision": envelope.source_revision,
+                            "predecessor_revision": envelope.predecessor_revision,
+                            "batch_id": batch["batch_id"],
+                            "batch_manifest_digest": batch["manifest_digest"],
+                            "batch_item_sequence": batch["item_sequence"],
+                            "batch_closed": False,
+                            "attachment_id": attachment_id,
+                            "attachment_version": lineage["attachment_version"],
+                            "supersedes_attachment_id": lineage[
+                                "predecessor_attachment_id"
+                            ],
+                            "receipt_id": receipt_id,
+                            "envelope_id": envelope.envelope_id,
+                            "envelope_fingerprint": envelope.fingerprint,
+                            "evidence_revision": next_evidence_revision,
+                            "lifecycle_revision": staged_app[
+                                "lifecycle_revision"
+                            ],
+                            "recorded_at": receipt_time,
+                        }
+                    )
+                    self._before_write("supplement_progress.receipt")
+                    staged.receipts[receipt_id] = result
+                    self._before_write("supplement_progress.audit")
+                    staged.audit_events.append(
+                        {
+                            "event_id": self._stable_id(
+                                "audit", f"supplement_progress:{receipt_id}"
+                            ),
+                            "action": "supplement_request_progress",
+                            "subject": principal.subject,
+                            "role": principal.role,
+                            "scope": principal.scope,
+                            "source_id": principal.source_id,
+                            "application_id": application_id,
+                            "request_id": request_id,
+                            "receipt_id": receipt_id,
+                            "attachment_id": attachment_id,
+                            "supersedes_attachment_id": lineage[
+                                "predecessor_attachment_id"
+                            ],
+                            "batch_id": batch["batch_id"],
+                            "batch_closed": False,
+                            "request_progress_revision": expected_progress_revision,
+                            "lifecycle_revision": staged_app[
+                                "lifecycle_revision"
+                            ],
+                            "evidence_revision": next_evidence_revision,
+                            "result": "accepted",
+                            **self._audit_time_fields(staged, now=receipt_time),
+                        }
+                    )
+                    self._before_write("supplement_progress.idempotency")
+                    staged.idempotency[binding_key] = (
+                        command_fingerprint,
+                        result,
+                    )
+                    self._before_write("supplement_progress.publish")
+                    staged.persist()
+                except StaleStoreRevision:
+                    if attempt == 0:
+                        continue
+                    return self._registered_rejected("intake.storage_unavailable")
+                except _StoreWriteFailure as error:
+                    return self._registered_rejected(
+                        "intake.audit_unavailable"
+                        if str(error) == "supplement_progress.audit"
+                        else "intake.storage_unavailable"
+                    )
+                except Exception:
+                    return self._registered_rejected("intake.storage_unavailable")
+                self._store = staged
+                return result
+            return self._registered_rejected("intake.storage_unavailable")
+
+    def _stage_supplement_expiry(
+        self,
+        staged: _TargetStore,
+        *,
+        request: dict[str, Any],
+        event_time: int,
+    ) -> dict[str, Any]:
+        request_id = request["request_id"]
+        application_id = request["application_id"]
+        recovery_target = {
+            "kind": "supplement_request",
+            "request_id": request_id,
+            "cycle": request["cycle"],
+            "due_at": request["due_at"],
+        }
+        staged_app = staged.applications[application_id]
+        self._before_write("supplement_expiry.lifecycle")
+        staged_app["evidence_ready"] = False
+        staged_app["route"] = "unprocessable"
+        staged_app["current_run_id"] = None
+        staged_app["current_evidence_snapshot_id"] = None
+        staged_app["current_evidence_snapshot_digest"] = None
+        staged_app["projection_visible"] = False
+        staged_app["projection_pending"] = False
+        self._transition_lifecycle(
+            staged_app,
+            "Unprocessable",
+            "SUPPLEMENT_DEADLINE_REACHED",
+            store=staged,
+        )
+        staged.lifecycle_events[-1].update(
+            {
+                "request_id": request_id,
+                "work_item_id": request["work_item_id"],
+                "reason_code": "supplement.deadline_reached",
+                "responsible_party": request["responsible_party"],
+                "recovery_action": "create_a_new_current_supplement_request",
+                "recovery_target": copy.deepcopy(recovery_target),
+                "invalidated_run_id": request["run_id"],
+            }
+        )
+        self._before_write("supplement_expiry.request")
+        staged.review_records.append(
+            {
+                "record_id": self._stable_id(
+                    "supplement_expiry",
+                    f"{request_id}:{request['due_at']}",
+                ),
+                "record_type": "supplement_request_expired",
+                "schema_version": "supplement-request-expiry/1",
+                "request_id": request_id,
+                "work_item_id": request["work_item_id"],
+                "application_id": application_id,
+                "cycle": request["cycle"],
+                "status": "expired",
+                "reason_code": "supplement.deadline_reached",
+                "responsible_party": request["responsible_party"],
+                "recovery_action": "create_a_new_current_supplement_request",
+                "recovery_target": copy.deepcopy(recovery_target),
+                "due_at": request["due_at"],
+                "expired_at": event_time,
+                "lifecycle_revision": staged_app["lifecycle_revision"],
+                "evidence_revision": staged_app["evidence_revision"],
+            }
+        )
+        self._before_write("supplement_expiry.work_item")
+        staged.review_records.append(
+            {
+                "record_id": self._stable_id(
+                    "review_record",
+                    f"{request['work_item_id']}:expired:1",
+                ),
+                "record_type": "supplement_work_item_expired",
+                "sequence": 1,
+                "request_id": request_id,
+                "work_item_id": request["work_item_id"],
+                "application_id": application_id,
+                "expired_at": event_time,
+                "recorded_at": event_time,
+            }
+        )
+        return recovery_target
+
+    def _append_supplement_expiry_audit(
+        self,
+        staged: _TargetStore,
+        *,
+        request: dict[str, Any],
+        principal: S01CommandPrincipal,
+        event_time: int,
+        recovery_target: dict[str, Any],
+        receipt_id: str | None,
+    ) -> None:
+        self._before_write("supplement_expiry.audit")
+        event = {
+            "event_id": self._stable_id(
+                "audit", f"supplement_expired:{request['request_id']}"
+            ),
+            "action": "supplement_request_expired",
+            "subject": principal.subject,
+            "role": principal.role,
+            "scope": principal.scope,
+            "source_id": principal.source_id,
+            "application_id": request["application_id"],
+            "request_id": request["request_id"],
+            "work_item_id": request["work_item_id"],
+            "reason_code": "supplement.deadline_reached",
+            "responsible_party": request["responsible_party"],
+            "recovery_action": "create_a_new_current_supplement_request",
+            "recovery_target": copy.deepcopy(recovery_target),
+            "lifecycle_revision": staged.applications[request["application_id"]][
+                "lifecycle_revision"
+            ],
+            "evidence_revision": staged.applications[request["application_id"]][
+                "evidence_revision"
+            ],
+            "result": "expired",
+            **self._audit_time_fields(staged, now=event_time),
+        }
+        if receipt_id is not None:
+            event["receipt_id"] = receipt_id
+        staged.audit_events.append(event)
+
+    def expire_due_supplement_requests(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        event_time = int(self._clock() if now is None else now)
+        if not self._valid_exception_router_principal(principal, now=event_time):
+            raise QueryNotFound("supplement_deadlines")
+        with self._lock:
+            for attempt in range(2):
+                self._reload_store()
+                terminal_request_ids = {
+                    record["request_id"]
+                    for record in self._store.review_records
+                    if record.get("record_type")
+                    in {
+                        "supplement_request_fulfilled",
+                        "supplement_request_expired",
+                        "supplement_request_invalidated",
+                    }
+                }
+                due = sorted(
+                    (
+                        record
+                        for record in self._store.review_records
+                        if record.get("record_type") == "supplement_request"
+                        and record.get("request_id") not in terminal_request_ids
+                        and int(record["due_at"]) <= event_time
+                    ),
+                    key=lambda record: (int(record["due_at"]), record["request_id"]),
+                )
+                if not due:
+                    return {
+                        "status": "accepted",
+                        "expired_request_ids": [],
+                        "expired_count": 0,
+                    }
+                if not self.audit_available:
+                    return {
+                        "status": "unavailable",
+                        "expired_request_ids": [],
+                        "expired_count": 0,
+                        "reason_code": "AUDIT_UNAVAILABLE",
+                    }
+                if not self.storage_available:
+                    return {
+                        "status": "unavailable",
+                        "expired_request_ids": [],
+                        "expired_count": 0,
+                        "reason_code": "STORAGE_UNAVAILABLE",
+                    }
+                staged = copy.deepcopy(self._store)
+                try:
+                    for request in due:
+                        app = staged.applications.get(request["application_id"])
+                        progress = [
+                            record
+                            for record in staged.review_records
+                            if record.get("record_type")
+                            == "supplement_request_progress"
+                            and record.get("request_id") == request["request_id"]
+                        ]
+                        expected_evidence_revision = (
+                            max(
+                                progress,
+                                key=lambda record: int(
+                                    record["request_progress_revision"]
+                                ),
+                            )["evidence_revision"]
+                            if progress
+                            else request["expected_evidence_revision"]
+                        )
+                        if (
+                            not isinstance(app, dict)
+                            or app.get("cycle") != request["cycle"]
+                            or app.get("phase")
+                            not in {"Supplement", "Awaiting Evidence"}
+                            or app.get("evidence_revision")
+                            != expected_evidence_revision
+                        ):
+                            return {
+                                "status": "unavailable",
+                                "expired_request_ids": [],
+                                "expired_count": 0,
+                                "reason_code": "STALE_SUPPLEMENT_CONTEXT",
+                            }
+                        recovery_target = self._stage_supplement_expiry(
+                            staged,
+                            request=request,
+                            event_time=event_time,
+                        )
+                        self._append_supplement_expiry_audit(
+                            staged,
+                            request=request,
+                            principal=principal,
+                            event_time=event_time,
+                            recovery_target=recovery_target,
+                            receipt_id=None,
+                        )
+                    self._before_write("supplement_expiry.publish")
+                    staged.persist()
+                except StaleStoreRevision:
+                    if attempt == 0:
+                        continue
+                    return {
+                        "status": "unavailable",
+                        "expired_request_ids": [],
+                        "expired_count": 0,
+                        "reason_code": "STORAGE_UNAVAILABLE",
+                    }
+                except _StoreWriteFailure as error:
+                    return {
+                        "status": "unavailable",
+                        "expired_request_ids": [],
+                        "expired_count": 0,
+                        "reason_code": (
+                            "AUDIT_UNAVAILABLE"
+                            if str(error) == "supplement_expiry.audit"
+                            else "STORAGE_UNAVAILABLE"
+                        ),
+                    }
+                self._store = staged
+                return {
+                    "status": "accepted",
+                    "expired_request_ids": [
+                        request["request_id"] for request in due
+                    ],
+                    "expired_count": len(due),
+                }
+        return {
+            "status": "unavailable",
+            "expired_request_ids": [],
+            "expired_count": 0,
+            "reason_code": "STORAGE_UNAVAILABLE",
+        }
+
+    def _invalidate_supplement_source_dependency(
+        self,
+        *,
+        request: dict[str, Any],
+        progress: list[dict[str, Any]],
+        envelope: Any,
+        batch: dict[str, Any],
+        binding_key: str,
+        command_fingerprint: str,
+        idempotency_key: str,
+        principal: S01CommandPrincipal,
+        event_time: int,
+    ) -> AdmissionResult:
+        request_id = request["request_id"]
+        application_id = request["application_id"]
+        reason_code = "supplement.source_evidence_unavailable"
+        recovery_action = "restore_source_evidence_and_create_a_new_request"
+        recovery_target = {
+            "kind": "source_evidence",
+            "application_id": application_id,
+            "request_id": request_id,
+            "cycle": request["cycle"],
+        }
+        receipt_id = self._stable_id(
+            "receipt",
+            f"supplement:invalidated:{binding_key}:{envelope.fingerprint}",
+        )
+        staged = copy.deepcopy(self._store)
+        staged_app = staged.applications[application_id]
+        self._before_write("supplement_invalidation.lifecycle")
+        staged_app["evidence_ready"] = False
+        staged_app["route"] = "unprocessable"
+        staged_app["current_run_id"] = None
+        staged_app["current_evidence_snapshot_id"] = None
+        staged_app["current_evidence_snapshot_digest"] = None
+        staged_app["projection_visible"] = False
+        staged_app["projection_pending"] = False
+        self._transition_lifecycle(
+            staged_app,
+            "Unprocessable",
+            "SUPPLEMENT_SOURCE_EVIDENCE_UNAVAILABLE",
+            store=staged,
+        )
+        staged.lifecycle_events[-1].update(
+            {
+                "request_id": request_id,
+                "work_item_id": request["work_item_id"],
+                "reason_code": reason_code,
+                "responsible_party": "platform_owner",
+                "recovery_action": recovery_action,
+                "recovery_target": copy.deepcopy(recovery_target),
+                "invalidated_run_id": request["run_id"],
+            }
+        )
+        self._before_write("supplement_invalidation.request")
+        staged.review_records.append(
+            {
+                "record_id": self._stable_id(
+                    "supplement_invalidation",
+                    f"{request_id}:source_evidence:{event_time}",
+                ),
+                "record_type": "supplement_request_invalidated",
+                "schema_version": "supplement-request-invalidation/1",
+                "request_id": request_id,
+                "work_item_id": request["work_item_id"],
+                "application_id": application_id,
+                "cycle": request["cycle"],
+                "status": "invalidated",
+                "reason_code": reason_code,
+                "responsible_party": "platform_owner",
+                "recovery_action": recovery_action,
+                "recovery_target": copy.deepcopy(recovery_target),
+                "invalidated_at": event_time,
+                "lifecycle_revision": staged_app["lifecycle_revision"],
+                "evidence_revision": staged_app["evidence_revision"],
+            }
+        )
+        self._before_write("supplement_invalidation.work_item")
+        staged.review_records.append(
+            {
+                "record_id": self._stable_id(
+                    "review_record",
+                    f"{request['work_item_id']}:invalidated:1",
+                ),
+                "record_type": "supplement_work_item_invalidated",
+                "sequence": 1,
+                "request_id": request_id,
+                "work_item_id": request["work_item_id"],
+                "application_id": application_id,
+                "invalidated_at": event_time,
+                "recorded_at": event_time,
+            }
+        )
+        result = AdmissionResult(
+            disposition=AdmissionDisposition.REJECTED,
+            application_id=application_id,
+            receipt_id=receipt_id,
+            reason_code=reason_code,
+            lifecycle_revision=staged_app["lifecycle_revision"],
+            evidence_revision=staged_app["evidence_revision"],
+            audit_recorded=True,
+            envelope_version=envelope.envelope_version,
+            schema_version=envelope.schema_version,
+            semantic_version=envelope.semantic_version,
+            envelope_id=envelope.envelope_id,
+            stream_id=envelope.stream_id,
+            source_revision_id=self._stable_id(
+                "source_revision",
+                f"{envelope.stream_id}:{envelope.source_revision}:"
+                f"{envelope.fingerprint}",
+            ),
+            batch_id=batch["batch_id"],
+            envelope_fingerprint=envelope.fingerprint,
+            idempotency_identity=binding_key,
+            idempotency_key_digest=hashlib.sha256(
+                idempotency_key.encode("utf-8")
+            ).hexdigest(),
+            adapter_id=envelope.adapter_id,
+            adapter_version=envelope.adapter_version,
+            artifact_manifest_digest=self._manifest.digest,
+            responsible_party="platform_owner",
+            recovery_action=recovery_action,
+            gate_results=(
+                "identity:verified",
+                "contract:verified",
+                "object:verified",
+                "request_binding:verified",
+                "source_evidence:unavailable",
+                "idempotency:bound",
+            ),
+            fact_counts={
+                "applications": 0,
+                "receipts": 1,
+                "idempotency_bindings": 1,
+                "lifecycle_events": 1,
+                "evidence_events": 0,
+                "audit_events": 1,
+                "jobs": 0,
+                "outbox_events": 0,
+                "attachments": 0,
+                "pages": 0,
+                "producer_results": 0,
+                "observations": 0,
+            },
+            real_cross_document_opportunities=0,
+            performance_status="not_estimable",
+            source_registration_digest=envelope.registration_digest,
+            source_revision=envelope.source_revision,
+            request_id=request_id,
+            request_status="invalidated",
+            batch_closed=batch["closed"],
+            request_progress_revision=len(progress) + 1,
+            attachment_id=progress[-1]["attachment_id"] if progress else None,
+            attachment_version=(
+                progress[-1]["attachment_version"] if progress else None
+            ),
+            supersedes_attachment_id=(
+                progress[-1]["supersedes_attachment_id"] if progress else None
+            ),
+            fulfilled=False,
+            phase="Unprocessable",
+            route="unprocessable",
+            recovery_target=recovery_target,
+        )
+        self._before_write("supplement_invalidation.receipt")
+        staged.receipts[receipt_id] = result
+        self._before_write("supplement_invalidation.audit")
+        staged.audit_events.append(
+            {
+                "event_id": self._stable_id(
+                    "audit",
+                    f"supplement_invalidated:{request_id}:source_evidence",
+                ),
+                "action": "supplement_request_invalidated",
+                "subject": principal.subject,
+                "role": principal.role,
+                "scope": principal.scope,
+                "source_id": principal.source_id,
+                "application_id": application_id,
+                "request_id": request_id,
+                "work_item_id": request["work_item_id"],
+                "receipt_id": receipt_id,
+                "reason_code": reason_code,
+                "responsible_party": "platform_owner",
+                "recovery_action": recovery_action,
+                "recovery_target": copy.deepcopy(recovery_target),
+                "lifecycle_revision": staged_app["lifecycle_revision"],
+                "evidence_revision": staged_app["evidence_revision"],
+                "result": "invalidated",
+                **self._audit_time_fields(staged, now=event_time),
+            }
+        )
+        self._before_write("supplement_invalidation.idempotency")
+        staged.idempotency[binding_key] = (command_fingerprint, result)
+        self._before_write("supplement_invalidation.publish")
+        staged.persist()
+        self._store = staged
+        return result
+
+    def _supplement_operations_state(
+        self, store: _TargetStore | None = None
+    ) -> dict[str, Any]:
+        owner = self._store if store is None else store
+        records = sorted(
+            (
+                record
+                for record in owner.review_records
+                if record.get("record_type") == "supplement_operations_changed"
+            ),
+            key=lambda record: int(record.get("sequence", 0)),
+        )
+        if [record.get("sequence") for record in records] != list(
+            range(1, len(records) + 1)
+        ):
+            raise RuntimeError("supplement operations authority is not contiguous")
+        state: dict[str, Any] = {
+            "requests": "open",
+            "intake": "open",
+            "workers": "open",
+            "revision": 0,
+            "changed_at": None,
+        }
+        for record in records:
+            if (
+                record.get("requests") not in {"open", "closed"}
+                or record.get("intake") not in {"open", "closed"}
+                or record.get("workers") not in {"open", "fenced"}
+                or record.get("revision") != record.get("sequence")
+                or isinstance(record.get("changed_at"), bool)
+                or not isinstance(record.get("changed_at"), (int, float))
+            ):
+                raise RuntimeError("supplement operations revision is invalid")
+            state.update(
+                {
+                    "requests": record["requests"],
+                    "intake": record["intake"],
+                    "workers": record["workers"],
+                    "revision": record["revision"],
+                    "changed_at": record.get("changed_at"),
+                }
+            )
+        return state
+
+    def supplement_operations_status(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        event_time = int(self._clock() if now is None else now)
+        if not self._valid_exception_router_principal(principal, now=event_time):
+            raise QueryNotFound("supplement_operations")
+        with self._lock:
+            self._reload_store()
+            state = self._supplement_operations_state()
+            open_requests = {
+                record["request_id"]
+                for record in self._store.review_records
+                if record.get("record_type") == "supplement_request"
+            }
+            for record in self._store.review_records:
+                if record.get("record_type") in {
+                    "supplement_request_fulfilled",
+                    "supplement_request_expired",
+                    "supplement_request_invalidated",
+                }:
+                    open_requests.discard(record.get("request_id"))
+            queued_jobs = sum(
+                job.get("kind") == "supplement_check"
+                and job.get("status") not in {"complete", "diagnostic"}
+                for job in self._store.jobs
+            )
+            return {
+                **state,
+                "open_request_count": len(open_requests),
+                "queued_job_count": queued_jobs,
+            }
+
+    def stop_new_supplement_requests(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        idempotency_key: str,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        return self._change_supplement_operations(
+            principal=principal,
+            idempotency_key=idempotency_key,
+            requests="closed",
+            now=now,
+        )
+
+    def stop_supplement_intake(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        idempotency_key: str,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        return self._change_supplement_operations(
+            principal=principal,
+            idempotency_key=idempotency_key,
+            intake="closed",
+            now=now,
+        )
+
+    def drain_supplement_operations(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        idempotency_key: str,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        result = self.stop_new_supplement_requests(
+            principal=principal,
+            idempotency_key=idempotency_key,
+            now=now,
+        )
+        if result.get("status") != "accepted":
+            return result
+        status = self.supplement_operations_status(principal=principal, now=now)
+        return {
+            **result,
+            "drain": (
+                "complete"
+                if status["open_request_count"] == 0
+                and status["queued_job_count"] == 0
+                else "draining"
+            ),
+            "open_request_count": status["open_request_count"],
+            "queued_job_count": status["queued_job_count"],
+        }
+
+    def fence_supplement_workers(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        idempotency_key: str,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        return self._change_supplement_operations(
+            principal=principal,
+            idempotency_key=idempotency_key,
+            workers="fenced",
+            now=now,
+        )
+
+    def resume_supplement_operations(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        idempotency_key: str,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        return self._change_supplement_operations(
+            principal=principal,
+            idempotency_key=idempotency_key,
+            requests="open",
+            intake="open",
+            workers="open",
+            now=now,
+        )
+
+    def _change_supplement_operations(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        idempotency_key: str,
+        requests: str | None = None,
+        intake: str | None = None,
+        workers: str | None = None,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        event_time = int(self._clock() if now is None else now)
+        if not self._valid_exception_router_principal(principal, now=event_time):
+            raise QueryNotFound("supplement_operations")
+        if not self._valid_idempotency_key(idempotency_key):
+            raise ValueError("supplement operations idempotency key is invalid")
+        requested = {key: value for key, value in {
+            "requests": requests,
+            "intake": intake,
+            "workers": workers,
+        }.items() if value is not None}
+        if not requested or any(
+            value not in ({"open", "closed"} if key != "workers" else {"open", "fenced"})
+            for key, value in requested.items()
+        ):
+            raise ValueError("supplement operations command is invalid")
+        fingerprint = hashlib.sha256(
+            json.dumps(requested, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        binding_key = self._exception_idempotency_binding_key(
+            principal,
+            "supplement_operations",
+            idempotency_key,
+            action="supplement_operations",
+        )
+        with self._lock:
+            for attempt in range(2):
+                self._reload_store()
+                previous = self._store.idempotency.get(binding_key)
+                if previous is not None:
+                    if previous[0] == fingerprint:
+                        return {**copy.deepcopy(previous[1]), "replayed": True}
+                    return {
+                        "status": "conflict",
+                        "replayed": False,
+                        "reason_code": "IDEMPOTENCY_KEY_CONFLICT",
+                    }
+                if not self.audit_available:
+                    return {
+                        "status": "unavailable",
+                        "replayed": False,
+                        "reason_code": "AUDIT_UNAVAILABLE",
+                    }
+                if not self.storage_available:
+                    return {
+                        "status": "unavailable",
+                        "replayed": False,
+                        "reason_code": "STORAGE_UNAVAILABLE",
+                    }
+                current = self._supplement_operations_state()
+                next_state = {
+                    key: requested.get(key, current[key])
+                    for key in ("requests", "intake", "workers")
+                }
+                staged = copy.deepcopy(self._store)
+                fenced_jobs = [
+                    job
+                    for job in staged.jobs
+                    if workers == "fenced"
+                    and job.get("kind") == "supplement_check"
+                    and job.get("status") == "leased"
+                ]
+                fenced_job_ids = sorted(job["job_id"] for job in fenced_jobs)
+                sequence = int(current["revision"]) + 1
+                record = {
+                    "record_id": self._stable_id(
+                        "supplement_operations", f"{sequence}:{fingerprint}"
+                    ),
+                    "record_type": "supplement_operations_changed",
+                    "schema_version": "supplement-operations/1",
+                    "sequence": sequence,
+                    "revision": sequence,
+                    "requests": next_state["requests"],
+                    "intake": next_state["intake"],
+                    "workers": next_state["workers"],
+                    "changed_at": event_time,
+                    "requested": copy.deepcopy(requested),
+                    "fenced_job_ids": fenced_job_ids,
+                }
+                result = {
+                    "status": "accepted",
+                    "replayed": False,
+                    **next_state,
+                    "revision": sequence,
+                    "changed_at": event_time,
+                    "reason_code": "supplement.operations_changed",
+                    "fenced_job_ids": fenced_job_ids,
+                }
+                try:
+                    if fenced_jobs:
+                        self._before_write("supplement_operations.worker_fence")
+                        for job in fenced_jobs:
+                            job["fence"] = int(job.get("fence", 0)) + 1
+                    self._before_write("supplement_operations.record")
+                    staged.review_records.append(record)
+                    self._before_write("supplement_operations.audit")
+                    staged.audit_events.append(
+                        {
+                            "event_id": self._stable_id(
+                                "audit", f"supplement_operations:{sequence}:{fingerprint}"
+                            ),
+                            "action": "supplement_operations_changed",
+                            "subject": principal.subject,
+                            "role": principal.role,
+                            "scope": principal.scope,
+                            "source_id": principal.source_id,
+                            "operations_revision": sequence,
+                            "requested": copy.deepcopy(requested),
+                            "requests": next_state["requests"],
+                            "intake": next_state["intake"],
+                            "workers": next_state["workers"],
+                            "fenced_job_ids": fenced_job_ids,
+                            "result": "accepted",
+                            **self._audit_time_fields(staged, now=event_time),
+                        }
+                    )
+                    self._before_write("supplement_operations.idempotency")
+                    staged.idempotency[binding_key] = (fingerprint, result)
+                    self._before_write("supplement_operations.publish")
+                    staged.persist()
+                except StaleStoreRevision:
+                    if attempt == 0:
+                        continue
+                    return {
+                        "status": "unavailable",
+                        "replayed": False,
+                        "reason_code": "STORAGE_UNAVAILABLE",
+                    }
+                except _StoreWriteFailure as error:
+                    return {
+                        "status": "unavailable",
+                        "replayed": False,
+                        "reason_code": (
+                            "AUDIT_UNAVAILABLE"
+                            if str(error) == "supplement_operations.audit"
+                            else "STORAGE_UNAVAILABLE"
+                        ),
+                    }
+                self._store = staged
+                return result
+        return {"status": "unavailable", "replayed": False, "reason_code": "STORAGE_UNAVAILABLE"}
 
     def stop_new_cohort(
         self,
@@ -1557,6 +3468,18 @@ class ControlledScenarioService:
                     status="stopped",
                     reason_code=durable_stop.get("failure_reason_code")
                     or "S01_RUNTIME_UNHEALTHY",
+                )
+            if (
+                self._supplement_operations_state()["workers"] == "fenced"
+                and any(
+                    job.get("kind") == "supplement_check"
+                    and job.get("status") not in {"complete", "diagnostic"}
+                    for job in self._store.jobs
+                )
+            ):
+                return WorkerResult(
+                    status="stopped",
+                    reason_code="supplement.workers_fenced",
                 )
             if duplicate:
                 return self._record_duplicate_result(worker_id)
@@ -3545,6 +5468,629 @@ class ControlledScenarioService:
                     "reason_code": "STORAGE_UNAVAILABLE",
                 }
             self._store = staged
+            return result
+
+    @classmethod
+    def _c_demo_supplement_policy(cls) -> dict[str, Any]:
+        policy = {
+            "material_requirement_id": cls._SUPPLEMENT_REQUIREMENT_ID,
+            "document_role": "financing_lease_contract",
+            "material_kind": "financing_lease_contract",
+            "operation": "replacement",
+            "required_fact_kinds": [
+                "attachment",
+                "page",
+                "producer",
+                "vin_observation",
+            ],
+            "responsible_party": "application_material_provider",
+            "allowed_tenant_id": "c-demo",
+            "allowed_source_system_ids": ["s06-material-source"],
+            "allowed_workload_identity_ids": ["s06-material-workload"],
+            "satisfaction_policy_id": cls._SUPPLEMENT_SATISFACTION_POLICY_ID,
+            "batch_item_count": 2,
+            "batch_closure_required": True,
+            "integrity_required": True,
+            "provenance_required": True,
+            "evidence_eligibility_required": True,
+        }
+        encoded = json.dumps(
+            policy, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        return {**policy, "satisfaction_policy_digest": hashlib.sha256(encoded).hexdigest()}
+
+    def request_supplement(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        work_item_id: str,
+        finding_id: str,
+        reason_code: str,
+        expected_fence: int,
+        expected_context: dict[str, Any],
+        idempotency_key: str,
+        predecessor_request_id: str | None = None,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Create one Lifecycle-owned request for the fixed C-DEMO material gap."""
+        request_time = int(self._clock() if now is None else now)
+        if not self._valid_reviewer_principal(principal, now=request_time):
+            raise QueryNotFound(work_item_id)
+        if (
+            not isinstance(finding_id, str)
+            or not finding_id
+            or finding_id.strip() != finding_id
+            or len(finding_id) > 200
+            or reason_code != self._SUPPLEMENT_REQUEST_REASON
+            or isinstance(expected_fence, bool)
+            or not isinstance(expected_fence, int)
+            or expected_fence < 1
+            or not self._valid_idempotency_key(idempotency_key)
+            or predecessor_request_id is not None
+        ):
+            raise ValueError("supplement request is invalid")
+        fingerprint_bytes = json.dumps(
+            {
+                "expected_context": expected_context,
+                "expected_fence": expected_fence,
+                "finding_id": finding_id,
+                "predecessor_request_id": predecessor_request_id,
+                "reason_code": reason_code,
+                "work_item_id": work_item_id,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        command_fingerprint = hashlib.sha256(fingerprint_bytes).hexdigest()
+        binding_key = self._review_idempotency_binding_key(
+            principal,
+            work_item_id,
+            idempotency_key,
+            action="request_supplement",
+        )
+
+        with self._lock:
+            for attempt in range(2):
+                self._reload_store()
+                work_item, state = self._review_work_item_authority(
+                    principal=principal,
+                    work_item_id=work_item_id,
+                    now=request_time,
+                )
+                app, run, actual_context = self._review_current_context(work_item)
+                previous = self._store.idempotency.get(binding_key)
+                if previous is not None:
+                    if previous[0] == command_fingerprint:
+                        return {**copy.deepcopy(previous[1]), "replayed": True}
+                    return {
+                        "status": "conflict",
+                        "replayed": False,
+                        "application_id": work_item["application_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": "IDEMPOTENCY_KEY_CONFLICT",
+                    }
+                if self._supplement_operations_state()["requests"] == "closed":
+                    return {
+                        "status": "stopped",
+                        "replayed": False,
+                        "application_id": work_item["application_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": "supplement.requests_stopped",
+                    }
+                if not self._review_context_matches(expected_context, actual_context):
+                    return {
+                        "status": "stale",
+                        "replayed": False,
+                        "application_id": work_item["application_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": "STALE_REVIEW_CONTEXT",
+                    }
+                if (
+                    state["status"] != "claimed"
+                    or state["claim_subject"] != principal.subject
+                    or state["claim_fence"] != expected_fence
+                    or float(state["claim_expires_at"]) <= request_time
+                    or app.get("phase") != "Manual Review"
+                    or app.get("current_run_id") != work_item["run_id"]
+                    or app.get("lifecycle_revision") != work_item["lifecycle_revision"]
+                    or app.get("evidence_revision") != work_item["evidence_revision"]
+                ):
+                    return {
+                        "status": "stale",
+                        "replayed": False,
+                        "application_id": work_item["application_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": "STALE_REVIEW_CONTEXT",
+                    }
+                findings = [
+                    finding
+                    for finding in self._store.findings
+                    if finding.get("application_id") == work_item["application_id"]
+                    and finding.get("run_id") == work_item["run_id"]
+                    and finding.get("finding_id") == finding_id
+                ]
+                finding = findings[0] if len(findings) == 1 else None
+                if (
+                    finding is None
+                    or finding_id not in work_item["finding_ids"]
+                    or finding.get("mandatory") is not True
+                    or finding.get("rule_id") != "R_VIN_CROSS"
+                    or finding.get("verdict") != "uncertain"
+                    or finding.get("reason_code") != "MISSING_DOCS"
+                    or app.get("artifact_manifest", {}).get("scenario_id")
+                    != "app_missing_vin_docs.json"
+                ):
+                    return {
+                        "status": "rejected",
+                        "replayed": False,
+                        "application_id": work_item["application_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": "FINDING_NOT_SUPPLEMENT_ELIGIBLE",
+                    }
+                terminal_request_ids = {
+                    record["request_id"]
+                    for record in self._store.review_records
+                    if record.get("record_type")
+                    in {
+                        "supplement_request_fulfilled",
+                        "supplement_request_expired",
+                        "supplement_request_invalidated",
+                    }
+                    and isinstance(record.get("request_id"), str)
+                }
+                active_requests = [
+                    record
+                    for record in self._store.review_records
+                    if record.get("record_type") == "supplement_request"
+                    and record.get("application_id") == work_item["application_id"]
+                    and record.get("cycle") == work_item["cycle"]
+                    and record.get("run_id") == work_item["run_id"]
+                    and record.get("finding_id") == finding_id
+                    and record.get("material_requirement_id")
+                    == self._SUPPLEMENT_REQUIREMENT_ID
+                    and record.get("request_id") not in terminal_request_ids
+                ]
+                if active_requests:
+                    return {
+                        "status": "conflict",
+                        "replayed": False,
+                        "application_id": work_item["application_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": "ACTIVE_SUPPLEMENT_REQUEST_EXISTS",
+                    }
+                gate = self._review_write_gate(app=app)
+                if gate is not None:
+                    status, failure = gate
+                    return {
+                        "status": status,
+                        "replayed": False,
+                        "application_id": work_item["application_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": failure,
+                    }
+                evidence = self._assemble_evidence(self._admitted_evidence(app))
+                lease_documents = [
+                    document
+                    for document in evidence
+                    if document.get("document_role")
+                    == self._SUPPLEMENT_TARGET_DOCUMENT_ROLE
+                ]
+                predecessor_attachment = (
+                    lease_documents[0].get("attachment")
+                    if len(lease_documents) == 1
+                    else None
+                )
+                if (
+                    not isinstance(predecessor_attachment, dict)
+                    or not isinstance(
+                        predecessor_attachment.get("attachment_id"), str
+                    )
+                    or predecessor_attachment.get("version") != 1
+                ):
+                    return {
+                        "status": "unavailable",
+                        "replayed": False,
+                        "application_id": work_item["application_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": "SOURCE_EVIDENCE_UNAVAILABLE",
+                    }
+
+                request_id = self._stable_id(
+                    "supplement_request", f"{binding_key}:{command_fingerprint}"
+                )
+                supplement_work_item_id = self._stable_id(
+                    "work", f"supplement:{request_id}"
+                )
+                policy = self._c_demo_supplement_policy()
+                due_at = request_time + self._SUPPLEMENT_TTL_SECONDS
+                staged = copy.deepcopy(self._store)
+                staged_app = staged.applications[work_item["application_id"]]
+                source_sequence = 1 + sum(
+                    record.get("work_item_id") == work_item_id
+                    and str(record.get("record_type", "")).startswith("work_item_")
+                    for record in staged.review_records
+                )
+                try:
+                    self._before_write("supplement_request.lifecycle")
+                    staged_app["route"] = "supplement_pending"
+                    staged_app["projection_visible"] = False
+                    staged_app["projection_pending"] = False
+                    self._transition_lifecycle(
+                        staged_app,
+                        "Supplement",
+                        "SUPPLEMENT_REQUESTED",
+                        store=staged,
+                    )
+                    staged.lifecycle_events[-1].update(
+                        {
+                            "run_id": work_item["run_id"],
+                            "request_id": request_id,
+                            "finding_id": finding_id,
+                            "source_work_item_id": work_item_id,
+                        }
+                    )
+                    spec = run["spec"]
+                    request_record = {
+                        "record_id": request_id,
+                        "record_type": "supplement_request",
+                        "schema_version": "supplement-request/1",
+                        "request_id": request_id,
+                        "work_item_id": supplement_work_item_id,
+                        "source_work_item_id": work_item_id,
+                        "application_id": work_item["application_id"],
+                        "tenant_id": policy["allowed_tenant_id"],
+                        "visibility_scope": work_item["visibility_scope"],
+                        "cycle": work_item["cycle"],
+                        "run_id": work_item["run_id"],
+                        "finding_id": finding_id,
+                        "rule_id": finding["rule_id"],
+                        "finding_reason_code": finding["reason_code"],
+                        "finding_verdict": finding["verdict"],
+                        "severity": finding["severity"],
+                        "evidence_revision": work_item["evidence_revision"],
+                        "evidence_snapshot_id": spec["evidence_snapshot_id"],
+                        "evidence_snapshot_digest": spec[
+                            "evidence_snapshot_digest"
+                        ],
+                        "release_id": spec["release_id"],
+                        "release_digest": spec["release_digest"],
+                        "checker_build": spec["checker_build"],
+                        "requester_subject": principal.subject,
+                        "requester_role": principal.role,
+                        "requester_source_id": principal.source_id,
+                        "request_reason_code": reason_code,
+                        "material_requirement_id": policy[
+                            "material_requirement_id"
+                        ],
+                        "document_role": policy["document_role"],
+                        "target_document_role": self._SUPPLEMENT_TARGET_DOCUMENT_ROLE,
+                        "material_kind": policy["material_kind"],
+                        "operation": policy["operation"],
+                        "expected_predecessor_attachment_id": (
+                            predecessor_attachment["attachment_id"]
+                        ),
+                        "expected_predecessor_attachment_version": (
+                            predecessor_attachment["version"]
+                        ),
+                        "responsible_party": policy["responsible_party"],
+                        "allowed_source_policy": {
+                            "tenant_id": policy["allowed_tenant_id"],
+                            "source_system_ids": copy.deepcopy(
+                                policy["allowed_source_system_ids"]
+                            ),
+                            "workload_identity_ids": copy.deepcopy(
+                                policy["allowed_workload_identity_ids"]
+                            ),
+                        },
+                        "satisfaction_policy_id": policy[
+                            "satisfaction_policy_id"
+                        ],
+                        "satisfaction_policy_digest": policy[
+                            "satisfaction_policy_digest"
+                        ],
+                        "batch_item_count": policy["batch_item_count"],
+                        "required_fact_kinds": copy.deepcopy(
+                            policy["required_fact_kinds"]
+                        ),
+                        "batch_closure_required": policy[
+                            "batch_closure_required"
+                        ],
+                        "integrity_required": policy["integrity_required"],
+                        "provenance_required": policy["provenance_required"],
+                        "evidence_eligibility_required": policy[
+                            "evidence_eligibility_required"
+                        ],
+                        "requester_claim_fence": expected_fence,
+                        "pre_request_lifecycle_revision": work_item[
+                            "lifecycle_revision"
+                        ],
+                        "post_request_lifecycle_revision": staged_app[
+                            "lifecycle_revision"
+                        ],
+                        "expected_evidence_revision": work_item[
+                            "evidence_revision"
+                        ],
+                        "projection_watermark": actual_context[
+                            "projection_watermark"
+                        ],
+                        "fixed_context": copy.deepcopy(actual_context),
+                        "requested_at": request_time,
+                        "due_at": due_at,
+                        "predecessor_request_id": predecessor_request_id,
+                        "idempotency_fingerprint": command_fingerprint,
+                    }
+                    request_bytes = json.dumps(
+                        request_record,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    request_record["context_digest"] = hashlib.sha256(
+                        request_bytes
+                    ).hexdigest()
+                    self._before_write("supplement_request.request")
+                    staged.review_records.append(request_record)
+                    self._before_write("supplement_request.review_work")
+                    staged.review_records.append(
+                        {
+                            "record_id": self._stable_id(
+                                "review_record",
+                                f"{work_item_id}:supplement:{source_sequence}",
+                            ),
+                            "record_type": "work_item_invalidated",
+                            "sequence": source_sequence,
+                            "work_item_id": work_item_id,
+                            "application_id": work_item["application_id"],
+                            "run_id": work_item["run_id"],
+                            "claim_subject": principal.subject,
+                            "claim_fence": expected_fence,
+                            "request_id": request_id,
+                            "reason_code": "SUPPLEMENT_REQUESTED",
+                            "invalidated_at": request_time,
+                            "recorded_at": request_time,
+                        }
+                    )
+                    self._before_write("supplement_request.work_item")
+                    staged.work_items.append(
+                        {
+                            "work_item_id": supplement_work_item_id,
+                            "owner": "Lifecycle",
+                            "kind": "supplement",
+                            "status": "active",
+                            "request_id": request_id,
+                            "application_id": work_item["application_id"],
+                            "cycle": work_item["cycle"],
+                            "run_id": work_item["run_id"],
+                            "finding_ids": [finding_id],
+                            "material_requirement_id": policy[
+                                "material_requirement_id"
+                            ],
+                            "lifecycle_revision": staged_app[
+                                "lifecycle_revision"
+                            ],
+                            "evidence_revision": work_item["evidence_revision"],
+                            "visibility_scope": work_item["visibility_scope"],
+                            "responsible_party": policy["responsible_party"],
+                            "due_at": due_at,
+                        }
+                    )
+                    self._before_write("supplement_request.audit")
+                    staged.audit_events.append(
+                        {
+                            "event_id": self._stable_id(
+                                "audit", f"supplement_requested:{request_id}"
+                            ),
+                            "action": "supplement_requested",
+                            "subject": principal.subject,
+                            "role": principal.role,
+                            "scope": work_item["visibility_scope"],
+                            "source_id": principal.source_id,
+                            "application_id": work_item["application_id"],
+                            "run_id": work_item["run_id"],
+                            "finding_id": finding_id,
+                            "request_id": request_id,
+                            "work_item_id": supplement_work_item_id,
+                            "reason_code": reason_code,
+                            "claim_fence": expected_fence,
+                            "due_at": due_at,
+                            "lifecycle_revision": staged_app[
+                                "lifecycle_revision"
+                            ],
+                            "evidence_revision": staged_app["evidence_revision"],
+                            "result": "accepted",
+                            **self._audit_time_fields(staged, now=request_time),
+                        }
+                    )
+                    result = {
+                        "status": "accepted",
+                        "replayed": False,
+                        "application_id": work_item["application_id"],
+                        "request_id": request_id,
+                        "work_item_id": supplement_work_item_id,
+                        "finding_id": finding_id,
+                        "material_requirement_id": policy[
+                            "material_requirement_id"
+                        ],
+                        "phase": "Supplement",
+                        "route": "supplement_pending",
+                        "due_at": due_at,
+                        "lifecycle_revision": staged_app[
+                            "lifecycle_revision"
+                        ],
+                        "evidence_revision": staged_app["evidence_revision"],
+                    }
+                    self._before_write("supplement_request.idempotency")
+                    staged.idempotency[binding_key] = (
+                        command_fingerprint,
+                        copy.deepcopy(result),
+                    )
+                    self._before_write("supplement_request.publish")
+                    staged.persist()
+                except StaleStoreRevision:
+                    if attempt == 0:
+                        continue
+                    return {
+                        "status": "unavailable",
+                        "replayed": False,
+                        "application_id": work_item["application_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": "STORAGE_UNAVAILABLE",
+                    }
+                except _StoreWriteFailure as error:
+                    return {
+                        "status": "unavailable",
+                        "replayed": False,
+                        "application_id": work_item["application_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": (
+                            "AUDIT_UNAVAILABLE"
+                            if str(error) == "supplement_request.audit"
+                            else "STORAGE_UNAVAILABLE"
+                        ),
+                    }
+                self._store = staged
+                return result
+            raise RuntimeError("supplement request retry exhausted")
+
+    def supplement_request_view(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        request_id: str,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Return one request from immutable Lifecycle facts."""
+        query_time = float(self._clock() if now is None else now)
+        if not self._valid_reviewer_principal(principal, now=query_time):
+            raise QueryNotFound(request_id)
+        with self._lock:
+            self._reload_store()
+            requests = [
+                record
+                for record in self._store.review_records
+                if record.get("record_type") == "supplement_request"
+                and record.get("request_id") == request_id
+            ]
+            if len(requests) != 1:
+                raise QueryNotFound(request_id)
+            request = requests[0]
+            app = self._reviewer_application_authority(
+                principal, request["application_id"]
+            )
+            successors = [
+                record
+                for record in self._store.review_records
+                if record.get("request_id") == request_id
+                and record.get("record_type")
+                in {
+                    "supplement_request_fulfilled",
+                    "supplement_request_expired",
+                    "supplement_request_invalidated",
+                }
+            ]
+            if len(successors) > 1:
+                raise RuntimeError("supplement request terminal authority is not unique")
+            status = successors[0]["status"] if successors else "open"
+            progress = sorted(
+                (
+                    record
+                    for record in self._store.review_records
+                    if record.get("record_type") == "supplement_request_progress"
+                    and record.get("request_id") == request_id
+                ),
+                key=lambda record: int(record["request_progress_revision"]),
+            )
+            expected_evidence_revision = (
+                progress[-1]["evidence_revision"]
+                if progress
+                else request["expected_evidence_revision"]
+            )
+            current = (
+                status == "open"
+                and query_time < float(request["due_at"])
+                and app.get("cycle") == request["cycle"]
+                and app.get("evidence_revision") == expected_evidence_revision
+                and (
+                    app.get("phase") == "Supplement"
+                    and app.get("route") == "supplement_pending"
+                    and not progress
+                    or app.get("phase") == "Awaiting Evidence"
+                    and app.get("route") == "awaiting_evidence"
+                    and bool(progress)
+                    and app.get("current_run_id") is None
+                )
+            )
+            material_requirement = {
+                "material_requirement_id": request["material_requirement_id"],
+                "document_role": request["document_role"],
+                "material_kind": request["material_kind"],
+                "operation": request["operation"],
+                "required_fact_kinds": copy.deepcopy(
+                    request["required_fact_kinds"]
+                ),
+                "responsible_party": request["responsible_party"],
+                "allowed_tenant_id": request["allowed_source_policy"][
+                    "tenant_id"
+                ],
+                "allowed_source_system_ids": copy.deepcopy(
+                    request["allowed_source_policy"]["source_system_ids"]
+                ),
+                "allowed_workload_identity_ids": copy.deepcopy(
+                    request["allowed_source_policy"]["workload_identity_ids"]
+                ),
+                "satisfaction_policy_id": request["satisfaction_policy_id"],
+                "batch_item_count": request["batch_item_count"],
+                "batch_closure_required": request["batch_closure_required"],
+                "integrity_required": request["integrity_required"],
+                "provenance_required": request["provenance_required"],
+                "evidence_eligibility_required": request[
+                    "evidence_eligibility_required"
+                ],
+            }
+            result = {
+                key: copy.deepcopy(request[key])
+                for key in (
+                    "schema_version",
+                    "request_id",
+                    "work_item_id",
+                    "source_work_item_id",
+                    "application_id",
+                    "cycle",
+                    "run_id",
+                    "finding_id",
+                    "rule_id",
+                    "finding_reason_code",
+                    "finding_verdict",
+                    "requester_claim_fence",
+                    "requested_at",
+                    "due_at",
+                    "fixed_context",
+                    "context_digest",
+                    "expected_predecessor_attachment_id",
+                    "expected_predecessor_attachment_version",
+                    "satisfaction_policy_digest",
+                )
+            } | {
+                "status": status,
+                "current": current,
+                "phase": app["phase"],
+                "route": app["route"],
+                "lifecycle_revision": app["lifecycle_revision"],
+                "evidence_revision": app["evidence_revision"],
+                "projection_watermark": request["projection_watermark"],
+                "material_requirement": material_requirement,
+            }
+            if successors and successors[0].get("reason_code") is not None:
+                result["failure"] = {
+                    key: copy.deepcopy(successors[0][key])
+                    for key in (
+                        "reason_code",
+                        "responsible_party",
+                        "recovery_action",
+                        "recovery_target",
+                    )
+                }
             return result
 
     def correct_field_observation(
@@ -7468,12 +10014,15 @@ class ControlledScenarioService:
     ) -> dict[str, Any] | None:
         current_run_id = app.get("current_run_id")
         if current_run_id is None:
-            if app.get("phase") in {
-                "Intake",
-                "Assembly",
-                "Evidence Ready",
-                "Checking",
-            } and app.get("route") == "pending_check":
+            phase_route = (app.get("phase"), app.get("route"))
+            if phase_route in {
+                ("Intake", "pending_check"),
+                ("Assembly", "pending_check"),
+                ("Evidence Ready", "pending_check"),
+                ("Checking", "pending_check"),
+                ("Awaiting Evidence", "awaiting_evidence"),
+                ("Unprocessable", "unprocessable"),
+            }:
                 return None
             raise _ApplicationStateAuthorityUnavailable(self._APPLICATION_STATE_FAILURE)
         lifecycle = [
@@ -7561,6 +10110,17 @@ class ControlledScenarioService:
                         "exception_expires_at": lifecycle.get("expires_at"),
                     }
                 )
+            failure_keys = (
+                "reason_code",
+                "responsible_party",
+                "recovery_action",
+                "recovery_target",
+            )
+            if all(key in lifecycle for key in failure_keys):
+                result["failure"] = {
+                    key: copy.deepcopy(lifecycle[key])
+                    for key in failure_keys
+                }
             return result
 
     def application_history_view(
@@ -7763,6 +10323,68 @@ class ControlledScenarioService:
                         "evidence_revision": event["revision"],
                     }
                 )
+            attachment_versions_by_id: dict[str, dict[str, Any]] = {}
+            for event in self._store.evidence_events:
+                if event.get("application_id") != application_id:
+                    continue
+                payload = event.get("payload")
+                event_evidence = payload.get("evidence") if isinstance(payload, dict) else None
+                if not isinstance(event_evidence, list):
+                    continue
+                for document in event_evidence:
+                    attachment = (
+                        document.get("attachment")
+                        if isinstance(document, dict)
+                        and document.get("document_role")
+                        == self._SUPPLEMENT_TARGET_DOCUMENT_ROLE
+                        else None
+                    )
+                    if not isinstance(attachment, dict):
+                        continue
+                    attachment_id = attachment.get("attachment_id")
+                    if not isinstance(attachment_id, str) or not attachment_id:
+                        raise RuntimeError("attachment history identity is unavailable")
+                    item = {
+                        "attachment_id": attachment_id,
+                        "version": attachment["version"],
+                        "document_id": document["document_id"],
+                        "document_role": document["document_role"],
+                        "supersedes_attachment_id": attachment.get(
+                            "supersedes_attachment_id"
+                        ),
+                        "page_ids": copy.deepcopy(attachment.get("page_ids", [])),
+                        "producer_result_id": attachment.get("producer_result_id"),
+                        "evidence_revision": event["revision"],
+                    }
+                    previous = attachment_versions_by_id.get(attachment_id)
+                    if previous is None:
+                        attachment_versions_by_id[attachment_id] = item
+                    elif {
+                        key: value
+                        for key, value in previous.items()
+                        if key != "evidence_revision"
+                    } != {
+                        key: value
+                        for key, value in item.items()
+                        if key != "evidence_revision"
+                    }:
+                        raise RuntimeError("attachment history is inconsistent")
+            superseded_attachment_ids = {
+                item["supersedes_attachment_id"]
+                for item in attachment_versions_by_id.values()
+                if item["supersedes_attachment_id"] is not None
+            }
+            attachment_versions = sorted(
+                (
+                    {
+                        **item,
+                        "current": item["attachment_id"]
+                        not in superseded_attachment_ids,
+                    }
+                    for item in attachment_versions_by_id.values()
+                ),
+                key=lambda item: (int(item["version"]), item["attachment_id"]),
+            )
             return {
                 "schema_version": "s04-application-history/1",
                 "application_id": application_id,
@@ -7770,6 +10392,7 @@ class ControlledScenarioService:
                 "runs": runs,
                 "corrections": corrections,
                 "business_exceptions": business_exceptions,
+                "attachment_versions": attachment_versions,
             }
 
     def _reviewer_application_authority(
@@ -8281,7 +10904,12 @@ class ControlledScenarioService:
             "c-demo-object:sha256:" + source_sha256
         )
         entries: list[dict[str, Any]] = []
-        for item in copy.deepcopy(self._C_DEMO_PROVENANCE_ENTRIES):
+        provenance_entries = (
+            self._C_DEMO_MISSING_VIN_PROVENANCE_ENTRIES
+            if self._scenario_id == "app_missing_vin_docs.json"
+            else self._C_DEMO_PROVENANCE_ENTRIES
+        )
+        for item in copy.deepcopy(provenance_entries):
             if isinstance(item, (list, tuple)) and len(item) == 4:
                 document_id, field, source_page, source_region = item
                 entries.append(
@@ -8592,10 +11220,12 @@ class ControlledScenarioService:
         principal: S01CommandPrincipal,
         idempotency_key: str,
         workload_identity_id: str,
+        *,
+        action: str = "submit_observation_result",
     ) -> str:
         material = json.dumps(
             {
-                "action": "submit_observation_result",
+                "action": action,
                 "key": idempotency_key,
                 "role": principal.role,
                 "scope": principal.scope,
@@ -8607,6 +11237,19 @@ class ControlledScenarioService:
             separators=(",", ":"),
         ).encode("utf-8")
         return "s02_idempotency_" + hashlib.sha256(material).hexdigest()
+
+    def _accepted_source_stream_receipts(
+        self, envelope: S02CanonicalEnvelope
+    ) -> list[AdmissionResult]:
+        return [
+            receipt
+            for receipt in self._store.receipts.values()
+            if isinstance(receipt, AdmissionResult)
+            and receipt.disposition is AdmissionDisposition.ACCEPTED
+            and receipt.source_registration_digest == envelope.registration_digest
+            and receipt.stream_id == envelope.stream_id
+            and type(receipt.source_revision) is int
+        ]
 
     def _registered_idempotency_conflict(
         self, previous: AdmissionResult
@@ -8658,6 +11301,9 @@ class ControlledScenarioService:
         principal: S01CommandPrincipal,
         submission: dict[str, Any],
         envelope: S02CanonicalEnvelope | None = None,
+        command_type: str = "submit_observation_result",
+        application_id: str | None = None,
+        request_id: str | None = None,
     ) -> AdmissionResult:
         if not self.audit_available:
             return self._registered_rejected("intake.audit_unavailable")
@@ -8748,6 +11394,8 @@ class ControlledScenarioService:
                     else error.registration_digest
                 ),
                 source_revision=source_revision,
+                application_id=application_id,
+                request_id=request_id,
             )
             staged = copy.deepcopy(self._store)
             staged.audit_events.append(
@@ -8760,11 +11408,12 @@ class ControlledScenarioService:
                     "role": principal.role,
                     "scope": principal.scope,
                     "source_id": principal.source_id,
-                    "application_id": None,
+                    "application_id": application_id,
+                    "request_id": request_id,
                     "receipt_id": receipt_id,
                     "result": error.disposition,
                     "reason_code": error.reason_code,
-                    "command_type": "submit_observation_result",
+                    "command_type": command_type,
                     "command_fingerprint": command_fingerprint,
                     "idempotency_scope": binding_key,
                     **self._audit_time_fields(staged),
@@ -9115,7 +11764,12 @@ class ControlledScenarioService:
             for event in self._store.evidence_events
             if event.get("application_id") == app["application_id"]
             and event.get("revision") == app["evidence_revision"]
-            and event.get("kind") in {"admitted_snapshot", "field_correction"}
+            and event.get("kind")
+            in {
+                "admitted_snapshot",
+                "field_correction",
+                "supplement_attachment_version",
+            }
         ]
         if len(matching) != 1:
             raise RuntimeError("admitted evidence authority is unavailable")
@@ -9125,6 +11779,7 @@ class ControlledScenarioService:
             "s01-admitted-evidence/1",
             "s02-admitted-evidence/1",
             "s04-corrected-evidence/1",
+            "s06-supplement-evidence/1",
         }:
             raise RuntimeError("admitted evidence authority is invalid")
         evidence = payload.get("evidence")
@@ -9179,7 +11834,34 @@ class ControlledScenarioService:
                 ):
                     raise RuntimeError("evidence supersession authority is unavailable")
                 fields[field] = copy.deepcopy(successors[0])
-        return assembled
+        attachment_documents: dict[str, dict[str, Any]] = {}
+        superseded_attachment_ids: set[str] = set()
+        for document in assembled:
+            attachment = document.get("attachment")
+            if not isinstance(attachment, dict):
+                continue
+            attachment_id = attachment.get("attachment_id")
+            if (
+                not isinstance(attachment_id, str)
+                or not attachment_id
+                or attachment_id in attachment_documents
+            ):
+                raise RuntimeError("attachment version authority is unavailable")
+            attachment_documents[attachment_id] = document
+            supersedes = attachment.get("supersedes_attachment_id")
+            if supersedes is not None:
+                if not isinstance(supersedes, str) or not supersedes:
+                    raise RuntimeError("attachment supersession authority is invalid")
+                superseded_attachment_ids.add(supersedes)
+        if not superseded_attachment_ids.issubset(attachment_documents):
+            raise RuntimeError("attachment predecessor authority is unavailable")
+        return [
+            document
+            for document in assembled
+            if not isinstance(document.get("attachment"), dict)
+            or document["attachment"].get("attachment_id")
+            not in superseded_attachment_ids
+        ]
 
     @classmethod
     def _verified_provenance_entries(
@@ -9358,13 +12040,34 @@ class ControlledScenarioService:
                     }
                 )
                 fields[str(field_name)] = field_value
-            evidence.append(
-                {
-                    "document_id": document_id,
-                    "document_role": str(document.get("doc_type") or ""),
-                    "fields": fields,
+            evidence_document = {
+                "document_id": document_id,
+                "document_role": str(document.get("doc_type") or ""),
+                "fields": fields,
+            }
+            if source.get("scenario_id") == "app_missing_vin_docs.json":
+                attachment_material = (
+                    f"{source['source_object_ref']}:{document_id}:attachment:1"
+                )
+                attachment_id = "attachment_" + hashlib.sha256(
+                    attachment_material.encode("utf-8")
+                ).hexdigest()[:24]
+                evidence_document["attachment"] = {
+                    "attachment_id": attachment_id,
+                    "version": 1,
+                    "source_object_ref": source["source_object_ref"],
+                    "source_sha256": source["source_sha256"],
+                    "media_type": "application/json",
+                    "producer_id": "c-demo-registered-source",
+                    "producer_version": "1",
+                    "page_ids": [
+                        "page_"
+                        + hashlib.sha256(
+                            f"{attachment_id}:page:1".encode("utf-8")
+                        ).hexdigest()[:24]
+                    ],
                 }
-            )
+            evidence.append(evidence_document)
         if not evidence or any(not x["document_id"] or not x["document_role"] for x in evidence):
             raise ValueError("evidence requires document IDs and roles")
         return {"evidence": evidence}
@@ -9431,6 +12134,7 @@ class ControlledScenarioService:
             if isinstance(receipt, AdmissionResult)
             and receipt.disposition is AdmissionDisposition.ACCEPTED
             and receipt.application_id == application_id
+            and receipt.request_id is None
         ]
         if (
             len(accepted_receipts) != 1
@@ -9581,13 +12285,21 @@ class ControlledScenarioService:
 
             phases = [event[2] for event in canonical_events]
             current_phase = phases[-1]
-            expected_evidence_ready = current_phase not in {"Intake", "Assembly"}
+            expected_evidence_ready = current_phase not in {
+                "Intake",
+                "Assembly",
+                "Awaiting Evidence",
+                "Unprocessable",
+            }
             current_lifecycle_event = max(
                 lifecycle, key=lambda event: int(event["revision"])
             )
             expected_route = {
                 "Manual Review": "manual_review",
                 "Pending Exception Approval": "pending_exception_approval",
+                "Supplement": "supplement_pending",
+                "Awaiting Evidence": "awaiting_evidence",
+                "Unprocessable": "unprocessable",
                 "Routing Determination": "routing_determination",
                 "Verification Completed": (
                     "human_complete"
@@ -9620,18 +12332,19 @@ class ControlledScenarioService:
             ]
             if len(admitted_events) != 1:
                 raise ValueError("admitted evidence authority is unavailable")
-            correction_events = sorted(
+            evidence_successors = sorted(
                 (
                     event
                     for event in self._store.evidence_events
                     if event.get("application_id") == application_id
-                    and event.get("kind") == "field_correction"
+                    and event.get("kind")
+                    in {"field_correction", "supplement_attachment_version"}
                 ),
                 key=lambda event: int(event["revision"]),
             )
             graph_revisions = [
                 admitted_events[0].get("revision"),
-                *(event.get("revision") for event in correction_events),
+                *(event.get("revision") for event in evidence_successors),
             ]
             observed_evidence_revision = app.get("evidence_revision")
             if (
@@ -10924,6 +13637,7 @@ class ControlledScenarioService:
                 for receipt in self._store.receipts.values()
                 if isinstance(receipt, AdmissionResult)
                 and receipt.disposition is AdmissionDisposition.ACCEPTED
+                and receipt.request_id is None
             ]
             accepted_applications = {
                 str(receipt.application_id): receipt
@@ -10932,6 +13646,43 @@ class ControlledScenarioService:
             }
             if len(accepted_applications) != len(accepted_receipts):
                 recovery_failure = True
+            supplement_receipts = [
+                receipt
+                for receipt in self._store.receipts.values()
+                if isinstance(receipt, AdmissionResult)
+                and receipt.disposition is AdmissionDisposition.ACCEPTED
+                and receipt.request_status == "fulfilled"
+                and isinstance(receipt.request_id, str)
+                and receipt.request_id
+                and isinstance(receipt.job_id, str)
+                and receipt.job_id
+            ]
+            supplement_receipts_by_job = {
+                str(receipt.job_id): receipt for receipt in supplement_receipts
+            }
+            if len(supplement_receipts_by_job) != len(supplement_receipts):
+                recovery_failure = True
+            correction_events_by_job: dict[str, dict[str, Any]] = {}
+            for event in self._store.audit_events:
+                if (
+                    event.get("action") != "evidence_correction"
+                    or event.get("result") != "accepted"
+                ):
+                    continue
+                job_id = event.get("job_id")
+                application_id = event.get("application_id")
+                correction_id = event.get("correction_id")
+                if not all(
+                    isinstance(value, str) and value
+                    for value in (job_id, application_id, correction_id)
+                ):
+                    recovery_failure = True
+                    break
+                previous = correction_events_by_job.get(job_id)
+                if previous is not None and previous != event:
+                    recovery_failure = True
+                    break
+                correction_events_by_job[job_id] = event
 
             if not recovery_failure:
                 for application_id, receipt in accepted_applications.items():
@@ -10987,12 +13738,72 @@ class ControlledScenarioService:
                     )
 
             if not recovery_failure:
+                for job_id, receipt in supplement_receipts_by_job.items():
+                    application_id = receipt.application_id
+                    event = events_by_job.get(job_id)
+                    app = (
+                        self._store.applications.get(application_id)
+                        if isinstance(application_id, str)
+                        else None
+                    )
+                    if not self._supplement_job_authority_matches(
+                        app, receipt, event
+                    ):
+                        recovery_failure = True
+                        break
+                    jobs = [
+                        job
+                        for job in self._store.jobs
+                        if job.get("job_id") == job_id
+                    ]
+                    if len(jobs) > 1:
+                        recovery_failure = True
+                        break
+                    unprocessed = self._supplement_is_unprocessed(app, receipt)
+                    canonical_job = self._supplement_job_record(
+                        job_id,
+                        str(application_id),
+                        str(receipt.request_id),
+                        str(receipt.envelope_fingerprint),
+                    )
+                    if jobs:
+                        job = jobs[0]
+                        if not self._job_matches_supplement(job, app, receipt):
+                            recovery_failure = True
+                            break
+                        if (
+                            unprocessed
+                            and job != canonical_job
+                            and not self._pristine_leased_job(job)
+                        ):
+                            repair_jobs.append(canonical_job)
+                        continue
+                    if not unprocessed:
+                        recovery_failure = True
+                        break
+                    repair_jobs.append(canonical_job)
+
+            if not recovery_failure:
                 known_application_ids = set(accepted_applications)
+                known_job_ids = {
+                    str(receipt.job_id) for receipt in accepted_receipts
+                } | set(supplement_receipts_by_job) | set(correction_events_by_job)
                 for event in request_events:
                     application_id = event.get("application_id")
+                    correction_event = correction_events_by_job.get(
+                        str(event.get("job_id"))
+                    )
                     if (
                         not isinstance(application_id, str)
                         or application_id not in known_application_ids
+                        or event.get("job_id") not in known_job_ids
+                        or correction_event is not None
+                        and (
+                            correction_event.get("application_id") != application_id
+                            or correction_event.get("correction_id")
+                            != event.get("fingerprint")
+                            or event.get("request_id") is not None
+                        )
                     ):
                         recovery_failure = True
                         break
@@ -11096,6 +13907,56 @@ class ControlledScenarioService:
             and job.get("fingerprint") == receipt.envelope_fingerprint
         )
 
+    def _supplement_job_authority_matches(
+        self,
+        app: dict[str, Any] | None,
+        receipt: AdmissionResult,
+        event: dict[str, Any] | None,
+    ) -> bool:
+        if (
+            not isinstance(app, dict)
+            or not isinstance(event, dict)
+            or event.get("status") != "pending"
+            or event.get("application_id") != receipt.application_id
+            or event.get("job_id") != receipt.job_id
+            or event.get("request_id") != receipt.request_id
+            or event.get("fingerprint") != receipt.envelope_fingerprint
+        ):
+            return False
+        fulfillment = [
+            record
+            for record in self._store.review_records
+            if record.get("record_type") == "supplement_request_fulfilled"
+            and record.get("application_id") == receipt.application_id
+            and record.get("request_id") == receipt.request_id
+            and record.get("receipt_id") == receipt.receipt_id
+            and record.get("envelope_fingerprint") == receipt.envelope_fingerprint
+            and record.get("lifecycle_revision") == receipt.lifecycle_revision
+            and record.get("evidence_revision") == receipt.evidence_revision
+        ]
+        lifecycle = [
+            item
+            for item in self._store.lifecycle_events
+            if item.get("application_id") == receipt.application_id
+            and item.get("revision") == receipt.lifecycle_revision
+            and item.get("reason_code") == "SUPPLEMENT_REQUEST_FULFILLED"
+            and item.get("request_id") == receipt.request_id
+            and item.get("job_id") == receipt.job_id
+        ]
+        return len(fulfillment) == 1 and len(lifecycle) == 1
+
+    @staticmethod
+    def _job_matches_supplement(
+        job: dict[str, Any], app: dict[str, Any] | None, receipt: AdmissionResult
+    ) -> bool:
+        return (
+            isinstance(app, dict)
+            and job.get("application_id") == app.get("application_id")
+            and job.get("kind") == "supplement_check"
+            and job.get("request_id") == receipt.request_id
+            and job.get("fingerprint") == receipt.envelope_fingerprint
+        )
+
     @staticmethod
     def _admission_job_record(
         job_id: str, application_id: str, fingerprint: str
@@ -11106,6 +13967,20 @@ class ControlledScenarioService:
             "kind": "controlled_check",
             "status": "queued",
             "fingerprint": fingerprint,
+        }
+
+    @classmethod
+    def _supplement_job_record(
+        cls,
+        job_id: str,
+        application_id: str,
+        request_id: str,
+        fingerprint: str,
+    ) -> dict[str, Any]:
+        return {
+            **cls._admission_job_record(job_id, application_id, fingerprint),
+            "kind": "supplement_check",
+            "request_id": request_id,
         }
 
     @staticmethod
@@ -11159,6 +14034,29 @@ class ControlledScenarioService:
         return not any(
             record.get("application_id") == application_id
             for record in (*self._store.attempts, *self._store.runs, *self._store.findings)
+        )
+
+    def _supplement_is_unprocessed(
+        self,
+        app: dict[str, Any] | None,
+        receipt: AdmissionResult,
+    ) -> bool:
+        if (
+            not isinstance(app, dict)
+            or app.get("application_id") != receipt.application_id
+            or app.get("phase") != "Assembly"
+            or app.get("route") != "pending_check"
+            or app.get("lifecycle_revision") != receipt.lifecycle_revision
+            or app.get("evidence_revision") != receipt.evidence_revision
+            or app.get("evidence_ready") is not False
+            or app.get("current_run_id") is not None
+            or app.get("projection_pending") is not False
+            or app.get("projection_visible") is not False
+        ):
+            return False
+        return not any(
+            record.get("job_id") == receipt.job_id
+            for record in (*self._store.attempts, *self._store.runs)
         )
 
     def _reload_store(self) -> None:

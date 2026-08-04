@@ -71,6 +71,32 @@ _SUBMISSION_KEYS = {
     "upstream_application_ref",
     "workload_identity_id",
 }
+_ATTACHMENT_VERSION_SUBMISSION_KEYS = _SUBMISSION_KEYS | {
+    "attachment_lineage",
+    "batch",
+    "request_binding",
+}
+_REQUEST_BINDING_KEYS = {
+    "material_requirement_id",
+    "request_context_digest",
+    "request_progress_revision",
+    "supplement_request_id",
+}
+_ATTACHMENT_LINEAGE_KEYS = {
+    "attachment_version",
+    "operation",
+    "predecessor_attachment_id",
+    "predecessor_attachment_version",
+}
+_REQUEST_BATCH_KEYS = {
+    "batch_id",
+    "closed",
+    "final_sequence",
+    "item_count",
+    "item_sequence",
+    "manifest_digest",
+    "scope_mode",
+}
 _DOCUMENT_BINDING_KEYS = {
     "document_role",
     "document_type",
@@ -864,6 +890,188 @@ class RegisteredSourceBoundary:
             observation_count=len(observations),
             attachment_count=len(graph_attachments),
             provenance_eligible=eligible,
+        )
+
+    def canonicalize_attachment_version(
+        self,
+        submission: Any,
+        *,
+        scope: str,
+        source_system_id: str,
+    ) -> S02CanonicalEnvelope:
+        """Verify one request-bound attachment using the registered S02 path."""
+        if (
+            not isinstance(submission, dict)
+            or submission.get("command_type") != "submit_attachment_version"
+        ):
+            self._fail(
+                "rejected",
+                "intake.schema_unsupported",
+                "integrator",
+                "submit_a_supported_command",
+                gates=("identity:verified", "contract:failed"),
+            )
+        base_submission = {
+            key: copy.deepcopy(submission.get(key)) for key in _SUBMISSION_KEYS
+        }
+        base_submission["command_type"] = "submit_observation_result"
+        base = self.canonicalize(
+            base_submission,
+            scope=scope,
+            source_system_id=source_system_id,
+        )
+        failure_context = {
+            "adapter_id": base.adapter_id,
+            "adapter_version": base.adapter_version,
+            "registration_digest": base.registration_digest,
+        }
+        self._validate_transport(submission, failure_context)
+        self._require_contract_keys(
+            submission,
+            allowed=_ATTACHMENT_VERSION_SUBMISSION_KEYS,
+            required=_ATTACHMENT_VERSION_SUBMISSION_KEYS,
+            failure_context=failure_context,
+        )
+
+        request = submission.get("request_binding")
+        self._require_contract_keys(
+            request,
+            allowed=_REQUEST_BINDING_KEYS,
+            required=_REQUEST_BINDING_KEYS,
+            failure_context=failure_context,
+        )
+        request_id = _required_id(request, "supplement_request_id")
+        requirement_id = request.get("material_requirement_id")
+        request_context_digest = request.get("request_context_digest")
+        progress_revision = request.get("request_progress_revision")
+        if (
+            not isinstance(requirement_id, str)
+            or not requirement_id
+            or requirement_id.strip() != requirement_id
+            or len(requirement_id) > 200
+            or not isinstance(request_context_digest, str)
+            or not _SHA256.fullmatch(request_context_digest)
+            or isinstance(progress_revision, bool)
+            or not isinstance(progress_revision, int)
+            or progress_revision < 1
+        ):
+            self._provenance_failure(failure_context)
+
+        lineage = submission.get("attachment_lineage")
+        self._require_contract_keys(
+            lineage,
+            allowed=_ATTACHMENT_LINEAGE_KEYS,
+            required=_ATTACHMENT_LINEAGE_KEYS,
+            failure_context=failure_context,
+        )
+        predecessor_attachment_id = _required_id(
+            lineage, "predecessor_attachment_id"
+        )
+        predecessor_version = lineage.get("predecessor_attachment_version")
+        attachment_version = lineage.get("attachment_version")
+        if (
+            lineage.get("operation") != "replacement"
+            or isinstance(predecessor_version, bool)
+            or not isinstance(predecessor_version, int)
+            or predecessor_version < 1
+            or isinstance(attachment_version, bool)
+            or not isinstance(attachment_version, int)
+            or attachment_version != predecessor_version + 1
+        ):
+            self._provenance_failure(failure_context)
+
+        batch = submission.get("batch")
+        self._require_contract_keys(
+            batch,
+            allowed=_REQUEST_BATCH_KEYS,
+            required=_REQUEST_BATCH_KEYS,
+            failure_context=failure_context,
+        )
+        batch_id = _required_id(batch, "batch_id")
+        item_sequence = batch.get("item_sequence")
+        item_count = batch.get("item_count")
+        final_sequence = batch.get("final_sequence")
+        closed = batch.get("closed")
+        manifest_digest = batch.get("manifest_digest")
+        scope_mode = batch.get("scope_mode")
+        if (
+            any(
+                isinstance(value, bool) or not isinstance(value, int) or value < 1
+                for value in (item_sequence, item_count, final_sequence)
+            )
+            or item_count != final_sequence
+            or item_sequence > final_sequence
+            or type(closed) is not bool
+            or closed != (item_sequence == final_sequence)
+            or scope_mode not in {"full", "incremental"}
+            or not isinstance(manifest_digest, str)
+            or not _SHA256.fullmatch(manifest_digest)
+        ):
+            self._fail(
+                "rejected",
+                "intake.batch_contract_invalid",
+                "integrator",
+                "submit_a_causally_valid_request_batch",
+                gates=(
+                    "identity:verified",
+                    "contract:verified",
+                    "object:verified",
+                    "causality:failed",
+                ),
+                **failure_context,
+            )
+        manifest = {
+            "batch_id": batch_id,
+            "final_sequence": final_sequence,
+            "item_count": item_count,
+            "scope_mode": scope_mode,
+            "stream_id": base.stream_id,
+            "supplement_request_id": request_id,
+        }
+        if _digest(manifest) != manifest_digest:
+            self._fail(
+                "quarantined",
+                "intake.batch_manifest_conflict",
+                "source_owner",
+                "reconcile_the_request_batch_manifest",
+                gates=(
+                    "identity:verified",
+                    "contract:verified",
+                    "object:verified",
+                    "causality:failed",
+                ),
+                **failure_context,
+            )
+
+        canonical_payload = copy.deepcopy(base.payload)
+        canonical_payload["envelope"].update(
+            {
+                "command_type": "submit_attachment_version",
+                "request_binding": copy.deepcopy(request),
+                "attachment_lineage": copy.deepcopy(lineage),
+                "batch": copy.deepcopy(batch),
+            }
+        )
+        canonical_payload["envelope"]["scope"].update(
+            {
+                "mode": f"request_bound_{scope_mode}",
+                "supplement_request_id": request_id,
+                "material_requirement_id": requirement_id,
+            }
+        )
+        canonical_payload["request_binding"] = copy.deepcopy(request)
+        canonical_payload["attachment_lineage"] = copy.deepcopy(lineage)
+        canonical_payload["batch"] = copy.deepcopy(batch)
+        canonical_payload["application"]["evidence"][0][
+            "attachment_lineage"
+        ] = copy.deepcopy(lineage)
+        return S02CanonicalEnvelope(
+            **{
+                **base.__dict__,
+                "command_type": "submit_attachment_version",
+                "fingerprint": _digest(canonical_payload),
+                "payload": canonical_payload,
+            }
         )
 
     def _verify_object(

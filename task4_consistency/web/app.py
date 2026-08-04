@@ -208,6 +208,13 @@ class S01BackgroundRuntime:
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
+                expire_due = getattr(
+                    self._service, "expire_due_supplement_requests", None
+                )
+                if expire_due is not None:
+                    expiry_result = expire_due(principal=self._principal)
+                    if expiry_result.get("status") != "accepted":
+                        raise RuntimeError("supplement deadline sweep failed")
                 worker_result = self._service.process_next_job()
                 projection_result = self._service.refresh_projection()
             except Exception:
@@ -857,6 +864,18 @@ def _s02_admission_json(result: Any) -> dict[str, Any]:
         "claim_label": result.claim_label,
         "real_cross_document_opportunities": result.real_cross_document_opportunities,
         "performance_status": result.performance_status,
+        "request_id": result.request_id,
+        "request_status": result.request_status,
+        "batch_id": result.batch_id,
+        "batch_closed": result.batch_closed,
+        "request_progress_revision": result.request_progress_revision,
+        "attachment_id": result.attachment_id,
+        "attachment_version": result.attachment_version,
+        "supersedes_attachment_id": result.supersedes_attachment_id,
+        "fulfilled": result.fulfilled,
+        "phase": result.phase,
+        "route": result.route,
+        "recovery_target": result.recovery_target,
     }
 
 
@@ -1111,6 +1130,30 @@ async def controlled_s02_submit(
             scope=principal.scope,
             source_id=S02_SOURCE_SYSTEM_ID,
         ),
+    )
+    return _s02_admission_json(result)
+
+
+@app.post("/controlled/s02/api/commands/submit-attachment-version")
+async def controlled_s06_submit_attachment_version(
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    principal = _s02_require_role(request, "integrator")
+    _s01_disable_cache(response)
+    body = await _s03_command_body(request, S02SubmitBody)
+    assert isinstance(body, S02SubmitBody)
+    result = _s02_service().submit_attachment_version(
+        submission=body.submission,
+        idempotency_key=body.idempotency_key,
+        principal=S01CommandPrincipal(
+            subject=principal.subject,
+            role="integrator",
+            scope=principal.scope,
+            source_id=S02_SOURCE_SYSTEM_ID,
+            expires_at=principal.expires_at,
+        ),
+        now=S01_SESSION_CLOCK(),
     )
     return _s02_admission_json(result)
 
@@ -1659,6 +1702,56 @@ async def controlled_s04_demo_correct_field_observation(
     except ValueError as error:
         raise _s03_invalid_command(error) from error
     return _s03_command_result(result)
+
+
+@app.post(
+    "/controlled/s01/api/commands/review-work-items/"
+    "{work_item_id}/supplement"
+)
+async def controlled_s06_request_supplement(
+    work_item_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s04_demo_reviewer_principal(request)
+    body = await _s03_command_body(request, S05RequestBody)
+    assert isinstance(body, S05RequestBody)
+    try:
+        result = _s01_service().request_supplement(
+            principal=principal,
+            work_item_id=work_item_id,
+            finding_id=body.finding_id,
+            reason_code=body.reason_code,
+            predecessor_request_id=body.predecessor_request_id,
+            expected_fence=body.expected_fence,
+            expected_context=body.expected_context,
+            idempotency_key=body.idempotency_key,
+            now=S01_SESSION_CLOCK(),
+        )
+    except QueryNotFound as error:
+        raise _s03_not_found(error) from error
+    except ValueError as error:
+        raise _s03_invalid_command(error) from error
+    return _s03_command_result(result)
+
+
+@app.get("/controlled/s01/api/queries/supplement-requests/{request_id}")
+def controlled_s06_supplement_request_view(
+    request_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s04_demo_reviewer_principal(request)
+    try:
+        return _s01_service().supplement_request_view(
+            principal=principal,
+            request_id=request_id,
+            now=S01_SESSION_CLOCK(),
+        )
+    except QueryNotFound as error:
+        raise _s03_not_found(error) from error
 
 
 @app.post(
@@ -2626,6 +2719,7 @@ def create_s02_test_app() -> FastAPI:
     )
 
     state_value = os.environ.get("TASK4_S02_TEST_STATE_PATH", "").strip()
+    scenario_value = os.environ.get("TASK4_S02_TEST_SCENARIO_ID", "").strip()
     state_path = (
         Path(state_value)
         if state_value and Path(state_value).is_absolute()
@@ -2653,6 +2747,7 @@ def create_s02_test_app() -> FastAPI:
             fault_injector=inject_s03_test_fault if s03_fault_point else None,
             registered_sources=S02_REGISTERED_SOURCES,
             controlled_objects=S02_CONTROLLED_OBJECTS,
+            scenario_id=scenario_value or "app_r53_bad_engine.json",
         )
         S01_TEST_DRIVER = None
     except Exception:
