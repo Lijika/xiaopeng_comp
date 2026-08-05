@@ -1505,12 +1505,6 @@ export interface components {
         };
         /** S01ValidationErrorItem */
         S01ValidationErrorItem: {
-            /** Ctx */
-            ctx?: {
-                [key: string]: unknown;
-            } | null;
-            /** Input */
-            input?: unknown | null;
             /** Loc */
             loc: (string | number)[];
             /** Msg */
@@ -2973,6 +2967,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["S01QueueResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
                 };
             };
         };

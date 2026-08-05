@@ -58,7 +58,8 @@ export default function QueuePanel({
             ? "队列不可用"
             : accessEnded
               ? "会话已过期"
-              : query.data?.recovery_items?.length
+              : (query.data?.items?.length ?? 0) > 0 ||
+                  (query.data?.recovery_items?.length ?? 0) > 0
                 ? "队列已同步"
                 : "队列为空"}
       </p>

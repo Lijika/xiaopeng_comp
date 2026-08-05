@@ -661,4 +661,201 @@ describe("RecoveryWorkPanel", () => {
       1,
     );
   });
+
+  it("no-ops Reload while VerifyRecovery is pending and never issues a second POST", async () => {
+    let postCount = 0;
+    let resolvePost: ((value: Response) => void) | undefined;
+    const postGate = new Promise<Response>((resolve) => {
+      resolvePost = resolve;
+    });
+    let getCount = 0;
+    const router = fetchRouter({
+      [`GET ${WORK_PATH}`]: () => {
+        getCount += 1;
+        if (getCount === 1) {
+          return new Response(
+            JSON.stringify(workPayload({ can_verify: true })),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response(JSON.stringify(RESOLVED), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+      [`POST ${VERIFY_PATH}`]: () => {
+        postCount += 1;
+        return postGate;
+      },
+    });
+    renderWithQuery(<RecoveryWorkPanel workId={WORK_ID} />);
+    const verifyButton = () =>
+      screen.getByRole("button", { name: "验证恢复" });
+    const reloadButton = () =>
+      screen.getByRole("button", { name: "重新加载" });
+    await waitFor(() => expect(verifyButton()).toBeEnabled());
+
+    await userEvent.click(verifyButton());
+    await waitFor(() => expect(postCount).toBe(1));
+    expect(reloadButton()).toBeDisabled();
+    await userEvent.click(reloadButton());
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(postCount).toBe(1);
+    expect(
+      screen.getByTestId("recovery-command-status"),
+    ).toHaveTextContent("恢复验证提交中");
+
+    resolvePost?.(
+      new Response(
+        JSON.stringify({
+          status: "accepted",
+          replayed: false,
+          recovery_work_id: WORK_ID,
+          recovery_fact_id: "fact-t01-pending-reload",
+          application_id: APP_ID,
+          phase: "Evidence Ready",
+          lifecycle_revision: 6,
+          evidence_revision: 1,
+          successor_job_id: "job_t01successor00000000000000",
+          successor_fence: 2,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("recovery-command-status")).toHaveTextContent(
+        "恢复事实已接受",
+      ),
+    );
+    expect(postCount).toBe(1);
+    expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(
+      1,
+    );
+  });
+
+  it("preserves the accepted latch and key through a failed refetch followed by Reload", async () => {
+    let getCount = 0;
+    let postCount = 0;
+    const router = fetchRouter({
+      [`GET ${WORK_PATH}`]: () => {
+        getCount += 1;
+        if (getCount === 1) {
+          return new Response(
+            JSON.stringify(workPayload({ can_verify: true })),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response(
+          JSON.stringify({ detail: { error: "S01_INTERNAL_ERROR" } }),
+          { status: 500, headers: { "Content-Type": "application/json" } },
+        );
+      },
+      [`POST ${VERIFY_PATH}`]: () => {
+        postCount += 1;
+        return new Response(
+          JSON.stringify({
+            status: "accepted",
+            replayed: false,
+            recovery_work_id: WORK_ID,
+            recovery_fact_id: "fact-t01-accepted-failed-refetch",
+            application_id: APP_ID,
+            phase: "Evidence Ready",
+            lifecycle_revision: 6,
+            evidence_revision: 1,
+            successor_job_id: "job_t01successor00000000000000",
+            successor_fence: 2,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    });
+    renderWithQuery(<RecoveryWorkPanel workId={WORK_ID} />);
+    const verifyButton = () =>
+      screen.getByRole("button", { name: "验证恢复" });
+    await waitFor(() => expect(verifyButton()).toBeEnabled());
+
+    await userEvent.click(verifyButton());
+    await waitFor(() =>
+      expect(screen.getByTestId("recovery-command-status")).toHaveTextContent(
+        "恢复事实已接受",
+      ),
+    );
+    expect(verifyButton()).toBeDisabled();
+
+    await userEvent.click(screen.getByRole("button", { name: "重新加载" }));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(
+      screen.getByTestId("recovery-command-status"),
+    ).toHaveTextContent("恢复事实已接受");
+    expect(verifyButton()).toBeDisabled();
+    expect(postCount).toBe(1);
+    expect(
+      router.calls.filter((call) => call.method === "POST"),
+    ).toHaveLength(1);
+  });
+
+  it("preserves the accepted latch and key when a reload still observes open server detail", async () => {
+    let getCount = 0;
+    let postCount = 0;
+    fetchRouter({
+      [`GET ${WORK_PATH}`]: () => {
+        getCount += 1;
+        if (getCount <= 2) {
+          return new Response(
+            JSON.stringify(workPayload({ can_verify: true })),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response(JSON.stringify(RESOLVED), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+      [`POST ${VERIFY_PATH}`]: () => {
+        postCount += 1;
+        return new Response(
+          JSON.stringify({
+            status: "accepted",
+            replayed: false,
+            recovery_work_id: WORK_ID,
+            recovery_fact_id: "fact-t01-accepted-still-open",
+            application_id: APP_ID,
+            phase: "Evidence Ready",
+            lifecycle_revision: 6,
+            evidence_revision: 1,
+            successor_job_id: "job_t01successor00000000000000",
+            successor_fence: 2,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    });
+    renderWithQuery(<RecoveryWorkPanel workId={WORK_ID} />);
+    const verifyButton = () =>
+      screen.getByRole("button", { name: "验证恢复" });
+    await waitFor(() => expect(verifyButton()).toBeEnabled());
+
+    await userEvent.click(verifyButton());
+    await waitFor(() =>
+      expect(screen.getByTestId("recovery-command-status")).toHaveTextContent(
+        "恢复事实已接受",
+      ),
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "重新加载" }));
+    await waitFor(() => expect(getCount).toBeGreaterThanOrEqual(3));
+    expect(
+      screen.getByTestId("recovery-command-status"),
+    ).toHaveTextContent("恢复事实已接受");
+    expect(verifyButton()).toBeDisabled();
+    expect(postCount).toBe(1);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("recovery-status")).toHaveTextContent(
+        "resolved",
+      ),
+    );
+    expect(postCount).toBe(1);
+    expect(verifyButton()).toBeDisabled();
+  });
 });

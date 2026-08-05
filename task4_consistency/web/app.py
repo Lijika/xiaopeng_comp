@@ -14,9 +14,11 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 import yaml
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import Body, Depends, FastAPI, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
@@ -28,6 +30,7 @@ from task4_consistency.controlled.s01 import (
     ControlledScenarioTestDriver,
     QueryNotFound,
     S01CommandPrincipal,
+    _ApplicationStateAuthorityUnavailable,
 )
 from task4_consistency.controlled.s02 import (
     ControlledObject,
@@ -265,6 +268,27 @@ async def _lifespan(application: FastAPI):
 
 
 app = FastAPI(title="Task4 Consistency Demo", version="1.0.0", lifespan=_lifespan)
+
+
+@app.exception_handler(RequestValidationError)
+async def _sanitized_validation_handler(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    """Validation 422s never reflect rejected input, context, credentials,
+    or oversized payload content back to the client."""
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": [
+                {
+                    "loc": list(error.get("loc", ())),
+                    "msg": str(error.get("msg", "")),
+                    "type": str(error.get("type", "")),
+                }
+                for error in exc.errors()
+            ]
+        },
+    )
 
 
 class _ImmutableHashedAssets(StaticFiles):
@@ -726,8 +750,6 @@ class S01ValidationErrorItem(BaseModel):
     loc: list[str | int]
     msg: str
     type: str
-    input: Any | None = None
-    ctx: dict[str, Any] | None = None
 
 
 class S01VerifyErrorResponse(BaseModel):
@@ -1737,21 +1759,50 @@ def _controlled_s01_shell_response(request: Request, html: str) -> HTMLResponse:
     return response
 
 
-_REACT_ASSET_REFERENCE = re.compile(r'(?:src|href)="(/static/react/[^"]+)"')
+_REACT_SCRIPT_REFERENCE = re.compile(r'<script\b[^>]*\bsrc="([^"]+)"')
+_REACT_STYLESHEET_REFERENCE = re.compile(
+    r'<link\b[^>]*\brel="stylesheet"[^>]*\bhref="([^"]+)"'
+)
 
 
 def _react_build_is_complete(index_html: str) -> bool:
-    root = S01_REACT_INDEX.parent
-    referenced: list[str] = []
-    for match in _REACT_ASSET_REFERENCE.finditer(index_html):
-        url_path = match.group(1)
-        if not url_path.endswith((".js", ".css")):
-            continue
-        referenced.append(url_path)
-    if not referenced:
+    """True only for a complete local executable React build.
+
+    Every script and stylesheet reference must be a clean absolute path
+    under ``/static/react/`` with no query/fragment or traversal, must
+    resolve to a file inside the React build root, and at least one
+    executable JavaScript module entry (a ``<script src="...js">``) must be
+    present.
+    """
+    root = S01_REACT_INDEX.parent.resolve()
+    module_entries = [
+        match.group(1)
+        for match in _REACT_SCRIPT_REFERENCE.finditer(index_html)
+        if match.group(1).endswith(".js")
+    ]
+    if not module_entries:
         return False
-    for url_path in referenced:
-        candidate = root.joinpath(url_path.removeprefix("/static/react/"))
+    references = [
+        match.group(1)
+        for match in _REACT_STYLESHEET_REFERENCE.finditer(index_html)
+        if match.group(1).endswith(".css")
+    ] + module_entries
+    for url_path in references:
+        parsed = urlparse(url_path)
+        if (
+            parsed.scheme
+            or parsed.netloc
+            or parsed.query
+            or parsed.fragment
+            or not url_path.startswith("/static/react/")
+        ):
+            return False
+        relative = url_path.removeprefix("/static/react/")
+        if not relative or relative.startswith("/"):
+            return False
+        candidate = (root / relative).resolve()
+        if not candidate.is_relative_to(root):
+            return False
         if not candidate.is_file():
             return False
     return True
@@ -1921,6 +1972,11 @@ def controlled_s07_recovery_work(
         raise _s07_not_found() from error
 
 
+def _s07_verify_operator_dependency(request: Request) -> S01CommandPrincipal:
+    """Existence-hiding Operator gate, solved before body validation."""
+    return _s07_operator_principal(request)
+
+
 @app.post(
     "/controlled/s01/api/commands/recovery-work-items/{recovery_work_id}/verify",
     response_model=S01VerifyRecoveryResult,
@@ -1934,12 +1990,12 @@ def controlled_s07_recovery_work(
 )
 def controlled_s07_verify_recovery(
     recovery_work_id: str,
-    body: S07VerifyRecoveryBody,
     request: Request,
     response: Response,
+    principal: S01CommandPrincipal = Depends(_s07_operator_principal),
+    body: S07VerifyRecoveryBody = Body(...),
 ) -> dict[str, Any]:
     _s01_disable_cache(response)
-    principal = _s07_operator_principal(request)
     try:
         result = _s01_service().verify_recovery(
             principal=principal,
@@ -1976,7 +2032,8 @@ def controlled_s07_verify_recovery(
                     ),
                 }
             }
-        }
+        },
+        503: {"model": S01ErrorResponse},
     },
 )
 def controlled_s01_queue(request: Request, response: Response) -> dict[str, Any]:
@@ -1996,12 +2053,21 @@ def controlled_s01_queue(request: Request, response: Response) -> dict[str, Any]
             "projection_watermark": 0,
             "access_ended": True if access_ended else None,
         }
-    return _s01_service().queue_view(
-        role="reviewer",
-        scope=principal.scope,
-        subject=principal.subject,
-        now=S01_SESSION_CLOCK(),
-    )
+    try:
+        return _s01_service().queue_view(
+            role="reviewer",
+            scope=principal.scope,
+            subject=principal.subject,
+            now=S01_SESSION_CLOCK(),
+        )
+    except _ApplicationStateAuthorityUnavailable:
+        raise HTTPException(
+            503,
+            detail={
+                "error": "S01_QUEUE_UNAVAILABLE",
+                "reason_code": "recovery.authority_unavailable",
+            },
+        ) from None
 
 
 @app.get("/controlled/s01/api/queries/applications/{application_id}/workspace")

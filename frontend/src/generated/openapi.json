@@ -964,27 +964,6 @@
       },
       "S01ValidationErrorItem": {
         "properties": {
-          "ctx": {
-            "anyOf": [
-              {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Ctx"
-          },
-          "input": {
-            "anyOf": [
-              {},
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Input"
-          },
           "loc": {
             "items": {
               "anyOf": [
@@ -2845,6 +2824,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "summary": "Controlled S01 Queue"

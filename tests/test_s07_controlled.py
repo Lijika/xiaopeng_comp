@@ -15,6 +15,7 @@ from task4_consistency.controlled.s01 import (
     ControlledScenarioTestDriver,
     QueryNotFound,
     S01CommandPrincipal,
+    _ApplicationStateAuthorityUnavailable,
 )
 from task4_consistency.rules.engine import RuleEngine
 from task4_consistency.rules.loader import load_rules
@@ -2356,3 +2357,87 @@ def test_queue_publishes_no_recovery_item_for_corrupt_application_authority(
     assert queue_after["projection_watermark"] == queue_before["projection_watermark"]
     assert application_id not in str(queue_after)
     assert failure.recovery_work_id not in str(queue_after)
+
+
+def test_queue_hides_only_the_corrupt_recovery_item_beside_a_healthy_one(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    driver = ControlledScenarioTestDriver(service)
+    application_id = _admit(service)
+    failure = driver.process_next_job(
+        worker_id="s07-queue-mixed-worker",
+        now=10,
+        operation_fault="checker_incompatible",
+    )
+    assert failure.status == "blocked"
+    healthy_work_id = failure.recovery_work_id
+
+    service._store.applications["app_attacker_no_authority"] = {
+        "application_id": "app_attacker_no_authority",
+        "phase": "Unprocessable",
+        "lifecycle_revision": 5,
+    }
+    service._store.recovery_events.append(
+        {
+            "event_id": "s07-attacker-fabricated-recovery",
+            "kind": "opened",
+            "recovery_work_id": "recovery_work_attacker_fabricated",
+            "application_id": "app_attacker_no_authority",
+            "visibility_scope": "C-DEMO",
+            "primary_reason_code": "configuration.checker_unavailable",
+            "responsible_party": "policy_owner",
+            "opened_at": 10,
+        }
+    )
+    service._store.persist()
+
+    queue = service.queue_view(
+        role="reviewer",
+        scope="C-DEMO",
+        subject=REVIEWER.subject,
+    )
+    published = [item["recovery_work_id"] for item in queue["recovery_items"]]
+    assert published == [healthy_work_id]
+    assert "recovery_work_attacker_fabricated" not in str(queue)
+    assert "app_attacker_no_authority" not in str(queue)
+
+
+def test_queue_surfaces_shared_authority_failure_as_unavailable_not_empty(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    driver = ControlledScenarioTestDriver(service)
+    application_id = _admit(service)
+    failure = driver.process_next_job(
+        worker_id="s07-queue-shared-worker",
+        now=10,
+        operation_fault="checker_incompatible",
+    )
+    assert failure.status == "blocked"
+    assert failure.recovery_work_id is not None
+    queue_before = service.queue_view(
+        role="reviewer",
+        scope="C-DEMO",
+        subject=REVIEWER.subject,
+    )
+    assert len(queue_before["recovery_items"]) == 1
+
+    service._store.audit_events.append(
+        {
+            "event_id": "s07-attacker-broken-authority",
+            "action": "controlled_admission",
+            "result": "accepted",
+            "application_id": "app_attacker_shared",
+            "scope": "C-DEMO",
+            "envelope": "not-a-dict",
+        }
+    )
+    service._store.persist()
+
+    with pytest.raises(_ApplicationStateAuthorityUnavailable):
+        service.queue_view(
+            role="reviewer",
+            scope="C-DEMO",
+            subject=REVIEWER.subject,
+        )

@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 
+import { useQueue } from "./api/hooks";
 import QueuePanel from "./components/QueuePanel";
 import RecoveryWorkPanel from "./components/RecoveryWorkPanel";
 
@@ -9,6 +10,8 @@ function readWorkParam(): string | null {
 
 export default function App() {
   const [workId, setWorkId] = useState<string | null>(readWorkParam);
+  const queue = useQueue();
+  const accessEnded = queue.data?.access_ended === true;
 
   const openWork = useCallback((id: string) => {
     setWorkId(id);
@@ -28,7 +31,9 @@ export default function App() {
       </header>
       <main>
         <QueuePanel onOpenWork={openWork} />
-        {workId !== null && <RecoveryWorkPanel workId={workId} />}
+        {workId !== null && !accessEnded && (
+          <RecoveryWorkPanel key={workId} workId={workId} />
+        )}
       </main>
     </div>
   );

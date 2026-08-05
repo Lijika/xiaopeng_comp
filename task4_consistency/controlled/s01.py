@@ -11397,6 +11397,13 @@ class ControlledScenarioService:
                 recovery_events_by_work.setdefault(
                     str(event.get("recovery_work_id") or ""), []
                 ).append(event)
+            # The shared accepted-admission authority is validated once up
+            # front: a broken shared authority must surface as an explicit
+            # unavailable error at the web boundary, never as an
+            # authoritative-looking empty queue.  With the shared authority
+            # proven consistent (the store is immutable within the lock),
+            # every later authority failure in this loop is item-local.
+            self._accepted_admission_authorities()
             for opened in self._store.recovery_events:
                 if opened.get("kind") != "opened":
                     continue
@@ -11420,10 +11427,12 @@ class ControlledScenarioService:
                         != query_subject
                     ):
                         continue
-                except Exception:
-                    # A corrupt or mismatched application must fail closed
-                    # per item: never publish a recovery item for it, and
-                    # never let it take down the whole queue projection.
+                except _ApplicationStateAuthorityUnavailable:
+                    # Item-local corruption (this application's envelope,
+                    # lifecycle, or evidence disagrees with its own
+                    # authority): fail closed per item and publish nothing
+                    # for it.  Shared authority failures were already
+                    # surfaced above and never reach this boundary.
                     continue
                 recovery_items.append(
                     {

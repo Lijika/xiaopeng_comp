@@ -16,6 +16,7 @@ These tests are the Slice-1 red/green driver:
 from __future__ import annotations
 
 import json
+import sqlite3
 import os
 from pathlib import Path
 from typing import Any
@@ -87,9 +88,142 @@ def create_t01_expiring_app() -> Any:
         rules_path=ROOT / "configs" / "rules_auto_lease.yaml",
         state_path=Path(os.environ["TASK4_S01_TEST_STATE_PATH"]),
         recovery_verifier=None,
-        worker_identity="t01-expiring-worker",
-    )
+        worker_identity="t01-expiring-worker",    )
     web.S01_TEST_DRIVER = _FailFirstS07Driver(web.S01_SERVICE)
+    return web.app
+
+
+def create_t01_queue_unavailable_app() -> Any:
+    """S07-style test app whose shared admission authority is corrupted.
+
+    One application is admitted and blocked (producing open Recovery Work),
+    then a malicious accepted-admission audit event is appended so the
+    shared authority check fails for every queue projection.  The queue
+    route must return a minimized explicit unavailable response instead of
+    an authoritative-looking empty queue.
+    """
+    import task4_consistency.web.app as web
+
+    from task4_consistency.controlled.s01 import (
+        AdmissionDisposition,
+        ControlledScenarioTestDriver,
+        S01CommandPrincipal,
+    )
+
+    web.S01_BACKGROUND_ENABLED = False
+    web.S01_REQUIRE_CONFIGURED_STARTUP = False
+    service = ControlledScenarioService(
+        fixture_root=ROOT / "fixtures" / "applications",
+        rules_path=ROOT / "configs" / "rules_auto_lease.yaml",
+        state_path=Path(os.environ["TASK4_S01_TEST_STATE_PATH"]),
+        recovery_verifier=None,
+        worker_identity="t01-queue-unavailable-worker",
+    )
+    principal = S01CommandPrincipal(
+        subject=os.environ.get("TASK4_S01_DEMO_SUBJECT", "c-demo-test-user"),
+        role="integrator",
+        scope="C-DEMO",
+        source_id="t01-queue-unavailable-intake",
+    )
+    admission = service.submit_demo(
+        scenario_id=SCENARIO,
+        idempotency_key="t01-queue-unavailable-admission",
+        principal=principal,
+    )
+    assert admission.disposition is AdmissionDisposition.ACCEPTED
+    driver = ControlledScenarioTestDriver(service)
+    failed = driver.process_next_job(
+        worker_id="t01-queue-unavailable-worker",
+        now=10,
+        operation_fault="checker_incompatible",
+    )
+    assert failed.status == "blocked"
+    assert failed.recovery_work_id is not None
+    service._store.audit_events.append(
+        {
+            "event_id": "t01-attacker-broken-authority",
+            "action": "controlled_admission",
+            "result": "accepted",
+            "application_id": "app_t01_attacker_shared",
+            "scope": "C-DEMO",
+            "envelope": "not-a-dict",
+        }
+    )
+    service._store.persist()
+    web.S01_SERVICE = service
+    web.S01_TEST_DRIVER = None
+    return web.app
+
+
+def create_t01_queue_unexpected_app() -> Any:
+    """S07-style test app whose recovery projection hits an unexpected fault.
+
+    One application is admitted and blocked under a real session principal
+    (producing open Recovery Work visible to that session), then a malformed
+    opened recovery event (no ``primary_reason_code``) is appended for the
+    same application so the recovery projection raises an unexpected
+    exception.  The queue route must surface a minimized explicit error
+    instead of an authoritative-looking empty queue.  The issued session
+    token is written to ``TASK4_S01_TEST_QUEUE_TOKEN_PATH`` for the test.
+    """
+    import task4_consistency.web.app as web
+
+    from task4_consistency.controlled.s01 import (
+        AdmissionDisposition,
+        ControlledScenarioTestDriver,
+        S01CommandPrincipal,
+    )
+
+    web.S01_BACKGROUND_ENABLED = False
+    web.S01_REQUIRE_CONFIGURED_STARTUP = False
+    service = ControlledScenarioService(
+        fixture_root=ROOT / "fixtures" / "applications",
+        rules_path=ROOT / "configs" / "rules_auto_lease.yaml",
+        state_path=Path(os.environ["TASK4_S01_TEST_STATE_PATH"]),
+        recovery_verifier=None,
+        worker_identity="t01-queue-unexpected-worker",
+    )
+    token_path = Path(os.environ["TASK4_S01_TEST_QUEUE_TOKEN_PATH"])
+    token, session_record = service.issue_session(
+        now=float(web.S01_SESSION_CLOCK()),
+        ttl_seconds=15 * 60,
+        subject=os.environ.get("TASK4_S01_DEMO_SUBJECT", "c-demo-test-user"),
+        roles=("integrator", "reviewer"),
+    )
+    token_path.write_text(token, encoding="ascii")
+    session_principal = S01CommandPrincipal(
+        subject=str(session_record["subject"]),
+        role="integrator",
+        scope=str(session_record["scope"]),
+        source_id="t01-queue-unexpected-session",
+    )
+    admission = service.submit_demo(
+        scenario_id=SCENARIO,
+        idempotency_key="t01-queue-unexpected-admission",
+        principal=session_principal,
+    )
+    assert admission.disposition is AdmissionDisposition.ACCEPTED
+    driver = ControlledScenarioTestDriver(service)
+    failed = driver.process_next_job(
+        worker_id="t01-queue-unexpected-worker",
+        now=10,
+        operation_fault="checker_incompatible",
+    )
+    assert failed.status == "blocked"
+    assert failed.recovery_work_id is not None
+    service._store.recovery_events.append(
+        {
+            "event_id": "t01-attacker-malformed-recovery",
+            "kind": "opened",
+            "recovery_work_id": "recovery_work_t01_malformed",
+            "application_id": admission.application_id,
+            "visibility_scope": session_principal.scope,
+            "opened_at": 10,
+        }
+    )
+    service._store.persist()
+    web.S01_SERVICE = service
+    web.S01_TEST_DRIVER = None
     return web.app
 
 MANUAL_ITEM_FIELDS = {
@@ -408,8 +542,10 @@ def test_openapi_typed_dto_contract_for_migrated_seams(tmp_path: Path) -> None:
     assert validation_schema.get("additionalProperties") is not True
     assert {"loc", "msg", "type"} <= set(validation_schema["required"])
     assert validation_schema["properties"]["loc"]["type"] == "array"
-    assert "input" in validation_schema["properties"]
-    assert "ctx" in validation_schema["properties"]
+    # Sanitized 422 items never reflect rejected input or context back to
+    # the client, so the schema must not declare them either.
+    assert "input" not in validation_schema["properties"]
+    assert "ctx" not in validation_schema["properties"]
 
     recovery_read_operation = next(
         operation
@@ -989,6 +1125,8 @@ def test_unauthenticated_recovery_reads_and_commands_are_hidden_typed_404(
 def test_react_shell_falls_back_to_legacy_for_partial_builds(tmp_path: Path) -> None:
     state_path = tmp_path / "t01-partial.sqlite3"
     legacy_marker = "一致性审核工作台 · C-DEMO"
+    outside_asset = tmp_path / "outside.css"
+    outside_asset.write_text("/* outside */", encoding="utf-8")
     cases = {
         "missing-js": (
             '<html><head></head><body><div id="root"></div>'
@@ -1003,10 +1141,38 @@ def test_react_shell_falls_back_to_legacy_for_partial_builds(tmp_path: Path) -> 
         "no-assets": (
             '<html><head></head><body><div id="root"></div></body></html>'
         ),
+        "css-only": (
+            '<html><head>'
+            '<link rel="stylesheet" href="/static/react/assets/index.css">'
+            '</head><body><div id="root"></div></body></html>'
+        ),
+        "script-src-css": (
+            '<html><head></head><body><div id="root"></div>'
+            '<script type="module" src="/static/react/assets/index.css"></script>'
+            "</body></html>"
+        ),
+        "traversal": (
+            '<html><head></head><body><div id="root"></div>'
+            '<script type="module" src="/static/react/../outside.css"></script>'
+            "</body></html>"
+        ),
+        "query-ambiguity": (
+            '<html><head></head><body><div id="root"></div>'
+            '<script type="module" src="/static/react/assets/index.css?v=1"></script>'
+            "</body></html>"
+        ),
+        "fragment-ambiguity": (
+            '<html><head></head><body><div id="root"></div>'
+            '<script type="module" src="/static/react/assets/index.css#entry"></script>'
+            "</body></html>"
+        ),
     }
     for case_name, index_html in cases.items():
         react_dir = tmp_path / f"partial-{case_name}"
         react_dir.mkdir()
+        assets_dir = react_dir / "assets"
+        assets_dir.mkdir()
+        (assets_dir / "index.css").write_text("/* present */", encoding="utf-8")
         (react_dir / "index.html").write_text(index_html, encoding="utf-8")
         env = _create_t01_app_environment(
             state_path, "verified", str(react_dir)
@@ -1025,5 +1191,166 @@ def test_react_shell_falls_back_to_legacy_for_partial_builds(tmp_path: Path) -> 
             assert shell.status == 200, (case_name, shell.text)
             assert legacy_marker in shell.text, case_name
             assert "index-MISSING" not in shell.text, case_name
+            assert "outside.css" not in shell.text, case_name
             assert shell.headers["cache-control"] == "no-store"
             assert "set-cookie" in shell.headers
+
+
+def test_queue_shared_authority_failure_returns_minimized_unavailable(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "t01-queue-unavailable.sqlite3"
+    with UvicornLoopback(
+        _environment(state_path, "verified"),
+        app_target="tests.test_t01_http:create_t01_queue_unavailable_app",
+        app_factory=True,
+    ) as server:
+        issued = server.request(
+            "POST",
+            "/controlled/s01/api/session",
+            body={},
+            headers=demo_auth_headers(),
+            use_session=False,
+        )
+        assert issued.status == 204, issued.text
+        queue = server.request(
+            "GET",
+            "/controlled/s01/api/queries/queue",
+            headers=headers("reviewer"),
+        )
+        assert queue.status == 503
+        assert queue.json() == {
+            "detail": {
+                "error": "S01_QUEUE_UNAVAILABLE",
+                "reason_code": "recovery.authority_unavailable",
+            }
+        }
+        assert queue.headers["cache-control"] == "no-store"
+        assert "app_t01_attacker_shared" not in queue.text
+        assert "recovery_work" not in queue.text
+        assert all(
+            value not in queue.text for value in _restricted_strings()
+        )
+
+
+def test_verify_auth_happens_before_validation_and_422_is_sanitized(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "t01-authfirst.sqlite3"
+    with UvicornLoopback(
+        _environment(state_path, "verified"),
+        app_target=APP_FACTORY,
+        app_factory=True,
+    ) as server:
+        blocked = _admit_and_block(server, "t01-authfirst-a", now=10)
+        work_id = blocked["recovery_work_id"]
+        sentinel = "t01-authfirst-SENTINEL-9f8e7d6c5b4a"
+        giant = "x" * 65536
+        bodies = {
+            "missing": {
+                "expected_lifecycle_revision": 1,
+                "idempotency_key": sentinel,
+            },
+            "malformed": {
+                "expected_lifecycle_revision": "not-an-int",
+                "expected_criterion_digest": "z" * 64,
+                "idempotency_key": sentinel,
+            },
+            "extra": {
+                "expected_lifecycle_revision": 1,
+                "expected_criterion_digest": "a" * 64,
+                "idempotency_key": sentinel,
+                "target": "injected-extra-field",
+            },
+            "oversized": {
+                "expected_lifecycle_revision": 1,
+                "expected_criterion_digest": "a" * 64,
+                "idempotency_key": giant,
+            },
+        }
+        for case, body in bodies.items():
+            for label, request_headers in (
+                ("anonymous", {}),
+                ("reviewer", headers("reviewer")),
+            ):
+                response = server.request(
+                    "POST",
+                    _verify_path(work_id),
+                    body=body,
+                    headers=request_headers,
+                    use_session=False,
+                )
+                assert response.status == 404, (case, label, response.text)
+                assert response.json() == {"detail": {"error": "S07_NOT_FOUND"}}, (
+                    case,
+                    label,
+                    response.text,
+                )
+                assert response.headers["cache-control"] == "no-store", (
+                    case,
+                    label,
+                )
+                assert sentinel not in response.text, (case, label)
+                assert work_id not in response.text, (case, label)
+                assert "injected-extra-field" not in response.text, (case, label)
+                assert giant not in response.text, (case, label)
+
+            operator_response = server.request(
+                "POST",
+                _verify_path(work_id),
+                body=body,
+                headers=operator_auth_headers(),
+                use_session=False,
+            )
+            assert operator_response.status == 422, (case, operator_response.text)
+            payload = operator_response.json()
+            assert isinstance(payload["detail"], list), (case, payload)
+            assert all(
+                {"loc", "msg", "type"} <= set(item) for item in payload["detail"]
+            ), (case, payload)
+            assert '"input"' not in operator_response.text, (case, "input echoed")
+            assert '"ctx"' not in operator_response.text, (case, "ctx echoed")
+            assert sentinel not in operator_response.text, (case, "sentinel echoed")
+            assert giant not in operator_response.text, (case, "oversized echoed")
+            assert work_id not in operator_response.text, (case, "work id echoed")
+            assert "injected-extra-field" not in operator_response.text, (
+                case,
+                "extra echoed",
+            )
+            assert all(
+                value not in operator_response.text
+                for value in _restricted_strings()
+            ), (case, "restricted echoed")
+
+
+def test_queue_unexpected_failure_is_bounded_and_not_authoritative_empty(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "t01-unexpected.sqlite3"
+    token_path = tmp_path / "t01-unexpected-token.txt"
+    env = _environment(state_path, "verified")
+    env["TASK4_S01_TEST_QUEUE_TOKEN_PATH"] = str(token_path)
+    with UvicornLoopback(
+        env,
+        app_target="tests.test_t01_http:create_t01_queue_unexpected_app",
+        app_factory=True,
+    ) as server:
+        token = token_path.read_text(encoding="ascii").strip()
+        assert token
+        queue = server.request(
+            "GET",
+            "/controlled/s01/api/queries/queue",
+            headers={**headers("reviewer"), "Cookie": f"s01_session={token}"},
+            use_session=False,
+        )
+        assert queue.status == 500
+        payload = queue.json()
+        assert payload == {
+            "detail": {
+                "error": "S01_INTERNAL_ERROR",
+                "message": "Controlled S01 request failed",
+            }
+        }
+        assert queue.headers["cache-control"] == "no-store"
+        assert "recovery_work_t01_malformed" not in queue.text
+        assert all(value not in queue.text for value in _restricted_strings())

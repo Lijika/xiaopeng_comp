@@ -138,22 +138,123 @@ function assertNoOverflow(page) {
 }
 
 /**
- * Records page errors and console errors, allowing only a documented set of
- * expected non-errors: the favicon 404, deliberate network aborts, and the
- * deliberate stale-command 409 responses exercised by the tracer itself.
+ * Records page errors and console errors against the live arrays (asserted
+ * after the flow), filtering only exact expected resource errors (the
+ * deliberate stale-command 409 and any named expectations such as the
+ * existence-hiding 404 after session expiry) — each counted separately —
+ * so any unexpected 404/500/network/console error stays visible.
  */
-function trackPageDiagnostics(page, allowedUrlFilters = []) {
+function trackPageDiagnostics(page, expectations = []) {
   const browserErrors = [];
   const consoleErrors = [];
+  const counts = { stale409: 0 };
+  for (const expectation of expectations) counts[expectation.name] = 0;
   page.on("pageerror", (error) => browserErrors.push(error.message));
   page.on("console", (message) => {
     if (message.type() !== "error") return;
     const location = message.location().url || "";
     if (location.endsWith("/favicon.ico")) return;
-    if (allowedUrlFilters.some((filter) => location.includes(filter))) return;
+    if (location.endsWith("/verify") && message.text().includes("409")) {
+      counts.stale409 += 1;
+      return;
+    }
+    for (const expectation of expectations) {
+      if (
+        location.includes(expectation.pathFragment) &&
+        message.text().includes(expectation.statusText)
+      ) {
+        counts[expectation.name] += 1;
+        return;
+      }
+    }
     consoleErrors.push(message.text());
   });
-  return { browserErrors, consoleErrors };
+  return { browserErrors, consoleErrors, counts };
+}
+
+async function assertControlsFitAndDoNotOverlap(page, testIds) {
+  const boxes = [];
+  const centerHits = [];
+  for (const testId of testIds) {
+    const locator = page.getByTestId(testId);
+    if ((await locator.count()) === 0) continue;
+    if (!(await locator.isVisible())) continue;
+    await locator.scrollIntoViewIfNeeded();
+    const box = await locator.boundingBox();
+    expect(box, testId).not.toBeNull();
+    const scroll = await page.evaluate(() => window.scrollY);
+    boxes.push({
+      testId,
+      box,
+      docTop: box.y + scroll,
+      mustFitViewport: !testId.endsWith("-panel"),
+    });
+    centerHits.push(
+      page.evaluate(({ testId, box }) => {
+        const element = document.querySelector(`[data-testid="${testId}"]`);
+        if (!element) return null;
+        const hit = document.elementFromPoint(
+          box.x + box.width / 2,
+          box.y + box.height / 2,
+        );
+        return element.contains(hit);
+      }, { testId, box }),
+    );
+  }
+  const { innerWidth, innerHeight } = await page.evaluate(() => ({
+    innerWidth: window.innerWidth,
+    innerHeight: window.innerHeight,
+  }));
+  for (const { testId, box, mustFitViewport } of boxes) {
+    expect(box.x, `${testId} left edge`).toBeGreaterThanOrEqual(0);
+    expect(box.y, `${testId} top edge`).toBeGreaterThanOrEqual(0);
+    expect(
+      box.x + box.width,
+      `${testId} right edge`,
+    ).toBeLessThanOrEqual(innerWidth + 1);
+    if (mustFitViewport) {
+      expect(
+        box.y + box.height,
+        `${testId} bottom edge`,
+      ).toBeLessThanOrEqual(innerHeight + 1);
+    }
+  }
+  const containsRelation = await page.evaluate(
+    (ids) => {
+      const byId = Object.fromEntries(
+        ids.map((id) => [
+          id,
+          document.querySelector(`[data-testid="${id}"]`),
+        ]),
+      );
+      const contains = {};
+      for (const a of ids) {
+        for (const b of ids) {
+          if (a === b || !byId[a] || !byId[b]) continue;
+          if (byId[a].contains(byId[b])) contains[`${a}>${b}`] = true;
+        }
+      }
+      return contains;
+    },
+    boxes.map((entry) => entry.testId),
+  );
+  for (let i = 0; i < boxes.length; i += 1) {
+    for (let j = i + 1; j < boxes.length; j += 1) {
+      if (containsRelation[`${boxes[i].testId}>${boxes[j].testId}`]) continue;
+      if (containsRelation[`${boxes[j].testId}>${boxes[i].testId}`]) continue;
+      const a = boxes[i];
+      const b = boxes[j];
+      const overlap =
+        a.docTop < b.docTop + b.box.height &&
+        a.docTop + a.box.height > b.docTop &&
+        a.box.x < b.box.x + b.box.width &&
+        a.box.x + a.box.width > b.box.x;
+      expect(overlap, `${a.testId} overlaps ${b.testId}`).toBe(false);
+    }
+  }
+  for (const hit of centerHits) {
+    expect(await hit).toBe(true);
+  }
 }
 
 async function runFullChainTracer(browser, viewport, label) {
@@ -169,17 +270,7 @@ async function runFullChainTracer(browser, viewport, label) {
   const reviewer = await reviewerContext.newPage();
   const operator = await operatorContext.newPage();
   const reviewerDiagnostics = trackPageDiagnostics(reviewer);
-  const operatorDiagnostics = trackPageDiagnostics(operator, [
-    "/recovery-work-items/",
-  ]);
-  const browserErrors = [
-    ...reviewerDiagnostics.browserErrors,
-    ...operatorDiagnostics.browserErrors,
-  ];
-  const consoleErrors = [
-    ...reviewerDiagnostics.consoleErrors,
-    ...operatorDiagnostics.consoleErrors,
-  ];
+  const operatorDiagnostics = trackPageDiagnostics(operator);
   const restricted = restrictedStrings();
 
   let verifyPosts = 0;
@@ -414,8 +505,25 @@ async function runFullChainTracer(browser, viewport, label) {
     const legacyResponse = await reviewer.goto(`${server.baseURL}/controlled/s01`);
     expect(legacyResponse.status()).toBe(200);
 
-    expect(browserErrors).toEqual([]);
-    expect(consoleErrors).toEqual([]);
+    await assertControlsFitAndDoNotOverlap(operator, [
+      "queue-panel",
+      "recovery-panel",
+      "recovery-actions",
+      "recovery-command-status",
+    ]);
+    await assertControlsFitAndDoNotOverlap(reviewer, [
+      "queue-panel",
+      "recovery-panel",
+      "recovery-actions",
+      "recovery-command-status",
+      "gate-panel",
+    ]);
+
+    expect(reviewerDiagnostics.browserErrors).toEqual([]);
+    expect(operatorDiagnostics.browserErrors).toEqual([]);
+    expect(reviewerDiagnostics.consoleErrors).toEqual([]);
+    expect(operatorDiagnostics.consoleErrors).toEqual([]);
+    expect(operatorDiagnostics.counts.stale409).toBe(1);
   } finally {
     await reviewerContext.close();
     await operatorContext.close();
@@ -432,6 +540,7 @@ for (const viewport of VIEWPORTS) {
   test(`T01 production tracer (${viewport.label}): queue discovery, handoff, stale reload, one accepted VerifyRecovery, server-owned gate`, async ({
     browser,
   }) => {
+    test.setTimeout(120_000);
     await runFullChainTracer(browser, viewport, viewport.label);
   });
 }
@@ -439,6 +548,7 @@ for (const viewport of VIEWPORTS) {
 test("T01 production tracer: expired session shows the explicit expired state and hides work existence", async ({
   browser,
 }) => {
+  test.setTimeout(120_000);
   const clockPath = path.join(
     "/tmp",
     `xiaopeng-task4-t01-react-clock-${process.pid}-${Date.now()}.txt`,
@@ -454,7 +564,13 @@ test("T01 production tracer: expired session shows the explicit expired state an
     extraHTTPHeaders: { Authorization: `Bearer ${DEMO_CREDENTIAL}` },
   });
   const reviewer = await reviewerContext.newPage();
-  const diagnostics = trackPageDiagnostics(reviewer);
+  const diagnostics = trackPageDiagnostics(reviewer, [
+    {
+      name: "hiddenWork404",
+      pathFragment: "/queries/recovery-work-items/",
+      statusText: "404",
+    },
+  ]);
   const restricted = restrictedStrings();
 
   try {
@@ -469,8 +585,16 @@ test("T01 production tracer: expired session shows the explicit expired state an
       reviewer.getByRole("link", { name: new RegExp(workId) }),
     ).toBeVisible();
 
+    // Open the work detail before expiry so cached identifiers and facts
+    // are present in the DOM when the session ends.
+    await reviewer.getByRole("link", { name: new RegExp(workId) }).click();
+    await expect(reviewer.getByTestId("recovery-panel")).toBeVisible();
+    await expect(reviewer.getByTestId("recovery-status")).toHaveText("open");
+    await expect(reviewer.getByTestId("recovery-fact-count")).toHaveText("0");
+
     // The session expires while the SPA stays open; a focus-driven refetch
-    // must surface the explicit expired state without leaking work.
+    // must surface the explicit expired state, unmount the cached detail,
+    // and leak no work identifiers or restricted facts.
     fs.writeFileSync(clockPath, "111", "ascii");
     await reviewer.evaluate(() =>
       window.dispatchEvent(new Event("visibilitychange")),
@@ -481,12 +605,15 @@ test("T01 production tracer: expired session shows the explicit expired state an
     );
     await expect(reviewer.getByTestId("queue-status")).toHaveText("会话已过期");
     await expect(reviewer.getByTestId("queue-recovery-items")).toHaveCount(0);
+    await expect(reviewer.getByTestId("recovery-panel")).toHaveCount(0);
     const expiredText = await reviewer.locator("body").innerText();
     for (const value of restricted) expect(expiredText).not.toContain(value);
     expect(expiredText).not.toContain(workId);
     expect(await assertNoOverflow(reviewer)).toBe(true);
     expect(diagnostics.browserErrors).toEqual([]);
     expect(diagnostics.consoleErrors).toEqual([]);
+    expect(diagnostics.counts.stale409).toBe(0);
+    expect(diagnostics.counts.hiddenWork404).toBe(1);
   } finally {
     await reviewerContext.close();
     await stopServer(server);
@@ -497,6 +624,7 @@ test("T01 production tracer: expired session shows the explicit expired state an
 test("T01 production tracer: a failed authoritative reload keeps the conflict fence", async ({
   browser,
 }) => {
+  test.setTimeout(120_000);
   const server = await startServer();
   const operatorContext = await browser.newContext({
     viewport: { width: 1280, height: 800 },
@@ -508,11 +636,7 @@ test("T01 production tracer: a failed authoritative reload keeps the conflict fe
   });
   const operator = await operatorContext.newPage();
   const reviewer = await reviewerContext.newPage();
-  const operatorDiagnostics = trackPageDiagnostics(operator, [
-    "/recovery-work-items/",
-  ]);
-  const browserErrors = operatorDiagnostics.browserErrors;
-  const consoleErrors = operatorDiagnostics.consoleErrors;
+  const operatorDiagnostics = trackPageDiagnostics(operator);
   const restricted = restrictedStrings();
   const workPath = "**/controlled/s01/api/queries/recovery-work-items/*";
 
@@ -556,9 +680,16 @@ test("T01 production tracer: a failed authoritative reload keeps the conflict fe
     );
     await operator.unroute(workPath);
 
-    // The authoritative reload fails at the network boundary; the fence and
-    // the semantic key must survive and the button must stay disabled.
-    await operator.route(workPath, (route) => route.abort("failed"));
+    // The authoritative reload fails at the HTTP boundary (a non-retryable
+    // 500); the fence and the semantic key must survive and the button must
+    // stay disabled.
+    await operator.route(workPath, (route) =>
+      route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({ detail: { error: "S01_INTERNAL_ERROR" } }),
+      }),
+    );
     await operator.getByRole("button", { name: "重新加载" }).click();
     await expect(operator.getByTestId("recovery-command-status")).toContainText(
       "recovery.context_changed",
@@ -582,8 +713,12 @@ test("T01 production tracer: a failed authoritative reload keeps the conflict fe
 
     const operatorText = await operator.locator("body").innerText();
     for (const value of restricted) expect(operatorText).not.toContain(value);
-    expect(browserErrors).toEqual([]);
-    expect(consoleErrors).toEqual([]);
+    // Exactly one deliberate 500 (the failed authoritative reload) and one
+    // deliberate stale-command 409; nothing else may surface.
+    expect(operatorDiagnostics.browserErrors).toEqual([]);
+    expect(operatorDiagnostics.consoleErrors).toHaveLength(1);
+    expect(operatorDiagnostics.consoleErrors[0]).toContain("500");
+    expect(operatorDiagnostics.counts.stale409).toBe(1);
   } finally {
     await operatorContext.close();
     await reviewerContext.close();

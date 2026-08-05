@@ -224,6 +224,10 @@ export default function RecoveryWorkPanel({ workId }: { workId: string }) {
   };
 
   const handleReload = async () => {
+    // A command outcome that is still pending must never be reset or given
+    // a fresh semantic key, and an accepted outcome must never be cleared
+    // by a reload.
+    if (verify.isPending) return;
     // Authoritative reload.  A failed refetch must never clear the conflict
     // fence nor rotate the semantic idempotency key, so the refetch throws
     // and the fence is kept on failure.
@@ -236,16 +240,18 @@ export default function RecoveryWorkPanel({ workId }: { workId: string }) {
       return;
     }
     await queryClient.invalidateQueries({ queryKey: ["s01"] });
-    const outcomeKnown = verify.error instanceof HttpError || !verify.isError;
-    if (outcomeKnown) {
+    const knownRejection = verify.isError && verify.error instanceof HttpError;
+    if (knownRejection) {
       // A known server rejection (e.g. 409) proves the previous key was
       // never accepted; a fresh semantic key is safe.  An unknown transport
-      // outcome keeps the original key so a retry replays idempotently.
+      // outcome keeps the original key so a retry replays idempotently, and
+      // an accepted outcome keeps the latch until server-owned detail
+      // converges.
       setVerifyKey(newIdempotencyKey());
       verify.reset();
+      setRequiresReload(false);
+      setConflictReason(null);
     }
-    setRequiresReload(false);
-    setConflictReason(null);
   };
 
   return (
@@ -263,8 +269,12 @@ export default function RecoveryWorkPanel({ workId }: { workId: string }) {
           <li key={`${attempt.attempt}`}>{attemptLabel(attempt)}</li>
         ))}
       </ol>
-      <div className="recovery-actions">
-        <Button variant="secondary" onClick={handleReload}>
+      <div className="recovery-actions" data-testid="recovery-actions">
+        <Button
+          variant="secondary"
+          onClick={handleReload}
+          disabled={verify.isPending}
+        >
           重新加载
         </Button>
         <Button onClick={handleVerify} disabled={!canVerify || verify.isPending}>
