@@ -138,6 +138,8 @@ class WorkerResult:
     evidence_snapshot_digest: str | None = None
     semantic_differential: dict[str, Any] | None = None
     retry_after_seconds: int = 0
+    recovery_work_id: str | None = None
+    reconciliation: dict[str, Any] | None = None
 
 
 class QueryNotFound(LookupError):
@@ -230,8 +232,12 @@ class ControlledScenarioService:
         "Intake": frozenset({"Assembly"}),
         "Assembly": frozenset({"Awaiting Evidence", "Evidence Ready", "Unprocessable"}),
         "Evidence Ready": frozenset({"Checking"}),
-        "Checking": frozenset({"Routing Determination", "Assembly"}),
-        "Routing Determination": frozenset({"Manual Review", "Verification Completed"}),
+        "Checking": frozenset(
+            {"Routing Determination", "Assembly", "Unprocessable"}
+        ),
+        "Routing Determination": frozenset(
+            {"Manual Review", "Verification Completed", "Unprocessable"}
+        ),
         "Manual Review": frozenset(
             {
                 "Manual Review",
@@ -243,7 +249,9 @@ class ControlledScenarioService:
         ),
         "Supplement": frozenset({"Assembly", "Unprocessable"}),
         "Awaiting Evidence": frozenset({"Assembly", "Unprocessable"}),
-        "Unprocessable": frozenset(),
+        "Unprocessable": frozenset(
+            {"Assembly", "Evidence Ready", "Routing Determination"}
+        ),
         "Pending Exception Approval": frozenset(
             {"Routing Determination", "Manual Review", "Assembly"}
         ),
@@ -259,6 +267,121 @@ class ControlledScenarioService:
     )
     _MAX_COMPLETE_RESULT_ATTEMPTS = 3
     _MAX_FAILURE_ATTEMPTS = 3
+    _S07_RETRY_POLICY_ID = "s07-c-demo-retry/1"
+    _S07_FAILURES = {
+        "checker_transient": {
+            "classification": "transient",
+            "primary_reason_code": "check.failed",
+            "related_reason_codes": (),
+            "operation": "execute_check_run",
+            "dependency": "c-demo-target-checker",
+            "responsible_party": "runtime_operations_owner",
+            "recovery_action": "repair_dependency_and_verify_fixed_execution_probe",
+            "recovery_target": "Evidence Ready",
+            "criterion_id": "s07-fixed-execution-probe/1",
+            "evidence_kind": "fixed_execution_probe",
+        },
+        "checker_incompatible": {
+            "classification": "terminal",
+            "primary_reason_code": "configuration.checker_unavailable",
+            "related_reason_codes": (),
+            "operation": "execute_check_run",
+            "dependency": "c-demo-target-checker",
+            "responsible_party": "policy_owner",
+            "recovery_action": (
+                "restore_exact_release_or_activate_compatible_successor"
+            ),
+            "recovery_target": "Evidence Ready",
+            "criterion_id": "s07-checker-compatibility/1",
+            "evidence_kind": "checker_compatibility_probe",
+        },
+        "checker_dead_lettered": {
+            "classification": "terminal",
+            "primary_reason_code": "check.failed",
+            "related_reason_codes": ("operation.dead_lettered",),
+            "operation": "execute_check_run",
+            "dependency": "c-demo-target-checker",
+            "responsible_party": "runtime_operations_owner",
+            "recovery_action": "repair_dependency_and_verify_fixed_execution_probe",
+            "recovery_target": "Evidence Ready",
+            "criterion_id": "s07-fixed-execution-probe/1",
+            "evidence_kind": "fixed_execution_probe",
+            "job_status": "dead_lettered",
+        },
+        "compensation_failed": {
+            "classification": "terminal",
+            "primary_reason_code": "operation.compensation_failed",
+            "related_reason_codes": ("check.outcome_unknown",),
+            "operation": "compensate_check_run",
+            "dependency": "c-demo-target-checker",
+            "responsible_party": "integration_owner",
+            "recovery_action": "complete_and_verify_compensation",
+            "recovery_target": "Evidence Ready",
+            "criterion_id": "s07-compensation-receipt/1",
+            "evidence_kind": "compensation_receipt",
+            "outcome_known": False,
+            "job_status": "compensation_failed",
+            "conditions": (
+                {
+                    "condition_id": "s07-exact-operation-reconciled/1",
+                    "reason_code": "check.outcome_unknown",
+                },
+                {
+                    "condition_id": "s07-compensation-receipt/1",
+                    "reason_code": "operation.compensation_failed",
+                },
+            ),
+        },
+        "checker_outcome_unknown": {
+            "classification": "terminal",
+            "primary_reason_code": "check.outcome_unknown",
+            "related_reason_codes": ("operation.status_unavailable",),
+            "operation": "execute_check_run",
+            "dependency": "c-demo-target-checker",
+            "responsible_party": "integration_owner",
+            "recovery_action": "reconcile_exact_logical_operation",
+            "recovery_target": "Evidence Ready",
+            "criterion_id": "s07-operation-status-reconciliation/1",
+            "evidence_kind": "operation_status_receipt",
+            "outcome_known": False,
+            "job_status": "outcome_unknown",
+        },
+        "result_publication_audit": {
+            "classification": "terminal",
+            "primary_reason_code": "control.audit_unavailable",
+            "related_reason_codes": (),
+            "operation": "publish_check_result",
+            "dependency": "security-audit-ledger",
+            "responsible_party": "security_audit_owner",
+            "recovery_action": "restore_and_reconcile_audit_ledger",
+            "recovery_target": "Evidence Ready",
+            "criterion_id": "s07-audit-ledger-reconciliation/1",
+            "evidence_kind": "audit_ledger_reconciliation",
+        },
+        "object_storage_unavailable": {
+            "classification": "terminal",
+            "primary_reason_code": "control.storage_unavailable",
+            "related_reason_codes": (),
+            "operation": "read_evidence_object",
+            "dependency": "c-demo-object-store",
+            "responsible_party": "platform_storage_owner",
+            "recovery_action": "restore_and_verify_storage_binding",
+            "recovery_target": "Assembly",
+            "criterion_id": "s07-object-storage-binding/1",
+            "evidence_kind": "object_storage_binding_probe",
+        },
+    }
+    _S07_ROUTING_FAILURE = {
+        "primary_reason_code": "routing.dependency_unavailable",
+        "related_reason_codes": (),
+        "operation": "determine_business_exception_route",
+        "dependency": "business-exception-routing-dependency",
+        "responsible_party": "routing_operations_owner",
+        "recovery_action": "restore_and_verify_routing_dependency",
+        "recovery_target": "Routing Determination",
+        "criterion_id": "s07-routing-dependency-probe/1",
+        "evidence_kind": "routing_dependency_probe",
+    }
     _RUNTIME_STOP_REASON = "S01_RUNTIME_UNHEALTHY"
     _PINNED_RELEASE_FAILURE = "PINNED_RELEASE_UNAVAILABLE"
     _APPLICATION_STATE_FAILURE = "APPLICATION_STATE_AUTHORITY_UNAVAILABLE"
@@ -373,6 +496,8 @@ class ControlledScenarioService:
         storage_available: bool = True,
         fault_injector: Callable[[str], None] | None = None,
         checker_runner: Callable[[Application], Any] | None = None,
+        checker_status_query: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+        recovery_verifier: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         legacy_oracle_runner: Callable[[Application], Any] | None = None,
         application_id_allocator: Callable[[], str] | None = None,
         state_path: str | Path | None = None,
@@ -404,6 +529,8 @@ class ControlledScenarioService:
         self._audit_writer = audit_writer
         self._fault_injector = fault_injector
         self._checker_runner = checker_runner
+        self._checker_status_query = checker_status_query
+        self._recovery_verifier = recovery_verifier
         self._legacy_oracle_runner = legacy_oracle_runner
         self._application_id_allocator = (
             application_id_allocator or self._default_application_id
@@ -840,6 +967,23 @@ class ControlledScenarioService:
                         "supplement_request_invalidated",
                     }
                 ]
+                matching_successors = [
+                    record
+                    for record in self._store.review_records
+                    if record.get("record_type") == "supplement_recovery_successor"
+                    and record.get("request_id") == request_id
+                    and record.get("stream_id") == envelope.stream_id
+                    and record.get("source_revision") == envelope.source_revision
+                    and record.get("envelope_fingerprint") == envelope.fingerprint
+                ]
+                if len(matching_successors) > 1:
+                    raise RuntimeError("supplement recovery successor is not unique")
+                if matching_successors:
+                    existing = self._store.receipts.get(
+                        str(matching_successors[0].get("receipt_id"))
+                    )
+                    if isinstance(existing, AdmissionResult):
+                        return self._registered_replay(existing)
                 if terminal:
                     matching_terminal = next(
                         (
@@ -859,6 +1003,88 @@ class ControlledScenarioService:
                         )
                         if isinstance(existing, AdmissionResult):
                             return self._registered_replay(existing)
+                recovery_successor: dict[str, Any] | None = None
+                if len(terminal) == 1 and terminal[0].get("record_type") == (
+                    "supplement_request_fulfilled"
+                ):
+                    terminal_record = terminal[0]
+                    terminal_receipt = self._store.receipts.get(
+                        str(terminal_record.get("receipt_id"))
+                    )
+                    open_recoveries = [
+                        event
+                        for event in self._store.recovery_events
+                        if event.get("kind") == "opened"
+                        and event.get("application_id") == application_id
+                        and event.get("cycle") == request["cycle"]
+                        and event.get("lifecycle_revision")
+                        == app.get("lifecycle_revision")
+                        and event.get("evidence_revision")
+                        == app.get("evidence_revision")
+                        and not any(
+                            successor.get("recovery_work_id")
+                            == event.get("recovery_work_id")
+                            and successor.get("kind")
+                            in {"resolved", "superseded", "terminated"}
+                            for successor in self._store.recovery_events
+                        )
+                    ]
+                    blocked_jobs = [
+                        job
+                        for job in self._store.jobs
+                        if len(open_recoveries) == 1
+                        and job.get("job_id") == open_recoveries[0].get("job_id")
+                        and job.get("application_id") == application_id
+                        and job.get("kind") == "supplement_check"
+                        and job.get("request_id") == request_id
+                        and job.get("status")
+                        in {
+                            "blocked",
+                            "exhausted",
+                            "dead_lettered",
+                            "outcome_unknown",
+                            "compensation_failed",
+                        }
+                    ]
+                    if (
+                        app.get("phase") == "Unprocessable"
+                        and app.get("cycle") == request["cycle"]
+                        and app.get("current_run_id") is None
+                        and len(open_recoveries) == len(blocked_jobs) == 1
+                        and terminal_record.get("application_id") == application_id
+                        and terminal_record.get("cycle") == request["cycle"]
+                        and terminal_record.get("evidence_revision")
+                        == app.get("evidence_revision")
+                        and isinstance(
+                            terminal_record.get("lifecycle_revision"), int
+                        )
+                        and isinstance(
+                            open_recoveries[0].get("pre_block_lifecycle_revision"),
+                            int,
+                        )
+                        and terminal_record["lifecycle_revision"]
+                        < open_recoveries[0]["pre_block_lifecycle_revision"]
+                        and terminal_record.get("evidence_revision")
+                        == open_recoveries[0].get("evidence_revision")
+                        and isinstance(terminal_receipt, AdmissionResult)
+                        and terminal_receipt.disposition
+                        is AdmissionDisposition.ACCEPTED
+                        and terminal_receipt.request_id == request_id
+                        and terminal_receipt.request_status == "fulfilled"
+                        and terminal_receipt.job_id == open_recoveries[0].get("job_id")
+                        and terminal_receipt.stream_id == envelope.stream_id
+                        and terminal_receipt.source_registration_digest
+                        == envelope.registration_digest
+                        and terminal_receipt.adapter_id == envelope.adapter_id
+                        and terminal_receipt.adapter_version == envelope.adapter_version
+                    ):
+                        recovery_successor = {
+                            "work": open_recoveries[0],
+                            "job": blocked_jobs[0],
+                            "terminal": terminal_record,
+                            "receipt": terminal_receipt,
+                        }
+                if terminal and recovery_successor is None:
                     return reject(
                         "evidence.late_input_requires_reopen",
                         responsible_party="lifecycle_owner",
@@ -869,6 +1095,16 @@ class ControlledScenarioService:
                 document = envelope.payload["application"]["evidence"][0]
                 lineage = envelope.payload["attachment_lineage"]
                 batch = envelope.payload["batch"]
+                expected_attachment_id = (
+                    recovery_successor["terminal"]["attachment_id"]
+                    if recovery_successor is not None
+                    else request["expected_predecessor_attachment_id"]
+                )
+                expected_attachment_version = (
+                    recovery_successor["terminal"]["attachment_version"]
+                    if recovery_successor is not None
+                    else request["expected_predecessor_attachment_version"]
+                )
                 if (
                     authenticated.get("tenant_id") != allowed["tenant_id"]
                     or authenticated.get("source_id")
@@ -886,11 +1122,11 @@ class ControlledScenarioService:
                     or document.get("document_type") != request["material_kind"]
                     or lineage.get("operation") != request["operation"]
                     or lineage.get("predecessor_attachment_id")
-                    != request["expected_predecessor_attachment_id"]
+                    != expected_attachment_id
                     or lineage.get("predecessor_attachment_version")
-                    != request["expected_predecessor_attachment_version"]
+                    != expected_attachment_version
                     or lineage.get("attachment_version")
-                    != request["expected_predecessor_attachment_version"] + 1
+                    != expected_attachment_version + 1
                 ):
                     return reject("intake.request_context_mismatch")
                 progress = sorted(
@@ -903,11 +1139,21 @@ class ControlledScenarioService:
                     ),
                     key=lambda record: int(record["request_progress_revision"]),
                 )
-                expected_progress_revision = len(progress) + 1
-                expected_source_revision = len(progress) + 1
-                expected_predecessor = (
-                    progress[-1]["source_revision"] if progress else None
-                )
+                if recovery_successor is None:
+                    expected_progress_revision = len(progress) + 1
+                    expected_source_revision = len(progress) + 1
+                    expected_predecessor = (
+                        progress[-1]["source_revision"] if progress else None
+                    )
+                    expected_batch_sequence = expected_progress_revision
+                else:
+                    predecessor = recovery_successor["terminal"]
+                    expected_progress_revision = (
+                        int(predecessor["request_progress_revision"]) + 1
+                    )
+                    expected_source_revision = int(predecessor["source_revision"]) + 1
+                    expected_predecessor = predecessor["source_revision"]
+                    expected_batch_sequence = int(request["batch_item_count"])
                 same_source_revision = [
                     receipt
                     for receipt in self._accepted_source_stream_receipts(envelope)
@@ -935,11 +1181,22 @@ class ControlledScenarioService:
                     != expected_progress_revision
                     or envelope.source_revision != expected_source_revision
                     or envelope.predecessor_revision != expected_predecessor
-                    or batch["item_sequence"] != expected_progress_revision
+                    or batch["item_sequence"] != expected_batch_sequence
                     or progress
                     and (
                         progress[0]["batch_id"] != batch["batch_id"]
                         or progress[0]["batch_manifest_digest"]
+                        != batch["manifest_digest"]
+                    )
+                    or recovery_successor is not None
+                    and (
+                        recovery_successor["terminal"].get("stream_id")
+                        != envelope.stream_id
+                        or recovery_successor["terminal"].get("batch_id")
+                        != batch["batch_id"]
+                        or recovery_successor["terminal"].get(
+                            "batch_manifest_digest"
+                        )
                         != batch["manifest_digest"]
                     )
                 ):
@@ -950,7 +1207,10 @@ class ControlledScenarioService:
                         recovery_action="submit_and_reconcile_the_declared_predecessor",
                         retryable=True,
                     )
-                if receipt_time >= int(request["due_at"]):
+                if (
+                    recovery_successor is None
+                    and receipt_time >= int(request["due_at"])
+                ):
                     if not self.audit_available:
                         return self._registered_rejected("intake.audit_unavailable")
                     if not self.storage_available:
@@ -1085,7 +1345,7 @@ class ControlledScenarioService:
                         )
                     self._store = staged
                     return result
-                if (
+                if recovery_successor is None and (
                     app.get("cycle") != request["cycle"]
                     or app.get("phase") not in {"Supplement", "Awaiting Evidence"}
                     or app.get("evidence_revision")
@@ -1126,7 +1386,10 @@ class ControlledScenarioService:
                 gate = self._review_write_gate(app=app)
                 if gate is not None:
                     _, failure = gate
-                    if failure == self._REVIEW_SOURCE_FAILURE:
+                    if (
+                        failure == self._REVIEW_SOURCE_FAILURE
+                        and recovery_successor is None
+                    ):
                         try:
                             return self._invalidate_supplement_source_dependency(
                                 request=request,
@@ -1164,9 +1427,9 @@ class ControlledScenarioService:
                     for candidate in evidence
                     if isinstance(candidate.get("attachment"), dict)
                     and candidate["attachment"].get("attachment_id")
-                    == request["expected_predecessor_attachment_id"]
+                    == expected_attachment_id
                     and candidate["attachment"].get("version")
-                    == request["expected_predecessor_attachment_version"]
+                    == expected_attachment_version
                 ]
                 if len(predecessor_documents) != 1:
                     return reject(
@@ -1175,7 +1438,7 @@ class ControlledScenarioService:
                         responsible_party="lifecycle_owner",
                         recovery_action="reconcile_the_attachment_lineage",
                     )
-                if batch["closed"]:
+                if batch["closed"] and recovery_successor is None:
                     if not progress:
                         return reject(
                             "intake.sequence_gap",
@@ -1566,6 +1829,10 @@ class ControlledScenarioService:
                     ],
                     "batch": copy.deepcopy(batch),
                 }
+                if recovery_successor is not None:
+                    evidence_payload["supersedes_recovery_work_id"] = (
+                        recovery_successor["work"]["recovery_work_id"]
+                    )
                 evidence_bytes = json.dumps(
                     evidence_payload,
                     ensure_ascii=False,
@@ -1578,6 +1845,14 @@ class ControlledScenarioService:
                 source_revision_id = self._stable_id(
                     "source_revision",
                     f"{envelope.stream_id}:{envelope.source_revision}:{envelope.fingerprint}",
+                )
+                successor_job_id = (
+                    self._stable_id(
+                        "job",
+                        f"{application_id}:supplement-recovery:{receipt_id}",
+                    )
+                    if recovery_successor is not None
+                    else None
                 )
                 staged = copy.deepcopy(self._store)
                 staged_app = staged.applications[application_id]
@@ -1603,7 +1878,11 @@ class ControlledScenarioService:
                     )
                     staged_app["evidence_revision"] = next_evidence_revision
                     staged_app["evidence_ready"] = False
-                    staged_app["route"] = "awaiting_evidence"
+                    staged_app["route"] = (
+                        "pending_check"
+                        if recovery_successor is not None
+                        else "awaiting_evidence"
+                    )
                     staged_app["current_run_id"] = None
                     staged_app["current_evidence_snapshot_id"] = None
                     staged_app["current_evidence_snapshot_digest"] = None
@@ -1613,7 +1892,11 @@ class ControlledScenarioService:
                     self._transition_lifecycle(
                         staged_app,
                         "Assembly",
-                        "SUPPLEMENT_PROGRESS_ACCEPTED",
+                        (
+                            "RECOVERY_CONTEXT_SUCCESSOR_ACCEPTED"
+                            if recovery_successor is not None
+                            else "SUPPLEMENT_PROGRESS_ACCEPTED"
+                        ),
                         store=staged,
                     )
                     staged.lifecycle_events[-1].update(
@@ -1626,26 +1909,90 @@ class ControlledScenarioService:
                             "invalidated_work_item_id": request[
                                 "source_work_item_id"
                             ],
+                            **(
+                                {
+                                    "recovery_work_id": recovery_successor[
+                                        "work"
+                                    ]["recovery_work_id"],
+                                    "superseded_recovery_target": recovery_successor[
+                                        "work"
+                                    ]["recovery_target"],
+                                    "job_id": successor_job_id,
+                                }
+                                if recovery_successor is not None
+                                else {}
+                            ),
                         }
                     )
-                    self._transition_lifecycle(
-                        staged_app,
-                        "Awaiting Evidence",
-                        "SUPPLEMENT_BATCH_OPEN",
-                        store=staged,
-                    )
-                    staged.lifecycle_events[-1].update(
-                        {
-                            "request_id": request_id,
-                            "receipt_id": receipt_id,
-                            "batch_id": batch["batch_id"],
-                        }
-                    )
+                    if recovery_successor is None:
+                        self._transition_lifecycle(
+                            staged_app,
+                            "Awaiting Evidence",
+                            "SUPPLEMENT_BATCH_OPEN",
+                            store=staged,
+                        )
+                        staged.lifecycle_events[-1].update(
+                            {
+                                "request_id": request_id,
+                                "receipt_id": receipt_id,
+                                "batch_id": batch["batch_id"],
+                            }
+                        )
+                    else:
+                        recovery_work_id = recovery_successor["work"][
+                            "recovery_work_id"
+                        ]
+                        staged.recovery_events.append(
+                            {
+                                "event_id": self._stable_id(
+                                    "recovery_event",
+                                    f"{recovery_work_id}:superseded:{receipt_id}",
+                                ),
+                                "kind": "superseded",
+                                "schema_version": "recovery-work/1",
+                                "recovery_work_id": recovery_work_id,
+                                "application_id": application_id,
+                                "successor_kind": "supplement_attachment_version",
+                                "successor_receipt_id": receipt_id,
+                                "successor_evidence_revision": next_evidence_revision,
+                                "superseded_at": receipt_time,
+                                "successor_target": "Assembly",
+                            }
+                        )
+                        assert successor_job_id is not None
+                        self._before_write("supplement_progress.job")
+                        staged.jobs.append(
+                            self._supplement_job_record(
+                                successor_job_id,
+                                application_id,
+                                request_id,
+                                envelope.fingerprint,
+                            )
+                        )
+                        self._before_write("supplement_progress.outbox")
+                        staged.outbox.append(
+                            {
+                                "event_id": self._stable_id(
+                                    "outbox", successor_job_id
+                                ),
+                                "kind": "controlled_check_requested",
+                                "application_id": application_id,
+                                "job_id": successor_job_id,
+                                "fingerprint": envelope.fingerprint,
+                                "request_id": request_id,
+                                "status": "pending",
+                            }
+                        )
                     result = AdmissionResult(
                         disposition=AdmissionDisposition.ACCEPTED,
                         application_id=application_id,
                         receipt_id=receipt_id,
-                        reason_code="request_progress_accepted",
+                        job_id=successor_job_id,
+                        reason_code=(
+                            "request_fulfilled"
+                            if recovery_successor is not None
+                            else "request_progress_accepted"
+                        ),
                         replayed=False,
                         lifecycle_revision=staged_app["lifecycle_revision"],
                         evidence_revision=next_evidence_revision,
@@ -1671,17 +2018,26 @@ class ControlledScenarioService:
                             "object:verified",
                             "provenance:verified",
                             "request_binding:verified",
+                            *(
+                                ("recovery_context:verified",)
+                                if recovery_successor is not None
+                                else ()
+                            ),
                             "idempotency:bound",
                         ),
                         fact_counts={
                             "applications": 0,
                             "receipts": 1,
                             "idempotency_bindings": 1,
-                            "lifecycle_events": 2,
+                            "lifecycle_events": (
+                                1 if recovery_successor is not None else 2
+                            ),
                             "evidence_events": 1,
                             "audit_events": 1,
-                            "jobs": 0,
-                            "outbox_events": 0,
+                            "jobs": 1 if recovery_successor is not None else 0,
+                            "outbox_events": (
+                                1 if recovery_successor is not None else 0
+                            ),
                             "attachments": 1,
                             "pages": len(pages),
                             "producer_results": 1,
@@ -1692,28 +2048,52 @@ class ControlledScenarioService:
                         source_registration_digest=envelope.registration_digest,
                         source_revision=envelope.source_revision,
                         request_id=request_id,
-                        request_status="open",
-                        batch_closed=False,
+                        request_status=(
+                            "fulfilled"
+                            if recovery_successor is not None
+                            else "open"
+                        ),
+                        batch_closed=recovery_successor is not None,
                         request_progress_revision=expected_progress_revision,
                         attachment_id=attachment_id,
                         attachment_version=lineage["attachment_version"],
                         supersedes_attachment_id=lineage[
                             "predecessor_attachment_id"
                         ],
-                        fulfilled=False,
-                        phase="Awaiting Evidence",
-                        route="awaiting_evidence",
+                        fulfilled=recovery_successor is not None,
+                        phase=(
+                            "Assembly"
+                            if recovery_successor is not None
+                            else "Awaiting Evidence"
+                        ),
+                        route=(
+                            "pending_check"
+                            if recovery_successor is not None
+                            else "awaiting_evidence"
+                        ),
                     )
                     self._before_write("supplement_progress.request")
                     staged.review_records.append(
                         {
                             "record_id": self._stable_id(
-                                "supplement_progress",
+                                (
+                                    "supplement_recovery_successor"
+                                    if recovery_successor is not None
+                                    else "supplement_progress"
+                                ),
                                 f"{request_id}:{expected_progress_revision}:"
                                 f"{envelope.fingerprint}",
                             ),
-                            "record_type": "supplement_request_progress",
-                            "schema_version": "supplement-request-progress/1",
+                            "record_type": (
+                                "supplement_recovery_successor"
+                                if recovery_successor is not None
+                                else "supplement_request_progress"
+                            ),
+                            "schema_version": (
+                                "supplement-recovery-successor/1"
+                                if recovery_successor is not None
+                                else "supplement-request-progress/1"
+                            ),
                             "request_id": request_id,
                             "work_item_id": request["work_item_id"],
                             "application_id": application_id,
@@ -1725,7 +2105,7 @@ class ControlledScenarioService:
                             "batch_id": batch["batch_id"],
                             "batch_manifest_digest": batch["manifest_digest"],
                             "batch_item_sequence": batch["item_sequence"],
-                            "batch_closed": False,
+                            "batch_closed": recovery_successor is not None,
                             "attachment_id": attachment_id,
                             "attachment_version": lineage["attachment_version"],
                             "supersedes_attachment_id": lineage[
@@ -1739,6 +2119,19 @@ class ControlledScenarioService:
                                 "lifecycle_revision"
                             ],
                             "recorded_at": receipt_time,
+                            **(
+                                {
+                                    "recovery_work_id": recovery_successor[
+                                        "work"
+                                    ]["recovery_work_id"],
+                                    "predecessor_receipt_id": recovery_successor[
+                                        "terminal"
+                                    ]["receipt_id"],
+                                    "job_id": successor_job_id,
+                                }
+                                if recovery_successor is not None
+                                else {}
+                            ),
                         }
                     )
                     self._before_write("supplement_progress.receipt")
@@ -1747,9 +2140,18 @@ class ControlledScenarioService:
                     staged.audit_events.append(
                         {
                             "event_id": self._stable_id(
-                                "audit", f"supplement_progress:{receipt_id}"
+                                "audit",
+                                (
+                                    f"supplement_recovery_successor:{receipt_id}"
+                                    if recovery_successor is not None
+                                    else f"supplement_progress:{receipt_id}"
+                                ),
                             ),
-                            "action": "supplement_request_progress",
+                            "action": (
+                                "supplement_recovery_successor"
+                                if recovery_successor is not None
+                                else "supplement_request_progress"
+                            ),
                             "subject": principal.subject,
                             "role": principal.role,
                             "scope": principal.scope,
@@ -1762,13 +2164,26 @@ class ControlledScenarioService:
                                 "predecessor_attachment_id"
                             ],
                             "batch_id": batch["batch_id"],
-                            "batch_closed": False,
+                            "batch_closed": recovery_successor is not None,
                             "request_progress_revision": expected_progress_revision,
                             "lifecycle_revision": staged_app[
                                 "lifecycle_revision"
                             ],
                             "evidence_revision": next_evidence_revision,
                             "result": "accepted",
+                            **(
+                                {
+                                    "recovery_work_id": recovery_successor[
+                                        "work"
+                                    ]["recovery_work_id"],
+                                    "superseded_recovery_target": recovery_successor[
+                                        "work"
+                                    ]["recovery_target"],
+                                    "job_id": successor_job_id,
+                                }
+                                if recovery_successor is not None
+                                else {}
+                            ),
                             **self._audit_time_fields(staged, now=receipt_time),
                         }
                     )
@@ -2464,6 +2879,17 @@ class ControlledScenarioService:
                         "replayed": False,
                         "reason_code": "IDEMPOTENCY_KEY_CONFLICT",
                     }
+                cohort_stop = self._store.cohort_stop
+                if (
+                    "open" in requested.values()
+                    and cohort_stop is not None
+                    and cohort_stop.get("reason_code") == self._RUNTIME_STOP_REASON
+                ):
+                    return {
+                        "status": "stopped",
+                        "replayed": False,
+                        "reason_code": "S01_RUNTIME_REPAIR_NOT_VERIFIED",
+                    }
                 if not self.audit_available:
                     return {
                         "status": "unavailable",
@@ -3127,6 +3553,690 @@ class ControlledScenarioService:
             raise RuntimeError("projection repair probe returned an invalid result")
         return probe
 
+    def verify_recovery(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        recovery_work_id: str,
+        expected_lifecycle_revision: int,
+        expected_criterion_digest: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Verify one pinned condition and re-enter its fixed normal gate."""
+        if (
+            not isinstance(recovery_work_id, str)
+            or not recovery_work_id
+            or recovery_work_id.strip() != recovery_work_id
+            or isinstance(expected_lifecycle_revision, bool)
+            or not isinstance(expected_lifecycle_revision, int)
+            or expected_lifecycle_revision < 1
+            or not isinstance(expected_criterion_digest, str)
+            or len(expected_criterion_digest) != 64
+            or any(character not in "0123456789abcdef" for character in expected_criterion_digest)
+            or not self._valid_idempotency_key(idempotency_key)
+        ):
+            raise ValueError("VerifyRecovery command is invalid")
+        if (
+            principal.role != "operator"
+            or not isinstance(principal.subject, str)
+            or not principal.subject
+            or principal.subject.strip() != principal.subject
+            or not self.is_controlled_scope(principal.scope)
+            or not isinstance(principal.source_id, str)
+            or not principal.source_id
+        ):
+            raise QueryNotFound(recovery_work_id)
+
+        command = {
+            "recovery_work_id": recovery_work_id,
+            "expected_lifecycle_revision": expected_lifecycle_revision,
+            "expected_criterion_digest": expected_criterion_digest,
+            "idempotency_key": idempotency_key,
+        }
+        command_fingerprint = hashlib.sha256(
+            json.dumps(command, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        binding_key = ":".join(
+            (
+                "s07",
+                "verify_recovery",
+                principal.scope,
+                principal.subject,
+                recovery_work_id,
+                hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest(),
+            )
+        )
+
+        with self._lock:
+            self._reload_store()
+            events = [
+                event
+                for event in self._store.recovery_events
+                if event.get("recovery_work_id") == recovery_work_id
+            ]
+            opened = [event for event in events if event.get("kind") == "opened"]
+            if len(opened) != 1 or not self._recovery_scope_visible(
+                principal, opened[0].get("visibility_scope")
+            ):
+                raise QueryNotFound(recovery_work_id)
+            work = opened[0]
+            previous = self._store.idempotency.get(binding_key)
+            if previous is not None:
+                previous_fingerprint, previous_result = previous
+                if previous_fingerprint == command_fingerprint:
+                    return {**copy.deepcopy(previous_result), "replayed": True}
+                return {
+                    "status": "conflict",
+                    "reason_code": "recovery.idempotency_conflict",
+                    "replayed": False,
+                }
+            resolved_events = [
+                event for event in events if event.get("kind") == "resolved"
+            ]
+            if len(resolved_events) > 1 or any(
+                event.get("kind") in {"superseded", "terminated"}
+                for event in events
+            ):
+                return {
+                    "status": "stale",
+                    "reason_code": "recovery.work_not_open",
+                    "replayed": False,
+                }
+            resolved_delivery = len(resolved_events) == 1
+            application_id = str(work["application_id"])
+            app = self._store.applications.get(application_id)
+            self._require_application_state_authority(app)
+            assert app is not None
+            if (
+                work["lifecycle_revision"] != expected_lifecycle_revision
+                or work["criterion"]["digest"] != expected_criterion_digest
+                or not resolved_delivery
+                and (
+                    app["phase"] != "Unprocessable"
+                    or app["cycle"] != work["cycle"]
+                    or app["lifecycle_revision"] != expected_lifecycle_revision
+                    or app["evidence_revision"] != work["evidence_revision"]
+                    or app["artifact_manifest"]["release_id"] != work["release_id"]
+                    or app["artifact_manifest"]["release_digest"]
+                    != work["release_digest"]
+                    or app["artifact_manifest"]["checker_build"]
+                    != work["checker_build"]
+                )
+            ):
+                return {
+                    "status": "stale",
+                    "reason_code": "recovery.context_changed",
+                    "replayed": False,
+                }
+            if not self.audit_available or not self.storage_available:
+                return {
+                    "status": "unavailable",
+                    "reason_code": "recovery.authority_unavailable",
+                    "replayed": False,
+                }
+            if self._recovery_verifier is None:
+                return {
+                    "status": "unavailable",
+                    "reason_code": "recovery.verifier_unavailable",
+                    "replayed": False,
+                }
+            try:
+                verification = self._recovery_verifier(copy.deepcopy(work))
+            except Exception:
+                return {
+                    "status": "unavailable",
+                    "reason_code": "recovery.verifier_unavailable",
+                    "replayed": False,
+                }
+            if not isinstance(verification, dict):
+                return {
+                    "status": "rejected",
+                    "reason_code": "recovery.criterion_not_satisfied",
+                    "replayed": False,
+                }
+            verification_id = verification.get("verification_id")
+            observed_at = verification.get("observed_at")
+            evidence_kind = verification.get("evidence_kind")
+            condition_results = verification.get("conditions")
+            expected_condition_ids = {
+                str(condition["condition_id"]) for condition in work["conditions"]
+            }
+            valid_conditions = (
+                isinstance(condition_results, list)
+                and len(condition_results) == len(expected_condition_ids)
+                and {
+                    str(condition.get("condition_id"))
+                    for condition in condition_results
+                    if isinstance(condition, dict)
+                }
+                == expected_condition_ids
+                and all(
+                    isinstance(condition, dict)
+                    and condition.get("verified") is True
+                    and isinstance(condition.get("evidence_digest"), str)
+                    and len(condition["evidence_digest"]) == 64
+                    and all(
+                        character in "0123456789abcdef"
+                        for character in condition["evidence_digest"]
+                    )
+                    for condition in condition_results
+                )
+            )
+            if (
+                not isinstance(verification_id, str)
+                or not verification_id
+                or verification_id.strip() != verification_id
+                or len(verification_id) > 200
+                or isinstance(observed_at, bool)
+                or not isinstance(observed_at, int)
+                or observed_at <= int(work["opened_at"])
+                or evidence_kind != work["criterion"]["evidence_kind"]
+                or verification.get("scope") != work["visibility_scope"]
+                or verification.get("recovery_work_id") != recovery_work_id
+                or verification.get("criterion_digest")
+                != expected_criterion_digest
+                or not valid_conditions
+            ):
+                return {
+                    "status": "rejected",
+                    "reason_code": "recovery.criterion_not_satisfied",
+                    "replayed": False,
+                }
+
+            target = str(work["recovery_target"])
+            recovery_fact_event_id = self._stable_id(
+                "recovery_event", f"{recovery_work_id}:fact:{verification_id}"
+            )
+            recovery_fact = {
+                "event_id": recovery_fact_event_id,
+                "kind": "fact",
+                "schema_version": "recovery-fact/1",
+                "recovery_work_id": recovery_work_id,
+                "recovery_fact_id": verification_id,
+                "application_id": application_id,
+                "visibility_scope": work["visibility_scope"],
+                "criterion_digest": expected_criterion_digest,
+                "evidence_kind": evidence_kind,
+                "condition_results": copy.deepcopy(condition_results),
+                "observed_at": observed_at,
+                "verifier": work["criterion"]["trusted_verifier"],
+            }
+            semantic_digest = hashlib.sha256(
+                json.dumps(
+                    recovery_fact,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            duplicate_result = self._replay_s07_recovery_delivery(
+                binding_key=binding_key,
+                command_fingerprint=command_fingerprint,
+                recovery_fact=recovery_fact,
+                semantic_digest=semantic_digest,
+            )
+            if duplicate_result is not None:
+                return duplicate_result
+            if resolved_delivery:
+                return {
+                    "status": "stale",
+                    "reason_code": "recovery.work_not_open",
+                    "replayed": False,
+                }
+            staged = copy.deepcopy(self._store)
+            staged_app = staged.applications[application_id]
+            blocked_job = next(
+                job for job in staged.jobs if job.get("job_id") == work["job_id"]
+            )
+            resolved = {
+                "event_id": self._stable_id(
+                    "recovery_event", f"{recovery_work_id}:resolved"
+                ),
+                "kind": "resolved",
+                "schema_version": "recovery-work/1",
+                "recovery_work_id": recovery_work_id,
+                "application_id": application_id,
+                "recovery_fact_id": verification_id,
+                "resolved_at": observed_at,
+                "recovery_target": target,
+            }
+            staged.recovery_events.extend((recovery_fact, resolved))
+            staged.inbox.append(
+                {
+                    "message_id": verification_id,
+                    "kind": "s07_recovery_fact",
+                    "semantic_digest": semantic_digest,
+                    "recovery_work_id": recovery_work_id,
+                    "application_id": application_id,
+                    "received_at": observed_at,
+                }
+            )
+            staged_app["evidence_ready"] = target != "Assembly"
+            staged_app["route"] = (
+                "routing_determination"
+                if target == "Routing Determination"
+                else "pending_check"
+            )
+            staged_app["projection_visible"] = False
+            staged_app["projection_pending"] = False
+            self._transition_lifecycle(
+                staged_app,
+                target,
+                "VERIFIED_RECOVERY_FACT_ACCEPTED",
+                store=staged,
+            )
+            staged.lifecycle_events[-1].update(
+                {
+                    "recovery_work_id": recovery_work_id,
+                    "recovery_fact_id": verification_id,
+                }
+            )
+            routing_context = None
+            routing_request = None
+            routing_decision = None
+            if target == "Routing Determination":
+                routing_request_id = work.get("request_id")
+                routing_decision_id = work.get("decision_id")
+                routing_request = (
+                    self._business_exception_request_authority(routing_request_id)
+                    if isinstance(routing_request_id, str)
+                    else None
+                )
+                routing_decisions = [
+                    record
+                    for record in staged.review_records
+                    if record.get("record_type") == "business_exception_decision"
+                    and record.get("request_id") == routing_request_id
+                    and record.get("decision_id") == routing_decision_id
+                    and record.get("decision") == "approved"
+                ]
+                if routing_request is None or len(routing_decisions) != 1:
+                    return {
+                        "status": "unavailable",
+                        "reason_code": "recovery.authority_unavailable",
+                        "replayed": False,
+                    }
+                routing_decision = routing_decisions[0]
+                routing_context = self._business_exception_routing_context(
+                    routing_request, routing_decision, staged_app
+                )
+                if work.get("routing_context") != blocked_job.get("routing_context"):
+                    return {
+                        "status": "unavailable",
+                        "reason_code": "recovery.authority_unavailable",
+                        "replayed": False,
+                    }
+                staged.lifecycle_events[-1].update(
+                    {
+                        "run_id": routing_request["run_id"],
+                        "request_id": routing_request["request_id"],
+                        "decision_id": routing_decision["decision_id"],
+                    }
+                )
+            successor_job_id = self._stable_id(
+                "job", f"s07_recovery:{recovery_work_id}:{verification_id}"
+            )
+            successor_fence = int(blocked_job.get("fence", 0)) + 1
+            successor_job = {
+                "job_id": successor_job_id,
+                "application_id": application_id,
+                "kind": "recovery_check"
+                if target in {"Assembly", "Evidence Ready"}
+                else "recovery_route",
+                "status": "queued",
+                "fingerprint": expected_criterion_digest,
+                "logical_operation_id": successor_job_id,
+                "recovery_work_id": recovery_work_id,
+                "fence": successor_fence,
+                "attempt_no": 0,
+            }
+            if target == "Routing Determination":
+                successor_job.update(
+                    {
+                        "request_id": routing_request["request_id"],
+                        "decision_id": routing_decision["decision_id"],
+                        "routing_context": copy.deepcopy(routing_context),
+                    }
+                )
+            staged.jobs.append(successor_job)
+            try:
+                self._before_write("s07.recovery.audit")
+            except _StoreWriteFailure:
+                return {
+                    "status": "unavailable",
+                    "reason_code": "recovery.authority_unavailable",
+                    "replayed": False,
+                }
+            staged.audit_events.append(
+                {
+                    "event_id": self._stable_id(
+                        "audit", f"s07_recovery:{recovery_work_id}:{verification_id}"
+                    ),
+                    "action": "verified_recovery_accepted",
+                    "subject": principal.subject,
+                    "role": principal.role,
+                    "scope": principal.scope,
+                    "source_id": principal.source_id,
+                    "application_id": application_id,
+                    "recovery_work_id": recovery_work_id,
+                    "recovery_fact_id": verification_id,
+                    "result": "accepted",
+                    "lifecycle_revision": staged_app["lifecycle_revision"],
+                    "recovery_target": target,
+                    "successor_job_id": successor_job_id,
+                    "successor_fence": successor_fence,
+                    **self._audit_time_fields(staged),
+                }
+            )
+            staged.outbox.append(
+                {
+                    "event_id": self._stable_id(
+                        "outbox", f"s07_recovery_gate:{successor_job_id}"
+                    ),
+                    "kind": "s07_recovery_gate_requested",
+                    "application_id": application_id,
+                    "recovery_work_id": recovery_work_id,
+                    "recovery_fact_id": verification_id,
+                    "job": copy.deepcopy(successor_job),
+                    "lifecycle_revision": staged_app["lifecycle_revision"],
+                    "visibility_scope": work["visibility_scope"],
+                    "status": "pending",
+                }
+            )
+            result = {
+                "status": "accepted",
+                "replayed": False,
+                "recovery_work_id": recovery_work_id,
+                "recovery_fact_id": verification_id,
+                "application_id": application_id,
+                "phase": target,
+                "lifecycle_revision": staged_app["lifecycle_revision"],
+                "evidence_revision": staged_app["evidence_revision"],
+                "successor_job_id": successor_job_id,
+                "successor_fence": successor_fence,
+            }
+            if routing_context is not None:
+                result["routing_context"] = copy.deepcopy(routing_context)
+            staged.idempotency[binding_key] = (command_fingerprint, result)
+            try:
+                self._before_write("s07.recovery.publish")
+                staged.persist()
+            except _StoreWriteFailure:
+                return {
+                    "status": "unavailable",
+                    "reason_code": "recovery.authority_unavailable",
+                    "replayed": False,
+                }
+            except StaleStoreRevision:
+                self._reload_store()
+                previous = self._store.idempotency.get(binding_key)
+                if previous is not None:
+                    if previous[0] == command_fingerprint:
+                        return {**copy.deepcopy(previous[1]), "replayed": True}
+                    return {
+                        "status": "conflict",
+                        "reason_code": "recovery.idempotency_conflict",
+                        "replayed": False,
+                    }
+                duplicate_result = self._replay_s07_recovery_delivery(
+                    binding_key=binding_key,
+                    command_fingerprint=command_fingerprint,
+                    recovery_fact=recovery_fact,
+                    semantic_digest=semantic_digest,
+                )
+                if duplicate_result is not None:
+                    return duplicate_result
+                current_events = [
+                    event
+                    for event in self._store.recovery_events
+                    if event.get("recovery_work_id") == recovery_work_id
+                ]
+                if any(
+                    event.get("kind") in {"resolved", "superseded", "terminated"}
+                    for event in current_events
+                ):
+                    return {
+                        "status": "stale",
+                        "reason_code": "recovery.work_not_open",
+                        "replayed": False,
+                    }
+                return {
+                    "status": "unavailable",
+                    "reason_code": "recovery.authority_unavailable",
+                    "replayed": False,
+                }
+            self._store = staged
+            return copy.deepcopy(result)
+
+    def _replay_s07_recovery_delivery(
+        self,
+        *,
+        binding_key: str,
+        command_fingerprint: str,
+        recovery_fact: dict[str, Any],
+        semantic_digest: str,
+    ) -> dict[str, Any] | None:
+        verification_id = recovery_fact["recovery_fact_id"]
+        recovery_work_id = recovery_fact["recovery_work_id"]
+        application_id = recovery_fact["application_id"]
+        delivered = [
+            message
+            for message in self._store.inbox
+            if message.get("message_id") == verification_id
+        ]
+        facts = [
+            event
+            for event in self._store.recovery_events
+            if event.get("kind") == "fact"
+            and event.get("recovery_fact_id") == verification_id
+        ]
+        if not delivered and not facts:
+            return None
+        if (
+            len(delivered) != 1
+            or delivered[0].get("semantic_digest") != semantic_digest
+            or delivered[0].get("recovery_work_id") != recovery_work_id
+            or delivered[0].get("application_id") != application_id
+            or len(facts) != 1
+            or facts[0] != recovery_fact
+        ):
+            return {
+                "status": "conflict",
+                "reason_code": "recovery.fact_identity_conflict",
+                "replayed": False,
+            }
+        accepted_results = [
+            stored_result
+            for _, stored_result in self._store.idempotency.values()
+            if isinstance(stored_result, dict)
+            and stored_result.get("status") == "accepted"
+            and stored_result.get("recovery_work_id") == recovery_work_id
+            and stored_result.get("recovery_fact_id") == verification_id
+        ]
+        canonical_results = {
+            json.dumps(
+                stored_result,
+                sort_keys=True,
+                separators=(",", ":"),
+            ): stored_result
+            for stored_result in accepted_results
+        }
+        if len(canonical_results) != 1:
+            return {
+                "status": "unavailable",
+                "reason_code": "recovery.authority_unavailable",
+                "replayed": False,
+            }
+        canonical = copy.deepcopy(next(iter(canonical_results.values())))
+        previous = self._store.idempotency.get(binding_key)
+        if previous is not None:
+            if previous[0] == command_fingerprint:
+                return {**copy.deepcopy(previous[1]), "replayed": True}
+            return {
+                "status": "conflict",
+                "reason_code": "recovery.idempotency_conflict",
+                "replayed": False,
+            }
+        rebound = copy.deepcopy(self._store)
+        rebound.idempotency[binding_key] = (command_fingerprint, canonical)
+        try:
+            rebound.persist()
+        except StaleStoreRevision:
+            self._reload_store()
+            rebound_previous = self._store.idempotency.get(binding_key)
+            if (
+                rebound_previous is None
+                or rebound_previous[0] != command_fingerprint
+            ):
+                return {
+                    "status": "unavailable",
+                    "reason_code": "recovery.authority_unavailable",
+                    "replayed": False,
+                }
+            canonical = copy.deepcopy(rebound_previous[1])
+        else:
+            self._store = rebound
+        return {**canonical, "replayed": True}
+
+    def recovery_work_view(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        recovery_work_id: str,
+    ) -> dict[str, Any]:
+        """Return one minimized Lifecycle-owned recovery work view."""
+        if (
+            not isinstance(recovery_work_id, str)
+            or not recovery_work_id
+            or recovery_work_id.strip() != recovery_work_id
+            or principal.role not in {"reviewer", "operator"}
+            or not self.is_controlled_scope(principal.scope)
+        ):
+            raise QueryNotFound(str(recovery_work_id))
+        with self._lock:
+            self._reload_store()
+            events = [
+                event
+                for event in self._store.recovery_events
+                if event.get("recovery_work_id") == recovery_work_id
+            ]
+            opened = [event for event in events if event.get("kind") == "opened"]
+            if len(opened) != 1:
+                raise QueryNotFound(recovery_work_id)
+            work = opened[0]
+            if not self._recovery_scope_visible(
+                principal, work.get("visibility_scope")
+            ):
+                raise QueryNotFound(recovery_work_id)
+            application_id = str(work["application_id"])
+            if (
+                principal.role == "reviewer"
+                and self._application_review_assignee(application_id)
+                != principal.subject
+            ):
+                raise QueryNotFound(recovery_work_id)
+            app = self._store.applications.get(application_id)
+            self._require_application_state_authority(app)
+            assert app is not None
+            status = "open"
+            if any(event.get("kind") == "resolved" for event in events):
+                status = "resolved"
+            elif any(event.get("kind") == "superseded" for event in events):
+                status = "superseded"
+            elif any(event.get("kind") == "terminated" for event in events):
+                status = "terminated"
+            attempt_ids = set(work.get("attempt_ids") or ())
+            attempts = sorted(
+                (
+                    {
+                        "attempt": int(record["attempt_no"]),
+                        "classification": str(record["failure_classification"]),
+                        "status": {
+                            "failure_publication_pending": "reconcile_wait",
+                            "terminal_failure": "blocked",
+                            "transient_failure": "retry_wait",
+                            "exhausted": "exhausted",
+                        }[str(record["status"])],
+                        "started_at": int(record["started_at"]),
+                        "retry_not_before": record.get("retry_not_before"),
+                    }
+                    for record in self._store.runs
+                    if record.get("attempt_id") in attempt_ids
+                    and record.get("status")
+                    in {
+                        "failure_publication_pending",
+                        "terminal_failure",
+                        "transient_failure",
+                        "exhausted",
+                    }
+                ),
+                key=lambda item: item["attempt"],
+            )
+            if not attempts:
+                attempts = sorted(
+                    (
+                        {
+                            "attempt": int(record["attempt_no"]),
+                            "classification": str(
+                                record["failure_classification"]
+                            ),
+                            "status": "blocked",
+                            "started_at": int(record["started_at"]),
+                            "retry_not_before": record.get("retry_not_before"),
+                        }
+                        for record in self._store.attempts
+                        if record.get("attempt_id") in attempt_ids
+                        and record.get("status") == "terminal_failure"
+                        and record.get("failure_classification") == "terminal"
+                    ),
+                    key=lambda item: item["attempt"],
+                )
+            protected_business_revision = sum(
+                record.get("application_id") == application_id
+                and record.get("status") == "complete"
+                for record in self._store.runs
+            )
+            return {
+                "schema_version": "recovery-work-view/1",
+                "recovery_work_id": recovery_work_id,
+                "status": status,
+                "application_id": application_id,
+                "cycle": app["cycle"],
+                "phase": app["phase"],
+                "lifecycle_revision": app["lifecycle_revision"],
+                "evidence_revision": app["evidence_revision"],
+                "primary_reason_code": work["primary_reason_code"],
+                "related_reason_codes": list(work["related_reason_codes"]),
+                "operation": work["operation"],
+                "dependency": work["dependency"],
+                "logical_operation_id": work["logical_operation_id"],
+                "attempts": attempts,
+                "responsible_party": work["responsible_party"],
+                "recovery_action": work["recovery_action"],
+                "recovery_target": work["recovery_target"],
+                "criterion": copy.deepcopy(work["criterion"]),
+                "retry_policy": copy.deepcopy(work["retry_policy"]),
+                "outcome_known": bool(work["outcome_known"]),
+                "retryable": False,
+                "recovery_fact_count": sum(
+                    event.get("kind") == "fact" for event in events
+                ),
+                "resolution_count": sum(
+                    event.get("kind") == "resolved" for event in events
+                ),
+                "job_status": next(
+                    str(job["status"])
+                    for job in self._store.jobs
+                    if job.get("job_id") == work["job_id"]
+                ),
+                "delivery_semantics": "at_least_once",
+                "protected_business_revision": protected_business_revision,
+                "current_run_id": app.get("current_run_id"),
+                "projection_watermark": self._store.projection_watermark,
+                "can_verify": principal.role == "operator",
+            }
+
     def fact_counts(self) -> dict[str, int]:
         with self._lock:
             self._reload_store()
@@ -3435,6 +4545,7 @@ class ControlledScenarioService:
         stale: bool = False,
         cas_fault: str | None = None,
         duplicate: bool = False,
+        operation_fault: str | None = None,
     ) -> WorkerResult:
         """Claim and execute one durable job.
 
@@ -3447,6 +4558,8 @@ class ControlledScenarioService:
         selected_cas_fault = cas_fault or ("lifecycle_revision" if stale else None)
         if selected_cas_fault not in (None, *self._CAS_CONTEXT_FIELDS):
             return WorkerResult(status="rejected", reason_code="INVALID_CAS_FAULT")
+        if operation_fault not in (None, "checker_timeout", *self._S07_FAILURES):
+            return WorkerResult(status="rejected", reason_code="INVALID_OPERATION_FAULT")
         with self._lock:
             local_stop = self._local_cohort_stop
             if (
@@ -3484,6 +4597,42 @@ class ControlledScenarioService:
             if duplicate:
                 return self._record_duplicate_result(worker_id)
             try:
+                expired = next(
+                    (
+                        job
+                        for job in self._store.jobs
+                        if job.get("kind") in {"controlled_check", "recovery_check"}
+                        and job.get("status") == "leased"
+                        and int(job.get("lease_until", 0)) <= now
+                        and int(job.get("attempt_no", 0))
+                        >= self._MAX_FAILURE_ATTEMPTS
+                    ),
+                    None,
+                )
+                if expired is not None:
+                    expired_attempts = [
+                        attempt
+                        for attempt in self._store.attempts
+                        if attempt.get("job_id") == expired.get("job_id")
+                        and attempt.get("fence") == expired.get("fence")
+                        and attempt.get("attempt_no") == expired.get("attempt_no")
+                    ]
+                    if len(expired_attempts) != 1 or not isinstance(
+                        expired_attempts[0].get("run_spec"), dict
+                    ):
+                        raise _ApplicationStateAuthorityUnavailable(
+                            self._APPLICATION_STATE_FAILURE
+                        )
+                    expired_attempt = expired_attempts[0]
+                    return self._record_s07_operation_failure(
+                        self._store.applications[expired["application_id"]],
+                        expired,
+                        expired_attempt,
+                        expired_attempt["run_spec"],
+                        failure_kind="checker_transient",
+                        now=now,
+                        expired_lease=True,
+                    )
                 claimed = self._claim_job(worker_id, now)
             except (
                 _PinnedReleaseUnavailable,
@@ -3512,16 +4661,26 @@ class ControlledScenarioService:
                 return WorkerResult(status="idle", reason_code="NO_READY_JOB")
             job, attempt, run_spec = claimed
             attempt_id = attempt["attempt_id"]
+            app = self._store.applications[job["application_id"]]
             if crash:
                 return WorkerResult(
                     status="crashed",
                     application_id=job["application_id"],
                     job_id=job["job_id"],
                     attempt_id=attempt_id,
+                    run_id=run_spec["run_id"],
                     reason_code="WORKER_CRASH",
+                    lifecycle_revision=app["lifecycle_revision"],
+                    evidence_revision=app["evidence_revision"],
+                    lifecycle_phases=tuple(app["phase_history"]),
+                    release_id=run_spec["release_id"],
+                    release_digest=run_spec["release_digest"],
+                    checker_build=run_spec["checker_build"],
+                    fence=run_spec["fence"],
+                    evidence_snapshot_id=run_spec["evidence_snapshot_id"],
+                    evidence_snapshot_digest=run_spec["evidence_snapshot_digest"],
                 )
 
-            app = self._store.applications[job["application_id"]]
             if partial:
                 job["status"] = "queued"
                 self._prepare_retry(app, "PARTIAL_RESULT_RECORDED")
@@ -3534,6 +4693,24 @@ class ControlledScenarioService:
                     reason_code="PARTIAL_RESULT",
                     lifecycle_revision=app["lifecycle_revision"],
                     evidence_revision=app["evidence_revision"],
+                )
+
+            if operation_fault is not None:
+                if operation_fault == "checker_timeout":
+                    return self._reconcile_s07_checker_timeout(
+                        app,
+                        job,
+                        attempt,
+                        run_spec,
+                        now=now,
+                    )
+                return self._record_s07_operation_failure(
+                    app,
+                    job,
+                    attempt,
+                    run_spec,
+                    failure_kind=operation_fault,
+                    now=now,
                 )
 
             try:
@@ -3794,6 +4971,25 @@ class ControlledScenarioService:
                         raise RuntimeError(
                             "projection publication watermark is invalid"
                         )
+                    application = self._store.applications.get(application_id)
+                    if not isinstance(application, dict):
+                        raise RuntimeError("projection application authority is unavailable")
+                    projectable = application.get("phase") in {
+                        "Manual Review",
+                        "Verification Completed",
+                    }
+                    if (
+                        not projectable
+                        or event.get("run_id") != application.get("current_run_id")
+                        or event.get("lifecycle_revision")
+                        != application.get("lifecycle_revision")
+                    ):
+                        if not projectable and application_id in self._store.projections:
+                            self._store.projection_watermark += 1
+                            del self._store.projections[application_id]
+                        event["status"] = "published"
+                        updated += 1
+                        continue
                     self._store.projection_watermark += 1
                     self._store.projections[application_id] = (
                         self._projection_from_authority(
@@ -3801,10 +4997,8 @@ class ControlledScenarioService:
                             projection_watermark=source_watermark,
                         )
                     )
-                    application = self._store.applications.get(application_id)
-                    if application is not None:
-                        application["projection_pending"] = False
-                        application["projection_visible"] = True
+                    application["projection_pending"] = False
+                    application["projection_visible"] = True
                     event["status"] = "published"
                     updated += 1
                 if updated:
@@ -6960,6 +8154,20 @@ class ControlledScenarioService:
                     }
                 current = self._business_exception_operations_state()
                 unresolved = self._unresolved_business_exception_ids()
+                cohort_stop = self._store.cohort_stop
+                if (
+                    operations == "open"
+                    and cohort_stop is not None
+                    and cohort_stop.get("reason_code") == self._RUNTIME_STOP_REASON
+                ):
+                    return {
+                        "status": "stopped",
+                        "replayed": False,
+                        "operations": current["operations"],
+                        "revision": current["revision"],
+                        "unresolved_request_count": len(unresolved),
+                        "reason_code": "S01_RUNTIME_REPAIR_NOT_VERIFIED",
+                    }
                 if operations == "open" and unresolved:
                     return {
                         "status": "stopped",
@@ -8704,10 +9912,29 @@ class ControlledScenarioService:
                         "evidence_revision": staged_app["evidence_revision"],
                     }
                     if decision == "approved":
-                        result["routing_context"] = (
-                            self._business_exception_routing_context(
-                                request, decision_record, staged_app
-                            )
+                        routing_context = self._business_exception_routing_context(
+                            request, decision_record, staged_app
+                        )
+                        result["routing_context"] = routing_context
+                        self._before_write("exception_decision.routing_job")
+                        staged.jobs.append(
+                            {
+                                "job_id": self._stable_id(
+                                    "job", f"exception_route:{request_id}:{decision_id}"
+                                ),
+                                "application_id": request["application_id"],
+                                "kind": "business_exception_route",
+                                "status": "queued",
+                                "fingerprint": routing_context["current_context"],
+                                "logical_operation_id": self._stable_id(
+                                    "operation", f"exception_route:{request_id}"
+                                ),
+                                "request_id": request_id,
+                                "decision_id": decision_id,
+                                "routing_context": copy.deepcopy(routing_context),
+                                "fence": 0,
+                                "attempt_no": 0,
+                            }
                         )
                     self._before_write("exception_decision.idempotency")
                     staged.idempotency[binding_key] = (
@@ -9095,6 +10322,242 @@ class ControlledScenarioService:
                 return result
             raise RuntimeError("business exception deactivation retry exhausted")
 
+    def _record_s07_routing_failure(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        request: dict[str, Any],
+        decision: dict[str, Any],
+        run: dict[str, Any],
+        job: dict[str, Any],
+        routing_context: dict[str, Any],
+        binding_key: str,
+        command_fingerprint: str,
+        now: int,
+    ) -> dict[str, Any]:
+        failure = self._S07_ROUTING_FAILURE
+        retry_policy = {
+            "id": self._S07_RETRY_POLICY_ID,
+            "max_attempts": 3,
+            "retry_offsets_seconds": [1, 2],
+            "jitter": False,
+        }
+        retry_policy_digest = hashlib.sha256(
+            json.dumps(
+                retry_policy, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()
+        condition = {
+            "condition_id": failure["criterion_id"],
+            "reason_code": failure["primary_reason_code"],
+        }
+        criterion_body = {
+            "id": failure["criterion_id"],
+            "version": "1",
+            "operation": failure["operation"],
+            "dependency": failure["dependency"],
+            "required_conditions": [failure["primary_reason_code"]],
+            "trusted_verifier": failure["responsible_party"],
+            "evidence_kind": failure["evidence_kind"],
+            "conditions": [condition],
+        }
+        criterion_digest = hashlib.sha256(
+            json.dumps(
+                criterion_body, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()
+        application_id = str(request["application_id"])
+        recovery_work_id = self._stable_id(
+            "recovery_work",
+            ":".join(
+                (
+                    application_id,
+                    str(request["cycle"]),
+                    str(job["job_id"]),
+                    criterion_digest,
+                )
+            ),
+        )
+        staged = copy.deepcopy(self._store)
+        staged_app = staged.applications[application_id]
+        staged_job = next(
+            item for item in staged.jobs if item.get("job_id") == job["job_id"]
+        )
+        attempt_no = int(staged_job.get("attempt_no", 0)) + 1
+        fence = int(staged_job.get("fence", 0)) + 1
+        attempt_id = self._stable_id(
+            "attempt", f"{staged_job['job_id']}:{attempt_no}:{principal.subject}"
+        )
+        spec = run.get("spec")
+        if not isinstance(spec, dict):
+            return {
+                "status": "unavailable",
+                "replayed": False,
+                "request_id": request["request_id"],
+                "reason_code": "recovery.authority_unavailable",
+            }
+        pre_block_revision = int(staged_app["lifecycle_revision"])
+        try:
+            self._before_write("s07.routing_failure.attempt")
+            staged_job.update(
+                {
+                    "status": "blocked",
+                    "retryable": False,
+                    "terminal_reason_code": failure["primary_reason_code"],
+                    "worker_id": principal.subject,
+                    "fence": fence,
+                    "attempt_no": attempt_no,
+                }
+            )
+            staged.attempts.append(
+                {
+                    "attempt_id": attempt_id,
+                    "job_id": staged_job["job_id"],
+                    "application_id": application_id,
+                    "worker_id": principal.subject,
+                    "fence": fence,
+                    "attempt_no": attempt_no,
+                    "started_at": now,
+                    "status": "terminal_failure",
+                    "failure_classification": "terminal",
+                    "retry_not_before": None,
+                }
+            )
+            self._before_write("s07.routing_failure.lifecycle")
+            staged_app["evidence_ready"] = False
+            staged_app["route"] = "unprocessable"
+            staged_app["projection_visible"] = False
+            staged_app["projection_pending"] = False
+            self._transition_lifecycle(
+                staged_app,
+                "Unprocessable",
+                failure["primary_reason_code"],
+                store=staged,
+            )
+            staged.lifecycle_events[-1].update(
+                {
+                    "run_id": request["run_id"],
+                    "request_id": request["request_id"],
+                    "decision_id": decision["decision_id"],
+                    "recovery_work_id": recovery_work_id,
+                    "responsible_party": failure["responsible_party"],
+                    "recovery_action": failure["recovery_action"],
+                    "recovery_target": failure["recovery_target"],
+                }
+            )
+            opened = {
+                "event_id": self._stable_id(
+                    "recovery_event", f"{recovery_work_id}:opened"
+                ),
+                "kind": "opened",
+                "schema_version": "recovery-work/1",
+                "recovery_work_id": recovery_work_id,
+                "application_id": application_id,
+                "visibility_scope": self._application_visibility_scope(application_id),
+                "cycle": staged_app["cycle"],
+                "evidence_revision": staged_app["evidence_revision"],
+                "release_id": spec["release_id"],
+                "release_digest": spec["release_digest"],
+                "checker_build": spec["checker_build"],
+                "pre_block_lifecycle_revision": pre_block_revision,
+                "lifecycle_revision": staged_app["lifecycle_revision"],
+                "failed_from_phase": "Routing Determination",
+                "operation": failure["operation"],
+                "logical_operation_id": staged_job["logical_operation_id"],
+                "job_id": staged_job["job_id"],
+                "attempt_ids": [attempt_id],
+                "dependency": failure["dependency"],
+                "safe_correlation_id": self._stable_id(
+                    "correlation", f"{staged_job['job_id']}:{attempt_id}"
+                ),
+                "primary_reason_code": failure["primary_reason_code"],
+                "related_reason_codes": list(failure["related_reason_codes"]),
+                "retry_policy": retry_policy,
+                "retry_policy_digest": retry_policy_digest,
+                "outcome_known": True,
+                "responsible_party": failure["responsible_party"],
+                "recovery_action": failure["recovery_action"],
+                "recovery_target": failure["recovery_target"],
+                "criterion": {**criterion_body, "digest": criterion_digest},
+                "conditions": [condition],
+                "request_id": request["request_id"],
+                "decision_id": decision["decision_id"],
+                "routing_context": copy.deepcopy(routing_context),
+                "opened_at": now,
+                "idempotency_fingerprint": hashlib.sha256(
+                    f"{staged_job['job_id']}:routing_dependency".encode("utf-8")
+                ).hexdigest(),
+            }
+            self._before_write("s07.routing_failure.recovery_work")
+            staged.recovery_events.append(opened)
+            self._before_write("s07.routing_failure.audit")
+            staged.audit_events.append(
+                {
+                    "event_id": self._stable_id(
+                        "audit", f"s07_routing_failure:{recovery_work_id}"
+                    ),
+                    "action": "protected_operation_failed",
+                    "subject": principal.subject,
+                    "role": principal.role,
+                    "scope": principal.scope,
+                    "source_id": principal.source_id,
+                    "application_id": application_id,
+                    "job_id": staged_job["job_id"],
+                    "attempt_id": attempt_id,
+                    "request_id": request["request_id"],
+                    "decision_id": decision["decision_id"],
+                    "recovery_work_id": recovery_work_id,
+                    "result": "blocked",
+                    "reason_code": failure["primary_reason_code"],
+                    "lifecycle_revision": staged_app["lifecycle_revision"],
+                    **self._audit_time_fields(staged, now=now),
+                }
+            )
+            result = {
+                "status": "blocked",
+                "replayed": False,
+                "application_id": application_id,
+                "request_id": request["request_id"],
+                "decision_id": decision["decision_id"],
+                "job_id": staged_job["job_id"],
+                "attempt_id": attempt_id,
+                "recovery_work_id": recovery_work_id,
+                "phase": "Unprocessable",
+                "route": "unprocessable",
+                "lifecycle_revision": staged_app["lifecycle_revision"],
+                "evidence_revision": staged_app["evidence_revision"],
+            }
+            self._before_write("s07.routing_failure.idempotency")
+            staged.idempotency[binding_key] = (
+                command_fingerprint,
+                copy.deepcopy(result),
+            )
+            self._before_write("s07.routing_failure.outbox")
+            staged.outbox.append(
+                {
+                    "event_id": self._stable_id(
+                        "outbox", f"s07_recovery:{recovery_work_id}"
+                    ),
+                    "kind": "s07_recovery_work_opened",
+                    "application_id": application_id,
+                    "recovery_work_id": recovery_work_id,
+                    "lifecycle_revision": staged_app["lifecycle_revision"],
+                    "visibility_scope": opened["visibility_scope"],
+                    "status": "pending",
+                }
+            )
+            self._before_write("s07.routing_failure.publish")
+            staged.persist()
+        except (_StoreWriteFailure, StaleStoreRevision):
+            return {
+                "status": "unavailable",
+                "replayed": False,
+                "request_id": request["request_id"],
+                "reason_code": "recovery.authority_unavailable",
+            }
+        self._store = staged
+        return result
+
     def determine_business_exception_route(
         self,
         *,
@@ -9207,6 +10670,47 @@ class ControlledScenarioService:
                         "request_id": request_id,
                         "reason_code": failure_reason,
                     }
+                route_jobs = [
+                    item
+                    for item in self._store.jobs
+                    if item.get("application_id") == request["application_id"]
+                    and item.get("request_id") == request_id
+                    and item.get("decision_id") == decision["decision_id"]
+                    and item.get("kind")
+                    in {"business_exception_route", "recovery_route"}
+                ]
+                queued_route_jobs = [
+                    item for item in route_jobs if item.get("status") == "queued"
+                ]
+                if len(queued_route_jobs) != 1:
+                    return {
+                        "status": "unavailable",
+                        "replayed": False,
+                        "request_id": request_id,
+                        "reason_code": "routing.job_authority_unavailable",
+                    }
+                route_job = queued_route_jobs[0]
+                if route_job.get("routing_context") != actual_context:
+                    return {
+                        "status": "stale",
+                        "replayed": False,
+                        "request_id": request_id,
+                        "reason_code": "STALE_ROUTING_CONTEXT",
+                    }
+                try:
+                    self._before_write("exception_route.operation")
+                except _StoreWriteFailure:
+                    return self._record_s07_routing_failure(
+                        principal=principal,
+                        request=request,
+                        decision=decision,
+                        run=run,
+                        job=route_job,
+                        routing_context=actual_context,
+                        binding_key=binding_key,
+                        command_fingerprint=command_fingerprint,
+                        now=route_time,
+                    )
                 outstanding = [
                     item
                     for item in self._store.findings
@@ -9223,7 +10727,41 @@ class ControlledScenarioService:
                     for item in staged.runs
                     if item.get("run_record_id") == run.get("run_record_id")
                 )
+                staged_route_job = next(
+                    item
+                    for item in staged.jobs
+                    if item.get("job_id") == route_job["job_id"]
+                )
+                route_attempt_no = int(staged_route_job.get("attempt_no", 0)) + 1
+                route_fence = int(staged_route_job.get("fence", 0)) + 1
+                route_attempt_id = self._stable_id(
+                    "attempt",
+                    f"{staged_route_job['job_id']}:{route_attempt_no}:{principal.subject}",
+                )
                 try:
+                    staged_route_job.update(
+                        {
+                            "status": "complete",
+                            "worker_id": principal.subject,
+                            "fence": route_fence,
+                            "attempt_no": route_attempt_no,
+                            "completed_at": route_time,
+                        }
+                    )
+                    staged.attempts.append(
+                        {
+                            "attempt_id": route_attempt_id,
+                            "job_id": staged_route_job["job_id"],
+                            "application_id": request["application_id"],
+                            "worker_id": principal.subject,
+                            "fence": route_fence,
+                            "attempt_no": route_attempt_no,
+                            "started_at": route_time,
+                            "status": "complete",
+                            "completed_at": route_time,
+                            "run_spec": copy.deepcopy(run["spec"]),
+                        }
+                    )
                     self._before_write("exception_route.lifecycle")
                     if outstanding:
                         staged_app["route"] = "manual_review"
@@ -10254,6 +11792,15 @@ class ControlledScenarioService:
                         "checker_build": spec["checker_build"],
                         "finding_ids": copy.deepcopy(run.get("finding_ids", [])),
                         "cas_mismatches": list(run.get("cas_mismatches", ())),
+                        **(
+                            {
+                                "reconciliation": copy.deepcopy(
+                                    run["reconciliation"]
+                                )
+                            }
+                            if run.get("reconciliation") is not None
+                            else {}
+                        ),
                         "selected_observation_ids": sorted(
                             {
                                 outcome["observation_id"]
@@ -10995,6 +12542,20 @@ class ControlledScenarioService:
     @classmethod
     def is_controlled_scope(cls, scope: object) -> bool:
         return cls.is_c_demo_scope(scope) or cls.is_registered_scope(scope)
+
+    @classmethod
+    def _recovery_scope_visible(
+        cls,
+        principal: S01CommandPrincipal,
+        visibility_scope: object,
+    ) -> bool:
+        return visibility_scope == principal.scope or (
+            principal.role == "operator"
+            and principal.scope == "C-DEMO"
+            and isinstance(visibility_scope, str)
+            and visibility_scope.startswith(cls._SESSION_SCOPE_PREFIX)
+            and cls.is_c_demo_scope(visibility_scope)
+        )
 
     @classmethod
     def _valid_principal(cls, principal: S01CommandPrincipal) -> bool:
@@ -12079,7 +13640,20 @@ class ControlledScenarioService:
             staged = copy.deepcopy(self._store)
             selected = None
             for job in staged.jobs:
-                if job["status"] == "complete" or job["status"] == "diagnostic":
+                if job.get("kind") in {
+                    "business_exception_route",
+                    "recovery_route",
+                }:
+                    continue
+                if job["status"] in {
+                    "complete",
+                    "diagnostic",
+                    "blocked",
+                    "exhausted",
+                    "dead_lettered",
+                    "outcome_unknown",
+                    "compensation_failed",
+                }:
                     continue
                 if job["status"] == "leased" and job.get("lease_until", 0) > now:
                     continue
@@ -12111,6 +13685,8 @@ class ControlledScenarioService:
                 "application_id": selected["application_id"],
                 "worker_id": worker_id,
                 "fence": selected["fence"],
+                "attempt_no": selected["attempt_no"],
+                "started_at": now,
                 "status": "started",
                 "run_spec": copy.deepcopy(run_spec),
             }
@@ -12379,7 +13955,14 @@ class ControlledScenarioService:
         owner = store or self._store
         self._require_admitted_release(app)
         recovery_reason = job.pop("recovery_reason", None)
-        if app["phase"] == "Checking" and recovery_reason is not None:
+        same_check_gate_retry = bool(job.pop("s07_retry", False)) and app[
+            "phase"
+        ] == "Checking"
+        if (
+            app["phase"] == "Checking"
+            and recovery_reason is not None
+            and not same_check_gate_retry
+        ):
             app["evidence_ready"] = False
             app["route"] = "pending_check"
             app["projection_visible"] = False
@@ -12389,12 +13972,15 @@ class ControlledScenarioService:
             self._transition_lifecycle(
                 app, "Assembly", "ADMITTED_EVIDENCE_ASSEMBLED", store=owner
             )
-        if not app["evidence_ready"]:
+        if not app["evidence_ready"] and not same_check_gate_retry:
             app["evidence_ready"] = True
             self._transition_lifecycle(
                 app, "Evidence Ready", "EVIDENCE_SNAPSHOT_FROZEN", store=owner
             )
-        self._transition_lifecycle(app, "Checking", "CHECK_JOB_STARTED", store=owner)
+        if not same_check_gate_retry:
+            self._transition_lifecycle(
+                app, "Checking", "CHECK_JOB_STARTED", store=owner
+            )
         snapshot_payload = {
             "schema_version": "s01-evidence-snapshot/1",
             "evidence": self._assemble_evidence(self._admitted_evidence(app)),
@@ -12460,7 +14046,8 @@ class ControlledScenarioService:
             "applicable_check_count": self._run_release["applicable_check_count"],
         }
 
-    def _run_checker(self, run_spec: dict[str, Any]):
+    @staticmethod
+    def _checker_application(run_spec: dict[str, Any]) -> Application:
         documents = []
         for evidence in run_spec["evidence_snapshot"]["evidence"]:
             documents.append(
@@ -12470,13 +14057,131 @@ class ControlledScenarioService:
                     "fields": copy.deepcopy(evidence["fields"]),
                 }
             )
-        application = Application.from_dict(
+        return Application.from_dict(
             {"application_id": run_spec["application_id"], "documents": documents}
         )
+
+    def _run_checker(self, run_spec: dict[str, Any]):
+        application = self._checker_application(run_spec)
         if self._checker_runner is not None:
             probe_result = self._checker_runner(application)
             self._convert_run_result(probe_result, run_spec)
         return self._target_checker.run(run_spec)
+
+    def _reconcile_s07_checker_timeout(
+        self,
+        app: dict[str, Any],
+        job: dict[str, Any],
+        attempt: dict[str, Any],
+        run_spec: dict[str, Any],
+        *,
+        now: int,
+    ) -> WorkerResult:
+        logical_operation_id = str(job["job_id"])
+        query = {
+            "schema_version": "s07-checker-status-query/1",
+            "logical_operation_id": logical_operation_id,
+            "semantic_idempotency_identity": str(job["fingerprint"]),
+            "run_id": run_spec["run_id"],
+            "application_id": run_spec["application_id"],
+            "attempt": int(job["attempt_no"]),
+            "dependency": "c-demo-target-checker",
+            "release_id": run_spec["release_id"],
+            "release_digest": run_spec["release_digest"],
+            "checker_build": run_spec["checker_build"],
+            "evidence_snapshot_id": run_spec["evidence_snapshot_id"],
+            "evidence_snapshot_digest": run_spec["evidence_snapshot_digest"],
+            "application": self._checker_application(run_spec),
+        }
+        try:
+            response = (
+                self._checker_status_query(copy.deepcopy(query))
+                if self._checker_status_query is not None
+                else None
+            )
+        except Exception:
+            response = None
+
+        expected_common = {"status", "logical_operation_id"}
+        status = response.get("status") if isinstance(response, dict) else None
+        identity_matches = (
+            isinstance(response, dict)
+            and response.get("logical_operation_id") == logical_operation_id
+        )
+        if (
+            identity_matches
+            and status == "not_committed"
+            and set(response) == expected_common
+        ):
+            return self._record_s07_operation_failure(
+                app,
+                job,
+                attempt,
+                run_spec,
+                failure_kind="checker_transient",
+                now=now,
+                reconciliation={
+                    "status": "not_committed",
+                    "logical_operation_id": logical_operation_id,
+                },
+            )
+
+        committed_keys = {
+            *expected_common,
+            "result_id",
+            "result_digest",
+            "result",
+        }
+        if (
+            identity_matches
+            and status == "committed"
+            and set(response) == committed_keys
+            and isinstance(response.get("result_id"), str)
+            and bool(response["result_id"])
+            and response["result_id"].strip() == response["result_id"]
+            and isinstance(response.get("result_digest"), str)
+            and len(response["result_digest"]) == 64
+            and all(
+                character in "0123456789abcdef"
+                for character in response["result_digest"]
+            )
+        ):
+            try:
+                run_result = self._convert_run_result(response["result"], run_spec)
+                semantic_differential = self._semantic_differential(app, run_result)
+            except _InvalidRunResult:
+                pass
+            else:
+                reconciliation = {
+                    "status": "committed",
+                    "logical_operation_id": logical_operation_id,
+                    "result_id": response["result_id"],
+                    "result_digest": response["result_digest"],
+                }
+                return self._commit_complete_result(
+                    app,
+                    job,
+                    attempt,
+                    run_spec,
+                    run_result,
+                    self._completion_context(run_spec),
+                    semantic_differential,
+                    now=now,
+                    reconciliation=reconciliation,
+                )
+
+        return self._record_s07_operation_failure(
+            app,
+            job,
+            attempt,
+            run_spec,
+            failure_kind="checker_outcome_unknown",
+            now=now,
+            reconciliation={
+                "status": "unknown",
+                "logical_operation_id": logical_operation_id,
+            },
+        )
 
     @staticmethod
     def _convert_run_result(report: Any, run_spec: dict[str, Any]) -> _RunResult:
@@ -12779,6 +14484,471 @@ class ControlledScenarioService:
 
         return self._publish_run_diagnostic(app, job, attempt, run_spec, stage)
 
+    def _record_s07_operation_failure(
+        self,
+        app: dict[str, Any],
+        job: dict[str, Any],
+        attempt: dict[str, Any],
+        run_spec: dict[str, Any],
+        *,
+        failure_kind: str,
+        now: int,
+        reconciliation: dict[str, Any] | None = None,
+        expired_lease: bool = False,
+    ) -> WorkerResult:
+        failure = self._S07_FAILURES[failure_kind]
+        attempt_no = int(job.get("attempt_no", 0))
+        retrying = (
+            failure["classification"] == "transient"
+            and attempt_no < self._MAX_FAILURE_ATTEMPTS
+        )
+        retry_after = 2 ** (attempt_no - 1) if retrying else 0
+        retry_not_before = now + retry_after if retrying else None
+        related_reason_codes = list(failure["related_reason_codes"])
+        if failure["classification"] == "transient" and not retrying:
+            related_reason_codes.append("operation.retry_exhausted")
+        failure_status = (
+            "transient_failure"
+            if retrying
+            else "exhausted"
+            if failure["classification"] == "transient"
+            else "terminal_failure"
+        )
+        retry_policy = {
+            "id": self._S07_RETRY_POLICY_ID,
+            "max_attempts": 3,
+            "retry_offsets_seconds": [1, 2],
+            "jitter": False,
+        }
+        retry_policy_digest = hashlib.sha256(
+            json.dumps(
+                retry_policy, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()
+        conditions = tuple(
+            failure.get(
+                "conditions",
+                (
+                    {
+                        "condition_id": failure["criterion_id"],
+                        "reason_code": failure["primary_reason_code"],
+                    },
+                ),
+            )
+        )
+        criterion_body = {
+            "id": failure["criterion_id"],
+            "version": "1",
+            "operation": failure["operation"],
+            "dependency": failure["dependency"],
+            "required_conditions": [condition["reason_code"] for condition in conditions],
+            "trusted_verifier": failure["responsible_party"],
+            "evidence_kind": failure["evidence_kind"],
+            "conditions": copy.deepcopy(conditions),
+        }
+        criterion_digest = hashlib.sha256(
+            json.dumps(
+                criterion_body, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()
+        recovery_work_id = self._stable_id(
+            "recovery_work",
+            ":".join(
+                (
+                    app["application_id"],
+                    str(app["cycle"]),
+                    job["job_id"],
+                    criterion_digest,
+                )
+            ),
+        )
+        staged = copy.deepcopy(self._store)
+        staged_app = staged.applications[app["application_id"]]
+        staged_job = next(
+            item for item in staged.jobs if item["job_id"] == job["job_id"]
+        )
+        staged_attempt = next(
+            item
+            for item in staged.attempts
+            if item["attempt_id"] == attempt["attempt_id"]
+        )
+        pre_block_revision = staged_app["lifecycle_revision"]
+        failed_from_phase = staged_app["phase"]
+        try:
+            self._before_write("s07.failure.attempt")
+            if expired_lease and not retrying:
+                recorded_attempts = {
+                    record.get("attempt_id") for record in staged.runs
+                }
+                for previous in sorted(
+                    (
+                        item
+                        for item in staged.attempts
+                        if item.get("job_id") == staged_job["job_id"]
+                        and int(item.get("attempt_no", 0)) < attempt_no
+                        and item.get("attempt_id") not in recorded_attempts
+                    ),
+                    key=lambda item: int(item["attempt_no"]),
+                ):
+                    previous_spec = previous.get("run_spec")
+                    if not isinstance(previous_spec, dict):
+                        raise _ApplicationStateAuthorityUnavailable(
+                            self._APPLICATION_STATE_FAILURE
+                        )
+                    previous_no = int(previous["attempt_no"])
+                    staged.runs.append(
+                        {
+                            "run_record_id": self._stable_id(
+                                "run_record",
+                                f"{previous['attempt_id']}:s07:lease_expired",
+                            ),
+                            "run_id": previous_spec["run_id"],
+                            "job_id": staged_job["job_id"],
+                            "attempt_id": previous["attempt_id"],
+                            "application_id": app["application_id"],
+                            "spec": copy.deepcopy(previous_spec),
+                            "status": "transient_failure",
+                            "reason_code": failure["primary_reason_code"],
+                            "failure_classification": "transient",
+                            "attempt_no": previous_no,
+                            "started_at": previous["started_at"],
+                            "retry_not_before": int(previous["started_at"])
+                            + 2 ** (previous_no - 1),
+                            "finding_ids": [],
+                        }
+                    )
+            staged.runs.append(
+                {
+                    "run_record_id": self._stable_id(
+                        "run_record", f"{attempt['attempt_id']}:s07:{failure_kind}"
+                    ),
+                    "run_id": run_spec["run_id"],
+                    "job_id": staged_job["job_id"],
+                    "attempt_id": attempt["attempt_id"],
+                    "application_id": app["application_id"],
+                    "spec": copy.deepcopy(run_spec),
+                    "status": failure_status,
+                    "reason_code": failure["primary_reason_code"],
+                    "failure_classification": failure["classification"],
+                    "attempt_no": staged_attempt["attempt_no"],
+                    "started_at": staged_attempt["started_at"],
+                    "retry_not_before": retry_not_before,
+                    "finding_ids": [],
+                    **(
+                        {"reconciliation": copy.deepcopy(reconciliation)}
+                        if reconciliation is not None
+                        else {}
+                    ),
+                }
+            )
+            if retrying:
+                self._before_write("s07.retry.job")
+                staged_job.update(
+                    {
+                        "status": "queued",
+                        "retryable": True,
+                        "recovery_reason": "S07_TRANSIENT_RETRY",
+                        "retry_not_before": retry_not_before,
+                        "s07_retry": True,
+                        "logical_operation_id": staged_job["job_id"],
+                    }
+                )
+                visibility_scope = self._application_visibility_scope(
+                    staged_app["application_id"]
+                )
+                self._before_write("s07.retry.audit")
+                staged.audit_events.append(
+                    {
+                        "event_id": self._stable_id(
+                            "audit", f"s07_retry:{staged_job['job_id']}:{attempt_no}"
+                        ),
+                        "action": "protected_operation_retry_scheduled",
+                        "subject": staged_job.get("worker_id")
+                        or self._worker_identity,
+                        "role": "worker",
+                        "scope": visibility_scope,
+                        "source_id": "s07-target-worker",
+                        "application_id": staged_app["application_id"],
+                        "job_id": staged_job["job_id"],
+                        "attempt_id": staged_attempt["attempt_id"],
+                        "result": "retry_wait",
+                        "reason_code": failure["primary_reason_code"],
+                        "failure_classification": "transient",
+                        "retry_not_before": retry_not_before,
+                        **self._audit_time_fields(staged),
+                    }
+                )
+                self._before_write("s07.retry.outbox")
+                staged.outbox.append(
+                    {
+                        "event_id": self._stable_id(
+                            "outbox", f"s07_retry:{staged_job['job_id']}:{attempt_no}"
+                        ),
+                        "kind": "s07_retry_scheduled",
+                        "application_id": staged_app["application_id"],
+                        "job_id": staged_job["job_id"],
+                        "attempt_no": attempt_no,
+                        "retry_not_before": retry_not_before,
+                        "visibility_scope": visibility_scope,
+                        "status": "pending",
+                    }
+                )
+                self._before_write("s07.retry.publish")
+                staged.persist()
+                self._store = staged
+                return WorkerResult(
+                    status="retry_wait",
+                    application_id=staged_app["application_id"],
+                    job_id=staged_job["job_id"],
+                    attempt_id=staged_attempt["attempt_id"],
+                    run_id=run_spec["run_id"],
+                    reason_code=failure["primary_reason_code"],
+                    lifecycle_revision=staged_app["lifecycle_revision"],
+                    evidence_revision=staged_app["evidence_revision"],
+                    lifecycle_phases=tuple(staged_app["phase_history"]),
+                    release_id=run_spec["release_id"],
+                    release_digest=run_spec["release_digest"],
+                    checker_build=run_spec["checker_build"],
+                    fence=run_spec["fence"],
+                    evidence_snapshot_id=run_spec["evidence_snapshot_id"],
+                    evidence_snapshot_digest=run_spec[
+                        "evidence_snapshot_digest"
+                    ],
+                    retry_after_seconds=retry_after,
+                    reconciliation=copy.deepcopy(reconciliation),
+                )
+            self._before_write("s07.failure.job")
+            staged_job.update(
+                {
+                    "status": failure.get(
+                        "job_status",
+                        "exhausted" if failure_status == "exhausted" else "blocked",
+                    ),
+                    "retryable": False,
+                    "terminal_reason_code": failure["primary_reason_code"],
+                    "logical_operation_id": staged_job["job_id"],
+                }
+            )
+            staged_job.pop("retry_not_before", None)
+            staged_job.pop("failure_publication_pending", None)
+            self._before_write("s07.failure.lifecycle")
+            staged_app["evidence_ready"] = False
+            staged_app["route"] = "unprocessable"
+            staged_app["projection_visible"] = False
+            staged_app["projection_pending"] = False
+            self._transition_lifecycle(
+                staged_app,
+                "Unprocessable",
+                failure["primary_reason_code"],
+                store=staged,
+            )
+            staged.lifecycle_events[-1]["recovery_work_id"] = recovery_work_id
+            self._before_write("s07.failure.recovery_work")
+            opened = {
+                "event_id": self._stable_id(
+                    "recovery_event", f"{recovery_work_id}:opened"
+                ),
+                "kind": "opened",
+                "schema_version": "recovery-work/1",
+                "recovery_work_id": recovery_work_id,
+                "application_id": staged_app["application_id"],
+                "visibility_scope": self._application_visibility_scope(
+                    staged_app["application_id"]
+                ),
+                "cycle": staged_app["cycle"],
+                "evidence_revision": staged_app["evidence_revision"],
+                "release_id": run_spec["release_id"],
+                "release_digest": run_spec["release_digest"],
+                "checker_build": run_spec["checker_build"],
+                "pre_block_lifecycle_revision": pre_block_revision,
+                "lifecycle_revision": staged_app["lifecycle_revision"],
+                "failed_from_phase": failed_from_phase,
+                "operation": failure["operation"],
+                "logical_operation_id": staged_job["job_id"],
+                "job_id": staged_job["job_id"],
+                "attempt_ids": [
+                    str(record["attempt_id"])
+                    for record in sorted(
+                        (
+                            record
+                            for record in staged.runs
+                            if record.get("application_id")
+                            == staged_app["application_id"]
+                            and record.get("job_id") == staged_job["job_id"]
+                            and record.get("status")
+                            in {
+                                "failure_publication_pending",
+                                "transient_failure",
+                                "terminal_failure",
+                                "exhausted",
+                            }
+                        ),
+                        key=lambda record: int(record.get("attempt_no", 0)),
+                    )
+                ],
+                "dependency": failure["dependency"],
+                "safe_correlation_id": self._stable_id(
+                    "correlation", f"{staged_job['job_id']}:{staged_attempt['attempt_id']}"
+                ),
+                "primary_reason_code": failure["primary_reason_code"],
+                "related_reason_codes": related_reason_codes,
+                "retry_policy": retry_policy,
+                "retry_policy_digest": retry_policy_digest,
+                "outcome_known": failure.get("outcome_known", True),
+                "responsible_party": failure["responsible_party"],
+                "recovery_action": failure["recovery_action"],
+                "recovery_target": failure["recovery_target"],
+                "criterion": {**criterion_body, "digest": criterion_digest},
+                "conditions": copy.deepcopy(conditions),
+                **(
+                    {"reconciliation": copy.deepcopy(reconciliation)}
+                    if reconciliation is not None
+                    else {}
+                ),
+                "opened_at": now,
+                "idempotency_fingerprint": hashlib.sha256(
+                    f"{staged_job['job_id']}:{failure_kind}".encode("utf-8")
+                ).hexdigest(),
+            }
+            staged.recovery_events.append(opened)
+            self._before_write("s07.failure.audit")
+            staged.audit_events.append(
+                {
+                    "event_id": self._stable_id(
+                        "audit", f"s07_failure:{recovery_work_id}"
+                    ),
+                    "action": "protected_operation_failed",
+                    "subject": staged_job.get("worker_id") or self._worker_identity,
+                    "role": "worker",
+                    "scope": opened["visibility_scope"],
+                    "source_id": "s07-target-worker",
+                    "application_id": staged_app["application_id"],
+                    "job_id": staged_job["job_id"],
+                    "attempt_id": staged_attempt["attempt_id"],
+                    "recovery_work_id": recovery_work_id,
+                    "result": "blocked",
+                    "reason_code": failure["primary_reason_code"],
+                    "lifecycle_revision": staged_app["lifecycle_revision"],
+                    **self._audit_time_fields(staged),
+                }
+            )
+            self._before_write("s07.failure.idempotency")
+            failure_binding = f"s07:failure:{staged_job['job_id']}"
+            failure_fingerprint = str(opened["idempotency_fingerprint"])
+            staged.idempotency[failure_binding] = (
+                failure_fingerprint,
+                {
+                    "status": "blocked",
+                    "recovery_work_id": recovery_work_id,
+                    "lifecycle_revision": staged_app["lifecycle_revision"],
+                },
+            )
+            self._before_write("s07.failure.outbox")
+            staged.outbox.append(
+                {
+                    "event_id": self._stable_id(
+                        "outbox", f"s07_recovery:{recovery_work_id}"
+                    ),
+                    "kind": "s07_recovery_work_opened",
+                    "application_id": staged_app["application_id"],
+                    "recovery_work_id": recovery_work_id,
+                    "lifecycle_revision": staged_app["lifecycle_revision"],
+                    "visibility_scope": opened["visibility_scope"],
+                    "status": "pending",
+                }
+            )
+            self._before_write("s07.failure.publish")
+        except _StoreWriteFailure:
+            self._record_s07_failure_publication_stop(
+                job,
+                attempt,
+                run_spec,
+                failure_kind=failure_kind,
+                now=now,
+            )
+            return WorkerResult(
+                status="authority_unavailable",
+                application_id=app["application_id"],
+                job_id=job["job_id"],
+                attempt_id=attempt["attempt_id"],
+                reason_code="control.failure_publication_unavailable",
+                lifecycle_revision=app["lifecycle_revision"],
+                evidence_revision=app["evidence_revision"],
+            )
+        staged.persist()
+        self._store = staged
+        return WorkerResult(
+            status="blocked",
+            application_id=staged_app["application_id"],
+            job_id=staged_job["job_id"],
+            attempt_id=staged_attempt["attempt_id"],
+            run_id=run_spec["run_id"],
+            reason_code=failure["primary_reason_code"],
+            lifecycle_revision=staged_app["lifecycle_revision"],
+            evidence_revision=staged_app["evidence_revision"],
+            lifecycle_phases=tuple(staged_app["phase_history"]),
+            release_id=run_spec["release_id"],
+            release_digest=run_spec["release_digest"],
+            checker_build=run_spec["checker_build"],
+            fence=run_spec["fence"],
+            evidence_snapshot_id=run_spec["evidence_snapshot_id"],
+            evidence_snapshot_digest=run_spec["evidence_snapshot_digest"],
+            recovery_work_id=recovery_work_id,
+            reconciliation=copy.deepcopy(reconciliation),
+        )
+
+    def _record_s07_failure_publication_stop(
+        self,
+        job: dict[str, Any],
+        attempt: dict[str, Any],
+        run_spec: dict[str, Any],
+        *,
+        failure_kind: str,
+        now: int,
+    ) -> None:
+        staged = copy.deepcopy(self._store)
+        staged_job = next(
+            item for item in staged.jobs if item.get("job_id") == job["job_id"]
+        )
+        retry_not_before = now + 1
+        staged_job.update(
+            {
+                "status": "queued",
+                "retry_not_before": retry_not_before,
+                "s07_retry": True,
+                "recovery_reason": "S07_FAILURE_PUBLICATION_RECONCILE",
+                "failure_publication_pending": failure_kind,
+                "retryable": False,
+            }
+        )
+        staged_job.pop("worker_id", None)
+        staged_job.pop("lease_until", None)
+        staged.runs.append(
+            {
+                "run_record_id": self._stable_id(
+                    "run_record",
+                    f"{attempt['attempt_id']}:failure_publication_pending",
+                ),
+                "run_id": run_spec["run_id"],
+                "job_id": job["job_id"],
+                "attempt_id": attempt["attempt_id"],
+                "application_id": job["application_id"],
+                "spec": copy.deepcopy(run_spec),
+                "status": "failure_publication_pending",
+                "reason_code": "control.failure_publication_unavailable",
+                "failure_classification": "authority_unavailable",
+                "attempt_no": int(job["attempt_no"]),
+                "started_at": int(attempt["started_at"]),
+                "retry_not_before": retry_not_before,
+                "finding_ids": [],
+            }
+        )
+        try:
+            staged.persist()
+        except Exception:
+            return
+        self._store = staged
+
     def _schedule_failure_retry(
         self,
         job: dict[str, Any],
@@ -12840,6 +15010,7 @@ class ControlledScenarioService:
         semantic_differential: dict[str, Any],
         *,
         now: int,
+        reconciliation: dict[str, Any] | None = None,
     ) -> WorkerResult:
         current_app = app
         current_job = job
@@ -12855,6 +15026,7 @@ class ControlledScenarioService:
                     completion_context,
                     semantic_differential,
                     now=now,
+                    reconciliation=reconciliation,
                 )
             except StaleStoreRevision:
                 self._reload_store()
@@ -12887,6 +15059,7 @@ class ControlledScenarioService:
         semantic_differential: dict[str, Any],
         *,
         now: int,
+        reconciliation: dict[str, Any] | None = None,
     ) -> WorkerResult:
         run_id = run_spec["run_id"]
         if not self.audit_available:
@@ -12998,6 +15171,11 @@ class ControlledScenarioService:
                         asdict(outcome) for outcome in run_result.selection_outcomes
                     ],
                     "semantic_differential": copy.deepcopy(semantic_differential),
+                    **(
+                        {"reconciliation": copy.deepcopy(reconciliation)}
+                        if reconciliation is not None
+                        else {}
+                    ),
                 }
             )
             self._before_write("result.attempt")
@@ -13098,6 +15276,11 @@ class ControlledScenarioService:
                     ),
                     "work_item_id": work_item_id,
                     "assigned_subject": review_assignee,
+                    **(
+                        {"reconciliation": copy.deepcopy(reconciliation)}
+                        if reconciliation is not None
+                        else {}
+                    ),
                     **self._audit_time_fields(staged),
                 }
             )
@@ -13154,6 +15337,7 @@ class ControlledScenarioService:
             evidence_snapshot_id=run_spec["evidence_snapshot_id"],
             evidence_snapshot_digest=run_spec["evidence_snapshot_digest"],
             semantic_differential=semantic_differential,
+            reconciliation=copy.deepcopy(reconciliation),
         )
 
     def _record_result_publication_failure(
@@ -13808,6 +15992,190 @@ class ControlledScenarioService:
                         recovery_failure = True
                         break
 
+            if not recovery_failure:
+                recovery_gate_events = [
+                    event
+                    for event in self._store.outbox
+                    if event.get("kind") == "s07_recovery_gate_requested"
+                ]
+                events_by_successor: dict[str, dict[str, Any]] = {}
+                for event in recovery_gate_events:
+                    frozen_job = event.get("job")
+                    job_id = (
+                        frozen_job.get("job_id")
+                        if isinstance(frozen_job, dict)
+                        else None
+                    )
+                    if (
+                        not isinstance(job_id, str)
+                        or not job_id
+                        or job_id in events_by_successor
+                    ):
+                        recovery_failure = True
+                        break
+                    events_by_successor[job_id] = event
+
+                for job_id, event in events_by_successor.items():
+                    frozen_job = event["job"]
+                    jobs = [
+                        job
+                        for job in self._store.jobs
+                        if job.get("job_id") == job_id
+                    ]
+                    if len(jobs) > 1:
+                        recovery_failure = True
+                        break
+                    if jobs:
+                        job = jobs[0]
+                        if job.get("status") in {
+                            "complete",
+                            "diagnostic",
+                            "blocked",
+                            "exhausted",
+                            "dead_lettered",
+                            "outcome_unknown",
+                            "compensation_failed",
+                        }:
+                            continue
+                        recovery_attempts = [
+                            record
+                            for record in self._store.attempts
+                            if record.get("job_id") == job_id
+                        ]
+                        if not recovery_attempts and job != frozen_job:
+                            recovery_failure = True
+                            break
+                        if recovery_attempts:
+                            latest_attempt = max(
+                                recovery_attempts,
+                                key=lambda record: int(record.get("attempt_no", 0)),
+                            )
+                            if any(
+                                job.get(key) != latest_attempt.get(key)
+                                for key in ("attempt_no", "fence")
+                            ):
+                                recovery_failure = True
+                                break
+                        if (
+                            any(
+                                job.get(key) != frozen_job.get(key)
+                                for key in (
+                                    "job_id",
+                                    "application_id",
+                                    "kind",
+                                    "fingerprint",
+                                    "logical_operation_id",
+                                    "recovery_work_id",
+                                )
+                            )
+                            or isinstance(job.get("fence"), bool)
+                            or not isinstance(job.get("fence"), int)
+                            or job["fence"] < frozen_job.get("fence", 0)
+                        ):
+                            recovery_failure = True
+                            break
+                        continue
+
+                    application_id = event.get("application_id")
+                    recovery_work_id = event.get("recovery_work_id")
+                    recovery_fact_id = event.get("recovery_fact_id")
+                    lifecycle_revision = event.get("lifecycle_revision")
+                    app = (
+                        self._store.applications.get(application_id)
+                        if isinstance(application_id, str)
+                        else None
+                    )
+                    if (
+                        not isinstance(app, dict)
+                        or app.get("lifecycle_revision") != lifecycle_revision
+                        or any(
+                            record.get("job_id") == job_id
+                            for record in (*self._store.attempts, *self._store.runs)
+                        )
+                    ):
+                        continue
+                    work_events = [
+                        item
+                        for item in self._store.recovery_events
+                        if item.get("recovery_work_id") == recovery_work_id
+                    ]
+                    opened = [
+                        item for item in work_events if item.get("kind") == "opened"
+                    ]
+                    facts = [
+                        item for item in work_events if item.get("kind") == "fact"
+                    ]
+                    resolved = [
+                        item for item in work_events if item.get("kind") == "resolved"
+                    ]
+                    if any(
+                        item.get("kind") in {"terminated", "superseded"}
+                        for item in work_events
+                    ):
+                        continue
+                    lifecycle = [
+                        item
+                        for item in self._store.lifecycle_events
+                        if item.get("application_id") == application_id
+                        and item.get("revision") == lifecycle_revision
+                    ]
+                    if not (
+                        len(opened) == len(facts) == len(resolved) == len(lifecycle) == 1
+                    ):
+                        continue
+                    work = opened[0]
+                    fact = facts[0]
+                    resolution = resolved[0]
+                    lifecycle_event = lifecycle[0]
+                    criterion = work.get("criterion")
+                    criterion_digest = (
+                        criterion.get("digest")
+                        if isinstance(criterion, dict)
+                        else None
+                    )
+                    target = work.get("recovery_target")
+                    expected_kind = (
+                        "recovery_check"
+                        if target in {"Assembly", "Evidence Ready"}
+                        else "recovery_route"
+                        if target == "Routing Determination"
+                        else None
+                    )
+                    expected_job = {
+                        "job_id": job_id,
+                        "application_id": application_id,
+                        "kind": expected_kind,
+                        "status": "queued",
+                        "fingerprint": criterion_digest,
+                        "logical_operation_id": job_id,
+                        "recovery_work_id": recovery_work_id,
+                        "fence": frozen_job.get("fence"),
+                        "attempt_no": 0,
+                    }
+                    if (
+                        frozen_job != expected_job
+                        or event.get("status") not in {"pending", "published"}
+                        or event.get("visibility_scope")
+                        != work.get("visibility_scope")
+                        or work.get("application_id") != application_id
+                        or fact.get("application_id") != application_id
+                        or resolution.get("application_id") != application_id
+                        or fact.get("recovery_fact_id") != recovery_fact_id
+                        or resolution.get("recovery_fact_id") != recovery_fact_id
+                        or fact.get("criterion_digest") != criterion_digest
+                        or resolution.get("recovery_target") != target
+                        or lifecycle_event.get("phase") != target
+                        or lifecycle_event.get("reason_code")
+                        != "VERIFIED_RECOVERY_FACT_ACCEPTED"
+                        or lifecycle_event.get("recovery_work_id")
+                        != recovery_work_id
+                        or lifecycle_event.get("recovery_fact_id")
+                        != recovery_fact_id
+                        or app.get("phase") != target
+                    ):
+                        continue
+                    repair_jobs.append(copy.deepcopy(frozen_job))
+
             if not recovery_failure and not repair_jobs:
                 return
 
@@ -13926,7 +16294,8 @@ class ControlledScenarioService:
         fulfillment = [
             record
             for record in self._store.review_records
-            if record.get("record_type") == "supplement_request_fulfilled"
+            if record.get("record_type")
+            in {"supplement_request_fulfilled", "supplement_recovery_successor"}
             and record.get("application_id") == receipt.application_id
             and record.get("request_id") == receipt.request_id
             and record.get("receipt_id") == receipt.receipt_id
@@ -13939,7 +16308,11 @@ class ControlledScenarioService:
             for item in self._store.lifecycle_events
             if item.get("application_id") == receipt.application_id
             and item.get("revision") == receipt.lifecycle_revision
-            and item.get("reason_code") == "SUPPLEMENT_REQUEST_FULFILLED"
+            and item.get("reason_code")
+            in {
+                "SUPPLEMENT_REQUEST_FULFILLED",
+                "RECOVERY_CONTEXT_SUCCESSOR_ACCEPTED",
+            }
             and item.get("request_id") == receipt.request_id
             and item.get("job_id") == receipt.job_id
         ]
@@ -14108,6 +16481,7 @@ class ControlledScenarioTestDriver:
         stale: bool = False,
         cas_fault: str | None = None,
         duplicate: bool = False,
+        operation_fault: str | None = None,
     ) -> WorkerResult:
         return self._service._process_next_job(
             worker_id=worker_id,
@@ -14117,4 +16491,5 @@ class ControlledScenarioTestDriver:
             stale=stale,
             cas_fault=cas_fault,
             duplicate=duplicate,
+            operation_fault=operation_fault,
         )

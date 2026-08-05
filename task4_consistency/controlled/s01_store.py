@@ -31,6 +31,8 @@ _TABLES = (
     "findings",
     "work_items",
     "review_records",
+    "recovery_events",
+    "inbox",
     "outbox",
     "projections",
     "sessions",
@@ -49,6 +51,8 @@ _IMMUTABLE_LIST_IDS = {
     "findings": "finding_id",
     "work_items": "work_item_id",
     "review_records": "record_id",
+    "recovery_events": "event_id",
+    "inbox": "message_id",
     "demo_sessions": "demo_session_id",
     "deletion_receipts": "deletion_receipt_id",
 }
@@ -73,6 +77,8 @@ _GOVERNED_DELETION_IDS = {
     "findings": "item_id",
     "work_items": "item_id",
     "review_records": "item_id",
+    "recovery_events": "item_id",
+    "inbox": "item_id",
     "outbox": "item_id",
     "projections": "item_id",
     "sessions": "item_id",
@@ -133,6 +139,8 @@ class SQLiteTargetStore:
         self.findings: list[dict[str, Any]] = []
         self.work_items: list[dict[str, Any]] = []
         self.review_records: list[dict[str, Any]] = []
+        self.recovery_events: list[dict[str, Any]] = []
+        self.inbox: list[dict[str, Any]] = []
         self.outbox: list[dict[str, Any]] = []
         self.projections: dict[str, dict[str, Any]] = {}
         self.sessions: dict[str, dict[str, Any]] = {}
@@ -161,6 +169,8 @@ class SQLiteTargetStore:
             "findings",
             "work_items",
             "review_records",
+            "recovery_events",
+            "inbox",
             "outbox",
             "projections",
             "sessions",
@@ -385,6 +395,10 @@ class SQLiteTargetStore:
                     self.work_items = [payload for _, payload in values]
                 elif table == "review_records":
                     self.review_records = [payload for _, payload in values]
+                elif table == "recovery_events":
+                    self.recovery_events = [payload for _, payload in values]
+                elif table == "inbox":
+                    self.inbox = [payload for _, payload in values]
                 elif table == "projections":
                     self.projections = {
                         key: json.loads(payload) for key, payload in values
@@ -445,6 +459,10 @@ class SQLiteTargetStore:
                 self._sync_immutable_list(
                     connection, "review_records", self.review_records
                 )
+                self._sync_immutable_list(
+                    connection, "recovery_events", self.recovery_events
+                )
+                self._sync_immutable_list(connection, "inbox", self.inbox)
                 self._sync_outbox(connection)
                 self._sync_mutable_map(connection, "projections", self.projections)
                 self._sync_mutable_map(connection, "sessions", self.sessions)

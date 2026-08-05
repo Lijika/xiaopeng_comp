@@ -499,6 +499,18 @@
         text-transform: uppercase;
       }
 
+      .recovery-panel {
+        max-width: 980px;
+      }
+
+      .recovery-actions {
+        margin-top: 16px;
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        flex-wrap: wrap;
+      }
+
       @media (max-width: 760px) {
         .header-inner,
         main {
@@ -606,7 +618,70 @@
         <span>Reviewer · Evidence correction</span>
       </div>
 
-      <div class="workbench">
+      <section
+        class="panel recovery-panel"
+        data-testid="recovery-panel"
+        data-overlap-check
+        aria-labelledby="recovery-title"
+        hidden
+      >
+        <div class="panel-header">
+          <h2 id="recovery-title">Recovery Work</h2>
+          <span class="read-only">LIFECYCLE OWNED</span>
+        </div>
+        <div class="panel-body">
+          <div class="blocker-band">
+            <div class="blocker-title">
+              <strong data-testid="recovery-primary-reason" data-fit-text></strong>
+              <span data-testid="recovery-status"></span>
+            </div>
+            <p class="scenario-meta">
+              Related: <span data-testid="recovery-related-reasons"></span>
+            </p>
+          </div>
+          <h3 class="evidence-heading">Recovery authority</h3>
+          <dl>
+            <dt>Phase</dt>
+            <dd data-testid="recovery-phase"></dd>
+            <dt>Lifecycle revision</dt>
+            <dd data-testid="recovery-lifecycle-revision"></dd>
+            <dt>Projection watermark</dt>
+            <dd data-testid="recovery-watermark"></dd>
+            <dt>Operation</dt>
+            <dd data-testid="recovery-operation" data-fit-text></dd>
+            <dt>Dependency</dt>
+            <dd data-testid="recovery-dependency" data-fit-text></dd>
+            <dt>Responsible party</dt>
+            <dd data-testid="recovery-responsible-party" data-fit-text></dd>
+            <dt>Recovery action</dt>
+            <dd data-testid="recovery-action" data-fit-text></dd>
+            <dt>Fixed target</dt>
+            <dd data-testid="recovery-target"></dd>
+            <dt>Criterion</dt>
+            <dd data-testid="recovery-criterion-id" data-fit-text></dd>
+            <dt>Criterion digest</dt>
+            <dd data-testid="recovery-criterion-digest" data-fit-text></dd>
+            <dt>Recovery facts</dt>
+            <dd data-testid="recovery-fact-count"></dd>
+            <dt>Resolutions</dt>
+            <dd data-testid="recovery-resolution-count"></dd>
+          </dl>
+          <h3 class="history-section-title">Attempts</h3>
+          <ol class="history-list" data-testid="recovery-attempts"></ol>
+          <div class="recovery-actions">
+            <button type="button" class="secondary" id="reload-recovery">重新加载</button>
+            <button type="button" id="verify-recovery" disabled>验证恢复</button>
+            <span
+              class="command-status"
+              data-testid="recovery-command-status"
+              role="status"
+              aria-live="polite"
+            >待加载</span>
+          </div>
+        </div>
+      </section>
+
+      <div class="workbench" id="normal-workbench">
         <div class="column">
           <section class="panel" aria-labelledby="admission-title">
             <div class="panel-header">
@@ -792,6 +867,7 @@
         const requestedParameters = new URLSearchParams(window.location.search);
         const requestedScenario = requestedParameters.get("scenario");
         const requestedApplication = requestedParameters.get("application");
+        const requestedRecovery = requestedParameters.get("recovery");
         const SCENARIO_ID =
           requestedScenario === "app_s04_bad_vin.json"
             ? requestedScenario
@@ -810,6 +886,8 @@
           evidenceLinks: [],
           claimFence: null,
           correctionActive: false,
+          recoveryWork: null,
+          pendingRecoveryKey: null,
         };
 
         const byId = (id) => document.getElementById(id);
@@ -903,12 +981,98 @@
           if (allowNotFound && response.status === 404) {
             return { payload: null, accessEnded: false, notFound: true };
           }
-          if (!response.ok) throw new Error(`request failed (${response.status})`);
+          const payload = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            const error = new Error(`request failed (${response.status})`);
+            error.status = response.status;
+            error.payload = payload;
+            throw error;
+          }
           return {
-            payload: await response.json(),
+            payload,
             accessEnded: response.headers.get("X-S01-Access-Ended") === "1",
             notFound: false,
           };
+        }
+
+        function renderRecovery(data) {
+          state.recoveryWork = data;
+          byTestId("recovery-primary-reason").textContent = data.primary_reason_code;
+          byTestId("recovery-related-reasons").textContent =
+            (data.related_reason_codes || []).join(", ") || "None";
+          byTestId("recovery-status").textContent = data.status;
+          byTestId("recovery-phase").textContent = data.phase;
+          byTestId("recovery-lifecycle-revision").textContent = String(
+            data.lifecycle_revision,
+          );
+          byTestId("recovery-watermark").textContent = String(data.projection_watermark);
+          byTestId("recovery-operation").textContent = data.operation;
+          byTestId("recovery-dependency").textContent = data.dependency;
+          byTestId("recovery-responsible-party").textContent = data.responsible_party;
+          byTestId("recovery-action").textContent = data.recovery_action;
+          byTestId("recovery-target").textContent = data.recovery_target;
+          byTestId("recovery-criterion-id").textContent = data.criterion.id;
+          byTestId("recovery-criterion-digest").textContent = data.criterion.digest;
+          byTestId("recovery-fact-count").textContent = String(data.recovery_fact_count);
+          byTestId("recovery-resolution-count").textContent = String(data.resolution_count);
+          const attempts = byTestId("recovery-attempts");
+          attempts.replaceChildren();
+          for (const attempt of data.attempts || []) {
+            const item = document.createElement("li");
+            item.textContent = `${attempt.attempt} · ${attempt.classification} · ${attempt.status}`;
+            attempts.append(item);
+          }
+          byId("verify-recovery").disabled = !(data.can_verify && data.status === "open");
+          if (!data.can_verify) {
+            setStatus(byTestId("recovery-command-status"), "仅 Operator 可验证");
+          } else if (data.status !== "open") {
+            setStatus(byTestId("recovery-command-status"), "恢复工作已收束", "success");
+          }
+          byTestId("recovery-panel").hidden = false;
+        }
+
+        async function loadRecovery() {
+          const { payload } = await request(
+            `${API_ROOT}/queries/recovery-work-items/${encodeURIComponent(requestedRecovery)}`,
+          );
+          renderRecovery(payload);
+          return payload;
+        }
+
+        async function verifyRecovery() {
+          const work = state.recoveryWork;
+          if (!work || !work.can_verify || work.status !== "open") return;
+          if (!state.pendingRecoveryKey) {
+            state.pendingRecoveryKey = `s07-browser-${crypto.randomUUID()}`;
+          }
+          byId("verify-recovery").disabled = true;
+          setStatus(byTestId("recovery-command-status"), "验证中");
+          try {
+            await request(
+              `${API_ROOT}/commands/recovery-work-items/${encodeURIComponent(requestedRecovery)}/verify`,
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  expected_lifecycle_revision: work.lifecycle_revision,
+                  expected_criterion_digest: work.criterion.digest,
+                  idempotency_key: state.pendingRecoveryKey,
+                }),
+              },
+            );
+            state.pendingRecoveryKey = null;
+            await loadRecovery();
+            setStatus(byTestId("recovery-command-status"), "恢复事实已接受", "success");
+          } catch (error) {
+            if (error.status === 409) state.pendingRecoveryKey = null;
+            const detail = error.payload && error.payload.detail;
+            const reason = detail && (detail.reason_code || detail.error);
+            setStatus(
+              byTestId("recovery-command-status"),
+              reason || "验证结果未知",
+              "error",
+            );
+            byId("verify-recovery").disabled = false;
+          }
         }
 
         function renderReceipt(data) {
@@ -1301,13 +1465,34 @@
         byId("claim-correction").addEventListener("click", claimCorrection);
         byId("reveal-source").addEventListener("click", revealSource);
         byId("submit-correction").addEventListener("click", submitCorrection);
+        byId("reload-recovery").addEventListener("click", async () => {
+          state.pendingRecoveryKey = null;
+          setStatus(byTestId("recovery-command-status"), "重新加载中");
+          try {
+            await loadRecovery();
+            if (state.recoveryWork.can_verify && state.recoveryWork.status === "open") {
+              setStatus(byTestId("recovery-command-status"), "待验证");
+            }
+          } catch (_) {
+            setStatus(byTestId("recovery-command-status"), "恢复工作不可用", "error");
+          }
+        });
+        byId("verify-recovery").addEventListener("click", verifyRecovery);
         byId("correction-source").addEventListener("change", () => {
           state.pendingRevealKey = null;
           clearRevealedSource();
           updateCorrectionControls();
         });
         byId("corrected-value").addEventListener("input", updateCorrectionControls);
-        if (state.applicationId) {
+        if (requestedRecovery) {
+          byId("normal-workbench").hidden = true;
+          byTestId("boundary-gate").textContent = "G2 恢复";
+          document.querySelector(".status-line").innerHTML =
+            "<span><strong>受控路径</strong> · S07</span><span>Reviewer / Operator · Recovery</span>";
+          loadRecovery().catch(() => {
+            setStatus(byTestId("recovery-command-status"), "恢复工作不可用", "error");
+          });
+        } else if (state.applicationId) {
           state.correctionActive = true;
           loadHistory().catch(clearSensitiveState);
         }

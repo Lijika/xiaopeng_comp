@@ -534,6 +534,19 @@ class S01RecoveryBody(BaseModel):
     expected_failure_reason_code: str
 
 
+class S07VerifyRecoveryBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_lifecycle_revision: int = Field(ge=1, strict=True)
+    expected_criterion_digest: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+        strict=True,
+    )
+    idempotency_key: str = Field(min_length=1, max_length=200, strict=True)
+
+
 class S02SubmitBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -760,7 +773,11 @@ def _s01_workbench_admission_json(result: Any) -> dict[str, Any]:
 
 
 def _s01_worker_json(result: Any) -> dict[str, Any]:
-    return asdict(result)
+    payload = asdict(result)
+    for optional in ("recovery_work_id", "reconciliation"):
+        if payload.get(optional) is None:
+            payload.pop(optional, None)
+    return payload
 
 
 def _s01_disable_cache(response: Response) -> None:
@@ -1053,6 +1070,63 @@ def _s05_invalid_command(error: ValueError) -> HTTPException:
             "error": "S05_INVALID_COMMAND",
             "message": "S05 command does not match the registered contract",
         },
+    )
+
+
+def _s07_command_result(result: dict[str, Any]) -> dict[str, Any]:
+    status = result.get("status")
+    if status == "accepted":
+        return result
+    mapping = {
+        "stale": (409, "S07_STALE"),
+        "conflict": (409, "S07_CONFLICT"),
+        "rejected": (409, "S07_REJECTED"),
+        "unavailable": (503, "S07_UNAVAILABLE"),
+    }
+    mapped = mapping.get(status)
+    if mapped is None:
+        raise RuntimeError("S07 domain returned an unsupported status")
+    status_code, error_code = mapped
+    detail = {"error": error_code}
+    reason_code = result.get("reason_code")
+    if isinstance(reason_code, str):
+        detail["reason_code"] = reason_code
+    raise HTTPException(status_code, detail=detail)
+
+
+def _s07_not_found() -> HTTPException:
+    return HTTPException(404, detail={"error": "S07_NOT_FOUND"})
+
+
+def _s07_operator_principal(request: Request) -> S01CommandPrincipal:
+    if not S01_OPERATOR_SUBJECT or not _s01_has_credential(
+        request, S01_OPERATOR_CREDENTIAL
+    ):
+        raise _s07_not_found()
+    return S01CommandPrincipal(
+        subject=S01_OPERATOR_SUBJECT,
+        role="operator",
+        scope="C-DEMO",
+        source_id="c-demo-recovery-console",
+    )
+
+
+def _s07_recovery_query_principal(request: Request) -> S01CommandPrincipal:
+    if _s01_has_credential(request, S01_OPERATOR_CREDENTIAL):
+        return _s07_operator_principal(request)
+    principal = _s01_principal(request)
+    if (
+        principal is None
+        or "reviewer" not in principal.roles
+        or not ControlledScenarioService.is_c_demo_scope(principal.scope)
+    ):
+        raise _s07_not_found()
+    return S01CommandPrincipal(
+        subject=principal.subject,
+        role="reviewer",
+        scope=principal.scope,
+        source_id="c-demo-review-console",
+        expires_at=principal.expires_at,
     )
 
 
@@ -1443,7 +1517,10 @@ def controlled_s01_page(request: Request) -> HTMLResponse:
     if not S01_TEMPLATE.is_file():
         raise HTTPException(500, detail={"error": "S01_PAGE_UNAVAILABLE"})
     response = HTMLResponse(S01_TEMPLATE.read_text(encoding="utf-8"))
-    _issue_s01_session(request, response)
+    if _s01_has_credential(request, S01_OPERATOR_CREDENTIAL):
+        _s01_require_operator(request)
+    else:
+        _issue_s01_session(request, response)
     _s01_disable_cache(response)
     return response
 
@@ -1550,6 +1627,55 @@ def controlled_s01_test_project(response: Response) -> dict[str, int]:
     if S01_TEST_DRIVER is None:
         raise HTTPException(404, detail={"error": "S01_NOT_FOUND"})
     return _s01_service().refresh_projection()
+
+
+@app.get("/controlled/s01/api/queries/recovery-work-items/{recovery_work_id}")
+def controlled_s07_recovery_work(
+    recovery_work_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s07_recovery_query_principal(request)
+    try:
+        return _s01_service().recovery_work_view(
+            principal=principal,
+            recovery_work_id=recovery_work_id,
+        )
+    except QueryNotFound as error:
+        raise _s07_not_found() from error
+
+
+@app.post(
+    "/controlled/s01/api/commands/recovery-work-items/{recovery_work_id}/verify"
+)
+def controlled_s07_verify_recovery(
+    recovery_work_id: str,
+    body: S07VerifyRecoveryBody,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s07_operator_principal(request)
+    try:
+        result = _s01_service().verify_recovery(
+            principal=principal,
+            recovery_work_id=recovery_work_id,
+            expected_lifecycle_revision=body.expected_lifecycle_revision,
+            expected_criterion_digest=body.expected_criterion_digest,
+            idempotency_key=body.idempotency_key,
+        )
+    except QueryNotFound as error:
+        raise _s07_not_found() from error
+    except ValueError as error:
+        raise HTTPException(
+            422,
+            detail={
+                "error": "S07_INVALID_COMMAND",
+                "message": "VerifyRecovery command does not match the contract",
+            },
+        ) from error
+    return _s07_command_result(result)
 
 
 @app.get("/controlled/s01/api/queries/queue")
