@@ -383,6 +383,7 @@ class ControlledScenarioService:
         "evidence_kind": "routing_dependency_probe",
     }
     _RUNTIME_STOP_REASON = "S01_RUNTIME_UNHEALTHY"
+    _S07_FAILURE_PUBLICATION_EXHAUSTED = "control.failure_publication_exhausted"
     _PINNED_RELEASE_FAILURE = "PINNED_RELEASE_UNAVAILABLE"
     _APPLICATION_STATE_FAILURE = "APPLICATION_STATE_AUTHORITY_UNAVAILABLE"
     _ADMISSION_JOB_RECOVERY_FAILURE = "ADMISSION_JOB_RECOVERY_UNAVAILABLE"
@@ -3421,7 +3422,10 @@ class ControlledScenarioService:
             encoded = json.dumps(
                 payload, sort_keys=True, separators=(",", ":")
             ).encode("utf-8")
-            return {**payload, "probe_digest": hashlib.sha256(encoded).hexdigest()}
+            return {
+                **payload,
+                "probe_digest": hashlib.sha256(encoded).hexdigest(),
+            }
 
         diagnostic_jobs = [
             job
@@ -3429,6 +3433,29 @@ class ControlledScenarioService:
             if job.get("status") == "diagnostic"
             and job.get("terminal_reason_code") == failure_reason_code
         ]
+        publication_jobs = [
+            job
+            for job in diagnostic_jobs
+            if isinstance(job.get("failure_publication_pending"), str)
+        ]
+        if publication_jobs:
+            if len(publication_jobs) != len(diagnostic_jobs):
+                return None
+            try:
+                self._before_write("s07.failure.audit")
+            except _StoreWriteFailure:
+                return None
+            payload = {
+                "kind": "failure_publication_authority_probe",
+                "logical_operation_ids": sorted(
+                    str(job["job_id"]) for job in publication_jobs
+                ),
+                "store_revision": self._store._store_revision,
+            }
+            encoded = json.dumps(
+                payload, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+            return {**payload, "probe_digest": hashlib.sha256(encoded).hexdigest()}
         if not diagnostic_jobs:
             if failure_reason_code not in {
                 "S01_BACKGROUND_RUNTIME_EXCEPTION",
@@ -4602,6 +4629,7 @@ class ControlledScenarioService:
                         job
                         for job in self._store.jobs
                         if job.get("kind") in {"controlled_check", "recovery_check"}
+                        and not job.get("failure_publication_pending")
                         and job.get("status") == "leased"
                         and int(job.get("lease_until", 0)) <= now
                         and int(job.get("attempt_no", 0))
@@ -4632,6 +4660,20 @@ class ControlledScenarioService:
                         failure_kind="checker_transient",
                         now=now,
                         expired_lease=True,
+                    )
+                publication_claimed = self._claim_s07_failure_publication(
+                    worker_id, now
+                )
+                if publication_claimed is not None:
+                    job, attempt, run_spec, failure_kind = publication_claimed
+                    app = self._store.applications[job["application_id"]]
+                    return self._record_s07_operation_failure(
+                        app,
+                        job,
+                        attempt,
+                        run_spec,
+                        failure_kind=failure_kind,
+                        now=now,
                     )
                 claimed = self._claim_job(worker_id, now)
             except (
@@ -13633,6 +13675,84 @@ class ControlledScenarioService:
             raise ValueError("evidence requires document IDs and roles")
         return {"evidence": evidence}
 
+    def _claim_s07_failure_publication(
+        self, worker_id: str, now: int
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str] | None:
+        for _ in range(2):
+            staged = copy.deepcopy(self._store)
+            selected = next(
+                (
+                    job
+                    for job in staged.jobs
+                    if isinstance(job.get("failure_publication_pending"), str)
+                    and job.get("status") not in {"diagnostic", "dead_lettered"}
+                    and not (
+                        job.get("status") == "leased"
+                        and int(job.get("lease_until", 0)) > now
+                    )
+                    and int(job.get("retry_not_before", 0)) <= now
+                ),
+                None,
+            )
+            if selected is None:
+                return None
+            failure_kind = str(selected["failure_publication_pending"])
+            if failure_kind not in self._S07_FAILURES:
+                raise _ApplicationStateAuthorityUnavailable(
+                    self._APPLICATION_STATE_FAILURE
+                )
+            pending_runs = [
+                run
+                for run in staged.runs
+                if run.get("job_id") == selected.get("job_id")
+                and run.get("status") == "failure_publication_pending"
+            ]
+            if len(pending_runs) != 1:
+                raise _ApplicationStateAuthorityUnavailable(
+                    self._APPLICATION_STATE_FAILURE
+                )
+            pending_run = pending_runs[0]
+            attempts = [
+                attempt
+                for attempt in staged.attempts
+                if attempt.get("attempt_id") == pending_run.get("attempt_id")
+                and attempt.get("job_id") == selected.get("job_id")
+                and isinstance(attempt.get("run_spec"), dict)
+            ]
+            if (
+                len(attempts) != 1
+                or pending_run.get("spec") != attempts[0]["run_spec"]
+            ):
+                raise _ApplicationStateAuthorityUnavailable(
+                    self._APPLICATION_STATE_FAILURE
+                )
+            selected.update(
+                {
+                    "status": "leased",
+                    "worker_id": worker_id,
+                    "fence": int(selected.get("fence", 0)) + 1,
+                    "lease_until": now + 30,
+                    "failure_publication_attempts": int(
+                        selected.get("failure_publication_attempts", 1)
+                    )
+                    + 1,
+                }
+            )
+            selected.pop("retry_not_before", None)
+            try:
+                staged.persist()
+            except StaleStoreRevision:
+                self._reload_store()
+                continue
+            self._store = staged
+            return (
+                selected,
+                attempts[0],
+                copy.deepcopy(attempts[0]["run_spec"]),
+                failure_kind,
+            )
+        return None
+
     def _claim_job(
         self, worker_id: str, now: int
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
@@ -13640,6 +13760,8 @@ class ControlledScenarioService:
             staged = copy.deepcopy(self._store)
             selected = None
             for job in staged.jobs:
+                if job.get("failure_publication_pending"):
+                    continue
                 if job.get("kind") in {
                     "business_exception_route",
                     "recovery_route",
@@ -14572,6 +14694,20 @@ class ControlledScenarioService:
             for item in staged.attempts
             if item["attempt_id"] == attempt["attempt_id"]
         )
+        reconciling_publication = isinstance(
+            staged_job.get("failure_publication_pending"), str
+        )
+        publication_attempt_no = int(
+            staged_job.get(
+                "failure_publication_attempts", staged_attempt["attempt_no"]
+            )
+        )
+        publication_started_at = (
+            now if reconciling_publication else int(staged_attempt["started_at"])
+        )
+        run_record_identity = f"{attempt['attempt_id']}:s07:{failure_kind}"
+        if reconciling_publication:
+            run_record_identity += f":publication:{publication_attempt_no}"
         pre_block_revision = staged_app["lifecycle_revision"]
         failed_from_phase = staged_app["phase"]
         try:
@@ -14620,7 +14756,7 @@ class ControlledScenarioService:
             staged.runs.append(
                 {
                     "run_record_id": self._stable_id(
-                        "run_record", f"{attempt['attempt_id']}:s07:{failure_kind}"
+                        "run_record", run_record_identity
                     ),
                     "run_id": run_spec["run_id"],
                     "job_id": staged_job["job_id"],
@@ -14630,8 +14766,8 @@ class ControlledScenarioService:
                     "status": failure_status,
                     "reason_code": failure["primary_reason_code"],
                     "failure_classification": failure["classification"],
-                    "attempt_no": staged_attempt["attempt_no"],
-                    "started_at": staged_attempt["started_at"],
+                    "attempt_no": publication_attempt_no,
+                    "started_at": publication_started_at,
                     "retry_not_before": retry_not_before,
                     "finding_ids": [],
                     **(
@@ -14653,6 +14789,8 @@ class ControlledScenarioService:
                         "logical_operation_id": staged_job["job_id"],
                     }
                 )
+                staged_job.pop("failure_publication_pending", None)
+                staged_job.pop("failure_publication_attempts", None)
                 visibility_scope = self._application_visibility_scope(
                     staged_app["application_id"]
                 )
@@ -14731,6 +14869,7 @@ class ControlledScenarioService:
             )
             staged_job.pop("retry_not_before", None)
             staged_job.pop("failure_publication_pending", None)
+            staged_job.pop("failure_publication_attempts", None)
             self._before_write("s07.failure.lifecycle")
             staged_app["evidence_ready"] = False
             staged_app["route"] = "unprocessable"
@@ -14859,7 +14998,7 @@ class ControlledScenarioService:
             )
             self._before_write("s07.failure.publish")
         except _StoreWriteFailure:
-            self._record_s07_failure_publication_stop(
+            publication = self._record_s07_failure_publication_stop(
                 job,
                 attempt,
                 run_spec,
@@ -14867,13 +15006,16 @@ class ControlledScenarioService:
                 now=now,
             )
             return WorkerResult(
-                status="authority_unavailable",
+                status=str(publication["status"]),
                 application_id=app["application_id"],
                 job_id=job["job_id"],
                 attempt_id=attempt["attempt_id"],
-                reason_code="control.failure_publication_unavailable",
+                run_id=run_spec["run_id"],
+                reason_code=str(publication["reason_code"]),
                 lifecycle_revision=app["lifecycle_revision"],
                 evidence_revision=app["evidence_revision"],
+                retry_after_seconds=int(publication["retry_after_seconds"]),
+                reconciliation=copy.deepcopy(publication["reconciliation"]),
             )
         staged.persist()
         self._store = staged
@@ -14905,49 +15047,120 @@ class ControlledScenarioService:
         *,
         failure_kind: str,
         now: int,
-    ) -> None:
+    ) -> dict[str, Any]:
         staged = copy.deepcopy(self._store)
         staged_job = next(
             item for item in staged.jobs if item.get("job_id") == job["job_id"]
         )
-        retry_not_before = now + 1
+        already_pending = isinstance(
+            staged_job.get("failure_publication_pending"), str
+        )
+        publication_attempt = int(
+            staged_job.get("failure_publication_attempts", 1)
+        )
+        exhausted = publication_attempt >= self._MAX_FAILURE_ATTEMPTS
+        retry_after = 0 if exhausted else (1, 2)[publication_attempt - 1]
+        retry_not_before = now + retry_after if retry_after else None
         staged_job.update(
             {
-                "status": "queued",
-                "retry_not_before": retry_not_before,
+                "status": "diagnostic" if exhausted else "queued",
                 "s07_retry": True,
                 "recovery_reason": "S07_FAILURE_PUBLICATION_RECONCILE",
                 "failure_publication_pending": failure_kind,
+                "failure_publication_attempts": publication_attempt,
                 "retryable": False,
+                "logical_operation_id": staged_job["job_id"],
             }
         )
+        if retry_not_before is None:
+            staged_job.pop("retry_not_before", None)
+        else:
+            staged_job["retry_not_before"] = retry_not_before
         staged_job.pop("worker_id", None)
         staged_job.pop("lease_until", None)
-        staged.runs.append(
-            {
-                "run_record_id": self._stable_id(
-                    "run_record",
-                    f"{attempt['attempt_id']}:failure_publication_pending",
-                ),
-                "run_id": run_spec["run_id"],
-                "job_id": job["job_id"],
-                "attempt_id": attempt["attempt_id"],
-                "application_id": job["application_id"],
-                "spec": copy.deepcopy(run_spec),
-                "status": "failure_publication_pending",
-                "reason_code": "control.failure_publication_unavailable",
-                "failure_classification": "authority_unavailable",
-                "attempt_no": int(job["attempt_no"]),
-                "started_at": int(attempt["started_at"]),
-                "retry_not_before": retry_not_before,
-                "finding_ids": [],
+        if not already_pending:
+            staged.runs.append(
+                {
+                    "run_record_id": self._stable_id(
+                        "run_record",
+                        f"{attempt['attempt_id']}:failure_publication_pending",
+                    ),
+                    "run_id": run_spec["run_id"],
+                    "job_id": job["job_id"],
+                    "attempt_id": attempt["attempt_id"],
+                    "application_id": job["application_id"],
+                    "spec": copy.deepcopy(run_spec),
+                    "status": "failure_publication_pending",
+                    "reason_code": "control.failure_publication_unavailable",
+                    "failure_classification": "authority_unavailable",
+                    "attempt_no": publication_attempt,
+                    "started_at": int(attempt["started_at"]),
+                    "retry_not_before": retry_not_before,
+                    "finding_ids": [],
+                }
+            )
+        reason_code = "control.failure_publication_unavailable"
+        status = "authority_unavailable"
+        if exhausted:
+            reason_code = self._S07_FAILURE_PUBLICATION_EXHAUSTED
+            status = "stopped"
+            staged_job["terminal_reason_code"] = reason_code
+            requested_stop = {
+                "track": "C-DEMO",
+                "admission": "stopped",
+                "reason_code": self._RUNTIME_STOP_REASON,
+                "failure_reason_code": reason_code,
             }
-        )
+            current_stop = staged.cohort_stop
+            next_stop = self._runtime_stop_with_resume(
+                requested_stop, current_stop
+            )
+            staged.cohort_stop = next_stop
+            if next_stop != current_stop:
+                self._append_cohort_stop_audit(
+                    staged,
+                    principal=S01CommandPrincipal(
+                        subject=str(job.get("worker_id") or self._worker_identity),
+                        role="worker",
+                        scope=self._application_visibility_scope(
+                            str(job["application_id"])
+                        ),
+                        source_id="s07-target-worker",
+                    ),
+                    reason_code=self._RUNTIME_STOP_REASON,
+                    failure_reason_code=reason_code,
+                    cohort_stop=next_stop,
+                )
         try:
             staged.persist()
         except Exception:
-            return
+            return {
+                "status": "authority_unavailable",
+                "reason_code": "control.failure_publication_unavailable",
+                "retry_after_seconds": 0,
+                "reconciliation": {
+                    "status": "failure_publication_unavailable",
+                    "logical_operation_id": job["job_id"],
+                    "attempt": publication_attempt,
+                    "max_attempts": self._MAX_FAILURE_ATTEMPTS,
+                },
+            }
         self._store = staged
+        return {
+            "status": status,
+            "reason_code": reason_code,
+            "retry_after_seconds": retry_after,
+            "reconciliation": {
+                "status": (
+                    "failure_publication_exhausted"
+                    if exhausted
+                    else "failure_publication_pending"
+                ),
+                "logical_operation_id": job["job_id"],
+                "attempt": publication_attempt,
+                "max_attempts": self._MAX_FAILURE_ATTEMPTS,
+            },
+        }
 
     def _schedule_failure_retry(
         self,

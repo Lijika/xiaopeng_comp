@@ -1046,6 +1046,190 @@ def test_publication_failure_is_atomic_and_authority_stop_reconciles_later(
     assert authority.fact_counts()["findings"] == 0
 
 
+def test_persistent_failure_publication_fault_stops_then_reconciles_without_reexecution(
+    tmp_path: Path,
+) -> None:
+    class PersistentPublicationFault:
+        enabled = True
+
+        def __call__(self, point: str) -> None:
+            if self.enabled and point == "s07.failure.audit":
+                raise OSError("audit authority unavailable")
+
+    checker_calls: list[str] = []
+
+    def checker_must_not_run(application: object) -> object:
+        checker_calls.append(str(application))
+        raise AssertionError("failure publication must not re-execute the checker")
+
+    fault = PersistentPublicationFault()
+    service = _service(
+        tmp_path,
+        fault_injector=fault,
+        checker_runner=checker_must_not_run,
+    )
+    application_id = _admit(service)
+    driver = ControlledScenarioTestDriver(service)
+
+    first = driver.process_next_job(
+        worker_id="s07-publication-worker",
+        now=40,
+        operation_fault="checker_incompatible",
+    )
+    assert first.status == "authority_unavailable"
+    assert first.reason_code == "control.failure_publication_unavailable"
+    assert first.retry_after_seconds == 1
+    assert first.reconciliation == {
+        "status": "failure_publication_pending",
+        "logical_operation_id": first.job_id,
+        "attempt": 1,
+        "max_attempts": 3,
+    }
+    assert first.recovery_work_id is None
+    first_counts = service.fact_counts()
+    first_history = service.application_history_view(
+        principal=REVIEWER,
+        application_id=application_id,
+    )
+    assert first_counts["attempts"] == 1
+    assert first_counts["runs"] == 1
+    assert first_counts["findings"] == 0
+    assert len(first_history["runs"]) == 1
+    original_run_id = first_history["runs"][0]["run_id"]
+    original_snapshot_id = first_history["runs"][0]["evidence_snapshot_id"]
+    assert service.current_route_view(
+        principal=REVIEWER,
+        application_id=application_id,
+    )["phase"] == "Checking"
+
+    too_early = driver.process_next_job(
+        worker_id="s07-publication-worker",
+        now=40,
+        operation_fault="checker_incompatible",
+    )
+    second = driver.process_next_job(
+        worker_id="s07-publication-worker",
+        now=41,
+        operation_fault="checker_incompatible",
+    )
+    assert too_early.status == "idle"
+    assert second.status == "authority_unavailable"
+    assert second.retry_after_seconds == 2
+    assert second.reconciliation == {
+        "status": "failure_publication_pending",
+        "logical_operation_id": first.job_id,
+        "attempt": 2,
+        "max_attempts": 3,
+    }
+    assert service.fact_counts() == first_counts
+
+    too_early_again = driver.process_next_job(
+        worker_id="s07-publication-worker",
+        now=42,
+        operation_fault="checker_incompatible",
+    )
+    exhausted = driver.process_next_job(
+        worker_id="s07-publication-worker",
+        now=43,
+        operation_fault="checker_incompatible",
+    )
+    assert too_early_again.status == "idle"
+    assert exhausted.status == "stopped"
+    assert exhausted.reason_code == "control.failure_publication_exhausted"
+    assert exhausted.retry_after_seconds == 0
+    assert exhausted.reconciliation == {
+        "status": "failure_publication_exhausted",
+        "logical_operation_id": first.job_id,
+        "attempt": 3,
+        "max_attempts": 3,
+    }
+    assert exhausted.recovery_work_id is None
+    exhausted_counts = service.fact_counts()
+    assert exhausted_counts == {
+        **first_counts,
+        "audit_events": first_counts["audit_events"] + 1,
+    }
+    assert service.cohort_status() == {
+        "track": "C-DEMO",
+        "admission": "stopped",
+        "reason_code": "S01_RUNTIME_UNHEALTHY",
+        "failure_reason_code": "control.failure_publication_exhausted",
+    }
+    assert service.current_route_view(
+        principal=REVIEWER,
+        application_id=application_id,
+    )["phase"] == "Checking"
+
+    stable = driver.process_next_job(
+        worker_id="s07-publication-worker",
+        now=100,
+        operation_fault="checker_incompatible",
+    )
+    assert stable.status == "stopped"
+    assert stable.reason_code == "control.failure_publication_exhausted"
+    assert service.fact_counts() == exhausted_counts
+
+    restarted = _service(
+        tmp_path,
+        fault_injector=fault,
+        checker_runner=checker_must_not_run,
+    )
+    assert restarted.cohort_status() == service.cohort_status()
+    assert restarted.fact_counts() == exhausted_counts
+    assert ControlledScenarioTestDriver(restarted).process_next_job(
+        worker_id="s07-publication-worker",
+        now=101,
+        operation_fault="checker_incompatible",
+    ).status == "stopped"
+    assert restarted.fact_counts() == exhausted_counts
+
+    unverified = restarted.recover_runtime(
+        principal=OPERATOR,
+        expected_failure_reason_code="control.failure_publication_exhausted",
+    )
+    assert unverified["recovery"] == "rejected"
+    assert unverified["reason_code"] == "S01_RUNTIME_REPAIR_NOT_VERIFIED"
+    assert unverified["requeued_jobs"] == 0
+    assert restarted.fact_counts() == exhausted_counts
+
+    fault.enabled = False
+    recovered = restarted.recover_runtime(
+        principal=OPERATOR,
+        expected_failure_reason_code="control.failure_publication_exhausted",
+    )
+    assert recovered["recovery"] == "scheduled"
+    assert recovered["requeued_jobs"] == 1
+    reconciled = ControlledScenarioTestDriver(restarted).process_next_job(
+        worker_id="s07-publication-worker",
+        now=102,
+    )
+    assert reconciled.status == "blocked"
+    assert reconciled.reason_code == "configuration.checker_unavailable"
+    assert reconciled.job_id == first.job_id
+    assert reconciled.run_id == original_run_id
+    assert reconciled.recovery_work_id is not None
+    final_counts = restarted.fact_counts()
+    assert final_counts["attempts"] == first_counts["attempts"]
+    assert final_counts["evidence_events"] == first_counts["evidence_events"]
+    assert final_counts["findings"] == 0
+    final_history = restarted.application_history_view(
+        principal=REVIEWER,
+        application_id=application_id,
+    )
+    assert {run["run_id"] for run in final_history["runs"]} == {original_run_id}
+    assert {run["evidence_snapshot_id"] for run in final_history["runs"]} == {
+        original_snapshot_id
+    }
+    work = restarted.recovery_work_view(
+        principal=REVIEWER,
+        recovery_work_id=reconciled.recovery_work_id,
+    )
+    assert work["phase"] == "Unprocessable"
+    assert work["logical_operation_id"] == first.job_id
+    assert work["protected_business_revision"] == 0
+    assert checker_calls == []
+
+
 def test_object_storage_recovery_reenters_assembly_without_mutating_evidence(
     tmp_path: Path,
 ) -> None:
