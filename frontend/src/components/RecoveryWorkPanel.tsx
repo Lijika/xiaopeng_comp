@@ -175,8 +175,9 @@ export default function RecoveryWorkPanel({ workId }: { workId: string }) {
     }
   }, [verify.isError, verify.error]);
 
-  if (work.isPending || work.isError || work.data === undefined) {
-    const notFound = work.isError && work.error instanceof HttpError && work.error.status === 404;
+  if (work.isPending || work.data === undefined) {
+    const notFound =
+      work.isError && work.error instanceof HttpError && work.error.status === 404;
     return (
       <section
         className="panel"
@@ -199,7 +200,10 @@ export default function RecoveryWorkPanel({ workId }: { workId: string }) {
 
   const data = work.data;
   const canVerify =
-    data.can_verify === true && data.status === "open" && !requiresReload;
+    data.can_verify === true &&
+    data.status === "open" &&
+    !requiresReload &&
+    !verify.isSuccess;
   const command: VerifyRecoveryCommand = {
     expected_lifecycle_revision: data.lifecycle_revision,
     expected_criterion_digest: data.criterion.digest,
@@ -220,11 +224,26 @@ export default function RecoveryWorkPanel({ workId }: { workId: string }) {
   };
 
   const handleReload = async () => {
-    // Authoritative reload: refetch every owning server query first, then
-    // issue a new semantic idempotency key for the next command.
-    await queryClient.refetchQueries({ queryKey: WORK_KEY(workId) });
+    // Authoritative reload.  A failed refetch must never clear the conflict
+    // fence nor rotate the semantic idempotency key, so the refetch throws
+    // and the fence is kept on failure.
+    try {
+      await queryClient.refetchQueries(
+        { queryKey: WORK_KEY(workId) },
+        { throwOnError: true },
+      );
+    } catch {
+      return;
+    }
     await queryClient.invalidateQueries({ queryKey: ["s01"] });
-    setVerifyKey(newIdempotencyKey());
+    const outcomeKnown = verify.error instanceof HttpError || !verify.isError;
+    if (outcomeKnown) {
+      // A known server rejection (e.g. 409) proves the previous key was
+      // never accepted; a fresh semantic key is safe.  An unknown transport
+      // outcome keeps the original key so a retry replays idempotently.
+      setVerifyKey(newIdempotencyKey());
+      verify.reset();
+    }
     setRequiresReload(false);
     setConflictReason(null);
   };
@@ -251,7 +270,7 @@ export default function RecoveryWorkPanel({ workId }: { workId: string }) {
         <Button onClick={handleVerify} disabled={!canVerify || verify.isPending}>
           验证恢复
         </Button>
-        {transportUnknown && (
+        {transportUnknown && data.status === "open" && (
           <Button variant="outline" onClick={handleVerify}>
             重试
           </Button>
@@ -260,6 +279,14 @@ export default function RecoveryWorkPanel({ workId }: { workId: string }) {
       <p role="status" aria-live="polite" data-testid="recovery-command-status">
         {verifyOutcome}
       </p>
+      {work.isError && (
+        <p
+          className="text-sm text-muted-foreground"
+          data-testid="recovery-refetch-error"
+        >
+          状态刷新失败：显示上次已确认的服务端状态
+        </p>
+      )}
       {!data.can_verify && (
         <p className="text-sm text-muted-foreground" data-testid="recovery-role-note">
           当前角色无法执行恢复验证

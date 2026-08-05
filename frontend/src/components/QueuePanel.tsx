@@ -34,6 +34,7 @@ export default function QueuePanel({
   onOpenWork: (workId: string) => void;
 }) {
   const query = useQueue();
+  const accessEnded = query.data?.access_ended === true;
 
   return (
     <section
@@ -55,15 +56,25 @@ export default function QueuePanel({
           ? "队列加载中"
           : query.isError
             ? "队列不可用"
-            : query.data?.recovery_items?.length
-              ? "队列已同步"
-              : "队列为空"}
+            : accessEnded
+              ? "会话已过期"
+              : query.data?.recovery_items?.length
+                ? "队列已同步"
+                : "队列为空"}
       </p>
 
       {query.isPending ? (
         <p data-testid="queue-loading">队列加载中…</p>
       ) : query.isError ? (
         <p data-testid="queue-error">队列不可用</p>
+      ) : accessEnded ? (
+        <p
+          className="text-sm text-muted-foreground"
+          role="alert"
+          data-testid="queue-access-ended"
+        >
+          会话已过期：请重新打开受控审核工作台以恢复访问
+        </p>
       ) : (
         <>
           <section aria-labelledby="queue-manual-title">

@@ -1350,6 +1350,8 @@ export interface components {
         };
         /** S01QueueResponse */
         S01QueueResponse: {
+            /** Access Ended */
+            access_ended?: boolean | null;
             /** Items */
             items: components["schemas"]["S01QueueManualItem"][];
             /** Projection Watermark */
@@ -1500,6 +1502,26 @@ export interface components {
             idempotency_key: string;
             /** Scenario Id */
             scenario_id: string;
+        };
+        /** S01ValidationErrorItem */
+        S01ValidationErrorItem: {
+            /** Ctx */
+            ctx?: {
+                [key: string]: unknown;
+            } | null;
+            /** Input */
+            input?: unknown | null;
+            /** Loc */
+            loc: (string | number)[];
+            /** Msg */
+            msg: string;
+            /** Type */
+            type: string;
+        };
+        /** S01VerifyErrorResponse */
+        S01VerifyErrorResponse: {
+            /** Detail */
+            detail: components["schemas"]["S01ErrorDetail"] | components["schemas"]["S01ValidationErrorItem"][];
         };
         /** S01VerifyRecoveryResult */
         S01VerifyRecoveryResult: {
@@ -2501,7 +2523,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["S01VerifyErrorResponse"];
                 };
             };
             /** @description Service Unavailable */
@@ -2790,6 +2812,15 @@ export interface operations {
                     "application/json": components["schemas"]["S01CurrentRouteResponse"];
                 };
             };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
             /** @description Validation Error */
             422: {
                 headers: {
@@ -2936,6 +2967,8 @@ export interface operations {
             /** @description Successful Response */
             200: {
                 headers: {
+                    /** @description Set to 1 when the session expired or is invalid; the response then hides all work (empty collections). */
+                    "X-S01-Access-Ended"?: "1";
                     [name: string]: unknown;
                 };
                 content: {
@@ -2962,6 +2995,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["S01RecoveryWorkResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
                 };
             };
             /** @description Validation Error */

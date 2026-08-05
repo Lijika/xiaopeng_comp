@@ -122,8 +122,8 @@ describe("queue shell (App)", () => {
     fetchRouter({
       "GET /controlled/s01/api/queries/queue": () =>
         new Response(
-          JSON.stringify({ detail: { error: "S01_UNAVAILABLE" } }),
-          { status: 503, headers: { "Content-Type": "application/json" } },
+          JSON.stringify({ detail: { error: "S01_INTERNAL_ERROR" } }),
+          { status: 500, headers: { "Content-Type": "application/json" } },
         ),
     });
     renderWithQuery(<App />);
@@ -132,8 +132,39 @@ describe("queue shell (App)", () => {
     );
     expect(screen.getByTestId("queue-error")).toHaveTextContent("队列不可用");
     expect(screen.getByTestId("queue-error").textContent).not.toContain(
-      "S01_UNAVAILABLE",
+      "S01_INTERNAL_ERROR",
     );
+  });
+
+  it("shows an explicit session-expired state without leaking work existence", async () => {
+    const router = fetchRouter({
+      "GET /controlled/s01/api/queries/queue": () =>
+        new Response(
+          JSON.stringify({
+            items: [],
+            recovery_items: [],
+            projection_watermark: 0,
+            access_ended: true,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    renderWithQuery(<App />);
+    await waitFor(() =>
+      expect(screen.getByTestId("queue-access-ended")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("queue-access-ended")).toHaveTextContent(
+      "会话已过期",
+    );
+    expect(screen.queryByTestId("queue-empty")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("queue-recovery-empty")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("queue-recovery-items")).not.toBeInTheDocument();
+    expect(screen.getByTestId("queue-status")).toHaveTextContent("会话已过期");
+    expect(screen.getByTestId("queue-access-ended")).toHaveAttribute(
+      "role",
+      "alert",
+    );
+    expect(router.calls).toHaveLength(1);
   });
 
   it("lists server-owned recovery items and opens the work view on click", async () => {

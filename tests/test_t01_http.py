@@ -68,6 +68,30 @@ def create_t01_test_app() -> Any:
         web.S01_REACT_INDEX = Path(react_dir).resolve() / "index.html"
     return web.app
 
+
+def create_t01_expiring_app() -> Any:
+    """S07-style test app with an externally driven session clock (P1)."""
+    from tests.test_s07_http import _FailFirstS07Driver
+
+    import task4_consistency.web.app as web
+
+    clock_path = Path(os.environ["TASK4_S01_TEST_SESSION_CLOCK_PATH"])
+    web.S01_SESSION_CLOCK = lambda: float(clock_path.read_text(encoding="ascii"))
+    web.S01_SESSION_TTL_SECONDS = int(
+        os.environ["TASK4_S01_TEST_SESSION_TTL_SECONDS"]
+    )
+    web.S01_BACKGROUND_ENABLED = False
+    web.S01_REQUIRE_CONFIGURED_STARTUP = False
+    web.S01_SERVICE = ControlledScenarioService(
+        fixture_root=ROOT / "fixtures" / "applications",
+        rules_path=ROOT / "configs" / "rules_auto_lease.yaml",
+        state_path=Path(os.environ["TASK4_S01_TEST_STATE_PATH"]),
+        recovery_verifier=None,
+        worker_identity="t01-expiring-worker",
+    )
+    web.S01_TEST_DRIVER = _FailFirstS07Driver(web.S01_SERVICE)
+    return web.app
+
 MANUAL_ITEM_FIELDS = {
     "application_id",
     "work_item_id",
@@ -346,7 +370,7 @@ def test_openapi_typed_dto_contract_for_migrated_seams(tmp_path: Path) -> None:
         "expected_criterion_digest",
         "idempotency_key",
     }
-    for status in ("404", "409", "422", "503"):
+    for status in ("404", "409", "503"):
         error_schema = (
             verify_operation["responses"]
             .get(status, {})
@@ -362,9 +386,79 @@ def test_openapi_typed_dto_contract_for_migrated_seams(tmp_path: Path) -> None:
         assert "reason_code" in detail_schema["properties"]
         assert "message" in detail_schema["properties"]
 
+    verify_422_schema = (
+        verify_operation["responses"]
+        .get("422", {})
+        .get("content", {})
+        .get("application/json", {})
+        .get("schema")
+    )
+    assert verify_422_schema is not None
+    verify_422_model = resolve(verify_422_schema)
+    assert verify_422_model.get("additionalProperties") is not True
+    assert set(verify_422_model["required"]) == {"detail"}
+    verify_422_detail = verify_422_model["properties"]["detail"]
+    assert "anyOf" in verify_422_detail, verify_422_detail
+    one_of_refs = [
+        member.get("$ref") or member.get("type") for member in verify_422_detail["anyOf"]
+    ]
+    assert "#/components/schemas/S01ErrorDetail" in one_of_refs
+    assert "array" in one_of_refs
+    validation_schema = components["S01ValidationErrorItem"]
+    assert validation_schema.get("additionalProperties") is not True
+    assert {"loc", "msg", "type"} <= set(validation_schema["required"])
+    assert validation_schema["properties"]["loc"]["type"] == "array"
+    assert "input" in validation_schema["properties"]
+    assert "ctx" in validation_schema["properties"]
+
+    recovery_read_operation = next(
+        operation
+        for operation in spec["paths"][recovery_path].values()
+        if isinstance(operation, dict) and "responses" in operation
+    )
+    recovery_404 = (
+        recovery_read_operation["responses"]
+        .get("404", {})
+        .get("content", {})
+        .get("application/json", {})
+        .get("schema")
+    )
+    assert recovery_404 is not None
+    assert resolve(recovery_404) is components["S01ErrorResponse"] or (
+        resolve(recovery_404).get("additionalProperties") is not True
+    )
+
     current_route_path = (
         "/controlled/s01/api/queries/applications/{application_id}/current-route"
     )
+    current_route_operation = next(
+        operation
+        for operation in spec["paths"][current_route_path].values()
+        if isinstance(operation, dict) and "responses" in operation
+    )
+    current_route_404 = (
+        current_route_operation["responses"]
+        .get("404", {})
+        .get("content", {})
+        .get("application/json", {})
+        .get("schema")
+    )
+    assert current_route_404 is not None
+    assert resolve(current_route_404).get("additionalProperties") is not True
+
+    queue_operation = next(
+        operation
+        for operation in spec["paths"][queue_path].values()
+        if isinstance(operation, dict) and "responses" in operation
+    )
+    queue_200 = queue_operation["responses"]["200"]
+    assert "X-S01-Access-Ended" in queue_200.get("headers", {})
+    access_ended = queue_schema["properties"].get("access_ended")
+    assert access_ended is not None
+    assert "boolean" in [
+        member.get("type") for member in access_ended.get("anyOf", [])
+    ]
+
     current_route_schema = success_schema(current_route_path)
     current_route_required = set(current_route_schema["required"])
     assert {
@@ -759,3 +853,177 @@ def test_react_shell_serves_committed_build_with_no_store_shell_and_immutable_as
             use_session=False,
         )
         assert legacy.status == 200, legacy.text
+
+
+def test_verify_validation_errors_return_the_real_detail_list_shape(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "t01-validation.sqlite3"
+    with UvicornLoopback(
+        _environment(state_path, "verified"),
+        app_target=APP_FACTORY,
+        app_factory=True,
+    ) as server:
+        blocked = _admit_and_block(server, "t01-validation-a", now=10)
+
+        missing_field = server.request(
+            "POST",
+            _verify_path(blocked["recovery_work_id"]),
+            body={
+                "expected_lifecycle_revision": 1,
+                "idempotency_key": "t01-validation-missing-digest",
+            },
+            headers=operator_auth_headers(),
+            use_session=False,
+        )
+        assert missing_field.status == 422
+        payload = missing_field.json()
+        assert isinstance(payload["detail"], list)
+        assert all(
+            {"loc", "msg", "type"} <= set(item)
+            and isinstance(item["loc"], list)
+            for item in payload["detail"]
+        )
+        assert any(
+            "expected_criterion_digest" in item["loc"] for item in payload["detail"]
+        )
+
+        bad_digest = server.request(
+            "POST",
+            _verify_path(blocked["recovery_work_id"]),
+            body={
+                "expected_lifecycle_revision": 1,
+                "expected_criterion_digest": "not-a-hex-digest",
+                "idempotency_key": "t01-validation-bad-digest",
+            },
+            headers=operator_auth_headers(),
+            use_session=False,
+        )
+        assert bad_digest.status == 422
+        assert isinstance(bad_digest.json()["detail"], list)
+
+        extra_field = server.request(
+            "POST",
+            _verify_path(blocked["recovery_work_id"]),
+            body={
+                "expected_lifecycle_revision": 1,
+                "expected_criterion_digest": "a" * 64,
+                "idempotency_key": "t01-validation-extra",
+                "target": "attacker-injected",
+            },
+            headers=operator_auth_headers(),
+            use_session=False,
+        )
+        assert extra_field.status == 422
+        assert isinstance(extra_field.json()["detail"], list)
+        assert blocked["recovery_work_id"] not in extra_field.text
+        assert all(
+            value not in extra_field.text for value in _restricted_strings()
+        )
+
+
+def test_verify_contract_rejection_is_a_typed_error_response(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "t01-contract.sqlite3"
+    with UvicornLoopback(
+        _environment(state_path, "verified"),
+        app_target=APP_FACTORY,
+        app_factory=True,
+    ) as server:
+        blocked = _admit_and_block(server, "t01-contract-a", now=10)
+        padded = server.request(
+            "POST",
+            _verify_path(blocked["recovery_work_id"]),
+            body={
+                "expected_lifecycle_revision": 1,
+                "expected_criterion_digest": "a" * 64,
+                "idempotency_key": "  padded-key  ",
+            },
+            headers=operator_auth_headers(),
+            use_session=False,
+        )
+        assert padded.status == 422
+        assert padded.json() == {
+            "detail": {
+                "error": "S07_INVALID_COMMAND",
+                "message": "VerifyRecovery command does not match the contract",
+            }
+        }
+
+
+def test_unauthenticated_recovery_reads_and_commands_are_hidden_typed_404(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "t01-hidden.sqlite3"
+    with UvicornLoopback(
+        _environment(state_path, "verified"),
+        app_target=APP_FACTORY,
+        app_factory=True,
+    ) as server:
+        blocked = _admit_and_block(server, "t01-hidden-a", now=10)
+        hidden_read = server.request(
+            "GET",
+            _recovery_path(blocked["recovery_work_id"]),
+            use_session=False,
+        )
+        assert hidden_read.status == 404
+        assert hidden_read.json() == {"detail": {"error": "S07_NOT_FOUND"}}
+        assert blocked["recovery_work_id"] not in hidden_read.text
+
+        hidden_command = server.request(
+            "POST",
+            _verify_path(blocked["recovery_work_id"]),
+            body={
+                "expected_lifecycle_revision": 1,
+                "expected_criterion_digest": "a" * 64,
+                "idempotency_key": "t01-hidden-command",
+            },
+            use_session=False,
+        )
+        assert hidden_command.status == 404
+        assert hidden_command.json() == {"detail": {"error": "S07_NOT_FOUND"}}
+        assert blocked["recovery_work_id"] not in hidden_command.text
+
+
+def test_react_shell_falls_back_to_legacy_for_partial_builds(tmp_path: Path) -> None:
+    state_path = tmp_path / "t01-partial.sqlite3"
+    legacy_marker = "一致性审核工作台 · C-DEMO"
+    cases = {
+        "missing-js": (
+            '<html><head></head><body><div id="root"></div>'
+            '<script type="module" src="/static/react/assets/index-MISSING-JS.js"></script>'
+            "</body></html>"
+        ),
+        "missing-css": (
+            '<html><head>'
+            '<link rel="stylesheet" href="/static/react/assets/index-MISSING-CSS.css">'
+            '</head><body><div id="root"></div></body></html>'
+        ),
+        "no-assets": (
+            '<html><head></head><body><div id="root"></div></body></html>'
+        ),
+    }
+    for case_name, index_html in cases.items():
+        react_dir = tmp_path / f"partial-{case_name}"
+        react_dir.mkdir()
+        (react_dir / "index.html").write_text(index_html, encoding="utf-8")
+        env = _create_t01_app_environment(
+            state_path, "verified", str(react_dir)
+        )
+        with UvicornLoopback(
+            env,
+            app_target="tests.test_t01_http:create_t01_test_app",
+            app_factory=True,
+        ) as server:
+            shell = server.request(
+                "GET",
+                "/controlled/s01/react",
+                headers=demo_auth_headers(),
+                use_session=False,
+            )
+            assert shell.status == 200, (case_name, shell.text)
+            assert legacy_marker in shell.text, case_name
+            assert "index-MISSING" not in shell.text, case_name
+            assert shell.headers["cache-control"] == "no-store"
+            assert "set-cookie" in shell.headers

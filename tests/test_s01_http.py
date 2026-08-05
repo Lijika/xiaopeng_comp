@@ -1869,7 +1869,12 @@ def test_issued_session_expiry_denies_commands_hides_reads_and_changes_no_busine
     assert expired_command.status == 403
     assert admission["application_id"] not in expired_command.text
     assert hidden_queue.status == 200
-    assert hidden_queue.json() == {"items": [], "recovery_items": [], "projection_watermark": 0}
+    assert hidden_queue.json() == {
+        "items": [],
+        "recovery_items": [],
+        "projection_watermark": 0,
+        "access_ended": True,
+    }
     assert hidden_queue.headers["x-s01-access-ended"] == "1"
     assert hidden_workspace.status == 404
     assert admission["application_id"] not in hidden_workspace.text

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -618,6 +619,7 @@ class S01QueueResponse(BaseModel):
     items: list[S01QueueManualItem]
     recovery_items: list[S01RecoveryQueueItem]
     projection_watermark: int
+    access_ended: bool | None = None
 
 
 class S01RecoveryAttempt(BaseModel):
@@ -718,6 +720,18 @@ class S01ErrorDetail(BaseModel):
 
 class S01ErrorResponse(BaseModel):
     detail: S01ErrorDetail
+
+
+class S01ValidationErrorItem(BaseModel):
+    loc: list[str | int]
+    msg: str
+    type: str
+    input: Any | None = None
+    ctx: dict[str, Any] | None = None
+
+
+class S01VerifyErrorResponse(BaseModel):
+    detail: S01ErrorDetail | list[S01ValidationErrorItem]
 
 
 class S01CurrentRouteFailure(BaseModel):
@@ -1713,18 +1727,44 @@ async def controlled_s03_submit_review_batch(
     return _s03_command_result(result)
 
 
-@app.get("/controlled/s01", response_class=HTMLResponse)
-def controlled_s01_page(request: Request) -> HTMLResponse:
-    _s01_service()
-    if not S01_TEMPLATE.is_file():
-        raise HTTPException(500, detail={"error": "S01_PAGE_UNAVAILABLE"})
-    response = HTMLResponse(S01_TEMPLATE.read_text(encoding="utf-8"))
+def _controlled_s01_shell_response(request: Request, html: str) -> HTMLResponse:
+    response = HTMLResponse(html)
     if _s01_has_credential(request, S01_OPERATOR_CREDENTIAL):
         _s01_require_operator(request)
     else:
         _issue_s01_session(request, response)
     _s01_disable_cache(response)
     return response
+
+
+_REACT_ASSET_REFERENCE = re.compile(r'(?:src|href)="(/static/react/[^"]+)"')
+
+
+def _react_build_is_complete(index_html: str) -> bool:
+    root = S01_REACT_INDEX.parent
+    referenced: list[str] = []
+    for match in _REACT_ASSET_REFERENCE.finditer(index_html):
+        url_path = match.group(1)
+        if not url_path.endswith((".js", ".css")):
+            continue
+        referenced.append(url_path)
+    if not referenced:
+        return False
+    for url_path in referenced:
+        candidate = root.joinpath(url_path.removeprefix("/static/react/"))
+        if not candidate.is_file():
+            return False
+    return True
+
+
+@app.get("/controlled/s01", response_class=HTMLResponse)
+def controlled_s01_page(request: Request) -> HTMLResponse:
+    _s01_service()
+    if not S01_TEMPLATE.is_file():
+        raise HTTPException(500, detail={"error": "S01_PAGE_UNAVAILABLE"})
+    return _controlled_s01_shell_response(
+        request, S01_TEMPLATE.read_text(encoding="utf-8")
+    )
 
 
 @app.get("/controlled/s01/react", response_class=HTMLResponse)
@@ -1738,13 +1778,20 @@ def controlled_s01_react_page(request: Request) -> HTMLResponse:
                 "message": "Controlled S01 React shell is not built",
             },
         )
-    response = HTMLResponse(S01_REACT_INDEX.read_text(encoding="utf-8"))
-    if _s01_has_credential(request, S01_OPERATOR_CREDENTIAL):
-        _s01_require_operator(request)
-    else:
-        _issue_s01_session(request, response)
-    _s01_disable_cache(response)
-    return response
+    index_html = S01_REACT_INDEX.read_text(encoding="utf-8")
+    if not _react_build_is_complete(index_html):
+        if not S01_TEMPLATE.is_file():
+            raise HTTPException(
+                503,
+                detail={
+                    "error": "S01_REACT_UNAVAILABLE",
+                    "message": "Controlled S01 React shell is not built",
+                },
+            )
+        return _controlled_s01_shell_response(
+            request, S01_TEMPLATE.read_text(encoding="utf-8")
+        )
+    return _controlled_s01_shell_response(request, index_html)
 
 
 @app.post("/controlled/s01/api/session", status_code=204)
@@ -1854,6 +1901,9 @@ def controlled_s01_test_project(response: Response) -> dict[str, int]:
 @app.get(
     "/controlled/s01/api/queries/recovery-work-items/{recovery_work_id}",
     response_model=S01RecoveryWorkResponse,
+    responses={
+        404: {"model": S01ErrorResponse},
+    },
 )
 def controlled_s07_recovery_work(
     recovery_work_id: str,
@@ -1878,7 +1928,7 @@ def controlled_s07_recovery_work(
     responses={
         404: {"model": S01ErrorResponse},
         409: {"model": S01ErrorResponse},
-        422: {"model": S01ErrorResponse},
+        422: {"model": S01VerifyErrorResponse},
         503: {"model": S01ErrorResponse},
     },
 )
@@ -1911,7 +1961,24 @@ def controlled_s07_verify_recovery(
     return _s07_command_result(result)
 
 
-@app.get("/controlled/s01/api/queries/queue", response_model=S01QueueResponse)
+@app.get(
+    "/controlled/s01/api/queries/queue",
+    response_model=S01QueueResponse,
+    response_model_exclude_none=True,
+    responses={
+        200: {
+            "headers": {
+                "X-S01-Access-Ended": {
+                    "schema": {"type": "string", "enum": ["1"]},
+                    "description": (
+                        "Set to 1 when the session expired or is invalid; the "
+                        "response then hides all work (empty collections)."
+                    ),
+                }
+            }
+        }
+    },
+)
 def controlled_s01_queue(request: Request, response: Response) -> dict[str, Any]:
     _s01_disable_cache(response)
     principal = _s01_principal(request)
@@ -1920,9 +1987,15 @@ def controlled_s01_queue(request: Request, response: Response) -> dict[str, Any]
         or "reviewer" not in principal.roles
         or not ControlledScenarioService.is_c_demo_scope(principal.scope)
     ):
-        if getattr(request.state, "s01_access_ended", False):
+        access_ended = bool(getattr(request.state, "s01_access_ended", False))
+        if access_ended:
             response.headers["X-S01-Access-Ended"] = "1"
-        return {"items": [], "recovery_items": [], "projection_watermark": 0}
+        return {
+            "items": [],
+            "recovery_items": [],
+            "projection_watermark": 0,
+            "access_ended": True if access_ended else None,
+        }
     return _s01_service().queue_view(
         role="reviewer",
         scope=principal.scope,
@@ -2371,6 +2444,9 @@ async def controlled_s05_resume_business_exception_operations(
 @app.get(
     "/controlled/s01/api/queries/applications/{application_id}/current-route",
     response_model=S01CurrentRouteResponse,
+    responses={
+        404: {"model": S01ErrorResponse},
+    },
 )
 def controlled_s04_demo_current_route(
     application_id: str,

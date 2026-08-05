@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const committedApi = join(root, "frontend/src/generated/api.ts");
+const committedSchema = join(root, "frontend/src/generated/openapi.json");
 
 const scratch = mkdtempSync(join(tmpdir(), "xiaopeng-t01-generated-"));
 try {
@@ -31,14 +32,25 @@ try {
   );
   const committed = readFileSync(committedApi, "utf8");
   const regenerated = readFileSync(regeneratedPath, "utf8");
+  const committedSchemaText = readFileSync(committedSchema, "utf8");
+  const regeneratedSchemaText = readFileSync(schemaPath, "utf8");
+  const drift = [];
   if (committed !== regenerated) {
+    drift.push("frontend/src/generated/api.ts");
+  }
+  if (committedSchemaText !== regeneratedSchemaText) {
+    drift.push("frontend/src/generated/openapi.json");
+  }
+  if (drift.length > 0) {
     console.error(
-      "Generated API types drifted from the FastAPI OpenAPI document.\n" +
-        "Run `npm run generate:api` and commit the regenerated types.",
+      `Generated artifacts drifted from the FastAPI OpenAPI document: ${drift.join(", ")}.\n` +
+        "Run `npm run generate:api` and commit the regenerated artifacts.",
     );
     process.exitCode = 1;
   } else {
-    console.log("Generated API types match the FastAPI OpenAPI document.");
+    console.log(
+      "Generated API types and OpenAPI document match the FastAPI authority.",
+    );
   }
 } finally {
   rmSync(scratch, { recursive: true, force: true });

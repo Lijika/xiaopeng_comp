@@ -2297,3 +2297,62 @@ def test_release_drill_resumes_only_after_probe_and_fences_old_execution(
     assert unknown_final["job_status"] == "outcome_unknown"
     assert unknown_final["recovery_fact_count"] == 0
     assert unknown_final["resolution_count"] == 0
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    (
+        "envelope",
+        "lifecycle",
+    ),
+)
+def test_queue_publishes_no_recovery_item_for_corrupt_application_authority(
+    tmp_path: Path, corruption: str
+) -> None:
+    service = _service(tmp_path)
+    driver = ControlledScenarioTestDriver(service)
+
+    application_id = _admit(service)
+    failure = driver.process_next_job(
+        worker_id="s07-queue-authority-worker",
+        now=10,
+        operation_fault="checker_incompatible",
+    )
+    assert failure.status == "blocked"
+    assert failure.recovery_work_id is not None
+    queue_before = service.queue_view(
+        role="reviewer",
+        scope="C-DEMO",
+        subject=REVIEWER.subject,
+    )
+    assert [
+        item["recovery_work_id"] for item in queue_before["recovery_items"]
+    ] == [failure.recovery_work_id]
+
+    corrupt_app = service._store.applications[application_id]
+    assert corrupt_app["phase"] == "Unprocessable"
+    if corruption == "envelope":
+        corrupt_app["upstream_application_reference"] = "attacker-controlled-ref"
+    else:
+        service._store.lifecycle_events.append(
+            {
+                "event_id": "s07-attacker-injected-lifecycle",
+                "application_id": application_id,
+                "revision": 999,
+                "cycle": 1,
+                "phase": "Evidence Ready",
+                "reason_code": "ATTACK_INJECTED",
+            }
+        )
+    service._store.persist()
+
+    queue_after = service.queue_view(
+        role="reviewer",
+        scope="C-DEMO",
+        subject=REVIEWER.subject,
+    )
+    assert queue_after["recovery_items"] == []
+    assert queue_after["items"] == []
+    assert queue_after["projection_watermark"] == queue_before["projection_watermark"]
+    assert application_id not in str(queue_after)
+    assert failure.recovery_work_id not in str(queue_after)

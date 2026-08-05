@@ -11410,18 +11410,20 @@ class ControlledScenarioService:
                     continue
                 application_id = str(opened["application_id"])
                 recovery_app = self._store.applications.get(application_id)
-                if (
-                    not isinstance(recovery_app, dict)
-                    or recovery_app.get("phase") != "Unprocessable"
-                ):
+                if not isinstance(recovery_app, dict):
                     continue
                 try:
+                    self._require_application_state_authority(recovery_app)
                     if (
-                        self._application_review_assignee(application_id)
+                        recovery_app.get("phase") != "Unprocessable"
+                        or self._application_review_assignee(application_id)
                         != query_subject
                     ):
                         continue
-                except _ApplicationStateAuthorityUnavailable:
+                except Exception:
+                    # A corrupt or mismatched application must fail closed
+                    # per item: never publish a recovery item for it, and
+                    # never let it take down the whole queue projection.
                     continue
                 recovery_items.append(
                     {

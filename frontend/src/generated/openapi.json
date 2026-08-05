@@ -530,6 +530,17 @@
       },
       "S01QueueResponse": {
         "properties": {
+          "access_ended": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Access Ended"
+          },
           "items": {
             "items": {
               "$ref": "#/components/schemas/S01QueueManualItem"
@@ -949,6 +960,83 @@
           "idempotency_key"
         ],
         "title": "S01SubmitBody",
+        "type": "object"
+      },
+      "S01ValidationErrorItem": {
+        "properties": {
+          "ctx": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ctx"
+          },
+          "input": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Loc",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Msg",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "S01ValidationErrorItem",
+        "type": "object"
+      },
+      "S01VerifyErrorResponse": {
+        "properties": {
+          "detail": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/S01ErrorDetail"
+              },
+              {
+                "items": {
+                  "$ref": "#/components/schemas/S01ValidationErrorItem"
+                },
+                "type": "array"
+              }
+            ],
+            "title": "Detail"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "S01VerifyErrorResponse",
         "type": "object"
       },
       "S01VerifyRecoveryResult": {
@@ -2197,7 +2285,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/S01ErrorResponse"
+                  "$ref": "#/components/schemas/S01VerifyErrorResponse"
                 }
               }
             },
@@ -2550,6 +2638,16 @@
             },
             "description": "Successful Response"
           },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -2735,7 +2833,18 @@
                 }
               }
             },
-            "description": "Successful Response"
+            "description": "Successful Response",
+            "headers": {
+              "X-S01-Access-Ended": {
+                "description": "Set to 1 when the session expired or is invalid; the response then hides all work (empty collections).",
+                "schema": {
+                  "enum": [
+                    "1"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
           }
         },
         "summary": "Controlled S01 Queue"
@@ -2765,6 +2874,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
           },
           "422": {
             "content": {
