@@ -1086,7 +1086,7 @@ def test_tenant_source_binding_and_reviewer_queries_are_isolated(tmp_path: Path)
         role="reviewer",
         scope="R-OBSERVED/tenant-other",
         subject=INTEGRATOR.subject,
-    ) == {"items": [], "projection_watermark": 0}
+    ) == {"items": [], "recovery_items": [], "projection_watermark": 0}
 
 
 def test_quarantine_reconciliation_requires_a_new_key_and_preserves_history(

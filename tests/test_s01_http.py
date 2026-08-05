@@ -580,7 +580,7 @@ def test_http_principal_scopes_idempotency_and_is_recorded_in_audit(
     assert [item["application_id"] for item in first_queue["items"]] == [
         first["application_id"]
     ]
-    assert second_queue_before_submit == {"items": [], "projection_watermark": 0}
+    assert second_queue_before_submit == {"items": [], "recovery_items": [], "projection_watermark": 0}
     assert second_reads_first.status == 404
     assert second["disposition"] == "accepted"
     assert second["reason_code"] is None
@@ -778,7 +778,7 @@ def test_loopback_malformed_document_fields_are_stably_rejected(
     assert rejected.json()["evidence_revision"] == 0
     assert queue.status == 200
     assert queue.headers.get("cache-control") == "no-store"
-    assert queue.json() == {"items": [], "projection_watermark": 0}
+    assert queue.json() == {"items": [], "recovery_items": [], "projection_watermark": 0}
 
 
 def test_loopback_reconciles_lost_response_with_idempotent_replay(
@@ -839,7 +839,7 @@ def test_forged_role_headers_cannot_create_an_authenticated_principal(
 
     assert forged_submit.status == 403
     assert forged_queue.status == 200
-    assert forged_queue.json() == {"items": [], "projection_watermark": 0}
+    assert forged_queue.json() == {"items": [], "recovery_items": [], "projection_watermark": 0}
 
 
 def test_loopback_process_queue_workspace_and_minimized_evidence(
@@ -1287,7 +1287,7 @@ def test_http_restart_recovers_one_pending_projection_without_duplication(
         assert completed["projection_pending"] is True
         assert first.request(
             "GET", "/controlled/s01/api/queries/queue"
-        ).json() == {"items": [], "projection_watermark": 0}
+        ).json() == {"items": [], "recovery_items": [], "projection_watermark": 0}
 
     with s01_test_loopback(state_env) as projected:
         projected._session_cookie = first_cookie
@@ -1737,6 +1737,7 @@ def test_loopback_missing_session_denies_commands_before_owner_and_hides_queries
     ).json()
     assert authoritative_after == authoritative_before == {
         "items": [],
+        "recovery_items": [],
         "projection_watermark": 0,
     }
 
@@ -1748,7 +1749,7 @@ def test_loopback_missing_session_denies_commands_before_owner_and_hides_queries
         use_session=False,
     )
     assert hidden_before.status == 200
-    assert hidden_before.json() == {"items": [], "projection_watermark": 0}
+    assert hidden_before.json() == {"items": [], "recovery_items": [], "projection_watermark": 0}
 
     wait_for_projected_queue_item(loopback, admission["application_id"])
 
@@ -1868,7 +1869,7 @@ def test_issued_session_expiry_denies_commands_hides_reads_and_changes_no_busine
     assert expired_command.status == 403
     assert admission["application_id"] not in expired_command.text
     assert hidden_queue.status == 200
-    assert hidden_queue.json() == {"items": [], "projection_watermark": 0}
+    assert hidden_queue.json() == {"items": [], "recovery_items": [], "projection_watermark": 0}
     assert hidden_queue.headers["x-s01-access-ended"] == "1"
     assert hidden_workspace.status == 404
     assert admission["application_id"] not in hidden_workspace.text
@@ -1897,4 +1898,4 @@ def test_loopback_audit_or_storage_failure_creates_no_visible_target_revision(
             "GET", "/controlled/s01/api/queries/queue", headers=headers("reviewer")
         )
         assert queue.status == 200
-        assert queue.json() == {"items": [], "projection_watermark": 0}
+        assert queue.json() == {"items": [], "recovery_items": [], "projection_watermark": 0}

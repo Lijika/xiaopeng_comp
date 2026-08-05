@@ -4231,6 +4231,7 @@ class ControlledScenarioService:
                 "application_id": application_id,
                 "cycle": app["cycle"],
                 "phase": app["phase"],
+                "route": app["route"],
                 "lifecycle_revision": app["lifecycle_revision"],
                 "evidence_revision": app["evidence_revision"],
                 "primary_reason_code": work["primary_reason_code"],
@@ -11314,9 +11315,18 @@ class ControlledScenarioService:
         subject: str = "",
         now: float | None = None,
     ) -> dict[str, Any]:
-        """Return a minimized Reviewer queue projection, hiding unauthorized scope."""
+        """Return a minimized Reviewer queue projection, hiding unauthorized scope.
+
+        The response is backward compatible: ``items`` keeps its exact meaning
+        and fields.  The additive ``recovery_items`` collection is produced by
+        the Lifecycle authority from open Recovery Work for applications still
+        blocked in ``Unprocessable``; the requesting Reviewer can only see work
+        in an authorized scope that is assigned to them.  It contains no raw
+        evidence, verifier result, object reference, run specification,
+        credential, or client-computed transition.
+        """
         if role != "reviewer" or not self.is_controlled_scope(scope):
-            return {"items": [], "projection_watermark": 0}
+            return {"items": [], "recovery_items": [], "projection_watermark": 0}
         with self._lock:
             self._reload_store()
             self._repair_published_projections()
@@ -11332,6 +11342,7 @@ class ControlledScenarioService:
                 source_id="review-queue",
             )
             items: list[dict[str, Any]] = []
+            recovery_items: list[dict[str, Any]] = []
             visible_watermark = 0
             for projection in self._store.projections.values():
                 if projection.get("visibility_scope") not in visible_scopes:
@@ -11381,8 +11392,63 @@ class ControlledScenarioService:
                         "projection_watermark": projection["projection_watermark"],
                     }
                 )
+            recovery_events_by_work: dict[str, list[dict[str, Any]]] = {}
+            for event in self._store.recovery_events:
+                recovery_events_by_work.setdefault(
+                    str(event.get("recovery_work_id") or ""), []
+                ).append(event)
+            for opened in self._store.recovery_events:
+                if opened.get("kind") != "opened":
+                    continue
+                if not self._recovery_scope_visible(
+                    queue_principal, opened.get("visibility_scope")
+                ):
+                    continue
+                recovery_work_id = str(opened["recovery_work_id"])
+                work_events = recovery_events_by_work.get(recovery_work_id, [])
+                if not self._recovery_work_is_open(work_events):
+                    continue
+                application_id = str(opened["application_id"])
+                recovery_app = self._store.applications.get(application_id)
+                if (
+                    not isinstance(recovery_app, dict)
+                    or recovery_app.get("phase") != "Unprocessable"
+                ):
+                    continue
+                try:
+                    if (
+                        self._application_review_assignee(application_id)
+                        != query_subject
+                    ):
+                        continue
+                except _ApplicationStateAuthorityUnavailable:
+                    continue
+                recovery_items.append(
+                    {
+                        "recovery_work_id": recovery_work_id,
+                        "application_id": application_id,
+                        "status": "open",
+                        "phase": "Unprocessable",
+                        "primary_reason_code": str(
+                            opened["primary_reason_code"]
+                        ),
+                        "responsible_party": str(opened["responsible_party"]),
+                        "lifecycle_revision": int(
+                            recovery_app["lifecycle_revision"]
+                        ),
+                        "projection_watermark": int(
+                            self._store.projection_watermark
+                        ),
+                    }
+                )
+            if recovery_items:
+                visible_watermark = max(
+                    visible_watermark,
+                    int(self._store.projection_watermark),
+                )
             return {
                 "items": items,
+                "recovery_items": recovery_items,
                 "projection_watermark": visible_watermark,
             }
 
@@ -12584,6 +12650,19 @@ class ControlledScenarioService:
     @classmethod
     def is_controlled_scope(cls, scope: object) -> bool:
         return cls.is_c_demo_scope(scope) or cls.is_registered_scope(scope)
+
+    @classmethod
+    def _recovery_work_is_open(
+        cls, work_events: list[dict[str, Any]]
+    ) -> bool:
+        """True when the append-only events describe exactly one open work item."""
+        return (
+            sum(event.get("kind") == "opened" for event in work_events) == 1
+            and not any(
+                event.get("kind") in {"resolved", "superseded", "terminated"}
+                for event in work_events
+            )
+        )
 
     @classmethod
     def _recovery_scope_visible(

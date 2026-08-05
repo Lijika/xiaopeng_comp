@@ -1,10 +1,46 @@
 {
-  "name": "xiaopeng-comp-s01-browser",
+  "name": "xiaopeng-comp-task4-frontend",
   "private": true,
+  "engines": {
+    "node": "22.22.2",
+    "npm": "11.11.0"
+  },
   "scripts": {
-    "test:s01:browser": "playwright test tests/test_s01_browser.spec.js"
+    "test:s01:browser": "playwright test tests/test_s01_browser.spec.js",
+    "generate:api": ".venv/bin/python scripts/export_openapi.py frontend/src/generated/openapi.json && openapi-typescript frontend/src/generated/openapi.json -o frontend/src/generated/api.ts",
+    "check:generated": "node scripts/check_generated.mjs",
+    "typecheck": "tsc -p frontend/tsconfig.json --noEmit",
+    "test:unit": "vitest run --config frontend/vitest.config.ts",
+    "build": "npm run typecheck && npm run check:generated && vite build --config frontend/vite.config.ts",
+    "test:e2e:t01": "playwright test tests/test_t01_react.spec.js",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "@radix-ui/react-slot": "1.2.3",
+    "@tanstack/react-query": "5.101.4",
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "tailwind-merge": "3.3.1"
   },
   "devDependencies": {
-    "@playwright/test": "1.58.2"
+    "@playwright/test": "1.58.2",
+    "@tailwindcss/vite": "4.3.3",
+    "@testing-library/dom": "10.4.1",
+    "@testing-library/jest-dom": "7.0.0",
+    "@testing-library/react": "16.3.2",
+    "@testing-library/user-event": "14.6.3",
+    "@types/node": "22.20.1",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "@vitejs/plugin-react": "6.0.5",
+    "jsdom": "30.0.1",
+    "openapi-typescript": "7.13.0",
+    "shadcn": "4.16.1",
+    "tailwindcss": "4.3.3",
+    "typescript": "5.9.3",
+    "vite": "8.2.0",
+    "vitest": "4.1.10"
   }
 }

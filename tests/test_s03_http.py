@@ -767,6 +767,7 @@ def test_missing_cross_scope_and_expired_sessions_hide_work_item_existence(
         assert hidden_responses[offset].status == 200
         assert hidden_responses[offset].json() == {
             "items": [],
+            "recovery_items": [],
             "projection_watermark": 0,
         }
         assert [response.status for response in hidden_responses[offset + 1 : offset + 5]] == [
@@ -832,7 +833,7 @@ def test_missing_cross_scope_and_expired_sessions_hide_work_item_existence(
         ).json()
 
     assert expired_queue.status == 200
-    assert expired_queue.json() == {"items": [], "projection_watermark": 0}
+    assert expired_queue.json() == {"items": [], "recovery_items": [], "projection_watermark": 0}
     assert expired_queue.headers["x-s02-access-ended"] == "1"
     assert expired_query.status == 404
     assert expired_query.json()["detail"]["error"] == "S03_NOT_FOUND"

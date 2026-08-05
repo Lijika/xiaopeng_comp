@@ -1,0 +1,3449 @@
+{
+  "components": {
+    "schemas": {
+      "BatchCheckBody": {
+        "description": "Run check on multiple applications (inline or fixture filenames).\n\nSoft limit: BATCH_CHECK_MAX_N (default 50). For full labeled metrics use CLI\n``evaluate --suite main`` — there is no ``/api/evaluate/batch`` or job queue.",
+        "properties": {
+          "applications": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Applications"
+          },
+          "fixture_files": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fixture Files"
+          }
+        },
+        "title": "BatchCheckBody",
+        "type": "object"
+      },
+      "CheckBody": {
+        "properties": {
+          "application": {
+            "additionalProperties": true,
+            "title": "Application",
+            "type": "object"
+          },
+          "rules_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rules Path"
+          }
+        },
+        "required": [
+          "application"
+        ],
+        "title": "CheckBody",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "KBItem": {
+        "properties": {
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "section": {
+            "description": "address_aliases | org_aliases | plate_prefixes",
+            "title": "Section",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "section",
+          "key",
+          "value"
+        ],
+        "title": "KBItem",
+        "type": "object"
+      },
+      "RulesBody": {
+        "properties": {
+          "content": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content"
+          },
+          "yaml_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Yaml Text"
+          }
+        },
+        "title": "RulesBody",
+        "type": "object"
+      },
+      "S01CurrentRouteFailure": {
+        "properties": {
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "recovery_action": {
+            "title": "Recovery Action",
+            "type": "string"
+          },
+          "recovery_target": {
+            "title": "Recovery Target",
+            "type": "string"
+          },
+          "responsible_party": {
+            "title": "Responsible Party",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason_code",
+          "responsible_party",
+          "recovery_action",
+          "recovery_target"
+        ],
+        "title": "S01CurrentRouteFailure",
+        "type": "object"
+      },
+      "S01CurrentRouteResponse": {
+        "properties": {
+          "application_id": {
+            "title": "Application Id",
+            "type": "string"
+          },
+          "checker_build": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checker Build"
+          },
+          "completion_basis": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completion Basis"
+          },
+          "current_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Run Id"
+          },
+          "currentness_reason": {
+            "title": "Currentness Reason",
+            "type": "string"
+          },
+          "cycle": {
+            "title": "Cycle",
+            "type": "integer"
+          },
+          "evidence_revision": {
+            "title": "Evidence Revision",
+            "type": "integer"
+          },
+          "evidence_snapshot_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence Snapshot Digest"
+          },
+          "evidence_snapshot_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence Snapshot Id"
+          },
+          "exception_decision_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exception Decision Id"
+          },
+          "exception_expires_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exception Expires At"
+          },
+          "exception_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exception Id"
+          },
+          "failure": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/S01CurrentRouteFailure"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "lifecycle_revision": {
+            "title": "Lifecycle Revision",
+            "type": "integer"
+          },
+          "phase": {
+            "title": "Phase",
+            "type": "string"
+          },
+          "release_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Release Digest"
+          },
+          "release_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Release Id"
+          },
+          "route": {
+            "title": "Route",
+            "type": "string"
+          },
+          "schema_version": {
+            "title": "Schema Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "application_id",
+          "phase",
+          "route",
+          "cycle",
+          "lifecycle_revision",
+          "evidence_revision",
+          "currentness_reason"
+        ],
+        "title": "S01CurrentRouteResponse",
+        "type": "object"
+      },
+      "S01ErrorDetail": {
+        "properties": {
+          "error": {
+            "title": "Error",
+            "type": "string"
+          },
+          "hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hint"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Code"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "title": "S01ErrorDetail",
+        "type": "object"
+      },
+      "S01ErrorResponse": {
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/S01ErrorDetail"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "S01ErrorResponse",
+        "type": "object"
+      },
+      "S01ProcessBody": {
+        "properties": {
+          "cas_fault": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cas Fault"
+          },
+          "crash": {
+            "default": false,
+            "title": "Crash",
+            "type": "boolean"
+          },
+          "duplicate": {
+            "default": false,
+            "title": "Duplicate",
+            "type": "boolean"
+          },
+          "now": {
+            "default": 0,
+            "title": "Now",
+            "type": "integer"
+          },
+          "partial": {
+            "default": false,
+            "title": "Partial",
+            "type": "boolean"
+          },
+          "stale": {
+            "default": false,
+            "title": "Stale",
+            "type": "boolean"
+          },
+          "worker_id": {
+            "default": "s01-http-worker",
+            "title": "Worker Id",
+            "type": "string"
+          }
+        },
+        "title": "S01ProcessBody",
+        "type": "object"
+      },
+      "S01QueueBlocker": {
+        "properties": {
+          "finding_id": {
+            "title": "Finding Id",
+            "type": "string"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "rule_id": {
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "severity": {
+            "title": "Severity",
+            "type": "string"
+          }
+        },
+        "required": [
+          "finding_id",
+          "rule_id",
+          "reason_code",
+          "severity"
+        ],
+        "title": "S01QueueBlocker",
+        "type": "object"
+      },
+      "S01QueueManualItem": {
+        "properties": {
+          "application_id": {
+            "title": "Application Id",
+            "type": "string"
+          },
+          "assigned_subject": {
+            "title": "Assigned Subject",
+            "type": "string"
+          },
+          "claim_expires_at": {
+            "title": "Claim Expires At",
+            "type": "integer"
+          },
+          "claim_fence": {
+            "title": "Claim Fence",
+            "type": "integer"
+          },
+          "evidence_ready": {
+            "title": "Evidence Ready",
+            "type": "boolean"
+          },
+          "evidence_revision": {
+            "title": "Evidence Revision",
+            "type": "integer"
+          },
+          "lifecycle_revision": {
+            "title": "Lifecycle Revision",
+            "type": "integer"
+          },
+          "mandatory_blockers": {
+            "items": {
+              "$ref": "#/components/schemas/S01QueueBlocker"
+            },
+            "title": "Mandatory Blockers",
+            "type": "array"
+          },
+          "phase": {
+            "title": "Phase",
+            "type": "string"
+          },
+          "projection_watermark": {
+            "title": "Projection Watermark",
+            "type": "integer"
+          },
+          "route": {
+            "title": "Route",
+            "type": "string"
+          },
+          "work_item_id": {
+            "title": "Work Item Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "application_id",
+          "work_item_id",
+          "assigned_subject",
+          "claim_fence",
+          "claim_expires_at",
+          "phase",
+          "route",
+          "evidence_ready",
+          "mandatory_blockers",
+          "lifecycle_revision",
+          "evidence_revision",
+          "projection_watermark"
+        ],
+        "title": "S01QueueManualItem",
+        "type": "object"
+      },
+      "S01QueueResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/S01QueueManualItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "projection_watermark": {
+            "title": "Projection Watermark",
+            "type": "integer"
+          },
+          "recovery_items": {
+            "items": {
+              "$ref": "#/components/schemas/S01RecoveryQueueItem"
+            },
+            "title": "Recovery Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items",
+          "recovery_items",
+          "projection_watermark"
+        ],
+        "title": "S01QueueResponse",
+        "type": "object"
+      },
+      "S01RecoveryAttempt": {
+        "properties": {
+          "attempt": {
+            "title": "Attempt",
+            "type": "integer"
+          },
+          "classification": {
+            "title": "Classification",
+            "type": "string"
+          },
+          "retry_not_before": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retry Not Before"
+          },
+          "started_at": {
+            "title": "Started At",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "attempt",
+          "classification",
+          "status",
+          "started_at"
+        ],
+        "title": "S01RecoveryAttempt",
+        "type": "object"
+      },
+      "S01RecoveryBody": {
+        "properties": {
+          "expected_failure_reason_code": {
+            "title": "Expected Failure Reason Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "expected_failure_reason_code"
+        ],
+        "title": "S01RecoveryBody",
+        "type": "object"
+      },
+      "S01RecoveryCriterion": {
+        "properties": {
+          "conditions": {
+            "items": {
+              "$ref": "#/components/schemas/S01RecoveryCriterionCondition"
+            },
+            "title": "Conditions",
+            "type": "array"
+          },
+          "dependency": {
+            "title": "Dependency",
+            "type": "string"
+          },
+          "digest": {
+            "title": "Digest",
+            "type": "string"
+          },
+          "evidence_kind": {
+            "title": "Evidence Kind",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "operation": {
+            "title": "Operation",
+            "type": "string"
+          },
+          "required_conditions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Required Conditions",
+            "type": "array"
+          },
+          "trusted_verifier": {
+            "title": "Trusted Verifier",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "version",
+          "operation",
+          "dependency",
+          "required_conditions",
+          "trusted_verifier",
+          "evidence_kind",
+          "conditions",
+          "digest"
+        ],
+        "title": "S01RecoveryCriterion",
+        "type": "object"
+      },
+      "S01RecoveryCriterionCondition": {
+        "properties": {
+          "condition_id": {
+            "title": "Condition Id",
+            "type": "string"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "condition_id",
+          "reason_code"
+        ],
+        "title": "S01RecoveryCriterionCondition",
+        "type": "object"
+      },
+      "S01RecoveryQueueItem": {
+        "properties": {
+          "application_id": {
+            "title": "Application Id",
+            "type": "string"
+          },
+          "lifecycle_revision": {
+            "title": "Lifecycle Revision",
+            "type": "integer"
+          },
+          "phase": {
+            "title": "Phase",
+            "type": "string"
+          },
+          "primary_reason_code": {
+            "title": "Primary Reason Code",
+            "type": "string"
+          },
+          "projection_watermark": {
+            "title": "Projection Watermark",
+            "type": "integer"
+          },
+          "recovery_work_id": {
+            "title": "Recovery Work Id",
+            "type": "string"
+          },
+          "responsible_party": {
+            "title": "Responsible Party",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "recovery_work_id",
+          "application_id",
+          "status",
+          "phase",
+          "primary_reason_code",
+          "responsible_party",
+          "lifecycle_revision",
+          "projection_watermark"
+        ],
+        "title": "S01RecoveryQueueItem",
+        "type": "object"
+      },
+      "S01RecoveryWorkResponse": {
+        "properties": {
+          "application_id": {
+            "title": "Application Id",
+            "type": "string"
+          },
+          "attempts": {
+            "items": {
+              "$ref": "#/components/schemas/S01RecoveryAttempt"
+            },
+            "title": "Attempts",
+            "type": "array"
+          },
+          "can_verify": {
+            "title": "Can Verify",
+            "type": "boolean"
+          },
+          "criterion": {
+            "$ref": "#/components/schemas/S01RecoveryCriterion"
+          },
+          "current_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Run Id"
+          },
+          "cycle": {
+            "title": "Cycle",
+            "type": "integer"
+          },
+          "delivery_semantics": {
+            "title": "Delivery Semantics",
+            "type": "string"
+          },
+          "dependency": {
+            "title": "Dependency",
+            "type": "string"
+          },
+          "evidence_revision": {
+            "title": "Evidence Revision",
+            "type": "integer"
+          },
+          "job_status": {
+            "title": "Job Status",
+            "type": "string"
+          },
+          "lifecycle_revision": {
+            "title": "Lifecycle Revision",
+            "type": "integer"
+          },
+          "logical_operation_id": {
+            "title": "Logical Operation Id",
+            "type": "string"
+          },
+          "operation": {
+            "title": "Operation",
+            "type": "string"
+          },
+          "outcome_known": {
+            "title": "Outcome Known",
+            "type": "boolean"
+          },
+          "phase": {
+            "title": "Phase",
+            "type": "string"
+          },
+          "primary_reason_code": {
+            "title": "Primary Reason Code",
+            "type": "string"
+          },
+          "projection_watermark": {
+            "title": "Projection Watermark",
+            "type": "integer"
+          },
+          "protected_business_revision": {
+            "title": "Protected Business Revision",
+            "type": "integer"
+          },
+          "recovery_action": {
+            "title": "Recovery Action",
+            "type": "string"
+          },
+          "recovery_fact_count": {
+            "title": "Recovery Fact Count",
+            "type": "integer"
+          },
+          "recovery_target": {
+            "title": "Recovery Target",
+            "type": "string"
+          },
+          "recovery_work_id": {
+            "title": "Recovery Work Id",
+            "type": "string"
+          },
+          "related_reason_codes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Related Reason Codes",
+            "type": "array"
+          },
+          "resolution_count": {
+            "title": "Resolution Count",
+            "type": "integer"
+          },
+          "responsible_party": {
+            "title": "Responsible Party",
+            "type": "string"
+          },
+          "retry_policy": {
+            "$ref": "#/components/schemas/S01RetryPolicy"
+          },
+          "retryable": {
+            "title": "Retryable",
+            "type": "boolean"
+          },
+          "route": {
+            "title": "Route",
+            "type": "string"
+          },
+          "schema_version": {
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "recovery_work_id",
+          "status",
+          "application_id",
+          "cycle",
+          "phase",
+          "route",
+          "lifecycle_revision",
+          "evidence_revision",
+          "primary_reason_code",
+          "related_reason_codes",
+          "operation",
+          "dependency",
+          "logical_operation_id",
+          "attempts",
+          "responsible_party",
+          "recovery_action",
+          "recovery_target",
+          "criterion",
+          "retry_policy",
+          "outcome_known",
+          "retryable",
+          "recovery_fact_count",
+          "resolution_count",
+          "job_status",
+          "delivery_semantics",
+          "protected_business_revision",
+          "projection_watermark",
+          "can_verify"
+        ],
+        "title": "S01RecoveryWorkResponse",
+        "type": "object"
+      },
+      "S01RetryPolicy": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "jitter": {
+            "title": "Jitter",
+            "type": "boolean"
+          },
+          "max_attempts": {
+            "title": "Max Attempts",
+            "type": "integer"
+          },
+          "retry_offsets_seconds": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Retry Offsets Seconds",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "max_attempts",
+          "retry_offsets_seconds",
+          "jitter"
+        ],
+        "title": "S01RetryPolicy",
+        "type": "object"
+      },
+      "S01SubmitBody": {
+        "properties": {
+          "idempotency_key": {
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "scenario_id": {
+            "title": "Scenario Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scenario_id",
+          "idempotency_key"
+        ],
+        "title": "S01SubmitBody",
+        "type": "object"
+      },
+      "S01VerifyRecoveryResult": {
+        "properties": {
+          "application_id": {
+            "title": "Application Id",
+            "type": "string"
+          },
+          "evidence_revision": {
+            "title": "Evidence Revision",
+            "type": "integer"
+          },
+          "lifecycle_revision": {
+            "title": "Lifecycle Revision",
+            "type": "integer"
+          },
+          "phase": {
+            "title": "Phase",
+            "type": "string"
+          },
+          "recovery_fact_id": {
+            "title": "Recovery Fact Id",
+            "type": "string"
+          },
+          "recovery_work_id": {
+            "title": "Recovery Work Id",
+            "type": "string"
+          },
+          "replayed": {
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "routing_context": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/S01VerifyRoutingContext"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "successor_fence": {
+            "title": "Successor Fence",
+            "type": "integer"
+          },
+          "successor_job_id": {
+            "title": "Successor Job Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "replayed",
+          "recovery_work_id",
+          "recovery_fact_id",
+          "application_id",
+          "phase",
+          "lifecycle_revision",
+          "evidence_revision",
+          "successor_job_id",
+          "successor_fence"
+        ],
+        "title": "S01VerifyRecoveryResult",
+        "type": "object"
+      },
+      "S01VerifyRoutingContext": {
+        "properties": {
+          "current_context": {
+            "title": "Current Context",
+            "type": "string"
+          },
+          "cycle": {
+            "title": "Cycle",
+            "type": "integer"
+          },
+          "decision_id": {
+            "title": "Decision Id",
+            "type": "string"
+          },
+          "evidence_revision": {
+            "title": "Evidence Revision",
+            "type": "integer"
+          },
+          "lifecycle_revision": {
+            "title": "Lifecycle Revision",
+            "type": "integer"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          }
+        },
+        "required": [
+          "cycle",
+          "lifecycle_revision",
+          "evidence_revision",
+          "request_id",
+          "decision_id",
+          "current_context"
+        ],
+        "title": "S01VerifyRoutingContext",
+        "type": "object"
+      },
+      "S07VerifyRecoveryBody": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_criterion_digest": {
+            "maxLength": 64,
+            "minLength": 64,
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Expected Criterion Digest",
+            "type": "string"
+          },
+          "expected_lifecycle_revision": {
+            "minimum": 1.0,
+            "title": "Expected Lifecycle Revision",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "expected_lifecycle_revision",
+          "expected_criterion_digest",
+          "idempotency_key"
+        ],
+        "title": "S07VerifyRecoveryBody",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "Task4 Consistency Demo",
+    "version": "1.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/": {
+      "get": {
+        "operationId": "index__get",
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Index"
+      }
+    },
+    "/api/audit/recent": {
+      "get": {
+        "description": "Tail audit JSONL for ops readability (demo; open unless TASK4_WEB_TOKEN).",
+        "operationId": "audit_recent_api_audit_recent_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Audit Recent Api Audit Recent Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Audit Recent"
+      }
+    },
+    "/api/check": {
+      "post": {
+        "operationId": "api_check_api_check_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CheckBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Api Check Api Check Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Api Check"
+      }
+    },
+    "/api/check/batch": {
+      "post": {
+        "operationId": "api_check_batch_api_check_batch_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchCheckBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Api Check Batch Api Check Batch Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Api Check Batch"
+      }
+    },
+    "/api/evaluate/summary": {
+      "get": {
+        "description": "Run evaluate by suite (default main). Round19/20 honesty: only main is delivery.",
+        "operationId": "api_evaluate_summary_api_evaluate_summary_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "suite",
+            "required": false,
+            "schema": {
+              "default": "main",
+              "title": "Suite",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Api Evaluate Summary Api Evaluate Summary Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Api Evaluate Summary"
+      }
+    },
+    "/api/fixtures": {
+      "get": {
+        "operationId": "list_fixtures_api_fixtures_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Fixtures Api Fixtures Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Fixtures"
+      }
+    },
+    "/api/fixtures/{name}": {
+      "get": {
+        "operationId": "get_fixture_api_fixtures__name__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Fixture Api Fixtures  Name  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Fixture"
+      }
+    },
+    "/api/health": {
+      "get": {
+        "description": "Liveness + config pointers (Round22: rules_path / kb_ok / version / audit).",
+        "operationId": "health_api_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Health Api Health Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health"
+      }
+    },
+    "/api/kb": {
+      "get": {
+        "operationId": "kb_get_api_kb_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Kb Get Api Kb Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Kb Get"
+      },
+      "post": {
+        "operationId": "kb_add_api_kb_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KBItem"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Kb Add Api Kb Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Kb Add"
+      }
+    },
+    "/api/kb/graph": {
+      "get": {
+        "description": "Lightweight entity graph (synonym/part_of) for demo + future linking.",
+        "operationId": "kb_graph_api_kb_graph_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Kb Graph Api Kb Graph Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Kb Graph"
+      }
+    },
+    "/api/kb/reload": {
+      "post": {
+        "operationId": "kb_reload_api_kb_reload_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Kb Reload Api Kb Reload Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Kb Reload"
+      }
+    },
+    "/api/kb/{section}/{key}": {
+      "delete": {
+        "operationId": "kb_delete_api_kb__section___key__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "section",
+            "required": true,
+            "schema": {
+              "title": "Section",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "title": "Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Kb Delete Api Kb  Section   Key  Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Kb Delete"
+      }
+    },
+    "/api/ocr_inbox": {
+      "get": {
+        "description": "List step2→OCR slot manifests (raw usually null until external OCR).",
+        "operationId": "list_ocr_inbox_api_ocr_inbox_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Ocr Inbox Api Ocr Inbox Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Ocr Inbox"
+      }
+    },
+    "/api/rules": {
+      "get": {
+        "operationId": "get_rules_api_rules_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Rules Api Rules Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Rules"
+      },
+      "put": {
+        "description": "Atomic save: validate+fingerprint first; then lock → tmp+fsync+replace.\n\nARCH Round16 W1: on any failure **never touch** active runtime_rules.yaml\n(no write_text rollback).",
+        "operationId": "put_rules_api_rules_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RulesBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Put Rules Api Rules Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Rules"
+      }
+    },
+    "/api/rules/reset": {
+      "post": {
+        "operationId": "reset_rules_api_rules_reset_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Reset Rules Api Rules Reset Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Reset Rules"
+      }
+    },
+    "/api/rules/validate": {
+      "post": {
+        "description": "Dry-run rule package validation without writing runtime_rules.yaml.",
+        "operationId": "validate_rules_api_rules_validate_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RulesBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Validate Rules Api Rules Validate Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Validate Rules"
+      }
+    },
+    "/api/step2/samples": {
+      "get": {
+        "description": "List competition-side page_order extractions (bboxes, no OCR text).",
+        "operationId": "list_step2_samples_api_step2_samples_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Step2 Samples Api Step2 Samples Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Step2 Samples"
+      }
+    },
+    "/api/step2/{sample_id}": {
+      "get": {
+        "operationId": "get_step2_sample_api_step2__sample_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sample_id",
+            "required": true,
+            "schema": {
+              "title": "Sample Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Step2 Sample Api Step2  Sample Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Step2 Sample"
+      }
+    },
+    "/controlled/s01": {
+      "get": {
+        "operationId": "controlled_s01_page_controlled_s01_get",
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Controlled S01 Page"
+      }
+    },
+    "/controlled/s01/api/_test/commands/process": {
+      "post": {
+        "operationId": "controlled_s01_test_process_controlled_s01_api__test_commands_process_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S01ProcessBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S01 Test Process Controlled S01 Api  Test Commands Process Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S01 Test Process"
+      }
+    },
+    "/controlled/s01/api/_test/commands/project": {
+      "post": {
+        "operationId": "controlled_s01_test_project_controlled_s01_api__test_commands_project_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "integer"
+                  },
+                  "title": "Response Controlled S01 Test Project Controlled S01 Api  Test Commands Project Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Controlled S01 Test Project"
+      }
+    },
+    "/controlled/s01/api/commands/business-exception-operations/close": {
+      "post": {
+        "operationId": "controlled_s05_close_business_exception_operations_controlled_s01_api_commands_business_exception_operations_close_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S05 Close Business Exception Operations Controlled S01 Api Commands Business Exception Operations Close Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Controlled S05 Close Business Exception Operations"
+      }
+    },
+    "/controlled/s01/api/commands/business-exception-operations/resume": {
+      "post": {
+        "operationId": "controlled_s05_resume_business_exception_operations_controlled_s01_api_commands_business_exception_operations_resume_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S05 Resume Business Exception Operations Controlled S01 Api Commands Business Exception Operations Resume Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Controlled S05 Resume Business Exception Operations"
+      }
+    },
+    "/controlled/s01/api/commands/business-exceptions/{request_id}/decide": {
+      "post": {
+        "operationId": "controlled_s05_decide_business_exception_controlled_s01_api_commands_business_exceptions__request_id__decide_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "title": "Request Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S05 Decide Business Exception Controlled S01 Api Commands Business Exceptions  Request Id  Decide Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S05 Decide Business Exception"
+      }
+    },
+    "/controlled/s01/api/commands/business-exceptions/{request_id}/expire": {
+      "post": {
+        "operationId": "controlled_s05_expire_business_exception_controlled_s01_api_commands_business_exceptions__request_id__expire_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "title": "Request Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S05 Expire Business Exception Controlled S01 Api Commands Business Exceptions  Request Id  Expire Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S05 Expire Business Exception"
+      }
+    },
+    "/controlled/s01/api/commands/business-exceptions/{request_id}/invalidate": {
+      "post": {
+        "operationId": "controlled_s05_invalidate_business_exception_controlled_s01_api_commands_business_exceptions__request_id__invalidate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "title": "Request Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S05 Invalidate Business Exception Controlled S01 Api Commands Business Exceptions  Request Id  Invalidate Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S05 Invalidate Business Exception"
+      }
+    },
+    "/controlled/s01/api/commands/business-exceptions/{request_id}/route": {
+      "post": {
+        "operationId": "controlled_s05_route_business_exception_controlled_s01_api_commands_business_exceptions__request_id__route_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "title": "Request Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S05 Route Business Exception Controlled S01 Api Commands Business Exceptions  Request Id  Route Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S05 Route Business Exception"
+      }
+    },
+    "/controlled/s01/api/commands/exception-work-items/{work_item_id}/claim": {
+      "post": {
+        "operationId": "controlled_s05_claim_exception_work_item_controlled_s01_api_commands_exception_work_items__work_item_id__claim_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "work_item_id",
+            "required": true,
+            "schema": {
+              "title": "Work Item Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S05 Claim Exception Work Item Controlled S01 Api Commands Exception Work Items  Work Item Id  Claim Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S05 Claim Exception Work Item"
+      }
+    },
+    "/controlled/s01/api/commands/recover-runtime": {
+      "post": {
+        "operationId": "controlled_s01_recover_runtime_controlled_s01_api_commands_recover_runtime_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S01RecoveryBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "integer"
+                      }
+                    ]
+                  },
+                  "title": "Response Controlled S01 Recover Runtime Controlled S01 Api Commands Recover Runtime Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S01 Recover Runtime"
+      }
+    },
+    "/controlled/s01/api/commands/recovery-work-items/{recovery_work_id}/verify": {
+      "post": {
+        "operationId": "controlled_s07_verify_recovery_controlled_s01_api_commands_recovery_work_items__recovery_work_id__verify_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "recovery_work_id",
+            "required": true,
+            "schema": {
+              "title": "Recovery Work Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S07VerifyRecoveryBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01VerifyRecoveryResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Controlled S07 Verify Recovery"
+      }
+    },
+    "/controlled/s01/api/commands/review-work-items/{work_item_id}/business-exceptions": {
+      "post": {
+        "operationId": "controlled_s05_request_business_exception_controlled_s01_api_commands_review_work_items__work_item_id__business_exceptions_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "work_item_id",
+            "required": true,
+            "schema": {
+              "title": "Work Item Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S05 Request Business Exception Controlled S01 Api Commands Review Work Items  Work Item Id  Business Exceptions Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S05 Request Business Exception"
+      }
+    },
+    "/controlled/s01/api/commands/review-work-items/{work_item_id}/claim": {
+      "post": {
+        "operationId": "controlled_s04_demo_claim_review_work_item_controlled_s01_api_commands_review_work_items__work_item_id__claim_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "work_item_id",
+            "required": true,
+            "schema": {
+              "title": "Work Item Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S04 Demo Claim Review Work Item Controlled S01 Api Commands Review Work Items  Work Item Id  Claim Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S04 Demo Claim Review Work Item"
+      }
+    },
+    "/controlled/s01/api/commands/review-work-items/{work_item_id}/correct-field-observation": {
+      "post": {
+        "operationId": "controlled_s04_demo_correct_field_observation_controlled_s01_api_commands_review_work_items__work_item_id__correct_field_observation_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "work_item_id",
+            "required": true,
+            "schema": {
+              "title": "Work Item Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S04 Demo Correct Field Observation Controlled S01 Api Commands Review Work Items  Work Item Id  Correct Field Observation Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S04 Demo Correct Field Observation"
+      }
+    },
+    "/controlled/s01/api/commands/review-work-items/{work_item_id}/reveal-field-observation": {
+      "post": {
+        "operationId": "controlled_s04_demo_reveal_field_observation_controlled_s01_api_commands_review_work_items__work_item_id__reveal_field_observation_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "work_item_id",
+            "required": true,
+            "schema": {
+              "title": "Work Item Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S04 Demo Reveal Field Observation Controlled S01 Api Commands Review Work Items  Work Item Id  Reveal Field Observation Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S04 Demo Reveal Field Observation"
+      }
+    },
+    "/controlled/s01/api/commands/review-work-items/{work_item_id}/supplement": {
+      "post": {
+        "operationId": "controlled_s06_request_supplement_controlled_s01_api_commands_review_work_items__work_item_id__supplement_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "work_item_id",
+            "required": true,
+            "schema": {
+              "title": "Work Item Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S06 Request Supplement Controlled S01 Api Commands Review Work Items  Work Item Id  Supplement Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S06 Request Supplement"
+      }
+    },
+    "/controlled/s01/api/commands/stop-new-cohort": {
+      "post": {
+        "operationId": "controlled_s01_stop_new_cohort_controlled_s01_api_commands_stop_new_cohort_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Controlled S01 Stop New Cohort Controlled S01 Api Commands Stop New Cohort Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Controlled S01 Stop New Cohort"
+      }
+    },
+    "/controlled/s01/api/commands/submit": {
+      "post": {
+        "operationId": "controlled_s01_submit_controlled_s01_api_commands_submit_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S01SubmitBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S01 Submit Controlled S01 Api Commands Submit Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S01 Submit"
+      }
+    },
+    "/controlled/s01/api/queries/applications/{application_id}/audit-timeline": {
+      "get": {
+        "operationId": "controlled_s01_audit_timeline_controlled_s01_api_queries_applications__application_id__audit_timeline_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "application_id",
+            "required": true,
+            "schema": {
+              "title": "Application Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S01 Audit Timeline Controlled S01 Api Queries Applications  Application Id  Audit Timeline Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S01 Audit Timeline"
+      }
+    },
+    "/controlled/s01/api/queries/applications/{application_id}/current-route": {
+      "get": {
+        "operationId": "controlled_s04_demo_current_route_controlled_s01_api_queries_applications__application_id__current_route_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "application_id",
+            "required": true,
+            "schema": {
+              "title": "Application Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01CurrentRouteResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S04 Demo Current Route"
+      }
+    },
+    "/controlled/s01/api/queries/applications/{application_id}/history": {
+      "get": {
+        "operationId": "controlled_s04_demo_application_history_controlled_s01_api_queries_applications__application_id__history_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "application_id",
+            "required": true,
+            "schema": {
+              "title": "Application Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S04 Demo Application History Controlled S01 Api Queries Applications  Application Id  History Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S04 Demo Application History"
+      }
+    },
+    "/controlled/s01/api/queries/applications/{application_id}/workspace": {
+      "get": {
+        "operationId": "controlled_s01_workspace_controlled_s01_api_queries_applications__application_id__workspace_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "application_id",
+            "required": true,
+            "schema": {
+              "title": "Application Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "finding_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Finding Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S01 Workspace Controlled S01 Api Queries Applications  Application Id  Workspace Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S01 Workspace"
+      }
+    },
+    "/controlled/s01/api/queries/business-exception-operations": {
+      "get": {
+        "operationId": "controlled_s05_business_exception_operations_status_controlled_s01_api_queries_business_exception_operations_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S05 Business Exception Operations Status Controlled S01 Api Queries Business Exception Operations Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Controlled S05 Business Exception Operations Status"
+      }
+    },
+    "/controlled/s01/api/queries/business-exceptions/{request_id}": {
+      "get": {
+        "operationId": "controlled_s05_business_exception_view_controlled_s01_api_queries_business_exceptions__request_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "title": "Request Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S05 Business Exception View Controlled S01 Api Queries Business Exceptions  Request Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S05 Business Exception View"
+      }
+    },
+    "/controlled/s01/api/queries/queue": {
+      "get": {
+        "operationId": "controlled_s01_queue_controlled_s01_api_queries_queue_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01QueueResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Controlled S01 Queue"
+      }
+    },
+    "/controlled/s01/api/queries/recovery-work-items/{recovery_work_id}": {
+      "get": {
+        "operationId": "controlled_s07_recovery_work_controlled_s01_api_queries_recovery_work_items__recovery_work_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "recovery_work_id",
+            "required": true,
+            "schema": {
+              "title": "Recovery Work Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01RecoveryWorkResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S07 Recovery Work"
+      }
+    },
+    "/controlled/s01/api/queries/review-work-items/{work_item_id}": {
+      "get": {
+        "operationId": "controlled_s04_demo_review_work_item_controlled_s01_api_queries_review_work_items__work_item_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "work_item_id",
+            "required": true,
+            "schema": {
+              "title": "Work Item Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S04 Demo Review Work Item Controlled S01 Api Queries Review Work Items  Work Item Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S04 Demo Review Work Item"
+      }
+    },
+    "/controlled/s01/api/queries/supplement-requests/{request_id}": {
+      "get": {
+        "operationId": "controlled_s06_supplement_request_view_controlled_s01_api_queries_supplement_requests__request_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "title": "Request Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S06 Supplement Request View Controlled S01 Api Queries Supplement Requests  Request Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S06 Supplement Request View"
+      }
+    },
+    "/controlled/s01/api/session": {
+      "post": {
+        "operationId": "controlled_s01_session_controlled_s01_api_session_post",
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Controlled S01 Session"
+      }
+    },
+    "/controlled/s01/api/workbench/commands/submit": {
+      "post": {
+        "operationId": "controlled_s01_workbench_submit_controlled_s01_api_workbench_commands_submit_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S01SubmitBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S01 Workbench Submit Controlled S01 Api Workbench Commands Submit Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S01 Workbench Submit"
+      }
+    },
+    "/controlled/s01/react": {
+      "get": {
+        "operationId": "controlled_s01_react_page_controlled_s01_react_get",
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Controlled S01 React Page"
+      }
+    },
+    "/controlled/s02": {
+      "get": {
+        "operationId": "controlled_s02_page_controlled_s02_get",
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Controlled S02 Page"
+      }
+    },
+    "/controlled/s02/api/commands/review-batches/preview": {
+      "post": {
+        "operationId": "controlled_s03_preview_review_batch_controlled_s02_api_commands_review_batches_preview_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S03 Preview Review Batch Controlled S02 Api Commands Review Batches Preview Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Controlled S03 Preview Review Batch"
+      }
+    },
+    "/controlled/s02/api/commands/review-batches/submit": {
+      "post": {
+        "operationId": "controlled_s03_submit_review_batch_controlled_s02_api_commands_review_batches_submit_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S03 Submit Review Batch Controlled S02 Api Commands Review Batches Submit Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Controlled S03 Submit Review Batch"
+      }
+    },
+    "/controlled/s02/api/commands/review-work-items/{work_item_id}/claim": {
+      "post": {
+        "operationId": "controlled_s03_claim_review_work_item_controlled_s02_api_commands_review_work_items__work_item_id__claim_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "work_item_id",
+            "required": true,
+            "schema": {
+              "title": "Work Item Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S03 Claim Review Work Item Controlled S02 Api Commands Review Work Items  Work Item Id  Claim Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S03 Claim Review Work Item"
+      }
+    },
+    "/controlled/s02/api/commands/review-work-items/{work_item_id}/correct-field-observation": {
+      "post": {
+        "operationId": "controlled_s04_correct_field_observation_controlled_s02_api_commands_review_work_items__work_item_id__correct_field_observation_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "work_item_id",
+            "required": true,
+            "schema": {
+              "title": "Work Item Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S04 Correct Field Observation Controlled S02 Api Commands Review Work Items  Work Item Id  Correct Field Observation Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S04 Correct Field Observation"
+      }
+    },
+    "/controlled/s02/api/commands/review-work-items/{work_item_id}/release": {
+      "post": {
+        "operationId": "controlled_s03_release_review_work_item_controlled_s02_api_commands_review_work_items__work_item_id__release_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "work_item_id",
+            "required": true,
+            "schema": {
+              "title": "Work Item Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S03 Release Review Work Item Controlled S02 Api Commands Review Work Items  Work Item Id  Release Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S03 Release Review Work Item"
+      }
+    },
+    "/controlled/s02/api/commands/review-work-items/{work_item_id}/renew": {
+      "post": {
+        "operationId": "controlled_s03_renew_review_work_item_controlled_s02_api_commands_review_work_items__work_item_id__renew_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "work_item_id",
+            "required": true,
+            "schema": {
+              "title": "Work Item Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S03 Renew Review Work Item Controlled S02 Api Commands Review Work Items  Work Item Id  Renew Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S03 Renew Review Work Item"
+      }
+    },
+    "/controlled/s02/api/commands/review-work-items/{work_item_id}/submit": {
+      "post": {
+        "operationId": "controlled_s03_submit_review_work_item_controlled_s02_api_commands_review_work_items__work_item_id__submit_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "work_item_id",
+            "required": true,
+            "schema": {
+              "title": "Work Item Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S03 Submit Review Work Item Controlled S02 Api Commands Review Work Items  Work Item Id  Submit Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S03 Submit Review Work Item"
+      }
+    },
+    "/controlled/s02/api/commands/submit": {
+      "post": {
+        "operationId": "controlled_s02_submit_controlled_s02_api_commands_submit_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S02 Submit Controlled S02 Api Commands Submit Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Controlled S02 Submit"
+      }
+    },
+    "/controlled/s02/api/commands/submit-attachment-version": {
+      "post": {
+        "operationId": "controlled_s06_submit_attachment_version_controlled_s02_api_commands_submit_attachment_version_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S06 Submit Attachment Version Controlled S02 Api Commands Submit Attachment Version Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Controlled S06 Submit Attachment Version"
+      }
+    },
+    "/controlled/s02/api/queries/applications/{application_id}/current-route": {
+      "get": {
+        "operationId": "controlled_s04_current_route_controlled_s02_api_queries_applications__application_id__current_route_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "application_id",
+            "required": true,
+            "schema": {
+              "title": "Application Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S04 Current Route Controlled S02 Api Queries Applications  Application Id  Current Route Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S04 Current Route"
+      }
+    },
+    "/controlled/s02/api/queries/applications/{application_id}/history": {
+      "get": {
+        "operationId": "controlled_s04_application_history_controlled_s02_api_queries_applications__application_id__history_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "application_id",
+            "required": true,
+            "schema": {
+              "title": "Application Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S04 Application History Controlled S02 Api Queries Applications  Application Id  History Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S04 Application History"
+      }
+    },
+    "/controlled/s02/api/queries/applications/{application_id}/workspace": {
+      "get": {
+        "operationId": "controlled_s02_workspace_controlled_s02_api_queries_applications__application_id__workspace_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "application_id",
+            "required": true,
+            "schema": {
+              "title": "Application Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "finding_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Finding Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S02 Workspace Controlled S02 Api Queries Applications  Application Id  Workspace Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S02 Workspace"
+      }
+    },
+    "/controlled/s02/api/queries/queue": {
+      "get": {
+        "operationId": "controlled_s02_queue_controlled_s02_api_queries_queue_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S02 Queue Controlled S02 Api Queries Queue Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Controlled S02 Queue"
+      }
+    },
+    "/controlled/s02/api/queries/review-work-items/{work_item_id}": {
+      "get": {
+        "operationId": "controlled_s03_review_work_item_controlled_s02_api_queries_review_work_items__work_item_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "work_item_id",
+            "required": true,
+            "schema": {
+              "title": "Work Item Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S03 Review Work Item Controlled S02 Api Queries Review Work Items  Work Item Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S03 Review Work Item"
+      }
+    },
+    "/controlled/s02/api/session": {
+      "post": {
+        "operationId": "controlled_s02_session_controlled_s02_api_session_post",
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Controlled S02 Session"
+      }
+    }
+  }
+}

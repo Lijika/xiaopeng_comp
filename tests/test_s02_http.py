@@ -304,7 +304,7 @@ def test_integrator_receipt_reaches_minimized_reviewer_trace_over_http(
             use_session=False,
         )
         assert hidden_queue.status == 200
-        assert hidden_queue.json() == {"items": [], "projection_watermark": 0}
+        assert hidden_queue.json() == {"items": [], "recovery_items": [], "projection_watermark": 0}
         assert hidden_workspace.status == 404
 
 
@@ -389,7 +389,7 @@ def test_oversized_command_body_is_rejected_before_intake(tmp_path: Path) -> Non
 
     assert response.status == 413
     assert response.json()["detail"]["error"] == "S02_COMMAND_TOO_LARGE"
-    assert queue.json() == {"items": [], "projection_watermark": 0}
+    assert queue.json() == {"items": [], "recovery_items": [], "projection_watermark": 0}
 
 
 def test_invalid_runtime_registry_is_confined_without_configuration_leakage(

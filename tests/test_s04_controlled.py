@@ -184,7 +184,7 @@ def test_correction_window_queries_hide_invalidated_work_after_checker_failure(
             scope=REVIEWER.scope,
             subject=REVIEWER.subject,
             now=102,
-        ) == {"items": [], "projection_watermark": 0}
+        ) == {"items": [], "recovery_items": [], "projection_watermark": 0}
         with pytest.raises(QueryNotFound):
             current.workspace_view(
                 application_id,

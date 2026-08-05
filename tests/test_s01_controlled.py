@@ -296,6 +296,7 @@ def test_admission_write_faults_publish_no_partial_facts_and_can_retry(
 
     assert service.queue_view(role="reviewer", scope="C-DEMO", subject=TEST_INTEGRATOR.subject) == {
         "items": [],
+        "recovery_items": [],
         "projection_watermark": 0,
     }
 
@@ -937,6 +938,7 @@ def test_complete_result_write_faults_keep_diagnostic_non_current_and_recover(
     )
     assert service.queue_view(role="reviewer", scope="C-DEMO", subject=TEST_INTEGRATOR.subject) == {
         "items": [],
+        "recovery_items": [],
         "projection_watermark": 0,
     }
     assert service.refresh_projection() == {
@@ -976,6 +978,7 @@ def test_complete_result_write_faults_keep_diagnostic_non_current_and_recover(
     )
     assert service.queue_view(role="reviewer", scope="C-DEMO", subject=TEST_INTEGRATOR.subject) == {
         "items": [],
+        "recovery_items": [],
         "projection_watermark": 0,
     }
     with pytest.raises(QueryNotFound):
@@ -1036,6 +1039,7 @@ def test_complete_result_fails_closed_when_required_audit_is_unavailable(
     )
     assert worker.queue_view(role="reviewer", scope="C-DEMO", subject=TEST_INTEGRATOR.subject) == {
         "items": [],
+        "recovery_items": [],
         "projection_watermark": 0,
     }
     assert worker.refresh_projection() == {
@@ -1083,6 +1087,7 @@ def test_checker_exception_is_non_current_and_higher_fence_recovers() -> None:
     )
     assert service.queue_view(role="reviewer", scope="C-DEMO", subject=TEST_INTEGRATOR.subject) == {
         "items": [],
+        "recovery_items": [],
         "projection_watermark": 0,
     }
     assert service.refresh_projection() == {
@@ -1114,6 +1119,7 @@ def test_checker_exception_is_non_current_and_higher_fence_recovers() -> None:
     )
     assert service.queue_view(role="reviewer", scope="C-DEMO", subject=TEST_INTEGRATOR.subject) == {
         "items": [],
+        "recovery_items": [],
         "projection_watermark": 0,
     }
     assert service.fact_counts()["outbox"] == 2
@@ -2084,6 +2090,7 @@ def test_invalid_checker_result_is_non_current_and_higher_fence_recovers(
     )
     assert service.queue_view(role="reviewer", scope="C-DEMO", subject=TEST_INTEGRATOR.subject) == queue_before == {
         "items": [],
+        "recovery_items": [],
         "projection_watermark": 0,
     }
     assert service.refresh_projection() == {
@@ -2120,6 +2127,7 @@ def test_invalid_checker_result_is_non_current_and_higher_fence_recovers(
     }
     assert service.queue_view(role="reviewer", scope="C-DEMO", subject=TEST_INTEGRATOR.subject) == {
         "items": [],
+        "recovery_items": [],
         "projection_watermark": 0,
     }
     assert service.fact_counts()["outbox"] == 2
@@ -2539,7 +2547,7 @@ def test_target_application_id_is_stable_and_never_projects_upstream_reference()
         admitted.application_id or "", role="reviewer", scope="C-DEMO", subject=TEST_INTEGRATOR.subject
     )
 
-    assert before_projection == {"items": [], "projection_watermark": 0}
+    assert before_projection == {"items": [], "recovery_items": [], "projection_watermark": 0}
     assert projected == {"updated": 1, "projection_watermark": 1}
     assert admitted.application_id is not None
     assert admitted.application_id.startswith("app_")
@@ -2585,6 +2593,7 @@ def test_target_owner_allocates_application_id_independent_of_source_content() -
     completed = service.process_next_job()
     assert service.queue_view(role="reviewer", scope="C-DEMO", subject=TEST_INTEGRATOR.subject) == {
         "items": [],
+        "recovery_items": [],
         "projection_watermark": 0,
     }
     assert service.refresh_projection() == {
@@ -2816,6 +2825,7 @@ def test_malformed_document_fields_are_stably_rejected_without_business_facts(
     }
     assert service.queue_view(role="reviewer", scope="C-DEMO", subject=TEST_INTEGRATOR.subject) == {
         "items": [],
+        "recovery_items": [],
         "projection_watermark": 0,
     }
 
@@ -4113,7 +4123,7 @@ def test_worker_pins_snapshot_release_and_routes_mandatory_blocker() -> None:
     )
     assert result.lifecycle_revision == 6
     before_projection = service.queue_view(role="reviewer", scope="C-DEMO", subject=TEST_INTEGRATOR.subject)
-    assert before_projection == {"items": [], "projection_watermark": 0}
+    assert before_projection == {"items": [], "recovery_items": [], "projection_watermark": 0}
     with pytest.raises(QueryNotFound):
         service.workspace_view(
             admission.application_id, role="reviewer", scope="C-DEMO", subject=TEST_INTEGRATOR.subject
@@ -4180,6 +4190,7 @@ def test_worker_executes_frozen_release_after_rules_path_changes(
     assert result.fence == 1
     assert service.queue_view(role="reviewer", scope="C-DEMO", subject=TEST_INTEGRATOR.subject) == {
         "items": [],
+        "recovery_items": [],
         "projection_watermark": 0,
     }
     assert service.refresh_projection() == {
@@ -4440,6 +4451,7 @@ def test_adapter_public_evidence_preserves_source_and_excludes_evaluation_labels
     assert copied_source.read_bytes() == original_bytes
     assert service.queue_view(role="reviewer", scope="C-DEMO", subject=TEST_INTEGRATOR.subject) == {
         "items": [],
+        "recovery_items": [],
         "projection_watermark": 0,
     }
     assert service.refresh_projection() == {
@@ -4939,6 +4951,7 @@ def test_complete_result_requires_matching_frozen_context_and_recovers(
     assert stale.cas_mismatches == (cas_fault,)
     assert service.queue_view(role="reviewer", scope="C-DEMO", subject=TEST_INTEGRATOR.subject) == {
         "items": [],
+        "recovery_items": [],
         "projection_watermark": 0,
     }
     assert service.refresh_projection() == {
@@ -4966,6 +4979,7 @@ def test_complete_result_requires_matching_frozen_context_and_recovers(
     )
     assert service.queue_view(role="reviewer", scope="C-DEMO", subject=TEST_INTEGRATOR.subject) == {
         "items": [],
+        "recovery_items": [],
         "projection_watermark": 0,
     }
     assert service.fact_counts()["outbox"] == 2
@@ -5033,7 +5047,7 @@ def test_manual_review_requires_lifecycle_owned_assigned_work_item() -> None:
         scope="C-DEMO",
         subject="other-reviewer",
         now=101,
-    ) == {"items": [], "projection_watermark": 0}
+    ) == {"items": [], "recovery_items": [], "projection_watermark": 0}
     with pytest.raises(QueryNotFound):
         service.workspace_view(
             admission.application_id or "",
@@ -5062,9 +5076,10 @@ def test_missing_scope_queries_default_deny_without_changing_facts() -> None:
     service.process_next_job()
     counts = service.fact_counts()
 
-    assert service.queue_view() == {"items": [], "projection_watermark": 0}
+    assert service.queue_view() == {"items": [], "recovery_items": [], "projection_watermark": 0}
     assert service.queue_view(role="reviewer") == {
         "items": [],
+        "recovery_items": [],
         "projection_watermark": 0,
     }
     with pytest.raises(QueryNotFound):
@@ -5089,7 +5104,7 @@ def test_unauthorized_queue_never_discloses_authoritative_activity_watermark() -
     service.refresh_projection()
     hidden_after_projection = service.queue_view(role="integrator", scope="C-DEMO")
 
-    assert hidden_before == {"items": [], "projection_watermark": 0}
+    assert hidden_before == {"items": [], "recovery_items": [], "projection_watermark": 0}
     assert hidden_after_admission == hidden_before
     assert hidden_after_result == hidden_before
     assert hidden_after_projection == hidden_before
@@ -5747,6 +5762,7 @@ def test_worker_uses_content_addressed_immutable_evidence_snapshot(
     processed = service.process_next_job()
     assert service.queue_view(role="reviewer", scope="C-DEMO", subject=TEST_INTEGRATOR.subject) == {
         "items": [],
+        "recovery_items": [],
         "projection_watermark": 0,
     }
     with pytest.raises(QueryNotFound):
@@ -5804,6 +5820,7 @@ def test_legacy_oracle_disagreement_cannot_control_target_route() -> None:
     processed = service.process_next_job()
     assert service.queue_view(role="reviewer", scope="C-DEMO", subject=TEST_INTEGRATOR.subject) == {
         "items": [],
+        "recovery_items": [],
         "projection_watermark": 0,
     }
     assert service.refresh_projection() == {
@@ -5951,7 +5968,7 @@ def test_reviewer_query_changes_only_after_independent_projection_consumes_outbo
 
     assert processed.status == "complete"
     assert processed.projection_pending is True
-    assert before_projection == {"items": [], "projection_watermark": 0}
+    assert before_projection == {"items": [], "recovery_items": [], "projection_watermark": 0}
     assert projected == {"updated": 1, "projection_watermark": 1}
     assert after_projection["projection_watermark"] == 1
     assert after_projection["items"][0]["application_id"] == admitted.application_id

@@ -31,6 +31,12 @@ task4-check = "task4_consistency.cli:main"
 [tool.setuptools.packages.find]
 include = ["task4_consistency*"]
 
+[tool.setuptools.package-data]
+task4_consistency = [
+  "web/templates/*.html",
+  "web/static/**/*",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

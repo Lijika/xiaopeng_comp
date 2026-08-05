@@ -54,6 +54,8 @@ TEMPLATES = Path(__file__).resolve().parent / "templates"
 _KB_SECTIONS = {"address_aliases", "org_aliases", "plate_prefixes"}
 S01_TEMPLATE = TEMPLATES / "s01.html"
 S02_TEMPLATE = TEMPLATES / "s02.html"
+S01_REACT_STATIC = STATIC / "react"
+S01_REACT_INDEX = S01_REACT_STATIC / "index.html"
 
 
 def _s01_demo_flag(name: str, *, default: bool) -> bool:
@@ -262,8 +264,39 @@ async def _lifespan(application: FastAPI):
 
 
 app = FastAPI(title="Task4 Consistency Demo", version="1.0.0", lifespan=_lifespan)
+
+
+class _ImmutableHashedAssets(StaticFiles):
+    """Serve content-hashed React assets with long-lived immutable caching."""
+
+    def file_response(self, *args: Any, **kwargs: Any) -> Response:
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
+
+
+react_assets = STATIC / "react" / "assets"
+app.mount(
+    "/static/react/assets",
+    _ImmutableHashedAssets(directory=str(react_assets), check_dir=False),
+    name="react-assets",
+)
 if STATIC.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
+
+
+class ReactShellCachePolicy(BaseHTTPMiddleware):
+    """Keep the built React shell no-store even when fetched from /static."""
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        response = await call_next(request)
+        if (
+            request.url.path == "/static/react/index.html"
+            and response.status_code == 200
+        ):
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["Pragma"] = "no-cache"
+        return response
 
 
 class OptionalTokenAuth(BaseHTTPMiddleware):
@@ -312,6 +345,7 @@ class OptionalTokenAuth(BaseHTTPMiddleware):
 
 
 app.add_middleware(OptionalTokenAuth)
+app.add_middleware(ReactShellCachePolicy)
 
 
 class S01ResponsePolicy(BaseHTTPMiddleware):
@@ -545,6 +579,174 @@ class S07VerifyRecoveryBody(BaseModel):
         strict=True,
     )
     idempotency_key: str = Field(min_length=1, max_length=200, strict=True)
+
+
+class S01QueueBlocker(BaseModel):
+    finding_id: str
+    rule_id: str
+    reason_code: str
+    severity: str
+
+
+class S01QueueManualItem(BaseModel):
+    application_id: str
+    work_item_id: str
+    assigned_subject: str
+    claim_fence: int
+    claim_expires_at: int
+    phase: str
+    route: str
+    evidence_ready: bool
+    mandatory_blockers: list[S01QueueBlocker]
+    lifecycle_revision: int
+    evidence_revision: int
+    projection_watermark: int
+
+
+class S01RecoveryQueueItem(BaseModel):
+    recovery_work_id: str
+    application_id: str
+    status: str
+    phase: str
+    primary_reason_code: str
+    responsible_party: str
+    lifecycle_revision: int
+    projection_watermark: int
+
+
+class S01QueueResponse(BaseModel):
+    items: list[S01QueueManualItem]
+    recovery_items: list[S01RecoveryQueueItem]
+    projection_watermark: int
+
+
+class S01RecoveryAttempt(BaseModel):
+    attempt: int
+    classification: str
+    status: str
+    started_at: int
+    retry_not_before: int | None = None
+
+
+class S01RecoveryCriterionCondition(BaseModel):
+    condition_id: str
+    reason_code: str
+
+
+class S01RecoveryCriterion(BaseModel):
+    id: str
+    version: str
+    operation: str
+    dependency: str
+    required_conditions: list[str]
+    trusted_verifier: str
+    evidence_kind: str
+    conditions: list[S01RecoveryCriterionCondition]
+    digest: str
+
+
+class S01RetryPolicy(BaseModel):
+    id: str
+    max_attempts: int
+    retry_offsets_seconds: list[int]
+    jitter: bool
+
+
+class S01RecoveryWorkResponse(BaseModel):
+    schema_version: str
+    recovery_work_id: str
+    status: str
+    application_id: str
+    cycle: int
+    phase: str
+    route: str
+    lifecycle_revision: int
+    evidence_revision: int
+    primary_reason_code: str
+    related_reason_codes: list[str]
+    operation: str
+    dependency: str
+    logical_operation_id: str
+    attempts: list[S01RecoveryAttempt]
+    responsible_party: str
+    recovery_action: str
+    recovery_target: str
+    criterion: S01RecoveryCriterion
+    retry_policy: S01RetryPolicy
+    outcome_known: bool
+    retryable: bool
+    recovery_fact_count: int
+    resolution_count: int
+    job_status: str
+    delivery_semantics: str
+    protected_business_revision: int
+    current_run_id: str | None = None
+    projection_watermark: int
+    can_verify: bool
+
+
+class S01VerifyRoutingContext(BaseModel):
+    cycle: int
+    lifecycle_revision: int
+    evidence_revision: int
+    run_id: str | None = None
+    request_id: str
+    decision_id: str
+    current_context: str
+
+
+class S01VerifyRecoveryResult(BaseModel):
+    status: str
+    replayed: bool
+    recovery_work_id: str
+    recovery_fact_id: str
+    application_id: str
+    phase: str
+    lifecycle_revision: int
+    evidence_revision: int
+    successor_job_id: str
+    successor_fence: int
+    routing_context: S01VerifyRoutingContext | None = None
+
+
+class S01ErrorDetail(BaseModel):
+    error: str
+    reason_code: str | None = None
+    message: str | None = None
+    hint: str | None = None
+
+
+class S01ErrorResponse(BaseModel):
+    detail: S01ErrorDetail
+
+
+class S01CurrentRouteFailure(BaseModel):
+    reason_code: str
+    responsible_party: str
+    recovery_action: str
+    recovery_target: str
+
+
+class S01CurrentRouteResponse(BaseModel):
+    schema_version: str
+    application_id: str
+    phase: str
+    route: str
+    current_run_id: str | None = None
+    cycle: int
+    lifecycle_revision: int
+    evidence_revision: int
+    evidence_snapshot_id: str | None = None
+    evidence_snapshot_digest: str | None = None
+    release_id: str | None = None
+    release_digest: str | None = None
+    checker_build: str | None = None
+    currentness_reason: str
+    completion_basis: str | None = None
+    exception_id: str | None = None
+    exception_decision_id: str | None = None
+    exception_expires_at: int | None = None
+    failure: S01CurrentRouteFailure | None = None
 
 
 class S02SubmitBody(BaseModel):
@@ -1243,7 +1445,7 @@ def controlled_s02_queue(request: Request, response: Response) -> dict[str, Any]
     ):
         if getattr(request.state, "s02_access_ended", False):
             response.headers["X-S02-Access-Ended"] = "1"
-        return {"items": [], "projection_watermark": 0}
+        return {"items": [], "recovery_items": [], "projection_watermark": 0}
     return _s02_service().queue_view(
         role="reviewer",
         scope=principal.scope,
@@ -1525,6 +1727,26 @@ def controlled_s01_page(request: Request) -> HTMLResponse:
     return response
 
 
+@app.get("/controlled/s01/react", response_class=HTMLResponse)
+def controlled_s01_react_page(request: Request) -> HTMLResponse:
+    _s01_service()
+    if not S01_REACT_INDEX.is_file():
+        raise HTTPException(
+            503,
+            detail={
+                "error": "S01_REACT_UNAVAILABLE",
+                "message": "Controlled S01 React shell is not built",
+            },
+        )
+    response = HTMLResponse(S01_REACT_INDEX.read_text(encoding="utf-8"))
+    if _s01_has_credential(request, S01_OPERATOR_CREDENTIAL):
+        _s01_require_operator(request)
+    else:
+        _issue_s01_session(request, response)
+    _s01_disable_cache(response)
+    return response
+
+
 @app.post("/controlled/s01/api/session", status_code=204)
 def controlled_s01_session(request: Request, response: Response) -> Response:
     _issue_s01_session(request, response)
@@ -1629,7 +1851,10 @@ def controlled_s01_test_project(response: Response) -> dict[str, int]:
     return _s01_service().refresh_projection()
 
 
-@app.get("/controlled/s01/api/queries/recovery-work-items/{recovery_work_id}")
+@app.get(
+    "/controlled/s01/api/queries/recovery-work-items/{recovery_work_id}",
+    response_model=S01RecoveryWorkResponse,
+)
 def controlled_s07_recovery_work(
     recovery_work_id: str,
     request: Request,
@@ -1647,7 +1872,15 @@ def controlled_s07_recovery_work(
 
 
 @app.post(
-    "/controlled/s01/api/commands/recovery-work-items/{recovery_work_id}/verify"
+    "/controlled/s01/api/commands/recovery-work-items/{recovery_work_id}/verify",
+    response_model=S01VerifyRecoveryResult,
+    response_model_exclude_none=True,
+    responses={
+        404: {"model": S01ErrorResponse},
+        409: {"model": S01ErrorResponse},
+        422: {"model": S01ErrorResponse},
+        503: {"model": S01ErrorResponse},
+    },
 )
 def controlled_s07_verify_recovery(
     recovery_work_id: str,
@@ -1678,7 +1911,7 @@ def controlled_s07_verify_recovery(
     return _s07_command_result(result)
 
 
-@app.get("/controlled/s01/api/queries/queue")
+@app.get("/controlled/s01/api/queries/queue", response_model=S01QueueResponse)
 def controlled_s01_queue(request: Request, response: Response) -> dict[str, Any]:
     _s01_disable_cache(response)
     principal = _s01_principal(request)
@@ -1689,7 +1922,7 @@ def controlled_s01_queue(request: Request, response: Response) -> dict[str, Any]
     ):
         if getattr(request.state, "s01_access_ended", False):
             response.headers["X-S01-Access-Ended"] = "1"
-        return {"items": [], "projection_watermark": 0}
+        return {"items": [], "recovery_items": [], "projection_watermark": 0}
     return _s01_service().queue_view(
         role="reviewer",
         scope=principal.scope,
@@ -2135,7 +2368,10 @@ async def controlled_s05_resume_business_exception_operations(
     return _s05_command_result(result)
 
 
-@app.get("/controlled/s01/api/queries/applications/{application_id}/current-route")
+@app.get(
+    "/controlled/s01/api/queries/applications/{application_id}/current-route",
+    response_model=S01CurrentRouteResponse,
+)
 def controlled_s04_demo_current_route(
     application_id: str,
     request: Request,

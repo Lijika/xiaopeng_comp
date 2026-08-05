@@ -1751,12 +1751,23 @@ def test_projection_replay_cannot_resurrect_review_work_after_unprocessable(
     replayed = _service(tmp_path)
     replayed.refresh_projection()
 
-    assert replayed.queue_view(
+    queue = replayed.queue_view(
         role="reviewer",
         scope=CORRECTION_REVIEWER.scope,
         subject=CORRECTION_REVIEWER.subject,
         now=103,
-    ) == {"items": [], "projection_watermark": 0}
+    )
+    assert queue["items"] == []
+    assert [item["recovery_work_id"] for item in queue["recovery_items"]] == [
+        blocked.recovery_work_id
+    ]
+    queue_recovery = queue["recovery_items"][0]
+    assert queue_recovery["status"] == "open"
+    assert queue_recovery["phase"] == "Unprocessable"
+    assert (
+        queue_recovery["lifecycle_revision"]
+        == recovery_before["lifecycle_revision"]
+    )
     with pytest.raises(QueryNotFound):
         replayed.workspace_view(
             application_id,
