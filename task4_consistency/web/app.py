@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import email.policy
 import hmac
 import json
 import os
@@ -1344,21 +1345,33 @@ def _s07_not_found() -> HTTPException:
     return HTTPException(404, detail={"error": "S07_NOT_FOUND"})
 
 
+_S07_MEDIA_POLICY = email.policy.default
+
+
 def _s07_request_is_json(content_type: str | None) -> bool:
     """True only when the request Content-Type media-type essence is exactly
-    ``application/json``.
+    ``application/json`` with well-formed parameters.
 
-    Uses the stdlib RFC 2045 media-type parser so substring lookalikes
-    (``text/plain; note=application/json``, ``application/json-patch+json``,
-    ``application/jsonx``) and a missing header are rejected while a
-    case-normalized essence with valid parameters is accepted.
+    Parses the header with the stdlib structured header parser
+    (``email.policy.default`` / ``email.headerregistry``) and fails closed on
+    any parser defect (``header.defects``): a missing header, substring
+    lookalikes (``text/plain; note=application/json``,
+    ``application/json-patch+json``, ``application/jsonx``), and malformed
+    parameter grammar (a missing ``=``, empty or invalid parameter name or
+    value, unterminated or broken quoting) are rejected, while a
+    case-normalized essence with valid token or quoted-string parameters —
+    including quoted values containing spaces or escaped quotes — is
+    accepted.
     """
     if not content_type:
         return False
-    message = Message()
+    message = Message(policy=_S07_MEDIA_POLICY)
     try:
         message["content-type"] = content_type
     except (TypeError, ValueError):
+        return False
+    header = message["Content-Type"]
+    if header is None or header.defects:
         return False
     return message.get_content_type() == "application/json"
 

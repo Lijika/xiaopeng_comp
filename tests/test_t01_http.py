@@ -238,6 +238,37 @@ def create_t01_queue_unexpected_app() -> Any:
     web.S01_TEST_DRIVER = None
     return web.app
 
+
+def create_t01_media_counter_app() -> Any:
+    """S07-style test app that counts real VerifyRecovery service calls.
+
+    Reuses the S07 test app seam (admission + ``_FailFirstS07Driver``) and
+    wraps the service's ``verify_recovery`` with a counting wrapper that
+    persists the running call count to ``TASK4_S01_TEST_VERIFY_COUNT_PATH``
+    after every invocation.  The real-socket media-type regression reads the
+    counter between requests to prove rejected media types never reach the
+    service while a valid media type does (even when it deterministically
+    returns stale 409).  No production endpoint or service hook is added.
+    """
+    import task4_consistency.web.app as web
+
+    from tests.test_s07_http import create_s07_test_app
+
+    app = create_s07_test_app()
+    service = web.S01_SERVICE
+    counter_path = Path(os.environ["TASK4_S01_TEST_VERIFY_COUNT_PATH"])
+    counter_path.write_text("0", encoding="ascii")
+    original = service.verify_recovery
+
+    def counting_verify_recovery(**kwargs: Any) -> dict[str, Any]:
+        count = int(counter_path.read_text(encoding="ascii"))
+        counter_path.write_text(str(count + 1), encoding="ascii")
+        return original(**kwargs)
+
+    service.verify_recovery = counting_verify_recovery  # type: ignore[method-assign]
+    return app
+
+
 MANUAL_ITEM_FIELDS = {
     "application_id",
     "work_item_id",
@@ -1641,18 +1672,30 @@ def test_verify_auth_hides_before_raw_body_parsing(tmp_path: Path) -> None:
 
 def test_verify_rejects_non_json_media_types_before_service(tmp_path: Path) -> None:
     """The VerifyRecovery media-type gate accepts only the exact
-    ``application/json`` essence (case-normalized, parameters allowed) and
-    rejects missing, disguised, and lookalike content types before any
-    service call, with a sanitized authorized 422 and zero service effect."""
+    ``application/json`` essence (case-normalized, valid parameters) and
+    rejects missing, disguised, lookalike, and malformed-parameter content
+    types before any service call.
+
+    A real service-call counter (wrapped in the test app factory seam) proves
+    every rejected media type -- Operator and anonymous/Reviewer alike --
+    leaves ``verify_recovery`` untouched, while valid media types increment
+    it (even when they deterministically return stale 409)."""
     state_path = tmp_path / "t01-media-type.sqlite3"
+    counter_path = tmp_path / "t01-media-type-verify-count.txt"
+    env = _environment(state_path, "verified")
+    env["TASK4_S01_TEST_VERIFY_COUNT_PATH"] = str(counter_path)
     with UvicornLoopback(
-        _environment(state_path, "verified"),
-        app_target=APP_FACTORY,
+        env,
+        app_target="tests.test_t01_http:create_t01_media_counter_app",
         app_factory=True,
     ) as server:
         blocked = _admit_and_block(server, "t01-media-type-a", now=10)
         work_id = blocked["recovery_work_id"]
         sentinel = "t01-media-SENTINEL-0f1e2d3c4b5a"
+
+        def verify_call_count() -> int:
+            return int(counter_path.read_text(encoding="ascii"))
+
         valid_body = (
             b'{"expected_lifecycle_revision": 1, '
             b'"expected_criterion_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", '
@@ -1660,11 +1703,17 @@ def test_verify_rejects_non_json_media_types_before_service(tmp_path: Path) -> N
         )
         media_type_cases = {
             "missing-content-type": (valid_body, None),
+            "missing-equals": (valid_body, "application/json; charset"),
+            "empty-param-name": (valid_body, "application/json; =oops"),
+            "empty-param-value": (valid_body, "application/json; charset="),
+            "unterminated-quote": (valid_body, 'application/json; charset="unterminated'),
+            "bad-param-name": (valid_body, "application/json; a b=c"),
             "disguised-param": (valid_body, "text/plain; note=application/json"),
             "lookalike-patch": (valid_body, "application/json-patch+json"),
             "lookalike-jsonx": (valid_body, "application/jsonx"),
             "plain-text": (valid_body, "text/plain"),
         }
+        assert verify_call_count() == 0
         for case, (raw, content_type) in media_type_cases.items():
             for label, auth_headers in (
                 ("anonymous", {}),
@@ -1689,6 +1738,11 @@ def test_verify_rejects_non_json_media_types_before_service(tmp_path: Path) -> N
                     label,
                 )
                 assert work_id not in response.text, (case, label)
+                assert verify_call_count() == 0, (
+                    case,
+                    label,
+                    "service called for a hidden request",
+                )
 
             operator_response = server.raw_request(
                 "POST",
@@ -1715,10 +1769,17 @@ def test_verify_rejects_non_json_media_types_before_service(tmp_path: Path) -> N
                 value not in operator_response.text
                 for value in _restricted_strings()
             ), (case, "restricted echoed")
+            assert verify_call_count() == 0, (
+                case,
+                "service called for a rejected media type",
+            )
 
-        # A case-normalized JSON essence with valid parameters IS accepted:
-        # the request reaches business handling (a deterministic stale 409,
-        # which commits no effect) instead of a media-type 422.
+        # A case-normalized JSON essence with valid parameters IS accepted,
+        # including valid quoted-string values with a space or an escaped
+        # quote: each request reaches business handling (a deterministic stale
+        # 409, which commits no effect) instead of a media-type 422, and the
+        # call counter increments -- proving the counter is live and
+        # discriminating.
         work_view = server.request(
             "GET",
             _recovery_path(work_id),
@@ -1726,7 +1787,12 @@ def test_verify_rejects_non_json_media_types_before_service(tmp_path: Path) -> N
             use_session=False,
         ).json()
         real_revision = work_view["lifecycle_revision"]
-        for accepted_type in ("Application/JSON", "application/json; charset=utf-8"):
+        for accepted_type in (
+            "Application/JSON",
+            "application/json; charset=utf-8",
+            'application/json; note="hello world"',
+            'application/json; note="a\\"b"',
+        ):
             accepted = server.raw_request(
                 "POST",
                 _verify_path(work_id),
@@ -1743,9 +1809,13 @@ def test_verify_rejects_non_json_media_types_before_service(tmp_path: Path) -> N
             )
             assert accepted.status == 409, (accepted_type, accepted.text)
             assert "S07_STALE" in accepted.text, (accepted_type, accepted.text)
+        assert verify_call_count() == 4, (
+            "valid media types must reach verify_recovery",
+        )
 
-        # Direct zero-service-call proof: none of the media-type attempts —
-        # rejected or accepted-but-stale — committed a VerifyRecovery effect.
+        # Complementary zero-persisted-effect proof: no attempt committed a
+        # VerifyRecovery fact (rejected media types never call the service;
+        # the valid-but-stale calls intentionally return 409 with no effect).
         final_view = server.request(
             "GET",
             _recovery_path(work_id),
