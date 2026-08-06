@@ -1708,6 +1708,13 @@ def test_verify_rejects_non_json_media_types_before_service(tmp_path: Path) -> N
             "empty-param-value": (valid_body, "application/json; charset="),
             "unterminated-quote": (valid_body, 'application/json; charset="unterminated'),
             "bad-param-name": (valid_body, "application/json; a b=c"),
+            "mime-comment": (valid_body, "application/json; foo=(comment)bar"),
+            "non-ascii-param-name": (valid_body, "application/json; föö=bar"),
+            "non-ascii-token-value": (valid_body, "application/json; foo=bär"),
+            "empty-param-segment": (valid_body, "application/json;; charset=utf-8"),
+            "trailing-empty-param": (valid_body, "application/json; charset=utf-8;"),
+            "ows-before-equals": (valid_body, "application/json; charset =utf-8"),
+            "ows-after-equals": (valid_body, "application/json; charset= utf-8"),
             "disguised-param": (valid_body, "text/plain; note=application/json"),
             "lookalike-patch": (valid_body, "application/json-patch+json"),
             "lookalike-jsonx": (valid_body, "application/jsonx"),
@@ -1792,6 +1799,9 @@ def test_verify_rejects_non_json_media_types_before_service(tmp_path: Path) -> N
             "application/json; charset=utf-8",
             'application/json; note="hello world"',
             'application/json; note="a\\"b"',
+            "application/json \t;\tcharset=utf-8",
+            'application/json; note="(comment) text"',
+            'application/json; note="bär"',
         ):
             accepted = server.raw_request(
                 "POST",
@@ -1809,7 +1819,7 @@ def test_verify_rejects_non_json_media_types_before_service(tmp_path: Path) -> N
             )
             assert accepted.status == 409, (accepted_type, accepted.text)
             assert "S07_STALE" in accepted.text, (accepted_type, accepted.text)
-        assert verify_call_count() == 4, (
+        assert verify_call_count() == 7, (
             "valid media types must reach verify_recovery",
         )
 

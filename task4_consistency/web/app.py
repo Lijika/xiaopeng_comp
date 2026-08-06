@@ -1346,22 +1346,38 @@ def _s07_not_found() -> HTTPException:
 
 
 _S07_MEDIA_POLICY = email.policy.default
+_S07_JSON_MEDIA_TYPE_PATTERN = re.compile(
+    r"""
+    application/json
+    (?:
+        [\t ]* ; [\t ]*
+        [!#$%&'*+\-.^_`|~0-9A-Za-z]+
+        =
+        (?:
+            [!#$%&'*+\-.^_`|~0-9A-Za-z]+
+            |
+            "
+            (?:
+                [\t \x21\x23-\x5b\x5d-\x7e\x80-\xff]
+                | \\[\t \x21-\x7e\x80-\xff]
+            )*
+            "
+        )
+    )*
+    """,
+    re.ASCII | re.IGNORECASE | re.VERBOSE,
+)
 
 
 def _s07_request_is_json(content_type: str | None) -> bool:
     """True only when the request Content-Type media-type essence is exactly
     ``application/json`` with well-formed parameters.
 
-    Parses the header with the stdlib structured header parser
-    (``email.policy.default`` / ``email.headerregistry``) and fails closed on
-    any parser defect (``header.defects``): a missing header, substring
-    lookalikes (``text/plain; note=application/json``,
-    ``application/json-patch+json``, ``application/jsonx``), and malformed
-    parameter grammar (a missing ``=``, empty or invalid parameter name or
-    value, unterminated or broken quoting) are rejected, while a
-    case-normalized essence with valid token or quoted-string parameters —
-    including quoted values containing spaces or escaped quotes — is
-    accepted.
+    The stdlib structured parser rejects MIME defects; the whole-value matcher
+    additionally enforces HTTP token/quoted-string parameter grammar because
+    the MIME parser permissively accepts comments and non-ASCII bare tokens.
+    Only SP/HTAB OWS around semicolons is allowed.  Valid quoted values retain
+    spaces, escaped characters, and opaque Latin-1 ``obs-text``.
     """
     if not content_type:
         return False
@@ -1371,7 +1387,11 @@ def _s07_request_is_json(content_type: str | None) -> bool:
     except (TypeError, ValueError):
         return False
     header = message["Content-Type"]
-    if header is None or header.defects:
+    if (
+        header is None
+        or header.defects
+        or _S07_JSON_MEDIA_TYPE_PATTERN.fullmatch(content_type) is None
+    ):
         return False
     return message.get_content_type() == "application/json"
 
