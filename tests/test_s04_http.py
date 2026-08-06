@@ -7,6 +7,7 @@ import json
 import sqlite3
 from pathlib import Path
 import time
+from uuid import uuid4
 
 from tests.test_s01_http import (
     UvicornLoopback,
@@ -264,7 +265,8 @@ def test_correction_rerun_history_and_current_route_over_http(tmp_path: Path) ->
             body=command,
             headers=headers("reviewer"),
         )
-        assert corrected.status == 200, corrected.text
+        corrected_status = corrected.status
+        assert corrected_status == 200
         pending = server.request(
             "GET",
             f"/controlled/s01/api/queries/applications/{application_id}/current-route",
@@ -280,7 +282,12 @@ def test_correction_rerun_history_and_current_route_over_http(tmp_path: Path) ->
             if history.status == 200 and len(history.json()["runs"]) == 2:
                 break
             if time.monotonic() >= deadline:
-                raise AssertionError((history.status, history.text))
+                run_count = (
+                    len(history.json()["runs"]) if history.status == 200 else None
+                )
+                raise AssertionError(
+                    {"history_status": history.status, "run_count": run_count}
+                )
             time.sleep(0.05)
         current = server.request(
             "GET",
@@ -288,16 +295,29 @@ def test_correction_rerun_history_and_current_route_over_http(tmp_path: Path) ->
             headers=headers("reviewer"),
         )
 
-    assert hidden.status == 404
-    assert hidden.json()["detail"] == {"error": "S03_NOT_FOUND"}
-    assert hidden_reveal.status == 404
-    assert hidden_reveal.json()["detail"] == {"error": "S03_NOT_FOUND"}
-    assert invalid.status == 422
-    assert invalid.json()["detail"]["error"] == "S03_INVALID_COMMAND"
+    response_statuses = (
+        hidden.status,
+        hidden_reveal.status,
+        invalid.status,
+        unsupported.status,
+    )
+    assert response_statuses == (404, 404, 422, 422)
+    hidden_is_sanitized = hidden.json()["detail"] == {"error": "S03_NOT_FOUND"}
+    assert hidden_is_sanitized
+    hidden_reveal_is_sanitized = hidden_reveal.json()["detail"] == {
+        "error": "S03_NOT_FOUND"
+    }
+    assert hidden_reveal_is_sanitized
+    invalid_error_is_sanitized = (
+        invalid.json()["detail"]["error"] == "S03_INVALID_COMMAND"
+    )
+    assert invalid_error_is_sanitized
     invalid_is_redacted = unexpected_raw not in invalid.text
     assert invalid_is_redacted
-    assert unsupported.status == 422
-    assert unsupported.json()["detail"]["error"] == "S03_INVALID_COMMAND"
+    unsupported_error_is_sanitized = (
+        unsupported.json()["detail"]["error"] == "S03_INVALID_COMMAND"
+    )
+    assert unsupported_error_is_sanitized
     assert after_rejection == before_rejection
     # The authoritative stored successor preserves the correction raw and
     # its lexeme byte-for-byte (leading/trailing whitespace included): only
@@ -331,11 +351,12 @@ def test_correction_rerun_history_and_current_route_over_http(tmp_path: Path) ->
     assert _restricted_digest(successors[0]["raw_lexeme"]) == _restricted_digest(
         padded_raw
     )
-    assert corrected.status == 200
     assert corrected.json()["status"] == "accepted"
-    assert pending.status == 200
+    pending_status = pending.status
+    assert pending_status == 200
     assert corrected.json()["route"] == "pending_check"
-    assert history.status == current.status == 200
+    convergence_statuses = (history.status, current.status)
+    assert convergence_statuses == (200, 200)
     assert [run["current"] for run in history.json()["runs"]] == [False, True]
     assert history.json()["runs"][0]["run_id"] == work_item["run_authority"]["run_id"]
     assert current.json()["current_run_id"] == history.json()["runs"][1]["run_id"]
@@ -352,6 +373,7 @@ def test_registered_source_correction_reruns_to_fresh_review_work_over_http(
     tmp_path: Path,
 ) -> None:
     environment, submission = _configured_http_source(tmp_path)
+    registered_correction_raw = f"registered-correction:{uuid4()}"
     with UvicornLoopback(
         environment,
         app_target="task4_consistency.web.app:create_s02_test_app",
@@ -398,7 +420,7 @@ def test_registered_source_correction_reruns_to_fresh_review_work_over_http(
                     "document_id": source["document_id"],
                     "document_role": source["document_role"],
                     "field": source["field"],
-                    "raw": "SAFE-VIN-B",
+                    "raw": registered_correction_raw,
                     "source_location": {
                         key: source[key]
                         for key in (
@@ -413,7 +435,8 @@ def test_registered_source_correction_reruns_to_fresh_review_work_over_http(
             headers=request_headers,
             use_session=False,
         )
-        assert corrected.status == 200, corrected.text
+        corrected_status = corrected.status
+        assert corrected_status == 200
         old_context = server.request(
             "GET",
             f"/controlled/s02/api/queries/review-work-items/{work_item_id}",
@@ -453,7 +476,15 @@ def test_registered_source_correction_reruns_to_fresh_review_work_over_http(
             if len(history.json()["runs"]) == 2 and fresh_item is not None:
                 break
             if time.monotonic() >= deadline:
-                raise AssertionError((history.text, current.text, queue.text))
+                raise AssertionError(
+                    {
+                        "history_status": history.status,
+                        "history_run_count": len(history.json()["runs"]),
+                        "current_status": current.status,
+                        "queue_status": queue.status,
+                        "queue_item_count": len(queue.json()["items"]),
+                    }
+                )
             time.sleep(0.05)
         fresh_workspace = server.request(
             "GET",
@@ -484,5 +515,7 @@ def test_registered_source_correction_reruns_to_fresh_review_work_over_http(
         ],
         ensure_ascii=False,
     )
-    assert "SAFE-VIN-A" not in public
-    assert "SAFE-VIN-B" not in public
+    public_is_redacted = all(
+        value not in public for value in ("SAFE-VIN-A", registered_correction_raw)
+    )
+    assert public_is_redacted

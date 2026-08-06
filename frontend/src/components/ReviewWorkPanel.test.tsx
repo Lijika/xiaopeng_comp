@@ -60,6 +60,18 @@ function restrictedElement(testId: string): HTMLElement {
   return elements[0];
 }
 
+function restrictedButtons(name: string): HTMLButtonElement[] {
+  return Array.from(document.querySelectorAll<HTMLButtonElement>("button")).filter(
+    (button) => button.textContent?.trim() === name,
+  );
+}
+
+function restrictedButton(name: string, index = 0): HTMLButtonElement {
+  const buttons = restrictedButtons(name);
+  expect(buttons.length).toBeGreaterThan(index);
+  return buttons[index];
+}
+
 async function findRestrictedElements(testId: string): Promise<HTMLElement[]> {
   await vi.waitFor(() => {
     expect(restrictedElements(testId).length).toBeGreaterThan(0);
@@ -286,12 +298,16 @@ function baseRoutes() {
 
 /** Waits until every owning read the action gate requires is loaded. */
 async function waitForReviewReady() {
-  await waitFor(() =>
-    expect(screen.getByTestId("review-workspace-rule")).toBeInTheDocument(),
-  );
-  await screen.findByTestId("gate-phase");
-  await screen.findByTestId("review-history-decisions");
-  await screen.findByTestId("review-status");
+  await vi.waitFor(() => {
+    for (const testId of [
+      "review-workspace-rule",
+      "gate-phase",
+      "review-history-decisions",
+      "review-status",
+    ]) {
+      expect(restrictedElements(testId).length).toBeGreaterThan(0);
+    }
+  });
 }
 
 describe("ReviewWorkPanel (T02)", () => {
@@ -1168,6 +1184,7 @@ describe("ReviewWorkPanel controlled reveal (T03)", () => {
     expect(
       screen.getAllByRole("button", { name: "更正该字段" }),
     ).toHaveLength(2);
+    const maskedEvidence = screen.getAllByTestId("review-evidence-masked");
     await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
     const sources = await findRestrictedElements("review-reveal-source");
     expect(sources.length).toBe(1);
@@ -1176,7 +1193,7 @@ describe("ReviewWorkPanel controlled reveal (T03)", () => {
     const panelText = restrictedElement("review-panel").textContent ?? "";
     expect(panelText.split(SOURCE_SENTINEL).length - 1).toBe(1);
     // The evidence stays masked for both observations.
-    for (const masked of screen.getAllByTestId("review-evidence-masked")) {
+    for (const masked of maskedEvidence) {
       expect(masked).toHaveTextContent("[REDACTED]");
     }
     const revealCall = router.calls.find((call) => call.method === "POST");
@@ -1245,9 +1262,10 @@ describe("ReviewWorkPanel controlled reveal (T03)", () => {
     });
     renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
     await waitForReviewReady();
+    const reloadButton = screen.getByRole("button", { name: "重新加载" });
     await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
     await findRestrictedElements("review-reveal-source");
-    await userEvent.click(screen.getByRole("button", { name: "重新加载" }));
+    await userEvent.click(reloadButton);
     await vi.waitFor(() =>
       expectRestrictedElementsAbsent("review-reveal-source"),
     );
@@ -1387,7 +1405,7 @@ describe("ReviewWorkPanel controlled reveal (T03)", () => {
     await act(async () => {
       await client.refetchQueries({ queryKey: WORKSPACE_KEY(APP_ID) });
     });
-    await screen.findByTestId("review-error");
+    await findRestrictedElements("review-error");
     await act(async () => {
       await client.refetchQueries({ queryKey: WORKSPACE_KEY(APP_ID) });
     });
@@ -1550,16 +1568,18 @@ describe("ReviewWorkPanel controlled reveal (T03)", () => {
     });
     renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
     await waitForReviewReady();
+    const correctButton = screen.getAllByRole("button", {
+      name: "更正该字段",
+    })[0];
+    const renewButton = screen.getByRole("button", { name: "续期" });
     await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
     await findRestrictedElements("review-reveal-source");
-    await userEvent.click(
-      screen.getAllByRole("button", { name: "更正该字段" })[0],
-    );
-    expect(screen.getByTestId("review-correction-form")).toBeInTheDocument();
+    await userEvent.click(correctButton);
+    expect(restrictedElements("review-correction-form").length).toBe(1);
     // The renewal extends the claim expiry without touching the fence: the
     // issued authorization (which includes the claim expiry) is no longer the
     // live one, so every restricted holder is scrubbed.
-    await userEvent.click(screen.getByRole("button", { name: "续期" }));
+    await userEvent.click(renewButton);
     await vi.waitFor(() =>
       expectRestrictedElementsAbsent("review-reveal-source"),
     );
@@ -1604,23 +1624,23 @@ describe("ReviewWorkPanel controlled reveal (T03)", () => {
       CORRECTION_SENTINEL,
     );
     await userEvent.click(submit);
-    await waitFor(() =>
-      expect(screen.getByTestId("review-command-status")).toHaveTextContent(
-        "结果未知：网络未确认，重试将使用同一幂等键",
-      ),
+    await vi.waitFor(() =>
+      expect(
+        (restrictedElement("review-command-status").textContent ?? "").includes(
+          "结果未知：网络未确认，重试将使用同一幂等键",
+        ),
+      ).toBe(true),
     );
-    expect(screen.getByTestId("retry-button")).toBeInTheDocument();
+    expect(restrictedElements("retry-button").length).toBe(1);
     // An authoritative context change (only the command context differs)
     // while the outcome is unknown must end the replay and clear its raw.
     await act(async () => {
       await client.refetchQueries({ queryKey: MANUAL_WORK_KEY(WORK_ID) });
     });
-    await waitFor(() =>
-      expect(screen.queryByTestId("retry-button")).not.toBeInTheDocument(),
+    await vi.waitFor(() =>
+      expect(restrictedElements("retry-button").length).toBe(0),
     );
-    expect(
-      screen.queryByTestId("review-correction-pending"),
-    ).not.toBeInTheDocument();
+    expect(restrictedElements("review-correction-pending").length).toBe(0);
     expectRestrictedAbsent(
       restrictedElement("review-panel").textContent,
       CORRECTION_SENTINEL,
@@ -1657,8 +1677,8 @@ describe("ReviewWorkPanel controlled reveal (T03)", () => {
     });
     const { client } = renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
     await waitForReviewReady();
-    await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
-    const pendingMarkers = await screen.findAllByTestId("review-reveal-pending");
+    await userEvent.click(restrictedButton("查看来源"));
+    const pendingMarkers = await findRestrictedElements("review-reveal-pending");
     expect(pendingMarkers.length).toBeGreaterThanOrEqual(2);
     expect(pending).toHaveLength(1);
     // Reclaim advances the fence: an authoritative refetch invalidates the
@@ -1666,13 +1686,11 @@ describe("ReviewWorkPanel controlled reveal (T03)", () => {
     await act(async () => {
       await client.refetchQueries({ queryKey: MANUAL_WORK_KEY(WORK_ID) });
     });
-    await waitFor(() =>
-      expect(
-        screen.queryByTestId("review-reveal-pending"),
-      ).not.toBeInTheDocument(),
+    await vi.waitFor(() =>
+      expect(restrictedElements("review-reveal-pending").length).toBe(0),
     );
-    await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
-    await waitFor(() => expect(pending).toHaveLength(2));
+    await userEvent.click(restrictedButton("查看来源"));
+    await vi.waitFor(() => expect(pending.length).toBe(2));
     // Resolve the first (superseded) issuance first: it must be discarded
     // before storage, then the current issuance alone may render.
     await act(async () => {
@@ -1684,12 +1702,12 @@ describe("ReviewWorkPanel controlled reveal (T03)", () => {
       );
     });
     expectRestrictedElementsAbsent("review-reveal-source");
-    expect(screen.getAllByTestId("review-reveal-pending").length).toBeGreaterThan(
-      0,
-    );
-    expect(screen.getByTestId("review-command-status")).toHaveTextContent(
-      "揭示提交中",
-    );
+    expect(restrictedElements("review-reveal-pending").length).toBeGreaterThan(0);
+    expect(
+      (restrictedElement("review-command-status").textContent ?? "").includes(
+        "揭示提交中",
+      ),
+    ).toBe(true);
     await act(async () => {
       pending[1](
         new Response(JSON.stringify(revealResultPayload()), {
@@ -1747,38 +1765,38 @@ describe("ReviewWorkPanel controlled reveal (T03)", () => {
     await waitForReviewReady();
 
     const issueCorrection = async (raw: string) => {
-      await userEvent.click(
-        screen.getAllByRole("button", { name: "更正该字段" })[0],
-      );
-      const submit = screen.getByRole("button", { name: "提交修正" });
-      await userEvent.type(screen.getByTestId("review-correction-raw"), raw);
+      await userEvent.click(restrictedButton("更正该字段"));
+      const submit = restrictedElement("review-correction-submit");
+      await userEvent.type(restrictedElement("review-correction-raw"), raw);
       await userEvent.click(submit);
     };
 
     await issueCorrection(`${CORRECTION_SENTINEL}:A`);
-    await waitFor(() => expect(pending.length).toBe(1));
+    await vi.waitFor(() => expect(pending.length).toBe(1));
     await act(async () => {
       await client.refetchQueries({ queryKey: MANUAL_WORK_KEY(WORK_ID) });
     });
-    await waitFor(() =>
-      expect(screen.queryByTestId("review-correction-pending")).not.toBeInTheDocument(),
+    await vi.waitFor(() =>
+      expect(restrictedElements("review-correction-pending").length).toBe(0),
     );
     await issueCorrection(`${CORRECTION_SENTINEL}:B`);
-    await waitFor(() => expect(pending.length).toBe(2));
+    await vi.waitFor(() => expect(pending.length).toBe(2));
 
     await act(async () => {
       pending[0](jsonResponse(correctionResultPayload()));
     });
-    expect(screen.getByTestId("review-command-status")).toHaveTextContent(
-      "更正提交中",
-    );
-    expect(screen.getByRole("button", { name: "续期" })).toBeDisabled();
+    expect(
+      (restrictedElement("review-command-status").textContent ?? "").includes(
+        "更正提交中",
+      ),
+    ).toBe(true);
+    expect(restrictedButton("续期").disabled).toBe(true);
 
     await act(async () => {
       pending[1](jsonResponse(correctionResultPayload()));
     });
-    await waitFor(() =>
-      expect(screen.getByTestId("review-correction-converged")).toBeInTheDocument(),
+    await vi.waitFor(() =>
+      expect(restrictedElements("review-correction-converged").length).toBe(1),
     );
     const cached = client
       .getMutationCache()
@@ -1822,23 +1840,26 @@ describe("ReviewWorkPanel evidence correction rerun (T03)", () => {
     });
     renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
     await waitForReviewReady();
+    const correctButton = screen.getAllByRole("button", {
+      name: "更正该字段",
+    })[0];
     await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
     await findRestrictedElements("review-reveal-source");
-    await userEvent.click(
-      screen.getAllByRole("button", { name: "更正该字段" })[0],
-    );
-    const submit = screen.getByRole("button", { name: "提交修正" });
+    await userEvent.click(correctButton);
+    const submit = restrictedElement("review-correction-submit");
     expect(submit).toBeDisabled();
     // The raw evidence crosses the boundary byte-for-byte: leading/trailing
     // whitespace is part of the entered value, not trimmed by the client.
     const paddedRaw = `  ${CORRECTION_SENTINEL}  `;
-    await userEvent.type(screen.getByTestId("review-correction-raw"), paddedRaw);
+    await userEvent.type(restrictedElement("review-correction-raw"), paddedRaw);
     expect(submit).toBeEnabled();
     await userEvent.click(submit);
-    await waitFor(() =>
-      expect(screen.getByTestId("review-correction-converged")).toHaveTextContent(
-        "run_t03succ",
-      ),
+    await vi.waitFor(() =>
+      expect(
+        (
+          restrictedElement("review-correction-converged").textContent ?? ""
+        ).includes("run_t03succ"),
+      ).toBe(true),
     );
     const correctCall = router.calls.filter(
       (call) => call.method === "POST",
@@ -1900,43 +1921,39 @@ describe("ReviewWorkPanel evidence correction rerun (T03)", () => {
       restrictedElement("review-panel").textContent,
       SOURCE_SENTINEL,
     );
+    expectRestrictedAbsent(
+      restrictedElement("review-panel").textContent,
+      CORRECTION_SENTINEL,
+    );
     // The invalidated old workspace/work reads existence-hide (404) but the
     // review shell, the authoritative gate, and history stay usable; the
     // successor convergence is resolved from server-owned route/history.
+    expect(restrictedElements("review-correction-pending").length).toBe(0);
+    const convergenceText =
+      restrictedElement("review-correction-converged").textContent ?? "";
+    expect(convergenceText.includes("证据修订 2")).toBe(true);
+    expect(convergenceText.includes("run_t03succ")).toBe(true);
     expect(
-      screen.queryByTestId("review-correction-pending"),
-    ).not.toBeInTheDocument();
-    expect(screen.getByTestId("review-correction-converged")).toHaveTextContent(
-      "证据修订 2",
-    );
-    expect(screen.getByTestId("review-correction-converged")).toHaveTextContent(
-      "run_t03succ",
-    );
-    expect(screen.getByTestId("gate-phase")).toHaveTextContent("Auto Complete");
-    expect(screen.getByTestId("review-history-corrections")).toHaveTextContent(
-      "correction_t03panel",
-    );
-    expect(screen.getByTestId("review-history-corrections")).toHaveTextContent(
-      "observation_t02panel → observation_t02panel_succ",
-    );
-    expect(screen.getByTestId("review-history-corrections")).toHaveTextContent(
-      "SOURCE_VALUE_MISREAD",
-    );
-    expect(screen.getByTestId("review-history-corrections")).toHaveTextContent(
-      "证据修订 2",
-    );
-    const runsText = screen.getByTestId("review-history-runs").textContent ?? "";
-    expect(runsText).toContain("run_t02panel");
-    expect(runsText).toContain("run_t03succ");
+      (restrictedElement("gate-phase").textContent ?? "").includes("Auto Complete"),
+    ).toBe(true);
+    const correctionsText =
+      restrictedElement("review-history-corrections").textContent ?? "";
+    expect(correctionsText.includes("correction_t03panel")).toBe(true);
+    expect(
+      correctionsText.includes(
+        "observation_t02panel → observation_t02panel_succ",
+      ),
+    ).toBe(true);
+    expect(correctionsText.includes("SOURCE_VALUE_MISREAD")).toBe(true);
+    expect(correctionsText.includes("证据修订 2")).toBe(true);
+    const runsText = restrictedElement("review-history-runs").textContent ?? "";
+    expect(runsText.includes("run_t02panel")).toBe(true);
+    expect(runsText.includes("run_t03succ")).toBe(true);
     expect(runsText.match(/· 当前/g)).toHaveLength(1);
     expect(runsText.match(/· 非当前/g)).toHaveLength(1);
     // All manual-review writes are fenced while the successor run converges.
-    expect(
-      screen.queryByRole("button", { name: "查看来源" }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "提交人工核验" }),
-    ).not.toBeInTheDocument();
+    expect(restrictedButtons("查看来源").length).toBe(0);
+    expect(restrictedButtons("提交人工核验").length).toBe(0);
   });
 
   it("renders the sanitized terminal outcome when the authoritative convergence read definitively fails", async () => {
@@ -1980,17 +1997,15 @@ describe("ReviewWorkPanel evidence correction rerun (T03)", () => {
     // The definitive 404 on the authoritative convergence read renders the
     // sanitized terminal outcome (never an elapsed-timeout claim, and never
     // raw error detail).
-    await waitFor(() =>
-      expect(screen.getByTestId("review-correction-terminal")).toBeInTheDocument(),
+    await vi.waitFor(() =>
+      expect(restrictedElements("review-correction-terminal").length).toBe(1),
     );
-    expect(
-      screen.queryByTestId("review-correction-timeout"),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.getByTestId("review-correction-terminal").textContent ?? "",
-    ).not.toContain("S03_NOT_FOUND");
+    expect(restrictedElements("review-correction-timeout").length).toBe(0);
+    const terminalText =
+      restrictedElement("review-correction-terminal").textContent ?? "";
+    expect(terminalText.includes("S03_NOT_FOUND")).toBe(false);
     expectRestrictedAbsent(
-      screen.getByTestId("review-correction-terminal").textContent,
+      terminalText,
       CORRECTION_SENTINEL,
     );
     expect(router.calls.filter((call) => call.method === "POST").length).toBe(1);
@@ -2015,21 +2030,24 @@ describe("ReviewWorkPanel evidence correction rerun (T03)", () => {
     });
     const { client } = renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
     await waitForReviewReady();
+    const correctButton = screen.getAllByRole("button", {
+      name: "更正该字段",
+    })[0];
     await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
     await findRestrictedElements("review-reveal-source");
-    await userEvent.click(
-      screen.getAllByRole("button", { name: "更正该字段" })[0],
-    );
-    const submit = screen.getByRole("button", { name: "提交修正" });
+    await userEvent.click(correctButton);
+    const submit = restrictedElement("review-correction-submit");
     await userEvent.type(
-      screen.getByTestId("review-correction-raw"),
+      restrictedElement("review-correction-raw"),
       CORRECTION_SENTINEL,
     );
     await userEvent.click(submit);
-    await waitFor(() =>
-      expect(screen.getByTestId("review-command-status")).toHaveTextContent(
-        "更正未接受（CORRECTION_REJECTED）：请重新加载权威上下文后再试",
-      ),
+    await vi.waitFor(() =>
+      expect(
+        (restrictedElement("review-command-status").textContent ?? "").includes(
+          "更正未接受（CORRECTION_REJECTED）：请重新加载权威上下文后再试",
+        ),
+      ).toBe(true),
     );
     // A definitive rejection proves no correction committed: the reveal and
     // the form are scrubbed, and no invalidation shell may appear.
@@ -2039,9 +2057,7 @@ describe("ReviewWorkPanel evidence correction rerun (T03)", () => {
       restrictedElement("review-panel").textContent,
       SOURCE_SENTINEL,
     );
-    expect(
-      screen.queryByTestId("review-correction-pending"),
-    ).not.toBeInTheDocument();
+    expect(restrictedElements("review-correction-pending").length).toBe(0);
     // The restricted raw must not survive in the MutationCache after the
     // definitive rejection scrubbed the panel.
     const cached = client
@@ -2049,12 +2065,12 @@ describe("ReviewWorkPanel evidence correction rerun (T03)", () => {
       .getAll()
       .map((mutation) => JSON.stringify(mutation.state.variables ?? {}));
     expectRestrictedAbsent(cached.join("\n"), CORRECTION_SENTINEL);
-    expect(screen.getByTestId("review-reload-note")).toBeInTheDocument();
-    for (const button of screen.getAllByRole("button", { name: "查看来源" })) {
-      expect(button).toBeDisabled();
+    expect(restrictedElements("review-reload-note").length).toBe(1);
+    for (const button of restrictedButtons("查看来源")) {
+      expect(button.disabled).toBe(true);
     }
     for (const name of ["认领", "续期", "释放", "提交人工核验"]) {
-      expect(screen.getByRole("button", { name })).toBeDisabled();
+      expect(restrictedButton(name).disabled).toBe(true);
     }
     expect(router.calls.filter((call) => call.method === "POST").length).toBe(2);
   });

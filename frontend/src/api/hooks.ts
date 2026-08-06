@@ -318,26 +318,31 @@ export function useCorrectionConvergence(
       if (cancelled) return;
       const routeState = queryClient.getQueryState(ROUTE_KEY(applicationId));
       const historyState = queryClient.getQueryState(HISTORY_KEY(applicationId));
+      const routeError = routeState?.error;
+      const historyError = historyState?.error;
+      const hasRouteError = routeError !== undefined && routeError !== null;
+      const hasHistoryError = historyError !== undefined && historyError !== null;
       if (
-        (routeState?.error !== undefined &&
-          routeState.error !== null &&
-          isDefinitiveRejection(routeState.error)) ||
-        (historyState?.error !== undefined &&
-          historyState.error !== null &&
-          isDefinitiveRejection(historyState.error))
+        (hasRouteError && isDefinitiveRejection(routeError)) ||
+        (hasHistoryError && isDefinitiveRejection(historyError))
       ) {
         setOutcome("terminal");
         return;
       }
-      const route = queryClient.getQueryData<CurrentRouteResponse>(
-        ROUTE_KEY(applicationId),
-      );
-      const history = queryClient.getQueryData<ApplicationHistoryResponse>(
-        HISTORY_KEY(applicationId),
-      );
-      if (correctionConverged(route, history, acceptedEvidenceRevision)) {
-        setOutcome("converged");
-        return;
+      // Retained data is never current evidence while either authoritative
+      // refetch is unavailable.  Transient errors remain waiting and consume
+      // the same bounded retry budget below.
+      if (!hasRouteError && !hasHistoryError) {
+        const route = queryClient.getQueryData<CurrentRouteResponse>(
+          ROUTE_KEY(applicationId),
+        );
+        const history = queryClient.getQueryData<ApplicationHistoryResponse>(
+          HISTORY_KEY(applicationId),
+        );
+        if (correctionConverged(route, history, acceptedEvidenceRevision)) {
+          setOutcome("converged");
+          return;
+        }
       }
       // Safety ceiling only: the bounded end is surfaced, never converged.
       if (attempts >= 240) {

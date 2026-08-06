@@ -705,6 +705,56 @@ describe("correction convergence polling (T03)", () => {
     expect(result.current.route.isError).toBe(true);
   });
 
+  it("waits through a transient route error instead of converging from retained data", async () => {
+    vi.useFakeTimers();
+    try {
+      let routeUnavailable = false;
+      let historyCaughtUp = false;
+      const currentHistory = historyPayload();
+      const waitingHistory = historyPayload({
+        runs: currentHistory.runs.map((run) => ({ ...run, current: false })),
+      });
+      const { jsonResponse } = fetchRouter({
+        [`GET ${ROUTE_PATH}`]: () =>
+          routeUnavailable
+            ? jsonResponse({ detail: { error: "UPSTREAM_UNAVAILABLE" } }, 503)
+            : jsonResponse(routePayload()),
+        [`GET ${HISTORY_PATH}`]: () =>
+          jsonResponse(historyCaughtUp ? currentHistory : waitingHistory),
+      });
+      const client = createQueryClient();
+      const { result, rerender } = renderHook(
+        ({ acceptedRevision }: { acceptedRevision: number | null }) => ({
+          route: useCurrentRoute(APP_ID),
+          history: useApplicationHistory(APP_ID),
+          converge: useCorrectionConvergence(APP_ID, acceptedRevision),
+        }),
+        {
+          wrapper: wrap(client),
+          initialProps: { acceptedRevision: null as number | null },
+        },
+      );
+      await settleWithTimers(
+        () => result.current.route.isSuccess && result.current.history.isSuccess,
+      );
+
+      routeUnavailable = true;
+      historyCaughtUp = true;
+      rerender({ acceptedRevision: 2 });
+      await settleWithTimers(
+        () =>
+          result.current.route.isError &&
+          result.current.history.data?.current_run_id === "run_succ",
+      );
+      expect(result.current.converge).toBe("waiting");
+
+      routeUnavailable = false;
+      await settleWithTimers(() => result.current.converge === "converged");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("cancels the poll timer on unmount", async () => {
     vi.useFakeTimers();
     try {
