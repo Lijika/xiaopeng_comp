@@ -1,15 +1,20 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 
-import { HttpError, type RecoveryWorkResponse } from "../api/client";
+import {
+  HttpError,
+  isDefinitiveRejection,
+  RECOVERY_DEFINITIVE_STATUSES,
+  type RecoveryWorkResponse,
+} from "../api/client";
 import {
   WORK_KEY,
-  useCurrentRoute,
   useRecoveryWork,
   useVerifyRecovery,
   type VerifyRecoveryCommand,
 } from "../api/hooks";
 import { Button } from "./ui/button";
+import GateSection from "./GateSection";
 
 function newIdempotencyKey(): string {
   return crypto.randomUUID();
@@ -21,13 +26,6 @@ function attemptLabel(attempt: {
   status: string;
 }): string {
   return `${attempt.attempt} · ${attempt.classification} · ${attempt.status}`;
-}
-
-/** The explicitly contracted definitive rejection status: a 409 proves the
- * command key was never accepted.  Every other HTTP outcome (5xx, other
- * statuses) may have committed an effect and stays visibly unknown. */
-function isDefinitiveRejection(error: unknown): error is HttpError {
-  return error instanceof HttpError && error.status === 409;
 }
 
 function describeVerifyStatus(
@@ -45,42 +43,13 @@ function describeVerifyStatus(
     return `恢复验证未接受（${conflictReason}）：请重新加载权威上下文后再试`;
   }
   if (verify.isError) {
-    if (isDefinitiveRejection(verify.error)) {
+    if (isDefinitiveRejection(verify.error, RECOVERY_DEFINITIVE_STATUSES)) {
       return verify.error.reasonCode ?? "恢复验证被拒绝";
     }
     return "结果未知：网络未确认，重试将使用同一幂等键";
   }
   if (verify.isSuccess) return "恢复事实已接受";
   return "等待操作";
-}
-
-function GatePanel({ applicationId }: { applicationId: string }) {
-  const gate = useCurrentRoute(applicationId);
-  if (gate.isPending) {
-    return <p data-testid="gate-loading">路由加载中…</p>;
-  }
-  if (gate.isError) {
-    return <p data-testid="gate-error">当前路由不可用</p>;
-  }
-  return (
-    <section className="panel" data-testid="gate-panel" aria-labelledby="gate-title">
-      <h3 id="gate-title">当前路由（服务端权威）</h3>
-      <dl className="facts">
-        <div>
-          <dt>阶段</dt>
-          <dd data-testid="gate-phase">{gate.data?.phase}</dd>
-        </div>
-        <div>
-          <dt>路由</dt>
-          <dd data-testid="gate-route">{gate.data?.route}</dd>
-        </div>
-        <div>
-          <dt>当前性</dt>
-          <dd data-testid="gate-currentness">{gate.data?.currentness_reason}</dd>
-        </div>
-      </dl>
-    </section>
-  );
 }
 
 function WorkFacts({ work }: { work: RecoveryWorkResponse }) {
@@ -223,7 +192,8 @@ export default function RecoveryWorkPanel({ workId }: { workId: string }) {
     conflictReason,
   );
   const transportUnknown =
-    verify.isError && !isDefinitiveRejection(verify.error);
+    verify.isError &&
+    !isDefinitiveRejection(verify.error, RECOVERY_DEFINITIVE_STATUSES);
 
   const handleVerify = () => {
     if (!canVerify) return;
@@ -254,10 +224,10 @@ export default function RecoveryWorkPanel({ workId }: { workId: string }) {
     // unknown transport results -- may have committed an effect, so the
     // original key is retained and a retry replays idempotently.  An
     // accepted outcome keeps the latch until server-owned detail converges.
-    const knownRejection =
-      verify.isError &&
-      verify.error instanceof HttpError &&
-      verify.error.status === 409;
+    const knownRejection = isDefinitiveRejection(
+      verify.error,
+      RECOVERY_DEFINITIVE_STATUSES,
+    );
     if (knownRejection) {
       setVerifyKey(newIdempotencyKey());
       verify.reset();
@@ -320,7 +290,7 @@ export default function RecoveryWorkPanel({ workId }: { workId: string }) {
         </p>
       )}
       {data.status === "resolved" && !data.can_verify && (
-        <GatePanel applicationId={data.application_id} />
+        <GateSection applicationId={data.application_id} />
       )}
     </section>
   );

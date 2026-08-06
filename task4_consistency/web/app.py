@@ -794,6 +794,162 @@ class S01CurrentRouteResponse(BaseModel):
     failure: S01CurrentRouteFailure | None = None
 
 
+class S01AutomaticFinding(BaseModel):
+    finding_id: str
+    rule_id: str
+    verdict: str
+    severity: str
+    reason_code: str
+
+
+class S01RunAuthority(BaseModel):
+    run_id: str
+    status: str
+    authority_digest: str
+
+
+class S01ReviewWorkItemResponse(BaseModel):
+    status: str
+    application_id: str
+    work_item_id: str
+    claim_subject: str | None = None
+    claim_fence: int
+    claim_expires_at: int
+    phase: str
+    route: str
+    lifecycle_revision: int
+    evidence_revision: int
+    command_context: dict[str, Any]
+    automatic_findings: list[S01AutomaticFinding]
+    run_authority: S01RunAuthority
+    decision: dict[str, Any] | None = None
+    decisions: list[dict[str, Any]]
+    completed_finding_ids: list[str]
+
+
+class S01EvidenceLink(BaseModel):
+    document_id: str
+    document_role: str
+    field: str
+    value_state: str
+    raw_masked: str | None = None
+    observation_id: str
+    source_sha256: str | None = None
+    provenance_manifest_digest: str | None = None
+    evidence_eligible: bool
+    eligibility_reason: str | None = None
+    source_page: int | None = None
+    source_region: str | None = None
+
+
+class S01WorkspaceFinding(BaseModel):
+    finding_id: str
+    run_id: str
+    rule_id: str
+    verdict: str
+    severity: str
+    reason_code: str
+    mandatory: bool
+    evidence_links: list[S01EvidenceLink]
+
+
+class S01WorkspaceResponse(BaseModel):
+    application_id: str
+    work_item_id: str
+    assigned_subject: str
+    claim_fence: int
+    claim_expires_at: int
+    track: str
+    phase: str
+    route: str
+    evidence_ready: bool
+    lifecycle_revision: int
+    evidence_revision: int
+    current_run_id: str | None = None
+    evidence_snapshot_id: str | None = None
+    evidence_snapshot_digest: str | None = None
+    projection_watermark: int
+    mandatory_blockers: list[S01WorkspaceFinding]
+    selected_finding: S01WorkspaceFinding | None = None
+    actions: list[str]
+
+
+class S01HistoryRun(BaseModel):
+    run_id: str
+    status: str
+    authority_digest: str
+    current: bool
+    currentness_reason: str
+    cycle: int
+    lifecycle_revision: int
+    evidence_revision: int
+    evidence_snapshot_id: str | None = None
+    evidence_snapshot_digest: str | None = None
+    release_id: str | None = None
+    release_digest: str | None = None
+    checker_build: str | None = None
+    finding_ids: list[str]
+    cas_mismatches: list[dict[str, Any]]
+    selected_observation_ids: list[str]
+    decision_ids: list[str]
+    exception_ids: list[str]
+    applicable_decision_ids: list[str]
+    applicable_exception_ids: list[str]
+    invalidated_decision_ids: list[str]
+    invalidated_exception_ids: list[str]
+    reconciliation: dict[str, Any] | None = None
+
+
+class S01ApplicationHistoryResponse(BaseModel):
+    schema_version: str
+    application_id: str
+    current_run_id: str | None = None
+    runs: list[S01HistoryRun]
+    corrections: list[dict[str, Any]]
+    business_exceptions: list[dict[str, Any]]
+    attachment_versions: list[dict[str, Any]]
+
+
+class S01ClaimResult(BaseModel):
+    status: str
+    application_id: str
+    work_item_id: str
+    claim_subject: str | None = None
+    claim_fence: int
+    claim_expires_at: int
+
+
+class S01RenewResult(BaseModel):
+    status: str
+    application_id: str
+    work_item_id: str
+    claim_subject: str
+    claim_fence: int
+    claim_expires_at: int
+    replayed: bool
+
+
+class S01ReleaseResult(BaseModel):
+    status: str
+    application_id: str
+    work_item_id: str
+    claim_fence: int
+    released_at: int
+    replayed: bool
+
+
+class S01SubmitResult(BaseModel):
+    status: str
+    replayed: bool
+    application_id: str
+    work_item_id: str
+    decision_id: str
+    claim_fence: int
+    lifecycle_revision: int
+    evidence_revision: int
+    route: str
+
+
 class S02SubmitBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -2234,7 +2390,14 @@ def controlled_s01_queue(request: Request, response: Response) -> dict[str, Any]
         ) from None
 
 
-@app.get("/controlled/s01/api/queries/applications/{application_id}/workspace")
+@app.get(
+    "/controlled/s01/api/queries/applications/{application_id}/workspace",
+    response_model=S01WorkspaceResponse,
+    response_model_exclude_none=True,
+    responses={
+        404: {"model": S01ErrorResponse},
+    },
+)
 def controlled_s01_workspace(
     application_id: str,
     request: Request,
@@ -2262,7 +2425,17 @@ def controlled_s01_workspace(
         raise HTTPException(404, detail={"error": "S01_NOT_FOUND"}) from error
 
 
-@app.get("/controlled/s01/api/queries/review-work-items/{work_item_id}")
+# The unclaimed/empty work item is serialized with explicit nulls for
+# ``claim_subject`` and ``decision`` (the React panel and the focused tests
+# pin those nulls), so this endpoint deliberately omits
+# ``response_model_exclude_none`` unlike its siblings.
+@app.get(
+    "/controlled/s01/api/queries/review-work-items/{work_item_id}",
+    response_model=S01ReviewWorkItemResponse,
+    responses={
+        404: {"model": S01ErrorResponse},
+    },
+)
 def controlled_s04_demo_review_work_item(
     work_item_id: str,
     request: Request,
@@ -2280,7 +2453,28 @@ def controlled_s04_demo_review_work_item(
         raise _s03_not_found(error) from error
 
 
-@app.post("/controlled/s01/api/commands/review-work-items/{work_item_id}/claim")
+@app.post(
+    "/controlled/s01/api/commands/review-work-items/{work_item_id}/claim",
+    response_model=S01ClaimResult,
+    response_model_exclude_none=True,
+    responses={
+        404: {"model": S01ErrorResponse},
+        409: {"model": S01ErrorResponse},
+        413: {"model": S01ErrorResponse},
+        422: {"model": S01VerifyErrorResponse},
+        503: {"model": S01ErrorResponse},
+    },
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": S03ClaimBody.model_json_schema(),
+                }
+            },
+        },
+    },
+)
 async def controlled_s04_demo_claim_review_work_item(
     work_item_id: str,
     request: Request,
@@ -2299,6 +2493,148 @@ async def controlled_s04_demo_claim_review_work_item(
         )
     except QueryNotFound as error:
         raise _s03_not_found(error) from error
+    return _s03_command_result(result)
+
+
+@app.post(
+    "/controlled/s01/api/commands/review-work-items/{work_item_id}/renew",
+    response_model=S01RenewResult,
+    response_model_exclude_none=True,
+    responses={
+        404: {"model": S01ErrorResponse},
+        409: {"model": S01ErrorResponse},
+        413: {"model": S01ErrorResponse},
+        422: {"model": S01VerifyErrorResponse},
+        503: {"model": S01ErrorResponse},
+    },
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": S03FencedBody.model_json_schema(),
+                }
+            },
+        },
+    },
+)
+async def controlled_s04_demo_renew_review_work_item(
+    work_item_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s04_demo_reviewer_principal(request)
+    body = await _s03_command_body(request, S03FencedBody)
+    assert isinstance(body, S03FencedBody)
+    try:
+        result = _s01_service().renew_review_work_item(
+            principal=principal,
+            work_item_id=work_item_id,
+            expected_fence=body.expected_fence,
+            expected_context=body.expected_context,
+            idempotency_key=body.idempotency_key,
+            now=S01_SESSION_CLOCK(),
+        )
+    except QueryNotFound as error:
+        raise _s03_not_found(error) from error
+    except ValueError as error:
+        raise _s03_invalid_command(error) from error
+    return _s03_command_result(result)
+
+
+@app.post(
+    "/controlled/s01/api/commands/review-work-items/{work_item_id}/release",
+    response_model=S01ReleaseResult,
+    response_model_exclude_none=True,
+    responses={
+        404: {"model": S01ErrorResponse},
+        409: {"model": S01ErrorResponse},
+        413: {"model": S01ErrorResponse},
+        422: {"model": S01VerifyErrorResponse},
+        503: {"model": S01ErrorResponse},
+    },
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": S03FencedBody.model_json_schema(),
+                }
+            },
+        },
+    },
+)
+async def controlled_s04_demo_release_review_work_item(
+    work_item_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s04_demo_reviewer_principal(request)
+    body = await _s03_command_body(request, S03FencedBody)
+    assert isinstance(body, S03FencedBody)
+    try:
+        result = _s01_service().release_review_work_item(
+            principal=principal,
+            work_item_id=work_item_id,
+            expected_fence=body.expected_fence,
+            expected_context=body.expected_context,
+            idempotency_key=body.idempotency_key,
+            now=S01_SESSION_CLOCK(),
+        )
+    except QueryNotFound as error:
+        raise _s03_not_found(error) from error
+    except ValueError as error:
+        raise _s03_invalid_command(error) from error
+    return _s03_command_result(result)
+
+
+@app.post(
+    "/controlled/s01/api/commands/review-work-items/{work_item_id}/submit",
+    response_model=S01SubmitResult,
+    response_model_exclude_none=True,
+    responses={
+        404: {"model": S01ErrorResponse},
+        409: {"model": S01ErrorResponse},
+        413: {"model": S01ErrorResponse},
+        422: {"model": S01VerifyErrorResponse},
+        503: {"model": S01ErrorResponse},
+    },
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": S03SubmitBody.model_json_schema(),
+                }
+            },
+        },
+    },
+)
+async def controlled_s04_demo_submit_review_work_item(
+    work_item_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s04_demo_reviewer_principal(request)
+    body = await _s03_command_body(request, S03SubmitBody)
+    assert isinstance(body, S03SubmitBody)
+    try:
+        result = _s01_service().submit_review_work_item(
+            principal=principal,
+            work_item_id=work_item_id,
+            expected_fence=body.expected_fence,
+            expected_context=body.expected_context,
+            idempotency_key=body.idempotency_key,
+            verification=body.verification,
+            now=S01_SESSION_CLOCK(),
+        )
+    except QueryNotFound as error:
+        raise _s03_not_found(error) from error
+    except ValueError as error:
+        raise _s03_invalid_command(error) from error
     return _s03_command_result(result)
 
 
@@ -2694,7 +3030,14 @@ def controlled_s04_demo_current_route(
         raise _s03_not_found(error) from error
 
 
-@app.get("/controlled/s01/api/queries/applications/{application_id}/history")
+@app.get(
+    "/controlled/s01/api/queries/applications/{application_id}/history",
+    response_model=S01ApplicationHistoryResponse,
+    response_model_exclude_none=True,
+    responses={
+        404: {"model": S01ErrorResponse},
+    },
+)
 def controlled_s04_demo_application_history(
     application_id: str,
     request: Request,

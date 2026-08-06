@@ -128,6 +128,147 @@
         "title": "RulesBody",
         "type": "object"
       },
+      "S01ApplicationHistoryResponse": {
+        "properties": {
+          "application_id": {
+            "title": "Application Id",
+            "type": "string"
+          },
+          "attachment_versions": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Attachment Versions",
+            "type": "array"
+          },
+          "business_exceptions": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Business Exceptions",
+            "type": "array"
+          },
+          "corrections": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Corrections",
+            "type": "array"
+          },
+          "current_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Run Id"
+          },
+          "runs": {
+            "items": {
+              "$ref": "#/components/schemas/S01HistoryRun"
+            },
+            "title": "Runs",
+            "type": "array"
+          },
+          "schema_version": {
+            "title": "Schema Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "application_id",
+          "runs",
+          "corrections",
+          "business_exceptions",
+          "attachment_versions"
+        ],
+        "title": "S01ApplicationHistoryResponse",
+        "type": "object"
+      },
+      "S01AutomaticFinding": {
+        "properties": {
+          "finding_id": {
+            "title": "Finding Id",
+            "type": "string"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "rule_id": {
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "severity": {
+            "title": "Severity",
+            "type": "string"
+          },
+          "verdict": {
+            "title": "Verdict",
+            "type": "string"
+          }
+        },
+        "required": [
+          "finding_id",
+          "rule_id",
+          "verdict",
+          "severity",
+          "reason_code"
+        ],
+        "title": "S01AutomaticFinding",
+        "type": "object"
+      },
+      "S01ClaimResult": {
+        "properties": {
+          "application_id": {
+            "title": "Application Id",
+            "type": "string"
+          },
+          "claim_expires_at": {
+            "title": "Claim Expires At",
+            "type": "integer"
+          },
+          "claim_fence": {
+            "title": "Claim Fence",
+            "type": "integer"
+          },
+          "claim_subject": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Claim Subject"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "work_item_id": {
+            "title": "Work Item Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "application_id",
+          "work_item_id",
+          "claim_fence",
+          "claim_expires_at"
+        ],
+        "title": "S01ClaimResult",
+        "type": "object"
+      },
       "S01CurrentRouteFailure": {
         "properties": {
           "reason_code": {
@@ -380,6 +521,298 @@
           "detail"
         ],
         "title": "S01ErrorResponse",
+        "type": "object"
+      },
+      "S01EvidenceLink": {
+        "properties": {
+          "document_id": {
+            "title": "Document Id",
+            "type": "string"
+          },
+          "document_role": {
+            "title": "Document Role",
+            "type": "string"
+          },
+          "eligibility_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Eligibility Reason"
+          },
+          "evidence_eligible": {
+            "title": "Evidence Eligible",
+            "type": "boolean"
+          },
+          "field": {
+            "title": "Field",
+            "type": "string"
+          },
+          "observation_id": {
+            "title": "Observation Id",
+            "type": "string"
+          },
+          "provenance_manifest_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provenance Manifest Digest"
+          },
+          "raw_masked": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Masked"
+          },
+          "source_page": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Page"
+          },
+          "source_region": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Region"
+          },
+          "source_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Sha256"
+          },
+          "value_state": {
+            "title": "Value State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "document_id",
+          "document_role",
+          "field",
+          "value_state",
+          "observation_id",
+          "evidence_eligible"
+        ],
+        "title": "S01EvidenceLink",
+        "type": "object"
+      },
+      "S01HistoryRun": {
+        "properties": {
+          "applicable_decision_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Applicable Decision Ids",
+            "type": "array"
+          },
+          "applicable_exception_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Applicable Exception Ids",
+            "type": "array"
+          },
+          "authority_digest": {
+            "title": "Authority Digest",
+            "type": "string"
+          },
+          "cas_mismatches": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Cas Mismatches",
+            "type": "array"
+          },
+          "checker_build": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checker Build"
+          },
+          "current": {
+            "title": "Current",
+            "type": "boolean"
+          },
+          "currentness_reason": {
+            "title": "Currentness Reason",
+            "type": "string"
+          },
+          "cycle": {
+            "title": "Cycle",
+            "type": "integer"
+          },
+          "decision_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Decision Ids",
+            "type": "array"
+          },
+          "evidence_revision": {
+            "title": "Evidence Revision",
+            "type": "integer"
+          },
+          "evidence_snapshot_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence Snapshot Digest"
+          },
+          "evidence_snapshot_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence Snapshot Id"
+          },
+          "exception_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Exception Ids",
+            "type": "array"
+          },
+          "finding_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Finding Ids",
+            "type": "array"
+          },
+          "invalidated_decision_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Invalidated Decision Ids",
+            "type": "array"
+          },
+          "invalidated_exception_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Invalidated Exception Ids",
+            "type": "array"
+          },
+          "lifecycle_revision": {
+            "title": "Lifecycle Revision",
+            "type": "integer"
+          },
+          "reconciliation": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reconciliation"
+          },
+          "release_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Release Digest"
+          },
+          "release_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Release Id"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "selected_observation_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Selected Observation Ids",
+            "type": "array"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "status",
+          "authority_digest",
+          "current",
+          "currentness_reason",
+          "cycle",
+          "lifecycle_revision",
+          "evidence_revision",
+          "finding_ids",
+          "cas_mismatches",
+          "selected_observation_ids",
+          "decision_ids",
+          "exception_ids",
+          "applicable_decision_ids",
+          "applicable_exception_ids",
+          "invalidated_decision_ids",
+          "invalidated_exception_ids"
+        ],
+        "title": "S01HistoryRun",
         "type": "object"
       },
       "S01ProcessBody": {
@@ -913,6 +1346,87 @@
         "title": "S01RecoveryWorkResponse",
         "type": "object"
       },
+      "S01ReleaseResult": {
+        "properties": {
+          "application_id": {
+            "title": "Application Id",
+            "type": "string"
+          },
+          "claim_fence": {
+            "title": "Claim Fence",
+            "type": "integer"
+          },
+          "released_at": {
+            "title": "Released At",
+            "type": "integer"
+          },
+          "replayed": {
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "work_item_id": {
+            "title": "Work Item Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "application_id",
+          "work_item_id",
+          "claim_fence",
+          "released_at",
+          "replayed"
+        ],
+        "title": "S01ReleaseResult",
+        "type": "object"
+      },
+      "S01RenewResult": {
+        "properties": {
+          "application_id": {
+            "title": "Application Id",
+            "type": "string"
+          },
+          "claim_expires_at": {
+            "title": "Claim Expires At",
+            "type": "integer"
+          },
+          "claim_fence": {
+            "title": "Claim Fence",
+            "type": "integer"
+          },
+          "claim_subject": {
+            "title": "Claim Subject",
+            "type": "string"
+          },
+          "replayed": {
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "work_item_id": {
+            "title": "Work Item Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "application_id",
+          "work_item_id",
+          "claim_subject",
+          "claim_fence",
+          "claim_expires_at",
+          "replayed"
+        ],
+        "title": "S01RenewResult",
+        "type": "object"
+      },
       "S01RetryPolicy": {
         "properties": {
           "id": {
@@ -944,6 +1458,140 @@
         "title": "S01RetryPolicy",
         "type": "object"
       },
+      "S01ReviewWorkItemResponse": {
+        "properties": {
+          "application_id": {
+            "title": "Application Id",
+            "type": "string"
+          },
+          "automatic_findings": {
+            "items": {
+              "$ref": "#/components/schemas/S01AutomaticFinding"
+            },
+            "title": "Automatic Findings",
+            "type": "array"
+          },
+          "claim_expires_at": {
+            "title": "Claim Expires At",
+            "type": "integer"
+          },
+          "claim_fence": {
+            "title": "Claim Fence",
+            "type": "integer"
+          },
+          "claim_subject": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Claim Subject"
+          },
+          "command_context": {
+            "additionalProperties": true,
+            "title": "Command Context",
+            "type": "object"
+          },
+          "completed_finding_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Completed Finding Ids",
+            "type": "array"
+          },
+          "decision": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decision"
+          },
+          "decisions": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Decisions",
+            "type": "array"
+          },
+          "evidence_revision": {
+            "title": "Evidence Revision",
+            "type": "integer"
+          },
+          "lifecycle_revision": {
+            "title": "Lifecycle Revision",
+            "type": "integer"
+          },
+          "phase": {
+            "title": "Phase",
+            "type": "string"
+          },
+          "route": {
+            "title": "Route",
+            "type": "string"
+          },
+          "run_authority": {
+            "$ref": "#/components/schemas/S01RunAuthority"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "work_item_id": {
+            "title": "Work Item Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "application_id",
+          "work_item_id",
+          "claim_fence",
+          "claim_expires_at",
+          "phase",
+          "route",
+          "lifecycle_revision",
+          "evidence_revision",
+          "command_context",
+          "automatic_findings",
+          "run_authority",
+          "decisions",
+          "completed_finding_ids"
+        ],
+        "title": "S01ReviewWorkItemResponse",
+        "type": "object"
+      },
+      "S01RunAuthority": {
+        "properties": {
+          "authority_digest": {
+            "title": "Authority Digest",
+            "type": "string"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "status",
+          "authority_digest"
+        ],
+        "title": "S01RunAuthority",
+        "type": "object"
+      },
       "S01SubmitBody": {
         "properties": {
           "idempotency_key": {
@@ -960,6 +1608,59 @@
           "idempotency_key"
         ],
         "title": "S01SubmitBody",
+        "type": "object"
+      },
+      "S01SubmitResult": {
+        "properties": {
+          "application_id": {
+            "title": "Application Id",
+            "type": "string"
+          },
+          "claim_fence": {
+            "title": "Claim Fence",
+            "type": "integer"
+          },
+          "decision_id": {
+            "title": "Decision Id",
+            "type": "string"
+          },
+          "evidence_revision": {
+            "title": "Evidence Revision",
+            "type": "integer"
+          },
+          "lifecycle_revision": {
+            "title": "Lifecycle Revision",
+            "type": "integer"
+          },
+          "replayed": {
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "route": {
+            "title": "Route",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "work_item_id": {
+            "title": "Work Item Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "replayed",
+          "application_id",
+          "work_item_id",
+          "decision_id",
+          "claim_fence",
+          "lifecycle_revision",
+          "evidence_revision",
+          "route"
+        ],
+        "title": "S01SubmitResult",
         "type": "object"
       },
       "S01ValidationErrorItem": {
@@ -1133,6 +1834,184 @@
           "current_context"
         ],
         "title": "S01VerifyRoutingContext",
+        "type": "object"
+      },
+      "S01WorkspaceFinding": {
+        "properties": {
+          "evidence_links": {
+            "items": {
+              "$ref": "#/components/schemas/S01EvidenceLink"
+            },
+            "title": "Evidence Links",
+            "type": "array"
+          },
+          "finding_id": {
+            "title": "Finding Id",
+            "type": "string"
+          },
+          "mandatory": {
+            "title": "Mandatory",
+            "type": "boolean"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "rule_id": {
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "severity": {
+            "title": "Severity",
+            "type": "string"
+          },
+          "verdict": {
+            "title": "Verdict",
+            "type": "string"
+          }
+        },
+        "required": [
+          "finding_id",
+          "run_id",
+          "rule_id",
+          "verdict",
+          "severity",
+          "reason_code",
+          "mandatory",
+          "evidence_links"
+        ],
+        "title": "S01WorkspaceFinding",
+        "type": "object"
+      },
+      "S01WorkspaceResponse": {
+        "properties": {
+          "actions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Actions",
+            "type": "array"
+          },
+          "application_id": {
+            "title": "Application Id",
+            "type": "string"
+          },
+          "assigned_subject": {
+            "title": "Assigned Subject",
+            "type": "string"
+          },
+          "claim_expires_at": {
+            "title": "Claim Expires At",
+            "type": "integer"
+          },
+          "claim_fence": {
+            "title": "Claim Fence",
+            "type": "integer"
+          },
+          "current_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Run Id"
+          },
+          "evidence_ready": {
+            "title": "Evidence Ready",
+            "type": "boolean"
+          },
+          "evidence_revision": {
+            "title": "Evidence Revision",
+            "type": "integer"
+          },
+          "evidence_snapshot_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence Snapshot Digest"
+          },
+          "evidence_snapshot_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence Snapshot Id"
+          },
+          "lifecycle_revision": {
+            "title": "Lifecycle Revision",
+            "type": "integer"
+          },
+          "mandatory_blockers": {
+            "items": {
+              "$ref": "#/components/schemas/S01WorkspaceFinding"
+            },
+            "title": "Mandatory Blockers",
+            "type": "array"
+          },
+          "phase": {
+            "title": "Phase",
+            "type": "string"
+          },
+          "projection_watermark": {
+            "title": "Projection Watermark",
+            "type": "integer"
+          },
+          "route": {
+            "title": "Route",
+            "type": "string"
+          },
+          "selected_finding": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/S01WorkspaceFinding"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "track": {
+            "title": "Track",
+            "type": "string"
+          },
+          "work_item_id": {
+            "title": "Work Item Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "application_id",
+          "work_item_id",
+          "assigned_subject",
+          "claim_fence",
+          "claim_expires_at",
+          "track",
+          "phase",
+          "route",
+          "evidence_ready",
+          "lifecycle_revision",
+          "evidence_revision",
+          "projection_watermark",
+          "mandatory_blockers",
+          "actions"
+        ],
+        "title": "S01WorkspaceResponse",
         "type": "object"
       },
       "ValidationError": {
@@ -2346,28 +3225,88 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "expected_context": {
+                    "additionalProperties": true,
+                    "title": "Expected Context",
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "expected_context"
+                ],
+                "title": "S03ClaimBody",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Controlled S04 Demo Claim Review Work Item Controlled S01 Api Commands Review Work Items  Work Item Id  Claim Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/S01ClaimResult"
                 }
               }
             },
             "description": "Successful Response"
           },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/S01VerifyErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "summary": "Controlled S04 Demo Claim Review Work Item"
@@ -2414,6 +3353,230 @@
         "summary": "Controlled S04 Demo Correct Field Observation"
       }
     },
+    "/controlled/s01/api/commands/review-work-items/{work_item_id}/release": {
+      "post": {
+        "operationId": "controlled_s04_demo_release_review_work_item_controlled_s01_api_commands_review_work_items__work_item_id__release_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "work_item_id",
+            "required": true,
+            "schema": {
+              "title": "Work Item Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "expected_context": {
+                    "additionalProperties": true,
+                    "title": "Expected Context",
+                    "type": "object"
+                  },
+                  "expected_fence": {
+                    "minimum": 0,
+                    "title": "Expected Fence",
+                    "type": "integer"
+                  },
+                  "idempotency_key": {
+                    "title": "Idempotency Key",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "expected_context",
+                  "expected_fence",
+                  "idempotency_key"
+                ],
+                "title": "S03FencedBody",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ReleaseResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01VerifyErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Controlled S04 Demo Release Review Work Item"
+      }
+    },
+    "/controlled/s01/api/commands/review-work-items/{work_item_id}/renew": {
+      "post": {
+        "operationId": "controlled_s04_demo_renew_review_work_item_controlled_s01_api_commands_review_work_items__work_item_id__renew_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "work_item_id",
+            "required": true,
+            "schema": {
+              "title": "Work Item Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "expected_context": {
+                    "additionalProperties": true,
+                    "title": "Expected Context",
+                    "type": "object"
+                  },
+                  "expected_fence": {
+                    "minimum": 0,
+                    "title": "Expected Fence",
+                    "type": "integer"
+                  },
+                  "idempotency_key": {
+                    "title": "Idempotency Key",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "expected_context",
+                  "expected_fence",
+                  "idempotency_key"
+                ],
+                "title": "S03FencedBody",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01RenewResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01VerifyErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Controlled S04 Demo Renew Review Work Item"
+      }
+    },
     "/controlled/s01/api/commands/review-work-items/{work_item_id}/reveal-field-observation": {
       "post": {
         "operationId": "controlled_s04_demo_reveal_field_observation_controlled_s01_api_commands_review_work_items__work_item_id__reveal_field_observation_post",
@@ -2453,6 +3616,124 @@
           }
         },
         "summary": "Controlled S04 Demo Reveal Field Observation"
+      }
+    },
+    "/controlled/s01/api/commands/review-work-items/{work_item_id}/submit": {
+      "post": {
+        "operationId": "controlled_s04_demo_submit_review_work_item_controlled_s01_api_commands_review_work_items__work_item_id__submit_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "work_item_id",
+            "required": true,
+            "schema": {
+              "title": "Work Item Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "expected_context": {
+                    "additionalProperties": true,
+                    "title": "Expected Context",
+                    "type": "object"
+                  },
+                  "expected_fence": {
+                    "minimum": 0,
+                    "title": "Expected Fence",
+                    "type": "integer"
+                  },
+                  "idempotency_key": {
+                    "title": "Idempotency Key",
+                    "type": "string"
+                  },
+                  "verification": {
+                    "additionalProperties": true,
+                    "title": "Verification",
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "expected_context",
+                  "expected_fence",
+                  "idempotency_key",
+                  "verification"
+                ],
+                "title": "S03SubmitBody",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01SubmitResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01VerifyErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Controlled S04 Demo Submit Review Work Item"
       }
     },
     "/controlled/s01/api/commands/review-work-items/{work_item_id}/supplement": {
@@ -2667,13 +3948,21 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Controlled S04 Demo Application History Controlled S01 Api Queries Applications  Application Id  History Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/S01ApplicationHistoryResponse"
                 }
               }
             },
             "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
           },
           "422": {
             "content": {
@@ -2724,13 +4013,21 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Controlled S01 Workspace Controlled S01 Api Queries Applications  Application Id  Workspace Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/S01WorkspaceResponse"
                 }
               }
             },
             "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
           },
           "422": {
             "content": {
@@ -2914,13 +4211,21 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Controlled S04 Demo Review Work Item Controlled S01 Api Queries Review Work Items  Work Item Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/S01ReviewWorkItemResponse"
                 }
               }
             },
             "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
           },
           "422": {
             "content": {

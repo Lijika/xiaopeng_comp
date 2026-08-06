@@ -5,9 +5,14 @@ import type { ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { paths } from "../generated/api";
 import {
+  useClaimWorkItem,
   useCurrentRoute,
   useQueue,
   useRecoveryWork,
+  useSubmitVerification,
+  type ClaimCommand,
+  type FencedCommand,
+  type SubmitCommand,
   type VerifyRecoveryCommand,
 } from "./hooks";
 import { createQueryClient, fetchRouter } from "../test-utils";
@@ -96,6 +101,22 @@ describe("generated request body binding (S2)", () => {
     expectTypeOf<VerifyRecoveryCommand>().toEqualTypeOf<GeneratedBody>();
     expectTypeOf<keyof GeneratedBody>().toEqualTypeOf<
       "expected_lifecycle_revision" | "expected_criterion_digest" | "idempotency_key"
+    >();
+  });
+
+  it("binds the S01 manual-review command types to the generated OpenAPI request bodies", () => {
+    type ClaimBody = paths["/controlled/s01/api/commands/review-work-items/{work_item_id}/claim"]["post"]["requestBody"]["content"]["application/json"];
+    type RenewBody = paths["/controlled/s01/api/commands/review-work-items/{work_item_id}/renew"]["post"]["requestBody"]["content"]["application/json"];
+    type SubmitBody = paths["/controlled/s01/api/commands/review-work-items/{work_item_id}/submit"]["post"]["requestBody"]["content"]["application/json"];
+    expectTypeOf<ClaimCommand>().toEqualTypeOf<ClaimBody>();
+    expectTypeOf<FencedCommand>().toEqualTypeOf<RenewBody>();
+    expectTypeOf<SubmitCommand>().toEqualTypeOf<SubmitBody>();
+    expectTypeOf<keyof ClaimBody>().toEqualTypeOf<"expected_context">();
+    expectTypeOf<keyof RenewBody>().toEqualTypeOf<
+      "expected_context" | "expected_fence" | "idempotency_key"
+    >();
+    expectTypeOf<keyof SubmitBody>().toEqualTypeOf<
+      "expected_context" | "expected_fence" | "idempotency_key" | "verification"
     >();
   });
 });
@@ -210,5 +231,92 @@ describe("endpoint- and status-specific GET retry policy (P5)", () => {
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(requests).toBe(1);
+  });
+});
+
+describe("manual-review mutations never retry and invalidate the S01 cache (T02)", () => {
+  const CLAIM_PATH =
+    "/controlled/s01/api/commands/review-work-items/work_t02hooks1234567890abcdef/claim";
+  const SUBMIT_PATH =
+    "/controlled/s01/api/commands/review-work-items/work_t02hooks1234567890abcdef/submit";
+
+  it("fires exactly one claim POST and invalidates the S01 queries on success", async () => {
+    let claimPosts = 0;
+    let queueRequests = 0;
+    const router = fetchRouter({
+      [`POST ${CLAIM_PATH}`]: () => {
+        claimPosts += 1;
+        return new Response(
+          JSON.stringify({
+            status: "claimed",
+            application_id: "app_t02hooks",
+            work_item_id: "work_t02hooks1234567890abcdef",
+            claim_subject: "t02-reviewer",
+            claim_fence: 1,
+            claim_expires_at: 1786000000,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+      "GET /controlled/s01/api/queries/queue": () => {
+        queueRequests += 1;
+        return new Response(
+          JSON.stringify({
+            items: [],
+            recovery_items: [],
+            projection_watermark: 0,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    });
+    const client = createQueryClient();
+    const { result } = renderHook(
+      () => ({
+        claim: useClaimWorkItem("work_t02hooks1234567890abcdef"),
+        queue: useQueue(),
+      }),
+      { wrapper: wrap(client) },
+    );
+    result.current.claim.mutate({ expected_context: { current_context: "ctx" } });
+    await waitFor(() => expect(result.current.claim.isSuccess).toBe(true));
+    expect(claimPosts).toBe(1);
+    expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(1);
+    // The accepted claim invalidates the server-owned S01 queue query.
+    await waitFor(() => expect(queueRequests).toBeGreaterThan(0));
+  });
+
+  it("never retries a rejected submit POST (retry: false)", async () => {
+    let submitPosts = 0;
+    fetchRouter({
+      [`POST ${SUBMIT_PATH}`]: () => {
+        submitPosts += 1;
+        return new Response(
+          JSON.stringify({
+            detail: { error: "S03_STALE", reason_code: "STALE_WORK_ITEM_CLAIM" },
+          }),
+          { status: 409, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    });
+    const { result } = renderHook(
+      () => useSubmitVerification("work_t02hooks1234567890abcdef"),
+      { wrapper: wrap(createQueryClient()) },
+    );
+    result.current.mutate({
+      expected_fence: 1,
+      expected_context: { current_context: "ctx" },
+      idempotency_key: "t02-hooks-key",
+      verification: {
+        schema_version: "human-decision/1",
+        outcome: "confirmed",
+        reason_code: "HUMAN_REVIEW_COMPLETED",
+        finding_decisions: [],
+      },
+    });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(submitPosts).toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(submitPosts).toBe(1);
   });
 });

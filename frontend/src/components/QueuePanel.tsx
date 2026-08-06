@@ -1,4 +1,4 @@
-import type { RecoveryQueueItem } from "../api/client";
+import type { QueueManualItem, RecoveryQueueItem } from "../api/client";
 import { useQueue } from "../api/hooks";
 
 function RecoveryItemLink({
@@ -29,10 +29,40 @@ function RecoveryItemLink({
   );
 }
 
+function ManualItemLink({
+  item,
+  onOpen,
+}: {
+  item: QueueManualItem;
+  onOpen: (workId: string) => void;
+}) {
+  return (
+    <a
+      href={`?review=${encodeURIComponent(item.work_item_id)}`}
+      onClick={(event) => {
+        event.preventDefault();
+        onOpen(item.work_item_id);
+      }}
+      data-testid="queue-manual-link"
+      className="block rounded-md border border-border px-3 py-2 [overflow-wrap:anywhere] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+    >
+      <span className="flex min-w-0 items-baseline justify-between gap-2">
+        <strong>{item.application_id}</strong>
+        <span data-testid="queue-manual-phase">{item.phase}</span>
+      </span>
+      <span className="block text-sm text-muted-foreground">
+        {item.work_item_id} · {item.route} · {item.mandatory_blockers.length} 个阻断
+      </span>
+    </a>
+  );
+}
+
 export default function QueuePanel({
   onOpenWork,
+  onOpenReview,
 }: {
   onOpenWork: (workId: string) => void;
+  onOpenReview: (workId: string) => void;
 }) {
   const query = useQueue();
   const accessEnded = query.data?.access_ended === true;
@@ -84,7 +114,7 @@ export default function QueuePanel({
             <ul data-testid="queue-items" className="[overflow-wrap:anywhere]">
               {(query.data?.items ?? []).map((item) => (
                 <li key={item.work_item_id} data-testid="queue-item">
-                  {item.application_id}
+                  <ManualItemLink item={item} onOpen={onOpenReview} />
                 </li>
               ))}
             </ul>

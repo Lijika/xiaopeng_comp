@@ -517,4 +517,199 @@ describe("queue shell (App)", () => {
     );
     expect(verifyButton()).toBeEnabled();
   });
+
+  it("lists server-owned manual items as links and opens the review panel on click", async () => {
+    const WORK_ID_MANUAL = "work_t01manual1234567890abcdef";
+    const APP_ID_MANUAL = "app_t01manual9876543210fedcba";
+    const FINDING_ID_MANUAL = "finding_t01manual00000000000001";
+    fetchRouter({
+      "GET /controlled/s01/api/queries/queue": () =>
+        new Response(
+          JSON.stringify({
+            items: [
+              {
+                application_id: APP_ID_MANUAL,
+                work_item_id: WORK_ID_MANUAL,
+                assigned_subject: "c-demo-test-user",
+                claim_fence: 0,
+                claim_expires_at: 0,
+                phase: "Manual Review",
+                route: "manual_review",
+                evidence_ready: true,
+                mandatory_blockers: [
+                  {
+                    finding_id: FINDING_ID_MANUAL,
+                    rule_id: "R_ENGINE_CROSS",
+                    reason_code: "ENGINE_MISMATCH",
+                    severity: "critical",
+                  },
+                ],
+                lifecycle_revision: 6,
+                evidence_revision: 1,
+                projection_watermark: 1,
+              },
+            ],
+            recovery_items: [],
+            projection_watermark: 1,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      [`GET /controlled/s01/api/queries/review-work-items/${WORK_ID_MANUAL}`]:
+        () =>
+          new Response(
+            JSON.stringify({
+              status: "unclaimed",
+              application_id: APP_ID_MANUAL,
+              work_item_id: WORK_ID_MANUAL,
+              claim_subject: null,
+              claim_fence: 0,
+              claim_expires_at: 0,
+              phase: "Manual Review",
+              route: "manual_review",
+              lifecycle_revision: 6,
+              evidence_revision: 1,
+              command_context: { current_context: "a".repeat(64) },
+              automatic_findings: [
+                {
+                  finding_id: FINDING_ID_MANUAL,
+                  rule_id: "R_ENGINE_CROSS",
+                  verdict: "inconsistent",
+                  severity: "critical",
+                  reason_code: "ENGINE_MISMATCH",
+                },
+              ],
+              run_authority: {
+                run_id: "run_t01manual",
+                status: "complete",
+                authority_digest: "b".repeat(64),
+              },
+              decision: null,
+              decisions: [],
+              completed_finding_ids: [],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+      [`GET /controlled/s01/api/queries/applications/${APP_ID_MANUAL}/workspace`]:
+        () =>
+          new Response(
+            JSON.stringify({
+              application_id: APP_ID_MANUAL,
+              work_item_id: WORK_ID_MANUAL,
+              assigned_subject: "c-demo-test-user",
+              claim_fence: 0,
+              claim_expires_at: 0,
+              track: "C-DEMO",
+              phase: "Manual Review",
+              route: "manual_review",
+              evidence_ready: true,
+              lifecycle_revision: 6,
+              evidence_revision: 1,
+              current_run_id: "run_t01manual",
+              evidence_snapshot_id: "snapshot_t01manual",
+              evidence_snapshot_digest: "c".repeat(64),
+              projection_watermark: 1,
+              mandatory_blockers: [],
+              selected_finding: {
+                finding_id: FINDING_ID_MANUAL,
+                run_id: "run_t01manual",
+                rule_id: "R_ENGINE_CROSS",
+                verdict: "inconsistent",
+                severity: "critical",
+                reason_code: "ENGINE_MISMATCH",
+                mandatory: true,
+                evidence_links: [],
+              },
+              actions: ["read_evidence"],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+      [`GET /controlled/s01/api/queries/applications/${APP_ID_MANUAL}/current-route`]:
+        () =>
+          new Response(
+            JSON.stringify({
+              schema_version: "s04-current-route/1",
+              application_id: APP_ID_MANUAL,
+              phase: "Manual Review",
+              route: "manual_review",
+              current_run_id: "run_t01manual",
+              cycle: 1,
+              lifecycle_revision: 6,
+              evidence_revision: 1,
+              evidence_snapshot_id: "snapshot_t01manual",
+              evidence_snapshot_digest: "c".repeat(64),
+              release_id: "auto_lease@1.9.0",
+              release_digest: "d".repeat(64),
+              checker_build: "s01-target-checker/6",
+              currentness_reason: "CURRENT_CONTEXT_MATCH",
+              completion_basis: null,
+              exception_id: null,
+              exception_decision_id: null,
+              exception_expires_at: null,
+              failure: null,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+      [`GET /controlled/s01/api/queries/applications/${APP_ID_MANUAL}/history`]:
+        () =>
+          new Response(
+            JSON.stringify({
+              schema_version: "s04-application-history/1",
+              application_id: APP_ID_MANUAL,
+              current_run_id: "run_t01manual",
+              runs: [
+                {
+                  run_id: "run_t01manual",
+                  status: "complete",
+                  authority_digest: "b".repeat(64),
+                  current: true,
+                  currentness_reason: "CURRENT_CONTEXT_MATCH",
+                  cycle: 1,
+                  lifecycle_revision: 6,
+                  evidence_revision: 1,
+                  evidence_snapshot_id: "snapshot_t01manual",
+                  evidence_snapshot_digest: "c".repeat(64),
+                  release_id: "auto_lease@1.9.0",
+                  release_digest: "d".repeat(64),
+                  checker_build: "s01-target-checker/6",
+                  finding_ids: [FINDING_ID_MANUAL],
+                  cas_mismatches: [],
+                  selected_observation_ids: [],
+                  decision_ids: [],
+                  exception_ids: [],
+                  applicable_decision_ids: [],
+                  applicable_exception_ids: [],
+                  invalidated_decision_ids: [],
+                  invalidated_exception_ids: [],
+                },
+              ],
+              corrections: [],
+              business_exceptions: [],
+              attachment_versions: [],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+    });
+    renderWithQuery(<App />);
+    const link = await screen.findByRole("link", {
+      name: new RegExp(WORK_ID_MANUAL),
+    });
+    expect(link).toHaveAttribute(
+      "href",
+      expect.stringContaining(encodeURIComponent(WORK_ID_MANUAL)),
+    );
+    expect(screen.getByTestId("queue-manual-link")).toBeInTheDocument();
+    await userEvent.click(link);
+    await waitFor(() =>
+      expect(screen.getByTestId("review-panel")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("review-status")).toHaveTextContent("unclaimed");
+    expect(screen.getByTestId("review-finding-rule")).toHaveTextContent(
+      "R_ENGINE_CROSS",
+    );
+    expect(screen.getByTestId("review-finding-verdict")).toHaveTextContent(
+      "inconsistent",
+    );
+    expect(window.location.search).toContain(encodeURIComponent(WORK_ID_MANUAL));
+    expect(window.location.search).toContain("review=");
+  });
 });

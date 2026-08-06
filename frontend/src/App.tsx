@@ -3,19 +3,32 @@ import { useCallback, useState } from "react";
 import { useQueue } from "./api/hooks";
 import QueuePanel from "./components/QueuePanel";
 import RecoveryWorkPanel from "./components/RecoveryWorkPanel";
+import ReviewWorkPanel from "./components/ReviewWorkPanel";
 
-function readWorkParam(): string | null {
-  return new URLSearchParams(window.location.search).get("work");
+function readParam(name: string): string | null {
+  return new URLSearchParams(window.location.search).get(name);
 }
 
 export default function App() {
-  const [workId, setWorkId] = useState<string | null>(readWorkParam);
+  const [workId, setWorkId] = useState<string | null>(() => readParam("work"));
+  const [reviewId, setReviewId] = useState<string | null>(() =>
+    readParam("review"),
+  );
   const queue = useQueue();
   const accessEnded = queue.data?.access_ended === true;
 
+  // The two panels are mutually exclusive: opening one clears the other, so
+  // the URL and the mounted panel always agree.
   const openWork = useCallback((id: string) => {
     setWorkId(id);
+    setReviewId(null);
     window.history.pushState(null, "", `?work=${encodeURIComponent(id)}`);
+  }, []);
+
+  const openReview = useCallback((id: string) => {
+    setReviewId(id);
+    setWorkId(null);
+    window.history.pushState(null, "", `?review=${encodeURIComponent(id)}`);
   }, []);
 
   return (
@@ -30,9 +43,12 @@ export default function App() {
         </span>
       </header>
       <main>
-        <QueuePanel onOpenWork={openWork} />
+        <QueuePanel onOpenWork={openWork} onOpenReview={openReview} />
         {workId !== null && !accessEnded && (
           <RecoveryWorkPanel key={workId} workId={workId} />
+        )}
+        {reviewId !== null && !accessEnded && (
+          <ReviewWorkPanel key={reviewId} workId={reviewId} />
         )}
       </main>
     </div>

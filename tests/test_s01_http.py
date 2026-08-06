@@ -85,6 +85,11 @@ class UvicornLoopback:
         self._process: subprocess.Popen[str] | None = None
         self._session_cookie: str | None = None
 
+    @property
+    def session_cookie(self) -> str | None:
+        """The captured ``s01_session`` cookie, if a session was opened."""
+        return self._session_cookie
+
     def __enter__(self) -> "UvicornLoopback":
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reservation:
             reservation.bind(("127.0.0.1", 0))
@@ -931,6 +936,378 @@ def test_loopback_process_queue_workspace_and_minimized_evidence(
     assert len(provenance_manifest_digests.pop()) == 64
     for forbidden in ("label", "expected_verdicts", "source_object_ref", "coordinate_system"):
         assert forbidden not in workspace.text
+
+
+def test_loopback_manual_review_lifecycle_typed_contract_over_http(
+    loopback: UvicornLoopback,
+) -> None:
+    admission = submit(loopback, "http-t02-lifecycle").json()
+    application_id = admission["application_id"]
+    item = wait_for_projected_queue_item(loopback, application_id)
+    work_item_id = item["work_item_id"]
+
+    work = loopback.request(
+        "GET",
+        f"/controlled/s01/api/queries/review-work-items/{work_item_id}",
+        headers=headers("reviewer"),
+    )
+    assert work.status == 200
+    assert work.headers.get("cache-control") == "no-store"
+    body = work.json()
+    assert body["status"] == "unclaimed"
+    assert body["claim_subject"] is None
+    assert body["claim_fence"] == 0
+    context = body["command_context"]
+    automatic = body["automatic_findings"]
+    finding_ids = [finding["finding_id"] for finding in automatic]
+    assert finding_ids
+    run_authority = body["run_authority"]
+    evidence_revision = body["evidence_revision"]
+    assert len(run_authority["authority_digest"]) == 64
+
+    workspace = loopback.request(
+        "GET",
+        f"/controlled/s01/api/queries/applications/{application_id}/workspace",
+        headers=headers("reviewer"),
+    )
+    assert workspace.status == 200
+    assert workspace.headers.get("cache-control") == "no-store"
+    workspace_body = workspace.json()
+    assert workspace_body["selected_finding"]["rule_id"] == "R_ENGINE_CROSS"
+    assert workspace_body["selected_finding"]["evidence_links"]
+    assert all(
+        link["raw_masked"] == "[REDACTED]"
+        for link in workspace_body["selected_finding"]["evidence_links"]
+    )
+    workspace_text = workspace.text
+    for forbidden in (
+        "producer_id",
+        "producer_family",
+        "producer_run_id",
+        "model_id",
+        "model_version",
+        "source_receipt_id",
+        "source_object_ref",
+        "coordinate_system",
+        "label",
+        "expected_verdicts",
+    ):
+        assert forbidden not in workspace_text
+    for raw in ("S2ENG54A", "LSVAA4182N5000054"):
+        assert raw not in workspace_text
+
+    hidden_work = loopback.request(
+        "GET",
+        f"/controlled/s01/api/queries/review-work-items/{work_item_id}",
+        headers=headers("reviewer"),
+        use_session=False,
+    )
+    hidden_claim = loopback.request(
+        "POST",
+        f"/controlled/s01/api/commands/review-work-items/{work_item_id}/claim",
+        body={"expected_context": context},
+        headers=headers("reviewer"),
+        use_session=False,
+    )
+    assert hidden_work.status == 404
+    assert hidden_work.json()["detail"] == {"error": "S03_NOT_FOUND"}
+    assert hidden_claim.status == 404
+    assert hidden_claim.json()["detail"] == {"error": "S03_NOT_FOUND"}
+
+    claimed = loopback.request(
+        "POST",
+        f"/controlled/s01/api/commands/review-work-items/{work_item_id}/claim",
+        body={"expected_context": context},
+        headers=headers("reviewer"),
+    )
+    assert claimed.status == 200
+    assert claimed.headers.get("cache-control") == "no-store"
+    claimed_body = claimed.json()
+    assert claimed_body["status"] == "claimed"
+    assert claimed_body["claim_subject"] == "c-demo-test-user"
+    assert claimed_body["claim_fence"] == 1
+    assert claimed_body["claim_expires_at"] > 0
+
+    renewed = loopback.request(
+        "POST",
+        f"/controlled/s01/api/commands/review-work-items/{work_item_id}/renew",
+        body={
+            "expected_fence": 1,
+            "expected_context": context,
+            "idempotency_key": "t02-http-renew",
+        },
+        headers=headers("reviewer"),
+    )
+    assert renewed.status == 200
+    renewed_body = renewed.json()
+    assert renewed_body["status"] == "renewed"
+    assert renewed_body["claim_fence"] == 1
+    assert renewed_body["replayed"] is False
+    assert renewed_body["claim_expires_at"] >= claimed_body["claim_expires_at"]
+
+    replayed = loopback.request(
+        "POST",
+        f"/controlled/s01/api/commands/review-work-items/{work_item_id}/renew",
+        body={
+            "expected_fence": 1,
+            "expected_context": context,
+            "idempotency_key": "t02-http-renew",
+        },
+        headers=headers("reviewer"),
+    )
+    assert replayed.status == 200
+    replayed_body = replayed.json()
+    assert replayed_body["status"] == "renewed"
+    assert replayed_body["replayed"] is True
+    assert replayed_body["claim_expires_at"] == renewed_body["claim_expires_at"]
+
+    released = loopback.request(
+        "POST",
+        f"/controlled/s01/api/commands/review-work-items/{work_item_id}/release",
+        body={
+            "expected_fence": 1,
+            "expected_context": context,
+            "idempotency_key": "t02-http-release",
+        },
+        headers=headers("reviewer"),
+    )
+    assert released.status == 200
+    released_body = released.json()
+    assert released_body["status"] == "released"
+    assert released_body["claim_fence"] == 1
+    assert released_body["replayed"] is False
+    assert released_body["released_at"] > 0
+
+    reclaimed = loopback.request(
+        "POST",
+        f"/controlled/s01/api/commands/review-work-items/{work_item_id}/claim",
+        body={"expected_context": context},
+        headers=headers("reviewer"),
+    )
+    assert reclaimed.status == 200
+    assert reclaimed.json()["status"] == "claimed"
+    assert reclaimed.json()["claim_fence"] == 2
+
+    stale_renew = loopback.request(
+        "POST",
+        f"/controlled/s01/api/commands/review-work-items/{work_item_id}/renew",
+        body={
+            "expected_fence": 1,
+            "expected_context": context,
+            "idempotency_key": "t02-http-stale-renew",
+        },
+        headers=headers("reviewer"),
+    )
+    assert stale_renew.status == 409
+    assert stale_renew.json()["detail"] == {
+        "error": "S03_STALE",
+        "reason_code": "STALE_WORK_ITEM_CLAIM",
+    }
+    drifted = loopback.request(
+        "POST",
+        f"/controlled/s01/api/commands/review-work-items/{work_item_id}/renew",
+        body={
+            "expected_fence": 2,
+            "expected_context": {"lifecycle_revision": 0},
+            "idempotency_key": "t02-http-drifted",
+        },
+        headers=headers("reviewer"),
+    )
+    assert drifted.status == 409
+    assert drifted.json()["detail"] == {
+        "error": "S03_STALE",
+        "reason_code": "STALE_REVIEW_CONTEXT",
+    }
+    invalid = loopback.request(
+        "POST",
+        f"/controlled/s01/api/commands/review-work-items/{work_item_id}/renew",
+        body={
+            "expected_fence": 2,
+            "expected_context": context,
+            "idempotency_key": "t02-http-invalid",
+            "unexpected": "RAW-CORRECTION-SENTINEL",
+        },
+        headers=headers("reviewer"),
+    )
+    assert invalid.status == 422
+    assert invalid.json()["detail"]["error"] == "S03_INVALID_COMMAND"
+    assert "RAW-CORRECTION-SENTINEL" not in invalid.text
+
+    verification = {
+        "schema_version": "human-decision/1",
+        "outcome": "confirmed",
+        "reason_code": "HUMAN_REVIEW_COMPLETED",
+        "finding_decisions": [
+            {"finding_id": finding_id, "outcome": "confirmed"}
+            for finding_id in finding_ids
+        ],
+    }
+    submitted = loopback.request(
+        "POST",
+        f"/controlled/s01/api/commands/review-work-items/{work_item_id}/submit",
+        body={
+            "expected_fence": 2,
+            "expected_context": context,
+            "idempotency_key": "t02-http-submit",
+            "verification": verification,
+        },
+        headers=headers("reviewer"),
+    )
+    assert submitted.status == 200
+    submitted_body = submitted.json()
+    assert submitted_body["status"] == "accepted"
+    assert submitted_body["decision_id"]
+    assert submitted_body["route"] == "human_complete"
+    assert submitted_body["replayed"] is False
+    decision_id = submitted_body["decision_id"]
+
+    replay_submit = loopback.request(
+        "POST",
+        f"/controlled/s01/api/commands/review-work-items/{work_item_id}/submit",
+        body={
+            "expected_fence": 2,
+            "expected_context": context,
+            "idempotency_key": "t02-http-submit",
+            "verification": verification,
+        },
+        headers=headers("reviewer"),
+    )
+    assert replay_submit.status == 200
+    replay_body = replay_submit.json()
+    assert replay_body["status"] == "accepted"
+    assert replay_body["replayed"] is True
+    assert replay_body["decision_id"] == decision_id
+
+    work_after = loopback.request(
+        "GET",
+        f"/controlled/s01/api/queries/review-work-items/{work_item_id}",
+        headers=headers("reviewer"),
+    )
+    assert work_after.status == 200
+    work_after_body = work_after.json()
+    assert work_after_body["status"] == "completed"
+    assert work_after_body["automatic_findings"] == automatic
+    assert work_after_body["run_authority"] == run_authority
+    assert work_after_body["evidence_revision"] == evidence_revision
+    assert [
+        decision["decision_id"] for decision in work_after_body["decisions"]
+    ] == [decision_id]
+
+    route = loopback.request(
+        "GET",
+        f"/controlled/s01/api/queries/applications/{application_id}/current-route",
+        headers=headers("reviewer"),
+    )
+    assert route.status == 200
+    assert route.json()["phase"] == "Verification Completed"
+    assert route.json()["route"] == "human_complete"
+
+    history = loopback.request(
+        "GET",
+        f"/controlled/s01/api/queries/applications/{application_id}/history",
+        headers=headers("reviewer"),
+    )
+    assert history.status == 200
+    current_run = next(
+        run for run in history.json()["runs"] if run["current"] is True
+    )
+    assert current_run["decision_ids"] == [decision_id]
+
+    queue = loopback.request(
+        "GET", "/controlled/s01/api/queries/queue", headers=headers("reviewer")
+    )
+    assert queue.status == 200
+    assert all(
+        candidate["work_item_id"] != work_item_id
+        for candidate in queue.json()["items"]
+    )
+
+    public = json.dumps(
+        [
+            body,
+            workspace_body,
+            claimed_body,
+            renewed_body,
+            released_body,
+            submitted_body,
+            work_after_body,
+            route.json(),
+            history.json(),
+            queue.json(),
+        ],
+        ensure_ascii=False,
+    )
+    for raw in ("S2ENG54A", "LSVAA4182N5000054"):
+        assert raw not in public
+
+
+def test_loopback_manual_review_audit_fault_returns_503_without_side_effects() -> None:
+    state_path = (
+        Path(tempfile.mkdtemp(prefix="xiaopeng-t02-http-")) / "target.sqlite3"
+    )
+    with s01_test_loopback(
+        {
+            "TASK4_S01_STATE_PATH": str(state_path),
+            "TASK4_S01_TEST_STATE_PATH": str(state_path),
+        }
+    ) as server:
+        admission = submit(server, "http-t02-fault-prep").json()
+        item = wait_for_projected_queue_item(server, admission["application_id"])
+        work_item_id = item["work_item_id"]
+        before = server.request(
+            "GET",
+            f"/controlled/s01/api/queries/review-work-items/{work_item_id}",
+            headers=headers("reviewer"),
+        ).json()
+        context = before["command_context"]
+        queue_before = server.request(
+            "GET", "/controlled/s01/api/queries/queue", headers=headers("reviewer")
+        ).json()
+        # S01 work is scoped to the issuing demo session; the fault server must
+        # resolve the same session from the shared state to see it.
+        session_cookie = server.session_cookie
+        assert session_cookie is not None
+        session_headers = {"Cookie": session_cookie}
+
+    with UvicornLoopback(
+        {
+            "TASK4_S01_STATE_PATH": str(state_path),
+            "TASK4_S01_TEST_STATE_PATH": str(state_path),
+            "TASK4_S02_TEST_STATE_PATH": str(state_path),
+            "TASK4_S03_TEST_FAULT_POINT": "review.audit",
+        },
+        app_target="task4_consistency.web.app:create_s02_test_app",
+        app_factory=True,
+    ) as server:
+        failed = server.request(
+            "POST",
+            f"/controlled/s01/api/commands/review-work-items/{work_item_id}/claim",
+            body={"expected_context": context},
+            headers=session_headers,
+            use_session=False,
+        )
+        after = server.request(
+            "GET",
+            f"/controlled/s01/api/queries/review-work-items/{work_item_id}",
+            headers=session_headers,
+            use_session=False,
+        )
+        queue_after = server.request(
+            "GET",
+            "/controlled/s01/api/queries/queue",
+            headers=session_headers,
+            use_session=False,
+        )
+
+    assert failed.status == 503
+    assert failed.headers.get("cache-control") == "no-store"
+    assert failed.json()["detail"] == {
+        "error": "S03_UNAVAILABLE",
+        "reason_code": "AUDIT_UNAVAILABLE",
+    }
+    assert after.status == 200
+    assert after.json() == before
+    assert queue_after.json() == queue_before
 
 
 @pytest.mark.parametrize(
