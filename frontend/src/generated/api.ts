@@ -1189,6 +1189,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/controlled/s02/api/queries/supplement-requests/{request_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Controlled S06 Integrator Supplement Request View */
+        get: operations["controlled_s06_integrator_supplement_request_view_controlled_s02_api_queries_supplement_requests__request_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/controlled/s02/api/session": {
         parameters: {
             query?: never;
@@ -1200,6 +1217,29 @@ export interface paths {
         put?: never;
         /** Controlled S02 Session */
         post: operations["controlled_s02_session_controlled_s02_api_session_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s02/react": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Controlled S02 React Page
+         * @description The Integrator React shell: same built artifact as the Reviewer shell,
+         *     issuing only the existing S02 session.  A missing or incomplete build is
+         *     an explicit 503; the legacy ``/controlled/s02`` page remains the
+         *     fallback URL.
+         */
+        get: operations["controlled_s02_react_page_controlled_s02_react_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1276,6 +1316,101 @@ export interface components {
             runs: components["schemas"]["S01HistoryRun"][];
             /** Schema Version */
             schema_version: string;
+        };
+        /**
+         * S01AttachmentSubmissionResponse
+         * @description Closed S02 attachment-version receipt; every current wire field of the
+         *     S02 admission JSON is enumerated with preserved nullability.
+         */
+        S01AttachmentSubmissionResponse: {
+            /** Adapter Id */
+            adapter_id: string | null;
+            /** Adapter Version */
+            adapter_version: string | null;
+            /** Application Id */
+            application_id: string | null;
+            /** Artifact Manifest Digest */
+            artifact_manifest_digest: string | null;
+            /** Attachment Id */
+            attachment_id: string | null;
+            /** Attachment Version */
+            attachment_version: number | null;
+            /** Batch Closed */
+            batch_closed: boolean | null;
+            /** Batch Id */
+            batch_id: string | null;
+            /** Claim Label */
+            claim_label: string | null;
+            /** Disposition */
+            disposition: string;
+            /** Envelope Fingerprint */
+            envelope_fingerprint: string | null;
+            /** Envelope Id */
+            envelope_id: string | null;
+            /** Envelope Version */
+            envelope_version: string | null;
+            /** Evidence Revision */
+            evidence_revision: number | null;
+            /** Fact Counts */
+            fact_counts: {
+                [key: string]: number;
+            };
+            /** Fulfilled */
+            fulfilled: boolean | null;
+            /** Gate Results */
+            gate_results: string[];
+            /** Job Id */
+            job_id: string | null;
+            /** Lifecycle Revision */
+            lifecycle_revision: number | null;
+            /** Performance Status */
+            performance_status: string | null;
+            /** Phase */
+            phase: string | null;
+            /** Real Cross Document Opportunities */
+            real_cross_document_opportunities: number | null;
+            /** Reason Code */
+            reason_code: string | null;
+            /** Receipt Id */
+            receipt_id: string | null;
+            /** Recovery Action */
+            recovery_action: string | null;
+            /** Recovery Target */
+            recovery_target: {
+                [key: string]: unknown;
+            } | null;
+            /** Replayed */
+            replayed: boolean;
+            /** Request Id */
+            request_id: string | null;
+            /** Request Progress Revision */
+            request_progress_revision: number | null;
+            /** Request Status */
+            request_status: string | null;
+            /** Responsible Party */
+            responsible_party: string | null;
+            /** Retryable */
+            retryable: boolean;
+            /** Route */
+            route: string | null;
+            /** Schema Version */
+            schema_version: string | null;
+            /** Semantic Version */
+            semantic_version: string | null;
+            /** Source Registration Digest */
+            source_registration_digest: string | null;
+            /** Source Revision */
+            source_revision: number | null;
+            /** Source Revision Id */
+            source_revision_id: string | null;
+            /** Source System Id */
+            source_system_id: string;
+            /** Stream Id */
+            stream_id: string | null;
+            /** Supersedes Attachment Id */
+            supersedes_attachment_id: string | null;
+            /** Tenant Id */
+            tenant_id: string;
         };
         /** S01AutomaticFinding */
         S01AutomaticFinding: {
@@ -1675,6 +1810,93 @@ export interface components {
             /** Source Sha256 */
             source_sha256: string;
         };
+        /**
+         * S01IntegratorBatchBinding
+         * @description The server-bound batch identity the next command must reuse after the
+         *     first accepted progress item (null before the first submission).
+         */
+        S01IntegratorBatchBinding: {
+            /** Batch Id */
+            batch_id: string | null;
+            /** Manifest Digest */
+            manifest_digest: string | null;
+            /** Stream Id */
+            stream_id: string | null;
+        };
+        /**
+         * S01IntegratorMaterialRequirement
+         * @description The minimized material requirement of the Integrator projection.
+         */
+        S01IntegratorMaterialRequirement: {
+            /** Allowed Source System Ids */
+            allowed_source_system_ids: string[];
+            /** Allowed Tenant Id */
+            allowed_tenant_id: string;
+            /** Allowed Workload Identity Ids */
+            allowed_workload_identity_ids: string[];
+            /** Batch Closure Required */
+            batch_closure_required: boolean;
+            /** Batch Item Count */
+            batch_item_count: number;
+            /** Document Role */
+            document_role: string;
+            /** Evidence Eligibility Required */
+            evidence_eligibility_required: boolean;
+            /** Integrity Required */
+            integrity_required: boolean;
+            /** Material Kind */
+            material_kind: string;
+            /** Material Requirement Id */
+            material_requirement_id: string;
+            /** Operation */
+            operation: string;
+            /** Provenance Required */
+            provenance_required: boolean;
+            /** Required Fact Kinds */
+            required_fact_kinds: string[];
+            /** Responsible Party */
+            responsible_party: string;
+        };
+        /**
+         * S01IntegratorSupplementRequestView
+         * @description Closed minimized Integrator projection.  It binds exactly the next
+         *     ``submit_attachment_version`` command for the registered source and never
+         *     carries application, reviewer, finding, run, snapshot or policy internals.
+         */
+        S01IntegratorSupplementRequestView: {
+            batch: components["schemas"]["S01IntegratorBatchBinding"];
+            /** Context Digest */
+            context_digest: string;
+            /** Current */
+            current: boolean;
+            /** Due At */
+            due_at: number;
+            /** Expected Predecessor Attachment Id */
+            expected_predecessor_attachment_id: string;
+            /** Expected Predecessor Attachment Version */
+            expected_predecessor_attachment_version: number;
+            /** Expected Predecessor Revision */
+            expected_predecessor_revision: number | null;
+            material_requirement: components["schemas"]["S01IntegratorMaterialRequirement"];
+            /** Next Attachment Version */
+            next_attachment_version: number;
+            /** Next Batch Item Sequence */
+            next_batch_item_sequence: number;
+            /** Next Request Progress Revision */
+            next_request_progress_revision: number;
+            /** Next Source Revision */
+            next_source_revision: number;
+            /** Request Id */
+            request_id: string;
+            /** Requested At */
+            requested_at: number;
+            /** Schema Version */
+            schema_version: string;
+            /** Status */
+            status: string;
+            /** Upstream Application Ref */
+            upstream_application_ref: string;
+        };
         /** S01NoteMetadata */
         S01NoteMetadata: {
             /** Byte Count */
@@ -2055,6 +2277,155 @@ export interface components {
             replayed: boolean;
             /** Route */
             route: string;
+            /** Status */
+            status: string;
+            /** Work Item Id */
+            work_item_id: string;
+        };
+        /**
+         * S01SupplementMaterialRequirement
+         * @description The closed material requirement of one supplement request.
+         */
+        S01SupplementMaterialRequirement: {
+            /** Allowed Source System Ids */
+            allowed_source_system_ids: string[];
+            /** Allowed Tenant Id */
+            allowed_tenant_id: string;
+            /** Allowed Workload Identity Ids */
+            allowed_workload_identity_ids: string[];
+            /** Batch Closure Required */
+            batch_closure_required: boolean;
+            /** Batch Item Count */
+            batch_item_count: number;
+            /** Document Role */
+            document_role: string;
+            /** Evidence Eligibility Required */
+            evidence_eligibility_required: boolean;
+            /** Integrity Required */
+            integrity_required: boolean;
+            /** Material Kind */
+            material_kind: string;
+            /** Material Requirement Id */
+            material_requirement_id: string;
+            /** Operation */
+            operation: string;
+            /** Provenance Required */
+            provenance_required: boolean;
+            /** Required Fact Kinds */
+            required_fact_kinds: string[];
+            /** Responsible Party */
+            responsible_party: string;
+            /** Satisfaction Policy Id */
+            satisfaction_policy_id: string;
+        };
+        /**
+         * S01SupplementRequestFailure
+         * @description The closed terminal failure of a supplement request.
+         */
+        S01SupplementRequestFailure: {
+            /** Reason Code */
+            reason_code: string;
+            /** Recovery Action */
+            recovery_action: string;
+            /** Recovery Target */
+            recovery_target?: {
+                [key: string]: unknown;
+            } | null;
+            /** Responsible Party */
+            responsible_party: string;
+        };
+        /**
+         * S01SupplementRequestResult
+         * @description Closed 200 result of the supplement request command.  Only the
+         *     ``accepted`` status reaches 200; every other domain status is mapped to
+         *     the registered S03 HTTP error before serialization.
+         */
+        S01SupplementRequestResult: {
+            /** Application Id */
+            application_id: string;
+            /** Due At */
+            due_at: number;
+            /** Evidence Revision */
+            evidence_revision: number;
+            /** Finding Id */
+            finding_id: string;
+            /** Lifecycle Revision */
+            lifecycle_revision: number;
+            /** Material Requirement Id */
+            material_requirement_id: string;
+            /** Phase */
+            phase: string;
+            /** Replayed */
+            replayed: boolean;
+            /** Request Id */
+            request_id: string;
+            /** Route */
+            route: string;
+            /**
+             * Status
+             * @constant
+             */
+            status: "accepted";
+            /** Work Item Id */
+            work_item_id: string;
+        };
+        /**
+         * S01SupplementRequestView
+         * @description Closed Reviewer request view; every current wire field is enumerated.
+         */
+        S01SupplementRequestView: {
+            /** Application Id */
+            application_id: string;
+            /** Context Digest */
+            context_digest: string;
+            /** Current */
+            current: boolean;
+            /** Cycle */
+            cycle: number;
+            /** Due At */
+            due_at: number;
+            /** Evidence Revision */
+            evidence_revision: number;
+            /** Expected Predecessor Attachment Id */
+            expected_predecessor_attachment_id: string;
+            /** Expected Predecessor Attachment Version */
+            expected_predecessor_attachment_version: number;
+            failure?: components["schemas"]["S01SupplementRequestFailure"] | null;
+            /** Finding Id */
+            finding_id: string;
+            /** Finding Reason Code */
+            finding_reason_code: string;
+            /** Finding Verdict */
+            finding_verdict: string;
+            /** Fixed Context */
+            fixed_context: {
+                [key: string]: unknown;
+            };
+            /** Lifecycle Revision */
+            lifecycle_revision: number;
+            material_requirement: components["schemas"]["S01SupplementMaterialRequirement"];
+            /** Phase */
+            phase: string;
+            /** Projection Watermark */
+            projection_watermark: number;
+            /** Request Id */
+            request_id: string;
+            /** Requested At */
+            requested_at: number;
+            /** Requester Claim Fence */
+            requester_claim_fence: number;
+            /** Route */
+            route: string;
+            /** Rule Id */
+            rule_id: string;
+            /** Run Id */
+            run_id: string;
+            /** Satisfaction Policy Digest */
+            satisfaction_policy_digest: string;
+            /** Schema Version */
+            schema_version: string;
+            /** Source Work Item Id */
+            source_work_item_id: string;
             /** Status */
             status: string;
             /** Work Item Id */
@@ -3833,7 +4204,26 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** Expected Context */
+                    expected_context: {
+                        [key: string]: unknown;
+                    };
+                    /** Expected Fence */
+                    expected_fence: number;
+                    /** Finding Id */
+                    finding_id: string;
+                    /** Idempotency Key */
+                    idempotency_key: string;
+                    /** Predecessor Request Id */
+                    predecessor_request_id?: string | null;
+                    /** Reason Code */
+                    reason_code: string;
+                };
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -3841,18 +4231,52 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["S01SupplementRequestResult"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["S01VerifyErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
                 };
             };
         };
@@ -4252,9 +4676,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["S01SupplementRequestView"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
                 };
             };
             /** @description Validation Error */
@@ -4599,7 +5030,18 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** Idempotency Key */
+                    idempotency_key: string;
+                    /** Submission */
+                    submission: {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -4607,9 +5049,61 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["S01AttachmentSubmissionResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
                 };
             };
         };
@@ -4770,6 +5264,46 @@ export interface operations {
             };
         };
     };
+    controlled_s06_integrator_supplement_request_view_controlled_s02_api_queries_supplement_requests__request_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                request_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01IntegratorSupplementRequestView"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     controlled_s02_session_controlled_s02_api_session_post: {
         parameters: {
             query?: never;
@@ -4785,6 +5319,26 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    controlled_s02_react_page_controlled_s02_react_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
             };
         };
     };

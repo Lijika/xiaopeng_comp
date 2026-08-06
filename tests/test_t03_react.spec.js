@@ -401,9 +401,10 @@ async function runRevealCorrectionTracer(browser, viewport, label) {
       workspaceGone404,
       workGone404,
     ]);
-    // Deterministic idempotency keys: the five command keys are minted at
-    // mount (renew, release, submit, reveal, correction); each reveal
-    // acceptance rotates a fresh key.  uuid(n) = nth crypto.randomUUID call.
+    // Deterministic idempotency keys: the six command keys are minted at
+    // mount (renew, release, submit, reveal, correction, supplement); each
+    // reveal acceptance rotates a fresh key.  uuid(n) = nth
+    // crypto.randomUUID call.
     const uuidSequence = [];
     await reviewer.addInitScript(
       (log) => {
@@ -503,7 +504,7 @@ async function runRevealCorrectionTracer(browser, viewport, label) {
     expect(
       posts.filter((entry) => entry.url.endsWith("/reveal-field-observation"))[1]
         .body.idempotency_key,
-    ).toBe(uuid(5));
+    ).toBe(uuid(6));
     await reviewer.getByTestId("review-correct-button").nth(3).click();
     await expect(reviewer.getByTestId("review-correction-form")).toBeVisible();
     await setRestrictedInput(

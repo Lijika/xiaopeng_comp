@@ -2075,3 +2075,414 @@ describe("ReviewWorkPanel evidence correction rerun (T03)", () => {
     expect(router.calls.filter((call) => call.method === "POST").length).toBe(2);
   });
 });
+
+const T04_REQUEST_ID = "supplement_request_t04panel00000000000000000000000";
+const T04_SUPP_PATH =
+  "/controlled/s01/api/commands/review-work-items/work_t02panel1234567890abcdef/supplement";
+const T04_REQUEST_VIEW_PATH =
+  "/controlled/s01/api/queries/supplement-requests/supplement_request_t04panel00000000000000000000000";
+
+function t04ClaimedWorkPayload() {
+  return workPayload({
+    status: "claimed",
+    claim_subject: "t02-reviewer",
+    claim_fence: 1,
+    claim_expires_at: LIVE_CLAIM_EXPIRES_AT,
+    automatic_findings: [
+      {
+        finding_id: FINDING_ID,
+        rule_id: "R_VIN_CROSS",
+        verdict: "uncertain",
+        severity: "critical",
+        reason_code: "MISSING_DOCS",
+      },
+    ],
+  });
+}
+
+function t04ClaimedWorkspacePayload() {
+  const finding = {
+    finding_id: FINDING_ID,
+    run_id: "run_t02panel",
+    rule_id: "R_VIN_CROSS",
+    verdict: "uncertain",
+    severity: "critical",
+    reason_code: "MISSING_DOCS",
+    mandatory: true,
+    evidence_links: [],
+  };
+  return workspacePayload({
+    claim_fence: 1,
+    claim_expires_at: LIVE_CLAIM_EXPIRES_AT,
+    mandatory_blockers: [finding],
+    selected_finding: finding,
+  });
+}
+
+function t04RequestViewPayload(overrides: Record<string, unknown> = {}) {
+  return {
+    schema_version: "supplement-request/1",
+    request_id: T04_REQUEST_ID,
+    work_item_id: "work_t04supplement1234567890abcd",
+    source_work_item_id: WORK_ID,
+    application_id: APP_ID,
+    cycle: 1,
+    run_id: "run_t02panel",
+    finding_id: FINDING_ID,
+    rule_id: "R_VIN_CROSS",
+    finding_reason_code: "MISSING_DOCS",
+    finding_verdict: "uncertain",
+    requester_claim_fence: 1,
+    requested_at: 100,
+    due_at: 9999999999,
+    fixed_context: CONTEXT,
+    context_digest: "g".repeat(64),
+    expected_predecessor_attachment_id: "attachment_t04v1",
+    expected_predecessor_attachment_version: 1,
+    satisfaction_policy_digest: "h".repeat(64),
+    status: "open",
+    current: true,
+    phase: "Supplement",
+    route: "supplement_pending",
+    lifecycle_revision: 7,
+    evidence_revision: 1,
+    projection_watermark: 1,
+    material_requirement: {
+      material_requirement_id: "c-demo-financing-lease-vin/1",
+      document_role: "financing_lease_contract",
+      material_kind: "financing_lease_contract",
+      operation: "replacement",
+      required_fact_kinds: [
+        "attachment",
+        "page",
+        "producer",
+        "vin_observation",
+      ],
+      responsible_party: "application_material_provider",
+      allowed_tenant_id: "c-demo",
+      allowed_source_system_ids: ["s06-material-source"],
+      allowed_workload_identity_ids: ["s06-material-workload"],
+      satisfaction_policy_id: "c-demo-supplement-satisfaction/1",
+      batch_item_count: 2,
+      batch_closure_required: true,
+      integrity_required: true,
+      provenance_required: true,
+      evidence_eligibility_required: true,
+    },
+    ...overrides,
+  };
+}
+
+function t04AcceptedResult() {
+  return {
+    status: "accepted",
+    replayed: false,
+    application_id: APP_ID,
+    request_id: T04_REQUEST_ID,
+    work_item_id: "work_t04supplement1234567890abcd",
+    finding_id: FINDING_ID,
+    material_requirement_id: "c-demo-financing-lease-vin/1",
+    phase: "Supplement",
+    route: "supplement_pending",
+    due_at: 9999999999,
+    lifecycle_revision: 7,
+    evidence_revision: 1,
+  };
+}
+
+function t04HistoryPayload(overrides: Record<string, unknown> = {}) {
+  const runs = historyPayload().runs;
+  return historyPayload({
+    current_run_id: "run_t04succ",
+    runs: [
+      { ...runs[0], current: false },
+      {
+        ...runs[0],
+        run_id: "run_t04succ",
+        current: true,
+        evidence_revision: 2,
+      },
+    ],
+    attachment_versions: [
+      {
+        attachment_id: "attachment_t04v1",
+        version: 1,
+        document_id: "lease",
+        document_role: "融资租赁合同",
+        supersedes_attachment_id: null,
+        page_ids: ["page_t04v1"],
+        producer_result_id: null,
+        evidence_revision: 1,
+        current: false,
+      },
+      {
+        attachment_id: "attachment_t04v2",
+        version: 2,
+        document_id: "lease",
+        document_role: "融资租赁合同",
+        supersedes_attachment_id: "attachment_t04v1",
+        page_ids: ["page_t04v2"],
+        producer_result_id: "result_t04v2",
+        evidence_revision: 2,
+        current: true,
+      },
+    ],
+    ...overrides,
+  });
+}
+
+function fetchMockBody(method: string, path: string): unknown {
+  const mock = vi.mocked(fetch);
+  for (let index = mock.mock.calls.length - 1; index >= 0; index -= 1) {
+    const call = mock.mock.calls[index];
+    const url = String(call[0]);
+    const callMethod = (call[1]?.method ?? "GET") as string;
+    const pathname = new URL(url, "http://localhost").pathname;
+    if (callMethod === method && pathname === path) {
+      return call[1]?.body !== undefined ? JSON.parse(String(call[1].body)) : undefined;
+    }
+  }
+  return undefined;
+}
+
+describe("ReviewWorkPanel supplement request (T04)", () => {
+  it("hides the supplement control for an ineligible finding", async () => {
+    fetchRouter({
+      ...baseRoutes(),
+      [`GET ${WORK_PATH}`]: () => jsonResponse(workPayload()),
+      [`GET ${WORKSPACE_PATH}`]: () => jsonResponse(workspacePayload()),
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    expect(
+      screen.queryByRole("button", { name: "请求补充材料" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows the supplement control for a claimed eligible R_VIN_CROSS finding", async () => {
+    fetchRouter({
+      ...baseRoutes(),
+      [`GET ${WORK_PATH}`]: () => jsonResponse(t04ClaimedWorkPayload()),
+      [`GET ${WORKSPACE_PATH}`]: () => jsonResponse(t04ClaimedWorkspacePayload()),
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    const supplementButton = screen.getByRole("button", {
+      name: "请求补充材料",
+    });
+    expect(supplementButton).toBeEnabled();
+  });
+
+  it("posts the exact server-bound supplement command and keeps the shell with the request view", async () => {
+    let workRequests = 0;
+    let workspaceRequests = 0;
+    const router = fetchRouter({
+      ...baseRoutes(),
+      [`GET ${WORK_PATH}`]: () => {
+        workRequests += 1;
+        return workRequests === 1
+          ? jsonResponse(t04ClaimedWorkPayload())
+          : jsonResponse({ detail: { error: "S03_NOT_FOUND" } }, 404);
+      },
+      [`GET ${WORKSPACE_PATH}`]: () => {
+        workspaceRequests += 1;
+        return workspaceRequests === 1
+          ? jsonResponse(t04ClaimedWorkspacePayload())
+          : jsonResponse({ detail: { error: "S03_NOT_FOUND" } }, 404);
+      },
+      [`GET ${T04_REQUEST_VIEW_PATH}`]: () =>
+        jsonResponse(t04RequestViewPayload()),
+      [`POST ${T04_SUPP_PATH}`]: () => jsonResponse(t04AcceptedResult()),
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    await userEvent.click(screen.getByRole("button", { name: "请求补充材料" }));
+    await vi.waitFor(() =>
+      expect(restrictedElements("review-supplement-status").length).toBeGreaterThan(
+        0,
+      ),
+    );
+    const supplementCalls = router.calls.filter((call) =>
+      call.method === "POST" && call.url.endsWith("/supplement"),
+    );
+    expect(supplementCalls).toHaveLength(1);
+    expect(supplementCalls[0].body).toEqual({
+      finding_id: FINDING_ID,
+      reason_code: "MISSING_REQUIRED_MATERIAL",
+      expected_fence: 1,
+      expected_context: CONTEXT,
+      idempotency_key: expect.any(String),
+      predecessor_request_id: null,
+    });
+    expect(
+      Object.keys(supplementCalls[0].body as Record<string, unknown>),
+    ).toEqual([
+      "finding_id",
+      "reason_code",
+      "expected_fence",
+      "expected_context",
+      "idempotency_key",
+      "predecessor_request_id",
+    ]);
+    // The old work item existence-hides but the shell, request view, gate
+    // and history stay usable; no fulfillment or route is ever inferred.
+    await vi.waitFor(() =>
+      expect(
+        (
+          restrictedElement("review-supplement-status").textContent ?? ""
+        ).includes("open"),
+      ).toBe(true),
+    );
+    expect(restrictedElements("gate-phase").length).toBe(1);
+    expect(restrictedElements("review-history-runs").length).toBe(1);
+    expect(restrictedElements("review-supplement-status").length).toBe(1);
+    expect(
+      restrictedElement("review-supplement-status").textContent,
+    ).not.toContain("fulfilled");
+  });
+
+  it("keeps the exact supplement command and key when the transport outcome is unknown", async () => {
+    let supplementPosts = 0;
+    fetchRouter({
+      ...baseRoutes(),
+      [`GET ${WORK_PATH}`]: () => jsonResponse(t04ClaimedWorkPayload()),
+      [`GET ${WORKSPACE_PATH}`]: () => jsonResponse(t04ClaimedWorkspacePayload()),
+      [`POST ${T04_SUPP_PATH}`]: () => {
+        supplementPosts += 1;
+        return Promise.reject(new TypeError("fetch failed: connection reset"));
+      },
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    await userEvent.click(screen.getByRole("button", { name: "请求补充材料" }));
+    await vi.waitFor(() =>
+      expect(
+        (
+          restrictedElement("review-command-status").textContent ?? ""
+        ).includes("结果未知"),
+      ).toBe(true),
+    );
+    expect(screen.getByRole("button", { name: "重试" })).toBeInTheDocument();
+    const firstBody = fetchMockBody("POST", T04_SUPP_PATH);
+    await userEvent.click(screen.getByRole("button", { name: "重试" }));
+    await vi.waitFor(() => expect(supplementPosts).toBe(2));
+    expect(fetchMockBody("POST", T04_SUPP_PATH)).toEqual(firstBody);
+  });
+
+  it("fences the supplement action after a definitive 409 and recovers only on reload", async () => {
+    const router = fetchRouter({
+      ...baseRoutes(),
+      [`GET ${WORK_PATH}`]: () => jsonResponse(t04ClaimedWorkPayload()),
+      [`GET ${WORKSPACE_PATH}`]: () => jsonResponse(t04ClaimedWorkspacePayload()),
+      [`POST ${T04_SUPP_PATH}`]: () =>
+        jsonResponse(
+          {
+            detail: {
+              error: "S03_CONFLICT",
+              reason_code: "ACTIVE_SUPPLEMENT_REQUEST_EXISTS",
+            },
+          },
+          409,
+        ),
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    await userEvent.click(screen.getByRole("button", { name: "请求补充材料" }));
+    await vi.waitFor(() =>
+      expect(
+        (
+          restrictedElement("review-command-status").textContent ?? ""
+        ).includes("ACTIVE_SUPPLEMENT_REQUEST_EXISTS"),
+      ).toBe(true),
+    );
+    expect(restrictedElements("review-reload-note").length).toBe(1);
+    expect(
+      (
+        screen.getByRole("button", { name: "请求补充材料" }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+    await userEvent.click(screen.getByRole("button", { name: "重新加载" }));
+    await vi.waitFor(() =>
+      expect(
+        (
+          restrictedElement("review-command-status").textContent ?? ""
+        ).includes("等待操作"),
+      ).toBe(true),
+    );
+    expect(
+      (
+        screen.getByRole("button", { name: "请求补充材料" }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(false);
+    expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(1);
+  });
+
+  it("renders attachment versions with exactly one server-current version", async () => {
+    fetchRouter({
+      ...baseRoutes(),
+      [`GET ${WORK_PATH}`]: () => jsonResponse(t04ClaimedWorkPayload()),
+      [`GET ${WORKSPACE_PATH}`]: () => jsonResponse(t04ClaimedWorkspacePayload()),
+      [`GET ${HISTORY_PATH}`]: () => jsonResponse(t04HistoryPayload()),
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    const attachments = restrictedElement("review-history-attachments");
+    const text = attachments.textContent ?? "";
+    expect(text.includes("v1")).toBe(true);
+    expect(text.includes("v2")).toBe(true);
+    expect(text.match(/· 当前/g)).toHaveLength(1);
+    expect(text.match(/· 非当前/g)).toHaveLength(1);
+  });
+
+  it("renders the fulfilled request and the converged successor from server facts", async () => {
+    const router = fetchRouter({
+      ...baseRoutes(),
+      [`GET ${WORK_PATH}`]: () => jsonResponse(t04ClaimedWorkPayload()),
+      [`GET ${WORKSPACE_PATH}`]: () => jsonResponse(t04ClaimedWorkspacePayload()),
+      [`GET ${HISTORY_PATH}`]: () => jsonResponse(t04HistoryPayload()),
+      [`GET ${ROUTE_PATH}`]: () =>
+        jsonResponse(
+          routePayload({
+            evidence_revision: 2,
+            current_run_id: "run_t04succ",
+            route: "manual_review",
+            phase: "Manual Review",
+          }),
+        ),
+      [`GET ${T04_REQUEST_VIEW_PATH}`]: () =>
+        jsonResponse(
+          t04RequestViewPayload({
+            status: "fulfilled",
+            current: false,
+            phase: "Assembly",
+            route: "pending_check",
+            evidence_revision: 2,
+            lifecycle_revision: 9,
+          }),
+        ),
+      [`POST ${T04_SUPP_PATH}`]: () => jsonResponse(t04AcceptedResult()),
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    await userEvent.click(screen.getByRole("button", { name: "请求补充材料" }));
+    await vi.waitFor(() =>
+      expect(restrictedElements("review-supplement-converged").length).toBe(1),
+    );
+    const converged =
+      restrictedElement("review-supplement-converged").textContent ?? "";
+    expect(converged.includes("证据修订 2")).toBe(true);
+    expect(converged.includes("run_t04succ")).toBe(true);
+    // The request status is server data rendered verbatim; the browser never
+    // invents fulfillment.
+    expect(
+      (
+        restrictedElement("review-supplement-status").textContent ?? ""
+      ).includes("fulfilled"),
+    ).toBe(true);
+    const runsText = restrictedElement("review-history-runs").textContent ?? "";
+    expect(runsText.match(/· 当前/g)).toHaveLength(1);
+    expect(
+      router.calls.filter((call) => call.method === "POST" && call.url.endsWith("/supplement")).length,
+    ).toBe(1);
+  });
+});

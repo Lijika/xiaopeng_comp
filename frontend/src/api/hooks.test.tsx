@@ -8,15 +8,20 @@ import type { paths } from "../generated/api";
 import { HttpError, isDefinitiveRejection } from "./client";
 import {
   correctionConverged,
+  evidenceRevisionConverged,
   useApplicationHistory,
   useClaimWorkItem,
   useCorrectFieldObservation,
   useCorrectionConvergence,
   useCurrentRoute,
+  useIntegratorSupplementRequest,
   useQueue,
   useRecoveryWork,
+  useRequestSupplement,
   useRevealFieldObservation,
+  useSubmitAttachmentVersion,
   useSubmitVerification,
+  useSupplementRequest,
   type ClaimCommand,
   type CorrectionCommand,
   type FencedCommand,
@@ -1057,5 +1062,308 @@ describe("reveal and correction mutations (T03)", () => {
       );
     });
     expect(revealPosts).toBe(1);
+  });
+});
+
+const T04_REQUEST_ID = "supplement_request_t04hook00000000000000000000000";
+
+function jsonResponse(payload: unknown, status = 200): Response {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+function errorResponse(status: number, error: string): Response {
+  return jsonResponse({ detail: { error } }, status);
+}
+
+const T04_SUPPLEMENT_PATH =
+  `/controlled/s01/api/commands/review-work-items/${WORK_ID}/supplement`;
+const T04_REQUEST_VIEW_PATH = `/controlled/s01/api/queries/supplement-requests/${T04_REQUEST_ID}`;
+const T04_INTEGRATOR_VIEW_PATH = `/controlled/s02/api/queries/supplement-requests/${T04_REQUEST_ID}`;
+const T04_SUBMIT_PATH = "/controlled/s02/api/commands/submit-attachment-version";
+
+function supplementRequestResult() {
+  return {
+    status: "accepted",
+    replayed: false,
+    application_id: "app_t04hook9876543210fedcba",
+    request_id: T04_REQUEST_ID,
+    work_item_id: "work_t04supplement1234567890abcd",
+    finding_id: "finding_t04hook0000000000000001",
+    material_requirement_id: "c-demo-financing-lease-vin/1",
+    phase: "Supplement",
+    route: "supplement_pending",
+    due_at: 200,
+    lifecycle_revision: 7,
+    evidence_revision: 1,
+  };
+}
+
+function integratorProjection(overrides: Record<string, unknown> = {}) {
+  return {
+    schema_version: "supplement-request-integrator/1",
+    request_id: T04_REQUEST_ID,
+    status: "open",
+    current: true,
+    requested_at: 100,
+    due_at: 200,
+    context_digest: "c".repeat(64),
+    upstream_application_ref: "APP-MISS-VINDOC",
+    material_requirement: {
+      material_requirement_id: "c-demo-financing-lease-vin/1",
+      document_role: "financing_lease_contract",
+      material_kind: "financing_lease_contract",
+      operation: "replacement",
+      required_fact_kinds: ["attachment", "page", "producer", "vin_observation"],
+      responsible_party: "application_material_provider",
+      allowed_tenant_id: "c-demo",
+      allowed_source_system_ids: ["s06-material-source"],
+      allowed_workload_identity_ids: ["s06-material-workload"],
+      batch_item_count: 2,
+      batch_closure_required: true,
+      integrity_required: true,
+      provenance_required: true,
+      evidence_eligibility_required: true,
+    },
+    expected_predecessor_attachment_id: "attachment_v1",
+    expected_predecessor_attachment_version: 1,
+    next_attachment_version: 2,
+    next_request_progress_revision: 1,
+    next_source_revision: 1,
+    expected_predecessor_revision: null,
+    next_batch_item_sequence: 1,
+    batch: { batch_id: null, manifest_digest: null, stream_id: null },
+    ...overrides,
+  };
+}
+
+function attachmentReceipt(overrides: Record<string, unknown> = {}) {
+  return {
+    disposition: "accepted",
+    reason_code: null,
+    responsible_party: null,
+    recovery_action: null,
+    retryable: false,
+    application_id: "app_t04hook9876543210fedcba",
+    receipt_id: "receipt_t04hook",
+    job_id: null,
+    lifecycle_revision: 8,
+    evidence_revision: 2,
+    replayed: false,
+    envelope_version: "registered-observation-envelope/1",
+    schema_version: "1.0.0",
+    semantic_version: "1.0.0",
+    envelope_id: "envelope_t04hook",
+    stream_id: "stream_t04hook",
+    source_revision: 1,
+    source_revision_id: "revision_t04hook",
+    envelope_fingerprint: "f".repeat(64),
+    adapter_id: "s06-detection-adapter",
+    adapter_version: "1",
+    source_registration_digest: "d".repeat(64),
+    artifact_manifest_digest: "e".repeat(64),
+    fact_counts: {},
+    gate_results: [],
+    tenant_id: "c-demo",
+    source_system_id: "s06-material-source",
+    claim_label: null,
+    real_cross_document_opportunities: 0,
+    performance_status: "not_estimable",
+    request_id: T04_REQUEST_ID,
+    request_status: "open",
+    batch_id: "batch_t04hook",
+    batch_closed: false,
+    request_progress_revision: 1,
+    attachment_id: "attachment_v2",
+    attachment_version: 2,
+    supersedes_attachment_id: "attachment_v1",
+    fulfilled: false,
+    phase: "Awaiting Evidence",
+    route: "awaiting_evidence",
+    recovery_target: null,
+    ...overrides,
+  };
+}
+
+describe("generated T04 supplement command binding (T04)", () => {
+  it("binds the supplement request command to the generated OpenAPI body", () => {
+    type Operation = paths["/controlled/s01/api/commands/review-work-items/{work_item_id}/supplement"]["post"];
+    type Command = NonNullable<Operation["requestBody"]>["content"]["application/json"];
+    type Rejected = Extract<Command, { reason_code: string }>;
+    expectTypeOf<Rejected>().not.toBeNever();
+  });
+
+  it("binds the attachment submission command to the generated OpenAPI body", () => {
+    type Operation = paths["/controlled/s02/api/commands/submit-attachment-version"]["post"];
+    type Command = NonNullable<Operation["requestBody"]>["content"]["application/json"];
+    type Rejected = Extract<Command, { idempotency_key: string; submission: unknown }>;
+    expectTypeOf<Rejected>().not.toBeNever();
+  });
+});
+
+describe("reviewer supplement request query and mutation (T04)", () => {
+  it("fetches the request view exactly once for a live request id", async () => {
+    const router = fetchRouter({
+      [`GET ${T04_REQUEST_VIEW_PATH}`]: () =>
+        jsonResponse(supplementRequestResult(), 200),
+    });
+    const { result } = renderHook(() => useSupplementRequest(T04_REQUEST_ID), {
+      wrapper: wrap(createQueryClient()),
+    });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data?.request_id).toBe(T04_REQUEST_ID);
+    expect(
+      router.calls.filter((call) => call.url.includes("supplement-requests")),
+    ).toHaveLength(1);
+  });
+
+  it("never issues the reviewer request view GET for a null request id", async () => {
+    const router = fetchRouter({});
+    const { result } = renderHook(() => useSupplementRequest(null), {
+      wrapper: wrap(createQueryClient()),
+    });
+    await waitFor(() => expect(result.current.fetchStatus).toBe("idle"));
+    expect(router.calls).toHaveLength(0);
+  });
+
+  it("does not retry an existence-hiding 404 for the request view", async () => {
+    const router = fetchRouter({
+      [`GET ${T04_REQUEST_VIEW_PATH}`]: () =>
+        errorResponse(404, "S03_NOT_FOUND"),
+    });
+    const client = createQueryClient();
+    const { result } = renderHook(() => useSupplementRequest(T04_REQUEST_ID), {
+      wrapper: wrap(client),
+    });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(router.calls).toHaveLength(1);
+  });
+
+  it("posts exactly one supplement command and invalidates the S01 cache on acceptance", async () => {
+    let queueGets = 0;
+    const router = fetchRouter({
+      [`POST ${T04_SUPPLEMENT_PATH}`]: () =>
+        jsonResponse(supplementRequestResult(), 200),
+      "GET /controlled/s01/api/queries/queue": () => {
+        queueGets += 1;
+        return jsonResponse(
+          { items: [], recovery_items: [], projection_watermark: 0 },
+          200,
+        );
+      },
+    });
+    const client = createQueryClient();
+    const { result } = renderHook(
+      () => ({
+        request: useRequestSupplement(WORK_ID),
+        queue: useQueue(),
+      }),
+      { wrapper: wrap(client) },
+    );
+    result.current.request.mutate({
+      finding_id: "finding_t04hook0000000000000001",
+      reason_code: "MISSING_REQUIRED_MATERIAL",
+      expected_fence: 1,
+      expected_context: { current_context: "a".repeat(64) },
+      idempotency_key: "t04-hook-key",
+      predecessor_request_id: null,
+    });
+    await waitFor(() => expect(result.current.request.isSuccess).toBe(true));
+    expect(result.current.request.data?.request_id).toBe(T04_REQUEST_ID);
+    const supplementPosts = router.calls.filter((call) =>
+      call.url.includes("/supplement"),
+    );
+    expect(supplementPosts).toHaveLength(1);
+    expect(supplementPosts[0].body).toEqual({
+      finding_id: "finding_t04hook0000000000000001",
+      reason_code: "MISSING_REQUIRED_MATERIAL",
+      expected_fence: 1,
+      expected_context: { current_context: "a".repeat(64) },
+      idempotency_key: "t04-hook-key",
+      predecessor_request_id: null,
+    });
+    // The accepted request invalidates the server-owned S01 queue query.
+    await waitFor(() => expect(queueGets).toBeGreaterThan(0));
+  });
+});
+
+describe("integrator projection query and submission mutation (T04)", () => {
+  it("fetches the minimized projection exactly once for a live request id", async () => {
+    const router = fetchRouter({
+      [`GET ${T04_INTEGRATOR_VIEW_PATH}`]: () =>
+        jsonResponse(integratorProjection(), 200),
+    });
+    const { result } = renderHook(
+      () => useIntegratorSupplementRequest(T04_REQUEST_ID),
+      { wrapper: wrap(createQueryClient()) },
+    );
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data?.status).toBe("open");
+    expect(result.current.data?.next_attachment_version).toBe(2);
+    expect(router.calls).toHaveLength(1);
+  });
+
+  it("does not retry an existence-hiding 404 for the minimized projection", async () => {
+    const router = fetchRouter({
+      [`GET ${T04_INTEGRATOR_VIEW_PATH}`]: () =>
+        errorResponse(404, "S02_NOT_FOUND"),
+    });
+    const { result } = renderHook(
+      () => useIntegratorSupplementRequest(T04_REQUEST_ID),
+      { wrapper: wrap(createQueryClient()) },
+    );
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(router.calls).toHaveLength(1);
+  });
+
+  it("posts exactly one submission and refetches the S02 projection on acceptance", async () => {
+    let projectionGets = 0;
+    const router = fetchRouter({
+      [`POST ${T04_SUBMIT_PATH}`]: () => jsonResponse(attachmentReceipt(), 200),
+      [`GET ${T04_INTEGRATOR_VIEW_PATH}`]: () => {
+        projectionGets += 1;
+        return jsonResponse(integratorProjection(), 200);
+      },
+    });
+    const client = createQueryClient();
+    const { result } = renderHook(
+      () => ({
+        submit: useSubmitAttachmentVersion(),
+        projection: useIntegratorSupplementRequest(T04_REQUEST_ID),
+      }),
+      { wrapper: wrap(client) },
+    );
+    await waitFor(() => expect(result.current.projection.isSuccess).toBe(true));
+    result.current.submit.mutate({
+      idempotency_key: "t04-hook-submit",
+      submission: { envelope_id: "envelope_t04hook" },
+    });
+    await waitFor(() => expect(result.current.submit.isSuccess).toBe(true));
+    expect(result.current.submit.data?.request_status).toBe("open");
+    expect(result.current.submit.data?.disposition).toBe("accepted");
+    const posts = router.calls.filter((call) =>
+      call.url.includes("submit-attachment-version"),
+    );
+    expect(posts).toHaveLength(1);
+    expect(posts[0].body).toEqual({
+      idempotency_key: "t04-hook-submit",
+      submission: { envelope_id: "envelope_t04hook" },
+    });
+    // The accepted submission refetches the server-owned S02 projection.
+    await waitFor(() => expect(projectionGets).toBeGreaterThan(1));
+  });
+});
+
+describe("shared evidence-revision convergence predicate (T04)", () => {
+  it("exposes the generalized predicate and converges on a fulfilled route/history", () => {
+    expect(
+      evidenceRevisionConverged(routePayload(), historyPayload(), 2),
+    ).toBe(true);
+    expect(evidenceRevisionConverged(routePayload(), historyPayload(), 3)).toBe(
+      false,
+    );
+    expect(correctionConverged(routePayload(), historyPayload(), 2)).toBe(true);
   });
 });

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { useQueue } from "./api/hooks";
+import AttachmentVersionPanel from "./components/AttachmentVersionPanel";
 import QueuePanel from "./components/QueuePanel";
 import RecoveryWorkPanel from "./components/RecoveryWorkPanel";
 import ReviewWorkPanel from "./components/ReviewWorkPanel";
@@ -9,7 +10,35 @@ function readParam(name: string): string | null {
   return new URLSearchParams(window.location.search).get(name);
 }
 
-export default function App() {
+/** The one built artifact serves both controlled shells; the pathname owns
+ * which role UI mounts.  ``/controlled/s01/react`` is the Reviewer shell and
+ * ``/controlled/s02/react`` is the Integrator shell; every other path keeps
+ * the Reviewer workbench behind the legacy URLs. */
+function isIntegratorShell(): boolean {
+  return window.location.pathname.startsWith("/controlled/s02");
+}
+function IntegratorShell() {
+  return (
+    <div className="mx-auto max-w-4xl px-4 py-6">
+      <header className="app-header">
+        <h1>受控材料补充工作台</h1>
+        <span className="boundary track" data-testid="integrator-boundary-track">
+          R-OBSERVED
+        </span>
+        <span className="boundary" data-testid="integrator-boundary-gate">
+          S02
+        </span>
+      </header>
+      <main>
+        <AttachmentVersionPanel />
+      </main>
+    </div>
+  );
+}
+
+/** The Reviewer workbench owns every S01 read; it is never mounted on the
+ * Integrator shell, so no S01 query can fire there. */
+function ReviewerWorkbench() {
   const [workId, setWorkId] = useState<string | null>(() => readParam("work"));
   const [reviewId, setReviewId] = useState<string | null>(() =>
     readParam("review"),
@@ -63,4 +92,11 @@ export default function App() {
       </main>
     </div>
   );
+}
+
+export default function App() {
+  if (isIntegratorShell()) {
+    return <IntegratorShell />;
+  }
+  return <ReviewerWorkbench />;
 }

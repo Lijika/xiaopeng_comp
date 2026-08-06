@@ -818,4 +818,88 @@ describe("queue shell (App)", () => {
     );
     expect(screen.queryByTestId("gate-loading")).not.toBeInTheDocument();
   });
+
+  it("mounts the Integrator shell by pathname and never issues the S01 queue read", async () => {
+    const router = fetchRouter({
+      [`GET /controlled/s02/api/queries/supplement-requests/${encodeURIComponent("supplement_request_t04app00000000000000000000000")}`]:
+        () =>
+          new Response(
+            JSON.stringify({
+              schema_version: "supplement-request-integrator/1",
+              request_id: "supplement_request_t04app00000000000000000000000",
+              status: "open",
+              current: true,
+              requested_at: 100,
+              due_at: 9999999999,
+              context_digest: "c".repeat(64),
+              upstream_application_ref: "APP-MISS-VINDOC",
+              material_requirement: {
+                material_requirement_id: "c-demo-financing-lease-vin/1",
+                document_role: "financing_lease_contract",
+                material_kind: "financing_lease_contract",
+                operation: "replacement",
+                required_fact_kinds: ["attachment"],
+                responsible_party: "application_material_provider",
+                allowed_tenant_id: "c-demo",
+                allowed_source_system_ids: ["s06-material-source"],
+                allowed_workload_identity_ids: ["s06-material-workload"],
+                batch_item_count: 2,
+                batch_closure_required: true,
+                integrity_required: true,
+                provenance_required: true,
+                evidence_eligibility_required: true,
+              },
+              expected_predecessor_attachment_id: "attachment_t04v1",
+              expected_predecessor_attachment_version: 1,
+              next_attachment_version: 2,
+              next_request_progress_revision: 1,
+              next_source_revision: 1,
+              expected_predecessor_revision: null,
+              next_batch_item_sequence: 1,
+              batch: { batch_id: null, manifest_digest: null, stream_id: null },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+    });
+    window.history.pushState(
+      null,
+      "",
+      `/controlled/s02/react?request=${encodeURIComponent("supplement_request_t04app00000000000000000000000")}`,
+    );
+    renderWithQuery(<App />);
+    await waitFor(() =>
+      expect(screen.getByTestId("integrator-panel")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("integrator-boundary-track")).toHaveTextContent(
+      "R-OBSERVED",
+    );
+    expect(screen.getByTestId("integrator-boundary-gate")).toHaveTextContent(
+      "S02",
+    );
+    expect(screen.queryByTestId("queue-panel")).not.toBeInTheDocument();
+    expect(
+      router.calls.filter((call) => call.url.includes("/controlled/s01/")),
+    ).toHaveLength(0);
+  });
+
+  it("keeps the Reviewer workbench on the legacy pathname even without the S02 prefix", async () => {
+    fetchRouter({
+      "GET /controlled/s01/api/queries/queue": () =>
+        new Response(
+          JSON.stringify({
+            items: [],
+            recovery_items: [],
+            projection_watermark: 0,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    window.history.pushState(null, "", "/controlled/s01/react");
+    renderWithQuery(<App />);
+    await waitFor(() =>
+      expect(screen.getByTestId("queue-panel")).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId("integrator-panel")).not.toBeInTheDocument();
+    expect(screen.getByTestId("boundary-track")).toHaveTextContent("C-DEMO");
+  });
 });

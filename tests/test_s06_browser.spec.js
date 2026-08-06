@@ -418,3 +418,267 @@ test("independent Reviewer and Integrator browsers fulfill one supplement reques
     await stopServer(server);
   }
 });
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(",")}]`;
+  }
+  if (value !== null && typeof value === "object") {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function t04SubmissionFromProjection(projection, server, { closed, batchId, streamId }) {
+  const material = projection.material_requirement;
+  const itemSequence = projection.next_batch_item_sequence;
+  const manifest = {
+    batch_id: batchId,
+    final_sequence: material.batch_item_count,
+    item_count: material.batch_item_count,
+    scope_mode: "full",
+    stream_id: streamId,
+    supplement_request_id: projection.request_id,
+  };
+  return {
+    envelope_id: `t04-browser-envelope-${itemSequence}`,
+    schema_version: "1.0.0",
+    semantic_version: "1.0.0",
+    command_type: "submit_attachment_version",
+    upstream_application_ref: projection.upstream_application_ref,
+    stream_id: streamId,
+    source_revision: projection.next_source_revision,
+    predecessor_revision: projection.expected_predecessor_revision,
+    must_understand: [],
+    workload_identity_id: material.allowed_workload_identity_ids[0],
+    request_binding: {
+      supplement_request_id: projection.request_id,
+      request_context_digest: projection.context_digest,
+      material_requirement_id: material.material_requirement_id,
+      request_progress_revision: projection.next_request_progress_revision,
+    },
+    document_binding: {
+      source_document_ref: "t04-lease-replacement",
+      document_type: material.material_kind,
+      document_role: material.document_role,
+    },
+    attachment_lineage: {
+      operation: material.operation,
+      predecessor_attachment_id: projection.expected_predecessor_attachment_id,
+      predecessor_attachment_version:
+        projection.expected_predecessor_attachment_version,
+      attachment_version: projection.next_attachment_version,
+    },
+    batch: {
+      batch_id: batchId,
+      item_sequence: itemSequence,
+      item_count: material.batch_item_count,
+      final_sequence: material.batch_item_count,
+      scope_mode: "full",
+      closed,
+      manifest_digest: sha256(canonicalJson(manifest)),
+    },
+    result_object: {
+      controlled_object_ref: "s06-result-object",
+      media_type: "application/json",
+      size_bytes: server.result.length,
+      sha256: sha256(server.result),
+    },
+    attachments: [
+      {
+        source_attachment_ref: "t04-source-attachment-2",
+        page_ref: "t04-source-page-2",
+        page_ordinal: 1,
+        source_name_sha256: sha256(Buffer.from("lease-page.png")),
+        object: {
+          controlled_object_ref: "s06-page-object",
+          media_type: "image/png",
+          size_bytes: server.page.length,
+          sha256: sha256(server.page),
+        },
+      },
+    ],
+    producer: {
+      producer_id: "t04-producer",
+      producer_family: "s06-ocr",
+      task_id: "t04-lease-field-extraction",
+      task_version: "1",
+      run_id: "t04-producer-run-1",
+      model_id: "t04-model",
+      model_version: "1",
+      coordinate_system: { name: "pixel", unit: "pixel", origin: "top_left" },
+      confidence_semantics: {
+        minimum: 0,
+        maximum: 1,
+        higher_is: "stronger_detection",
+        meaning: "producer_detection_score",
+        granularity: "observation",
+        calibration: "unknown",
+      },
+    },
+  };
+}
+
+test("T04 React: Reviewer request -> Integrator current projection -> valid progress/closure -> Reviewer current route/history", async ({
+  browser,
+}) => {
+  test.setTimeout(120_000);
+  const server = await startServer();
+  const reviewerContext = await browser.newContext({
+    extraHTTPHeaders: { Authorization: `Bearer ${REVIEWER_CREDENTIAL}` },
+  });
+  const integratorContext = await browser.newContext({
+    extraHTTPHeaders: { Authorization: `Bearer ${INTEGRATOR_CREDENTIAL}` },
+  });
+  const reviewer = await reviewerContext.newPage();
+  const integrator = await integratorContext.newPage();
+  const consoleErrors = [];
+  reviewer.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  integrator.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  try {
+    expect(
+      (await reviewer.goto(`${server.baseURL}/controlled/s01/react`)).status(),
+    ).toBe(200);
+    expect(
+      (await integrator.goto(`${server.baseURL}/controlled/s02/react`)).status(),
+    ).toBe(200);
+    expect(
+      (await reviewerContext.cookies()).some(
+        (cookie) => cookie.name === "s01_session",
+      ),
+    ).toBe(true);
+    expect(
+      (await integratorContext.cookies()).some(
+        (cookie) => cookie.name === "s02_session",
+      ),
+    ).toBe(true);
+
+    const admitted = await api(reviewer, "POST", "/controlled/s01/api/commands/submit", {
+      scenario_id: "app_missing_vin_docs.json",
+      idempotency_key: "t04-browser-admission",
+    });
+    expect(admitted.status).toBe(200);
+
+    // The queue query loaded before the admission; the authoritative reload
+    // refetches the server-owned queue.
+    await reviewer.reload();
+    await expect(reviewer.getByTestId("queue-item")).toBeVisible({ timeout: 15000 });
+    await reviewer.getByTestId("queue-manual-link").click();
+    await expect(reviewer.getByTestId("claim-button")).toBeEnabled({ timeout: 10000 });
+    await reviewer.getByTestId("claim-button").click();
+    await expect(reviewer.getByTestId("supplement-button")).toBeEnabled({ timeout: 10000 });
+    await reviewer.getByTestId("supplement-button").click();
+    await expect(reviewer.getByTestId("review-supplement-request")).toBeVisible({
+      timeout: 10000,
+    });
+    await expect(reviewer.getByTestId("review-supplement-status")).toHaveText("open");
+    const requestId = (await reviewer.getByTestId("review-supplement-request-id").textContent()).trim();
+    expect(requestId).toMatch(/^supplement_request_/);
+
+    await integrator.goto(
+      `${server.baseURL}/controlled/s02/react?request=${encodeURIComponent(requestId)}`,
+    );
+    await expect(integrator.getByTestId("integrator-projection-status")).toHaveText(
+      "open",
+      { timeout: 10000 },
+    );
+    expect(
+      await integrator.getByTestId("integrator-projection-request-id").textContent(),
+    ).toContain(requestId);
+
+    let projectionResponse = await api(
+      integrator,
+      "GET",
+      `/controlled/s02/api/queries/supplement-requests/${encodeURIComponent(requestId)}`,
+    );
+    expect(projectionResponse.status).toBe(200);
+    const openProjection = projectionResponse.body;
+    expect(openProjection.status).toBe("open");
+    expect(openProjection.current).toBe(true);
+    expect(openProjection.next_request_progress_revision).toBe(1);
+    const openSubmission = t04SubmissionFromProjection(openProjection, server, {
+      closed: false,
+      batchId: "t04-browser-batch",
+      streamId: "t04-browser-stream",
+    });
+    await integrator
+      .getByTestId("integrator-envelope-input")
+      .fill(JSON.stringify(openSubmission));
+    await integrator.getByTestId("integrator-submit-button").click();
+    await expect(integrator.getByTestId("integrator-receipt")).toBeVisible({
+      timeout: 10000,
+    });
+    await expect(
+      integrator.getByTestId("integrator-receipt-disposition"),
+    ).toHaveText("accepted");
+    await expect(
+      integrator.getByTestId("integrator-receipt-request-status"),
+    ).toHaveText("open");
+
+    projectionResponse = await api(
+      integrator,
+      "GET",
+      `/controlled/s02/api/queries/supplement-requests/${encodeURIComponent(requestId)}`,
+    );
+    expect(projectionResponse.status).toBe(200);
+    const afterProgress = projectionResponse.body;
+    expect(afterProgress.next_request_progress_revision).toBe(2);
+    expect(afterProgress.expected_predecessor_revision).toBe(1);
+    expect(afterProgress.batch.batch_id).toBe("t04-browser-batch");
+    const closedSubmission = t04SubmissionFromProjection(afterProgress, server, {
+      closed: true,
+      batchId: "t04-browser-batch",
+      streamId: "t04-browser-stream",
+    });
+    await integrator
+      .getByTestId("integrator-envelope-input")
+      .fill(JSON.stringify(closedSubmission));
+    await integrator.getByTestId("integrator-submit-button").click();
+    await expect(
+      integrator.getByTestId("integrator-receipt-request-status"),
+    ).toHaveText("fulfilled", { timeout: 10000 });
+    await expect(
+      integrator.getByTestId("integrator-receipt-disposition"),
+    ).toHaveText("accepted");
+
+    await reviewer.getByTestId("supplement-reload-button").click();
+    await expect(reviewer.getByTestId("review-supplement-converged")).toBeVisible({
+      timeout: 20000,
+    });
+    const converged = await reviewer.getByTestId("review-supplement-converged").textContent();
+    expect(converged).toContain("证据修订 2");
+    const attachments = await reviewer.getByTestId("review-history-attachments").textContent();
+    expect(attachments).toContain("v1");
+    expect(attachments).toContain("v2");
+    expect(attachments.match(/· 当前/g) ?? []).toHaveLength(1);
+    expect(attachments.match(/· 非当前/g) ?? []).toHaveLength(1);
+    const runs = await reviewer.getByTestId("review-history-runs").textContent();
+    expect(runs.match(/· 当前/g) ?? []).toHaveLength(1);
+    expect(runs.match(/· 非当前/g) ?? []).toHaveLength(1);
+    // The only console errors may be the designed existence-hiding 404s of
+    // the invalidated work item reads; anything else is a leak.
+    const unexpectedConsoleErrors = consoleErrors.filter(
+      (message) => !message.includes("404 (Not Found)"),
+    );
+    expect(unexpectedConsoleErrors).toEqual([]);
+    expect(await reviewer.evaluate(() => sessionStorage.length)).toBe(0);
+    expect(await reviewer.evaluate(() => localStorage.length)).toBe(0);    const publicSurface = JSON.stringify([
+      openProjection,
+      afterProgress,
+      await reviewer.getByTestId("review-panel").textContent(),
+      await integrator.getByTestId("integrator-panel").textContent(),
+    ]);
+    expect(publicSurface).not.toContain("LSVAA4182N2444555");
+  } finally {
+    await reviewerContext.close();
+    await integratorContext.close();
+    await stopServer(server);
+  }
+});

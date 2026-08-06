@@ -1247,6 +1247,203 @@ class S02SubmitBody(BaseModel):
     submission: dict[str, Any]
 
 
+class S01SupplementRequestResult(BaseModel):
+    """Closed 200 result of the supplement request command.  Only the
+    ``accepted`` status reaches 200; every other domain status is mapped to
+    the registered S03 HTTP error before serialization."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["accepted"]
+    replayed: bool
+    application_id: str
+    request_id: str
+    work_item_id: str
+    finding_id: str
+    material_requirement_id: str
+    phase: str
+    route: str
+    due_at: int
+    lifecycle_revision: int
+    evidence_revision: int
+
+
+class S01SupplementMaterialRequirement(BaseModel):
+    """The closed material requirement of one supplement request."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    material_requirement_id: str
+    document_role: str
+    material_kind: str
+    operation: str
+    required_fact_kinds: list[str]
+    responsible_party: str
+    allowed_tenant_id: str
+    allowed_source_system_ids: list[str]
+    allowed_workload_identity_ids: list[str]
+    satisfaction_policy_id: str
+    batch_item_count: int
+    batch_closure_required: bool
+    integrity_required: bool
+    provenance_required: bool
+    evidence_eligibility_required: bool
+
+
+class S01SupplementRequestFailure(BaseModel):
+    """The closed terminal failure of a supplement request."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason_code: str
+    responsible_party: str
+    recovery_action: str
+    recovery_target: dict[str, Any] | None = None
+
+
+class S01SupplementRequestView(BaseModel):
+    """Closed Reviewer request view; every current wire field is enumerated."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str
+    request_id: str
+    work_item_id: str
+    source_work_item_id: str
+    application_id: str
+    cycle: int
+    run_id: str
+    finding_id: str
+    rule_id: str
+    finding_reason_code: str
+    finding_verdict: str
+    requester_claim_fence: int
+    requested_at: int
+    due_at: int
+    fixed_context: dict[str, Any]
+    context_digest: str
+    expected_predecessor_attachment_id: str
+    expected_predecessor_attachment_version: int
+    satisfaction_policy_digest: str
+    status: str
+    current: bool
+    phase: str
+    route: str
+    lifecycle_revision: int
+    evidence_revision: int
+    projection_watermark: int
+    material_requirement: S01SupplementMaterialRequirement
+    failure: S01SupplementRequestFailure | None = None
+
+
+class S01IntegratorMaterialRequirement(BaseModel):
+    """The minimized material requirement of the Integrator projection."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    material_requirement_id: str
+    document_role: str
+    material_kind: str
+    operation: str
+    required_fact_kinds: list[str]
+    responsible_party: str
+    allowed_tenant_id: str
+    allowed_source_system_ids: list[str]
+    allowed_workload_identity_ids: list[str]
+    batch_item_count: int
+    batch_closure_required: bool
+    integrity_required: bool
+    provenance_required: bool
+    evidence_eligibility_required: bool
+
+
+class S01IntegratorBatchBinding(BaseModel):
+    """The server-bound batch identity the next command must reuse after the
+    first accepted progress item (null before the first submission)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    batch_id: str | None
+    manifest_digest: str | None
+    stream_id: str | None
+
+
+class S01IntegratorSupplementRequestView(BaseModel):
+    """Closed minimized Integrator projection.  It binds exactly the next
+    ``submit_attachment_version`` command for the registered source and never
+    carries application, reviewer, finding, run, snapshot or policy internals."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str
+    request_id: str
+    status: str
+    current: bool
+    requested_at: int
+    due_at: int
+    context_digest: str
+    upstream_application_ref: str
+    material_requirement: S01IntegratorMaterialRequirement
+    expected_predecessor_attachment_id: str
+    expected_predecessor_attachment_version: int
+    next_attachment_version: int
+    next_request_progress_revision: int
+    next_source_revision: int
+    expected_predecessor_revision: int | None
+    next_batch_item_sequence: int
+    batch: S01IntegratorBatchBinding
+
+
+class S01AttachmentSubmissionResponse(BaseModel):
+    """Closed S02 attachment-version receipt; every current wire field of the
+    S02 admission JSON is enumerated with preserved nullability."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    disposition: str
+    reason_code: str | None
+    responsible_party: str | None
+    recovery_action: str | None
+    retryable: bool
+    application_id: str | None
+    receipt_id: str | None
+    job_id: str | None
+    lifecycle_revision: int | None
+    evidence_revision: int | None
+    replayed: bool
+    envelope_version: str | None
+    schema_version: str | None
+    semantic_version: str | None
+    envelope_id: str | None
+    stream_id: str | None
+    source_revision: int | None
+    source_revision_id: str | None
+    envelope_fingerprint: str | None
+    adapter_id: str | None
+    adapter_version: str | None
+    source_registration_digest: str | None
+    artifact_manifest_digest: str | None
+    fact_counts: dict[str, int]
+    gate_results: list[str]
+    tenant_id: str
+    source_system_id: str
+    claim_label: str | None
+    real_cross_document_opportunities: int | None
+    performance_status: str | None
+    request_id: str | None
+    request_status: str | None
+    batch_id: str | None
+    batch_closed: bool | None
+    request_progress_revision: int | None
+    attachment_id: str | None
+    attachment_version: int | None
+    supersedes_attachment_id: str | None
+    fulfilled: bool | None
+    phase: str | None
+    route: str | None
+    recovery_target: dict[str, Any] | None
+
+
 class S03ClaimBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1616,6 +1813,28 @@ def _s04_demo_reviewer_principal(request: Request) -> S01CommandPrincipal:
     )
 
 
+def _s06_integrator_query_principal(request: Request) -> S01CommandPrincipal:
+    """The registered Integrator identity for the minimized request query.
+
+    Every failure mode (missing session, expired identity, wrong role, wrong
+    tenant scope) is the same sanitized 404; the domain projection then hides
+    requests that do not name this exact source in their allowed policy."""
+    principal = _s02_principal(request)
+    if (
+        principal is None
+        or "integrator" not in principal.roles
+        or not ControlledScenarioService.is_registered_scope(principal.scope)
+    ):
+        raise HTTPException(404, detail={"error": "S02_NOT_FOUND"})
+    return S01CommandPrincipal(
+        subject=principal.subject,
+        role="integrator",
+        scope=principal.scope,
+        source_id=S02_SOURCE_SYSTEM_ID,
+        expires_at=principal.expires_at,
+    )
+
+
 def _s05_exception_approver_principal(request: Request) -> S01CommandPrincipal:
     if not S05_EXCEPTION_APPROVER_SUBJECT or not _s01_has_credential(
         request, S05_EXCEPTION_APPROVER_CREDENTIAL
@@ -1969,6 +2188,36 @@ def controlled_s02_page(request: Request) -> HTMLResponse:
     return response
 
 
+@app.get("/controlled/s02/react", response_class=HTMLResponse)
+def controlled_s02_react_page(request: Request) -> HTMLResponse:
+    """The Integrator React shell: same built artifact as the Reviewer shell,
+    issuing only the existing S02 session.  A missing or incomplete build is
+    an explicit 503; the legacy ``/controlled/s02`` page remains the
+    fallback URL."""
+    _s02_service()
+    if not S01_REACT_INDEX.is_file():
+        raise HTTPException(
+            503,
+            detail={
+                "error": "S02_REACT_UNAVAILABLE",
+                "message": "Controlled S02 React shell is not built",
+            },
+        )
+    index_html = S01_REACT_INDEX.read_text(encoding="utf-8")
+    if not _react_build_is_complete(index_html):
+        raise HTTPException(
+            503,
+            detail={
+                "error": "S02_REACT_UNAVAILABLE",
+                "message": "Controlled S02 React shell is not built",
+            },
+        )
+    response = HTMLResponse(index_html)
+    _issue_s02_session(request, response)
+    _s01_disable_cache(response)
+    return response
+
+
 @app.post("/controlled/s02/api/session", status_code=204)
 def controlled_s02_session(request: Request, response: Response) -> Response:
     _issue_s02_session(request, response)
@@ -2036,7 +2285,28 @@ async def controlled_s02_submit(
     return _s02_admission_json(result)
 
 
-@app.post("/controlled/s02/api/commands/submit-attachment-version")
+@app.post(
+    "/controlled/s02/api/commands/submit-attachment-version",
+    response_model=S01AttachmentSubmissionResponse,
+    responses={
+        403: {"model": S01ErrorResponse},
+        404: {"model": S01ErrorResponse},
+        409: {"model": S01ErrorResponse},
+        413: {"model": S01ErrorResponse},
+        422: {"model": S01ErrorResponse},
+        503: {"model": S01ErrorResponse},
+    },
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": S02SubmitBody.model_json_schema(),
+                }
+            },
+        },
+    },
+)
 async def controlled_s06_submit_attachment_version(
     request: Request,
     response: Response,
@@ -3056,7 +3326,25 @@ async def controlled_s04_demo_correct_field_observation(
 
 @app.post(
     "/controlled/s01/api/commands/review-work-items/"
-    "{work_item_id}/supplement"
+    "{work_item_id}/supplement",
+    response_model=S01SupplementRequestResult,
+    responses={
+        404: {"model": S01ErrorResponse},
+        409: {"model": S01ErrorResponse},
+        413: {"model": S01ErrorResponse},
+        422: {"model": S01VerifyErrorResponse},
+        503: {"model": S01ErrorResponse},
+    },
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": _inline_openapi_schema(S05RequestBody.model_json_schema()),
+                }
+            },
+        },
+    },
 )
 async def controlled_s06_request_supplement(
     work_item_id: str,
@@ -3086,7 +3374,14 @@ async def controlled_s06_request_supplement(
     return _s03_command_result(result)
 
 
-@app.get("/controlled/s01/api/queries/supplement-requests/{request_id}")
+@app.get(
+    "/controlled/s01/api/queries/supplement-requests/{request_id}",
+    response_model=S01SupplementRequestView,
+    response_model_exclude_none=True,
+    responses={
+        404: {"model": S01ErrorResponse},
+    },
+)
 def controlled_s06_supplement_request_view(
     request_id: str,
     request: Request,
@@ -3102,6 +3397,30 @@ def controlled_s06_supplement_request_view(
         )
     except QueryNotFound as error:
         raise _s03_not_found(error) from error
+
+
+@app.get(
+    "/controlled/s02/api/queries/supplement-requests/{request_id}",
+    response_model=S01IntegratorSupplementRequestView,
+    responses={
+        404: {"model": S01ErrorResponse},
+    },
+)
+def controlled_s06_integrator_supplement_request_view(
+    request_id: str,
+    request: Request,
+    response: Response,
+    principal: S01CommandPrincipal = Depends(_s06_integrator_query_principal),
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    try:
+        return _s02_service().integrator_supplement_request_view(
+            principal=principal,
+            request_id=request_id,
+            now=S01_SESSION_CLOCK(),
+        )
+    except QueryNotFound as error:
+        raise HTTPException(404, detail={"error": "S02_NOT_FOUND"}) from error
 
 
 @app.post(

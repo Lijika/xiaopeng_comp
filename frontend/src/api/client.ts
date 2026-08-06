@@ -14,6 +14,13 @@ export type ClaimResult = components["schemas"]["S01ClaimResult"];
 export type RenewResult = components["schemas"]["S01RenewResult"];
 export type ReleaseResult = components["schemas"]["S01ReleaseResult"];
 export type SubmitResult = components["schemas"]["S01SubmitResult"];
+export type SupplementRequestResult =
+  components["schemas"]["S01SupplementRequestResult"];
+export type SupplementRequestView = components["schemas"]["S01SupplementRequestView"];
+export type IntegratorSupplementRequestView =
+  components["schemas"]["S01IntegratorSupplementRequestView"];
+export type AttachmentSubmissionResponse =
+  components["schemas"]["S01AttachmentSubmissionResponse"];
 
 /** A structured server rejection; never invents identifiers or evidence. */
 export class HttpError extends Error {

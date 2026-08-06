@@ -11,16 +11,20 @@ import {
 } from "../api/client";
 import {
   MANUAL_WORK_KEY,
+  SUPPLEMENT_REQUEST_KEY,
   useApplicationHistory,
   useClaimWorkItem,
   useCorrectFieldObservation,
   useCorrectionConvergence,
   useCurrentRoute,
+  useEvidenceConvergence,
   useManualWork,
   useReleaseWorkItem,
   useRenewWorkItem,
+  useRequestSupplement,
   useRevealFieldObservation,
   useSubmitVerification,
+  useSupplementRequest,
   useWorkspace,
   type ClaimCommand,
   type CorrectionCommand,
@@ -30,6 +34,9 @@ import {
   type RevealCommand,
   type RevealResult,
   type SubmitCommand,
+  type SupplementRequestCommand,
+  type SupplementRequestResult,
+  type SupplementRequestView,
 } from "../api/hooks";
 import { Button } from "./ui/button";
 import GateSection from "./GateSection";
@@ -46,7 +53,8 @@ type Action =
   | "release"
   | "submit"
   | "reveal"
-  | "correct";
+  | "correct"
+  | "supplement";
 
 type Outcome = "confirmed" | "not_confirmed" | "inconclusive";
 
@@ -132,7 +140,8 @@ type PendingCommand =
   | { action: "release"; command: FencedCommand }
   | { action: "submit"; command: SubmitCommand }
   | { action: "reveal"; command: RevealCommand }
-  | { action: "correct"; command: CorrectionCommand };
+  | { action: "correct"; command: CorrectionCommand }
+  | { action: "supplement"; command: SupplementRequestCommand };
 
 const ACTION_LABELS: Record<Action, string> = {
   claim: "认领",
@@ -141,6 +150,7 @@ const ACTION_LABELS: Record<Action, string> = {
   submit: "核验",
   reveal: "揭示",
   correct: "更正",
+  supplement: "补充请求",
 };
 
 /** Builds the structured manual verification from the Reviewer's explicit
@@ -589,6 +599,27 @@ function HistorySection({
           </dd>
         </div>
       </dl>
+      {history.data.attachment_versions.length > 0 && (
+        <div>
+          <h4>附件版本（服务端权威）</h4>
+          <ol data-testid="review-history-attachments">
+            {history.data.attachment_versions.map((item) => (
+              <li key={item.attachment_id}>
+                {item.document_role} · v{item.version}
+                {" · "}
+                {item.current === true ? "当前" : "非当前"}
+                {item.supersedes_attachment_id !== null &&
+                  item.supersedes_attachment_id !== undefined && (
+                    <>
+                      {" · 取代 "}
+                      {item.supersedes_attachment_id}
+                    </>
+                  )}
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
     </section>
   );
 }
@@ -651,6 +682,174 @@ function CorrectionProgressBanner({
   );
 }
 
+/** The visible supplement request status, resolved strictly from the
+ * server-owned request view and the shared evidence-revision convergence
+ * read.  The browser never marks fulfillment and never chooses a route. */
+function SupplementProgressBanner({
+  requestView,
+  accepted,
+  convergence,
+  currentRunId,
+  route,
+}: {
+  requestView: UseQueryResult<SupplementRequestView>;
+  accepted: { requestId: string };
+  convergence: CorrectionConvergence;
+  currentRunId: string | null;
+  route: string | null;
+}) {
+  const status = requestView.data?.status;
+  if (status === "fulfilled" && convergence === "converged" && requestView.data) {
+    return (
+      <p
+        role="status"
+        aria-live="polite"
+        data-testid="review-supplement-converged"
+      >
+        补充材料已满足并收敛（证据修订 {requestView.data.evidence_revision}）：
+        当前运行 {currentRunId ?? "None"} · {route ?? "None"}
+      </p>
+    );
+  }
+  if (convergence === "timed_out") {
+    return (
+      <p
+        role="status"
+        aria-live="polite"
+        data-testid="review-supplement-timeout"
+      >
+        补充材料收敛超时：自动刷新已停止，请重新加载查看权威状态
+      </p>
+    );
+  }
+  if (convergence === "terminal") {
+    return (
+      <p
+        role="status"
+        aria-live="polite"
+        data-testid="review-supplement-terminal"
+      >
+        补充材料收敛终止：权威读取失败，请重新加载查看最新状态
+      </p>
+    );
+  }
+  if (status === "fulfilled") {
+    return (
+      <p
+        role="status"
+        aria-live="polite"
+        data-testid="review-supplement-pending"
+      >
+        请求已满足：等待服务端后续运行收敛…
+      </p>
+    );
+  }
+  if (status === "expired") {
+    return (
+      <p
+        role="status"
+        aria-live="polite"
+        data-testid="review-supplement-terminal"
+      >
+        补充材料请求已过期（deadline）
+      </p>
+    );
+  }
+  if (status === "invalidated") {
+    return (
+      <p
+        role="status"
+        aria-live="polite"
+        data-testid="review-supplement-terminal"
+      >
+        补充材料请求已作废
+      </p>
+    );
+  }
+  return (
+    <p
+      role="status"
+      aria-live="polite"
+      data-testid="review-supplement-pending"
+    >
+      补充材料请求已接受（{accepted.requestId}）：等待材料提供方提交
+    </p>
+  );
+}
+
+/** The Reviewer's authoritative supplement request facts; server data
+ * rendered verbatim with fixed copy and stable statuses. */
+function SupplementRequestSection({
+  requestView,
+}: {
+  requestView: UseQueryResult<SupplementRequestView>;
+}) {
+  if (requestView.isPending) {
+    return <p data-testid="review-supplement-loading">请求加载中…</p>;
+  }
+  if (requestView.isError || requestView.data === undefined) {
+    const notFound =
+      requestView.error instanceof HttpError &&
+      requestView.error.status === 404;
+    return (
+      <p data-testid="review-supplement-error">
+        {notFound ? "请求未找到或无权访问" : "请求不可用"}
+      </p>
+    );
+  }
+  const request = requestView.data;
+  return (
+    <section
+      className="panel"
+      data-testid="review-supplement-request"
+      aria-labelledby="review-supplement-title"
+    >
+      <h3 id="review-supplement-title">补充材料请求（服务端权威）</h3>
+      <dl className="facts">
+        <div>
+          <dt>请求编号</dt>
+          <dd data-testid="review-supplement-request-id">{request.request_id}</dd>
+        </div>
+        <div>
+          <dt>状态</dt>
+          <dd data-testid="review-supplement-status">{request.status}</dd>
+        </div>
+        <div>
+          <dt>当前</dt>
+          <dd data-testid="review-supplement-current">
+            {request.current === true ? "是" : "否"}
+          </dd>
+        </div>
+        <div>
+          <dt>到期（epoch）</dt>
+          <dd data-testid="review-supplement-due">{request.due_at}</dd>
+        </div>
+        <div>
+          <dt>材料要求</dt>
+          <dd data-testid="review-supplement-material">
+            {request.material_requirement.material_requirement_id}
+            {" · "}
+            {request.material_requirement.document_role}
+            {" · "}
+            {request.material_requirement.operation}
+          </dd>
+        </div>
+        <div>
+          <dt>责任方</dt>
+          <dd data-testid="review-supplement-responsible">
+            {request.material_requirement.responsible_party}
+          </dd>
+        </div>
+      </dl>
+      {request.failure !== undefined && request.failure !== null && (
+        <p className="text-sm text-muted-foreground" data-testid="review-supplement-failure">
+          {request.failure.reason_code} · {request.failure.recovery_action}
+        </p>
+      )}
+    </section>
+  );
+}
+
 export default function ReviewWorkPanel({ workId }: { workId: string }) {
   const headingRef = useRef<HTMLHeadingElement>(null);
   const queryClient = useQueryClient();
@@ -662,8 +861,18 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     evidenceRevision: number;
     applicationId: string;
   } | null>(null);
+  // After an accepted supplement request the old work item is invalidated;
+  // the request id latch keeps the shell alive across its existence-hiding
+  // 404 and drives the authoritative request view read.
+  const [acceptedSupplement, setAcceptedSupplement] = useState<{
+    applicationId: string;
+    requestId: string;
+  } | null>(null);
   const applicationId =
-    work.data?.application_id ?? acceptedCorrection?.applicationId ?? null;
+    work.data?.application_id ??
+    acceptedCorrection?.applicationId ??
+    acceptedSupplement?.applicationId ??
+    null;
   const workspace = useWorkspace(
     work.data !== undefined && work.data.status !== "completed"
       ? work.data.application_id
@@ -677,6 +886,20 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     applicationId,
     acceptedCorrection?.evidenceRevision ?? null,
   );
+  // The fulfilled supplement converges through the same shared evidence
+  // predicate: the request view's server evidence revision after fulfillment
+  // plus exactly one server-current successor run matching current-route.
+  const requestView = useSupplementRequest(
+    acceptedSupplement?.requestId ?? null,
+  );
+  const supplementEvidenceRevision =
+    requestView.data?.status === "fulfilled"
+      ? requestView.data.evidence_revision
+      : null;
+  const supplementConvergence = useEvidenceConvergence(
+    applicationId,
+    supplementEvidenceRevision,
+  );
 
   const claim = useClaimWorkItem(workId);
   const renew = useRenewWorkItem(workId);
@@ -684,12 +907,14 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
   const submit = useSubmitVerification(workId);
   const reveal = useRevealFieldObservation(workId);
   const correct = useCorrectFieldObservation(workId);
+  const supplement = useRequestSupplement(workId);
 
   const [renewKey, setRenewKey] = useState(newIdempotencyKey);
   const [releaseKey, setReleaseKey] = useState(newIdempotencyKey);
   const [submitKey, setSubmitKey] = useState(newIdempotencyKey);
   const [revealKey, setRevealKey] = useState(newIdempotencyKey);
   const [correctionKey, setCorrectionKey] = useState(newIdempotencyKey);
+  const [supplementKey, setSupplementKey] = useState(newIdempotencyKey);
   const [pendingCommand, setPendingCommand] = useState<PendingCommand | null>(
     null,
   );
@@ -822,7 +1047,8 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     release.isPending ||
     submit.isPending ||
     reveal.isPending ||
-    correct.isPending;
+    correct.isPending ||
+    supplement.isPending;
 
   const mutations: Record<
     Action,
@@ -834,6 +1060,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     submit,
     reveal,
     correct,
+    supplement,
   };
   const active = pendingCommand === null ? null : pendingCommand.action;
   const activeMutation = active === null ? undefined : mutations[active];
@@ -850,6 +1077,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     submit: () => setSubmitKey(newIdempotencyKey()),
     reveal: () => setRevealKey(newIdempotencyKey()),
     correct: () => setCorrectionKey(newIdempotencyKey()),
+    supplement: () => setSupplementKey(newIdempotencyKey()),
   };
 
   const accepted = (action: Action) => () => {
@@ -946,6 +1174,52 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     submit.mutate(command, {
       onSuccess: accepted("submit"),
       onError: rejected("submit"),
+    });
+  };
+
+  /** The eligible server authority signals for a supplement request: the
+   * claimed work item carries the R_VIN_CROSS finding on the manual-review
+   * route.  The server remains the eligibility authority; this only gates
+   * the control on the same facts the command will present. */
+  const supplementEligibleFinding = (): ReviewWorkResponse["automatic_findings"][number] | undefined => {
+    if (work.data === undefined) return undefined;
+    return work.data.automatic_findings.find(
+      (finding) =>
+        finding.rule_id === "R_VIN_CROSS" &&
+        finding.verdict === "uncertain" &&
+        finding.reason_code === "MISSING_DOCS",
+    );
+  };
+
+  const handleSupplementAccepted = (result: SupplementRequestResult) => {
+    setAcceptedSupplement({
+      applicationId: result.application_id,
+      requestId: result.request_id,
+    });
+    accepted("supplement")();
+  };
+
+  const handleSupplement = () => {
+    if (work.data === undefined || anyPending || pendingCommand !== null) return;
+    if (requiresReload || work.isError || !owningReadsCurrent) return;
+    if (gate.data?.route !== "manual_review") return;
+    const finding = supplementEligibleFinding();
+    if (finding === undefined) return;
+    invalidateRestricted();
+    const command: SupplementRequestCommand = {
+      finding_id: finding.finding_id,
+      reason_code: "MISSING_REQUIRED_MATERIAL",
+      expected_fence: work.data.claim_fence,
+      expected_context: work.data.command_context,
+      idempotency_key: supplementKey,
+      predecessor_request_id: null,
+    };
+    setPendingCommand({ action: "supplement", command });
+    setLastAccepted(null);
+    setRejectedAction(null);
+    supplement.mutate(command, {
+      onSuccess: handleSupplementAccepted,
+      onError: rejected("supplement"),
     });
   };
 
@@ -1175,6 +1449,11 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
           storeCorrectionIfIssued(issuance, result),
         onError: rejected("correct"),
       });
+    } else if (pendingCommand.action === "supplement") {
+      supplement.mutate(pendingCommand.command, {
+        onSuccess: handleSupplementAccepted,
+        onError: rejected("supplement"),
+      });
     } else {
       submit.mutate(pendingCommand.command, {
         onSuccess: accepted("submit"),
@@ -1211,6 +1490,23 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     setConflictReason(null);
   };
 
+  /** Authoritative refetch while an accepted supplement request keeps the
+   * shell alive: the request view is refetched first, then the server-owned
+   * S01 reads (current-route, history) reconverge; the old invalidated work
+   * item existence-hides and is never required again. */
+  const handleSupplementReload = async () => {
+    if (anyPending || acceptedSupplement === null) return;
+    try {
+      await queryClient.refetchQueries(
+        { queryKey: SUPPLEMENT_REQUEST_KEY(acceptedSupplement.requestId) },
+        { throwOnError: true },
+      );
+    } catch {
+      return;
+    }
+    await queryClient.invalidateQueries({ queryKey: ["s01"] });
+  };
+
   let statusText = "等待操作";
   if (anyPending && active !== null) {
     statusText = `${ACTION_LABELS[active]}提交中…`;
@@ -1236,13 +1532,17 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
   }
 
   const correctionAccepted = acceptedCorrection !== null;
+  const supplementAccepted = acceptedSupplement !== null;
+  // Both accepted evidence flows invalidate the old work item; the shell,
+  // authoritative reads and history stay usable in either state.
+  const acceptedEvidenceFlow = correctionAccepted || supplementAccepted;
   const workspaceRequired =
     work.data !== undefined && work.data.status !== "completed";
   // After an accepted correction the invalidated old workspace existence-hides
   // (404) while the successor converges; that dependent read must not take
   // down the review shell, current-route, or history.
   const dependentError =
-    (workspaceRequired && workspace.isError && !correctionAccepted) ||
+    (workspaceRequired && workspace.isError && !acceptedEvidenceFlow) ||
     history.isError ||
     gate.isError;
 
@@ -1261,10 +1561,10 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
         </section>
       );
     }
-    if (correctionAccepted) {
-      // The corrected work item is invalidated: keep the review shell, the
-      // correction progress, the authoritative current route, and history
-      // usable while the successor run converges.
+    if (acceptedEvidenceFlow) {
+      // The invalidated work item: keep the review shell, the accepted-flow
+      // progress, the authoritative current route, and history usable while
+      // the successor converges.
       return (
         <section
           className="panel"
@@ -1274,14 +1574,40 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
           <h2 id="review-title" tabIndex={-1} ref={headingRef}>
             人工核验
           </h2>
-          <CorrectionProgressBanner
-            accepted={acceptedCorrection}
-            convergence={convergence}
-            currentRunId={gate.data?.current_run_id ?? null}
-            route={gate.data?.route ?? null}
-          />
-          <GateSection applicationId={acceptedCorrection.applicationId} />
+          {supplementAccepted && (
+            <>
+              <SupplementProgressBanner
+                requestView={requestView}
+                accepted={acceptedSupplement}
+                convergence={supplementConvergence}
+                currentRunId={gate.data?.current_run_id ?? null}
+                route={gate.data?.route ?? null}
+              />
+              <SupplementRequestSection requestView={requestView} />
+            </>
+          )}
+          {correctionAccepted && (
+            <CorrectionProgressBanner
+              accepted={acceptedCorrection}
+              convergence={convergence}
+              currentRunId={gate.data?.current_run_id ?? null}
+              route={gate.data?.route ?? null}
+            />
+          )}
+          <GateSection applicationId={applicationId ?? ""} />
           <HistorySection history={history} />
+          {supplementAccepted && (
+            <div className="recovery-actions" data-testid="review-supplement-actions">
+              <Button
+                variant="secondary"
+                onClick={handleSupplementReload}
+                disabled={anyPending}
+                data-testid="supplement-reload-button"
+              >
+                重新加载
+              </Button>
+            </div>
+          )}
         </section>
       );
     }
@@ -1322,20 +1648,29 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
   const canClaim =
     data.status !== "claimed" &&
     data.status !== "completed" &&
-    !correctionAccepted &&
+    !acceptedEvidenceFlow &&
     !commandBlocked &&
     !work.isError &&
     owningReadsCurrent;
   const canFenced =
-    claimed && !correctionAccepted && !commandBlocked && !work.isError &&
+    claimed && !acceptedEvidenceFlow && !commandBlocked && !work.isError &&
     owningReadsCurrent;
   const canSubmit =
     claimed &&
     data.automatic_findings.length > 0 &&
-    !correctionAccepted &&
+    !acceptedEvidenceFlow &&
     !commandBlocked &&
     !work.isError &&
     owningReadsCurrent;
+  const canSupplement =
+    claimed &&
+    !claimExpired &&
+    !acceptedEvidenceFlow &&
+    !commandBlocked &&
+    !work.isError &&
+    owningReadsCurrent &&
+    gate.data?.route === "manual_review" &&
+    supplementEligibleFinding() !== undefined;
 
   return (
     <section
@@ -1354,11 +1689,36 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
           route={gate.data?.route ?? null}
         />
       )}
+      {supplementAccepted && (
+        <>
+          <SupplementProgressBanner
+            requestView={requestView}
+            accepted={acceptedSupplement}
+            convergence={supplementConvergence}
+            currentRunId={gate.data?.current_run_id ?? null}
+            route={gate.data?.route ?? null}
+          />
+          <SupplementRequestSection requestView={requestView} />
+          <div
+            className="recovery-actions"
+            data-testid="review-supplement-actions"
+          >
+            <Button
+              variant="secondary"
+              onClick={handleSupplementReload}
+              disabled={anyPending}
+              data-testid="supplement-reload-button"
+            >
+              重新加载
+            </Button>
+          </div>
+        </>
+      )}
       <WorkFacts work={data} />
       <WorkspaceSection
         work={data}
         workspace={workspace}
-        claimed={claimed && !correctionAccepted}
+        claimed={claimed && !acceptedEvidenceFlow}
         liveTokenKey={liveTokenKey}
         revealed={revealed}
         correctionTarget={correctionTarget}
@@ -1370,7 +1730,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
         controlsDisabled={
           !claimed ||
           claimExpired ||
-          correctionAccepted ||
+          acceptedEvidenceFlow ||
           commandBlocked ||
           !owningReadsCurrent
         }
@@ -1383,7 +1743,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
       />
       <GateSection applicationId={data.application_id} />
       <HistorySection history={history} />
-      {!correctionAccepted && (
+      {!acceptedEvidenceFlow && (
         <div className="recovery-actions" data-testid="review-actions">
           <Button
             variant="secondary"
@@ -1414,6 +1774,15 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
           >
             释放
           </Button>
+          {claimed && supplementEligibleFinding() !== undefined && (
+            <Button
+              onClick={handleSupplement}
+              disabled={!canSupplement || anyPending}
+              data-testid="supplement-button"
+            >
+              请求补充材料
+            </Button>
+          )}
           {claimed && (
             <label className="text-sm">
               核验结论

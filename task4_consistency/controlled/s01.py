@@ -44,6 +44,7 @@ from .s02 import (
     S02CanonicalEnvelope,
     S02IntakeError,
     is_registered_scope,
+    tenant_from_scope,
 )
 
 
@@ -7329,6 +7330,168 @@ class ControlledScenarioService:
                     )
                 }
             return result
+
+    def integrator_supplement_request_view(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        request_id: str,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Return the minimized current request-binding projection for one
+        registered source.
+
+        This is a read-only query projection of Lifecycle-owned facts, not a
+        state owner: the registered Integrator principal may read only the
+        request whose allowed source policy names its exact tenant scope and
+        source system.  Every failure mode (unknown request, wrong role,
+        expired identity, wrong tenant, wrong source) is the same sanitized
+        ``QueryNotFound``.  The projection carries exactly the fields needed
+        to bind the next ``submit_attachment_version`` command and never
+        exposes application, reviewer, finding, run, snapshot or policy
+        internals.
+        """
+        query_time = float(self._clock() if now is None else now)
+        if not self._valid_registered_principal(principal) or (
+            principal.expires_at is not None
+            and not isinstance(principal.expires_at, bool)
+            and isinstance(principal.expires_at, (int, float))
+            and float(principal.expires_at) <= query_time
+        ):
+            raise QueryNotFound(request_id)
+        with self._lock:
+            self._reload_store()
+            requests = [
+                record
+                for record in self._store.review_records
+                if record.get("record_type") == "supplement_request"
+                and record.get("request_id") == request_id
+            ]
+            if len(requests) != 1:
+                raise QueryNotFound(request_id)
+            request = requests[0]
+            allowed = request["allowed_source_policy"]
+            tenant_id = tenant_from_scope(str(principal.scope))
+            if (
+                tenant_id != allowed["tenant_id"]
+                or principal.source_id not in allowed["source_system_ids"]
+            ):
+                raise QueryNotFound(request_id)
+            app = self._store.applications.get(request["application_id"])
+            self._require_application_state_authority(app)
+            assert app is not None
+            successors = [
+                record
+                for record in self._store.review_records
+                if record.get("request_id") == request_id
+                and record.get("record_type")
+                in {
+                    "supplement_request_fulfilled",
+                    "supplement_request_expired",
+                    "supplement_request_invalidated",
+                }
+            ]
+            if len(successors) > 1:
+                raise RuntimeError("supplement request terminal authority is not unique")
+            status = successors[0]["status"] if successors else "open"
+            progress = sorted(
+                (
+                    record
+                    for record in self._store.review_records
+                    if record.get("record_type") == "supplement_request_progress"
+                    and record.get("request_id") == request_id
+                ),
+                key=lambda record: int(record["request_progress_revision"]),
+            )
+            expected_evidence_revision = (
+                progress[-1]["evidence_revision"]
+                if progress
+                else request["expected_evidence_revision"]
+            )
+            current = (
+                status == "open"
+                and query_time < float(request["due_at"])
+                and app.get("cycle") == request["cycle"]
+                and app.get("evidence_revision") == expected_evidence_revision
+                and (
+                    app.get("phase") == "Supplement"
+                    and app.get("route") == "supplement_pending"
+                    and not progress
+                    or app.get("phase") == "Awaiting Evidence"
+                    and app.get("route") == "awaiting_evidence"
+                    and bool(progress)
+                    and app.get("current_run_id") is None
+                )
+            )
+            material_requirement = {
+                "material_requirement_id": request["material_requirement_id"],
+                "document_role": request["document_role"],
+                "material_kind": request["material_kind"],
+                "operation": request["operation"],
+                "required_fact_kinds": copy.deepcopy(
+                    request["required_fact_kinds"]
+                ),
+                "responsible_party": request["responsible_party"],
+                "allowed_tenant_id": allowed["tenant_id"],
+                "allowed_source_system_ids": copy.deepcopy(
+                    allowed["source_system_ids"]
+                ),
+                "allowed_workload_identity_ids": copy.deepcopy(
+                    allowed["workload_identity_ids"]
+                ),
+                "batch_item_count": request["batch_item_count"],
+                "batch_closure_required": request["batch_closure_required"],
+                "integrity_required": request["integrity_required"],
+                "provenance_required": request["provenance_required"],
+                "evidence_eligibility_required": request[
+                    "evidence_eligibility_required"
+                ],
+            }
+            next_progress_revision = len(progress) + 1
+            previous_progress = progress[-1] if progress else None
+            batch = (
+                {
+                    "batch_id": previous_progress["batch_id"],
+                    "manifest_digest": previous_progress[
+                        "batch_manifest_digest"
+                    ],
+                    "stream_id": previous_progress["stream_id"],
+                }
+                if previous_progress is not None
+                else {"batch_id": None, "manifest_digest": None, "stream_id": None}
+            )
+            return {
+                "schema_version": "supplement-request-integrator/1",
+                "request_id": request_id,
+                "status": status,
+                "current": current,
+                "requested_at": request["requested_at"],
+                "due_at": request["due_at"],
+                "context_digest": request["context_digest"],
+                "upstream_application_ref": app[
+                    "upstream_application_reference"
+                ],
+                "material_requirement": material_requirement,
+                "expected_predecessor_attachment_id": request[
+                    "expected_predecessor_attachment_id"
+                ],
+                "expected_predecessor_attachment_version": request[
+                    "expected_predecessor_attachment_version"
+                ],
+                "next_attachment_version": request[
+                    "expected_predecessor_attachment_version"
+                ]
+                + 1,
+                "next_request_progress_revision": next_progress_revision,
+                "next_source_revision": next_progress_revision,
+                "expected_predecessor_revision": (
+                    previous_progress["source_revision"]
+                    if previous_progress is not None
+                    else None
+                ),
+                "next_batch_item_sequence": next_progress_revision,
+                "batch": batch,
+            }
 
     def correct_field_observation(
         self,

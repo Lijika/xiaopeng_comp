@@ -189,6 +189,478 @@
         "title": "S01ApplicationHistoryResponse",
         "type": "object"
       },
+      "S01AttachmentSubmissionResponse": {
+        "additionalProperties": false,
+        "description": "Closed S02 attachment-version receipt; every current wire field of the\nS02 admission JSON is enumerated with preserved nullability.",
+        "properties": {
+          "adapter_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adapter Id"
+          },
+          "adapter_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adapter Version"
+          },
+          "application_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Application Id"
+          },
+          "artifact_manifest_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Artifact Manifest Digest"
+          },
+          "attachment_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attachment Id"
+          },
+          "attachment_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attachment Version"
+          },
+          "batch_closed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Batch Closed"
+          },
+          "batch_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Batch Id"
+          },
+          "claim_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Claim Label"
+          },
+          "disposition": {
+            "title": "Disposition",
+            "type": "string"
+          },
+          "envelope_fingerprint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Envelope Fingerprint"
+          },
+          "envelope_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Envelope Id"
+          },
+          "envelope_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Envelope Version"
+          },
+          "evidence_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence Revision"
+          },
+          "fact_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Fact Counts",
+            "type": "object"
+          },
+          "fulfilled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fulfilled"
+          },
+          "gate_results": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Gate Results",
+            "type": "array"
+          },
+          "job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Job Id"
+          },
+          "lifecycle_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lifecycle Revision"
+          },
+          "performance_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Performance Status"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phase"
+          },
+          "real_cross_document_opportunities": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Real Cross Document Opportunities"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Code"
+          },
+          "receipt_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Receipt Id"
+          },
+          "recovery_action": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recovery Action"
+          },
+          "recovery_target": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recovery Target"
+          },
+          "replayed": {
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Id"
+          },
+          "request_progress_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Progress Revision"
+          },
+          "request_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Status"
+          },
+          "responsible_party": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Responsible Party"
+          },
+          "retryable": {
+            "title": "Retryable",
+            "type": "boolean"
+          },
+          "route": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Route"
+          },
+          "schema_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schema Version"
+          },
+          "semantic_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Semantic Version"
+          },
+          "source_registration_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Registration Digest"
+          },
+          "source_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Revision"
+          },
+          "source_revision_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Revision Id"
+          },
+          "source_system_id": {
+            "title": "Source System Id",
+            "type": "string"
+          },
+          "stream_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stream Id"
+          },
+          "supersedes_attachment_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supersedes Attachment Id"
+          },
+          "tenant_id": {
+            "title": "Tenant Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "disposition",
+          "reason_code",
+          "responsible_party",
+          "recovery_action",
+          "retryable",
+          "application_id",
+          "receipt_id",
+          "job_id",
+          "lifecycle_revision",
+          "evidence_revision",
+          "replayed",
+          "envelope_version",
+          "schema_version",
+          "semantic_version",
+          "envelope_id",
+          "stream_id",
+          "source_revision",
+          "source_revision_id",
+          "envelope_fingerprint",
+          "adapter_id",
+          "adapter_version",
+          "source_registration_digest",
+          "artifact_manifest_digest",
+          "fact_counts",
+          "gate_results",
+          "tenant_id",
+          "source_system_id",
+          "claim_label",
+          "real_cross_document_opportunities",
+          "performance_status",
+          "request_id",
+          "request_status",
+          "batch_id",
+          "batch_closed",
+          "request_progress_revision",
+          "attachment_id",
+          "attachment_version",
+          "supersedes_attachment_id",
+          "fulfilled",
+          "phase",
+          "route",
+          "recovery_target"
+        ],
+        "title": "S01AttachmentSubmissionResponse",
+        "type": "object"
+      },
       "S01AutomaticFinding": {
         "properties": {
           "finding_id": {
@@ -1490,6 +1962,241 @@
         "title": "S01HumanDecisionCompatibilityTargetContext",
         "type": "object"
       },
+      "S01IntegratorBatchBinding": {
+        "additionalProperties": false,
+        "description": "The server-bound batch identity the next command must reuse after the\nfirst accepted progress item (null before the first submission).",
+        "properties": {
+          "batch_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Batch Id"
+          },
+          "manifest_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manifest Digest"
+          },
+          "stream_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stream Id"
+          }
+        },
+        "required": [
+          "batch_id",
+          "manifest_digest",
+          "stream_id"
+        ],
+        "title": "S01IntegratorBatchBinding",
+        "type": "object"
+      },
+      "S01IntegratorMaterialRequirement": {
+        "additionalProperties": false,
+        "description": "The minimized material requirement of the Integrator projection.",
+        "properties": {
+          "allowed_source_system_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Allowed Source System Ids",
+            "type": "array"
+          },
+          "allowed_tenant_id": {
+            "title": "Allowed Tenant Id",
+            "type": "string"
+          },
+          "allowed_workload_identity_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Allowed Workload Identity Ids",
+            "type": "array"
+          },
+          "batch_closure_required": {
+            "title": "Batch Closure Required",
+            "type": "boolean"
+          },
+          "batch_item_count": {
+            "title": "Batch Item Count",
+            "type": "integer"
+          },
+          "document_role": {
+            "title": "Document Role",
+            "type": "string"
+          },
+          "evidence_eligibility_required": {
+            "title": "Evidence Eligibility Required",
+            "type": "boolean"
+          },
+          "integrity_required": {
+            "title": "Integrity Required",
+            "type": "boolean"
+          },
+          "material_kind": {
+            "title": "Material Kind",
+            "type": "string"
+          },
+          "material_requirement_id": {
+            "title": "Material Requirement Id",
+            "type": "string"
+          },
+          "operation": {
+            "title": "Operation",
+            "type": "string"
+          },
+          "provenance_required": {
+            "title": "Provenance Required",
+            "type": "boolean"
+          },
+          "required_fact_kinds": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Required Fact Kinds",
+            "type": "array"
+          },
+          "responsible_party": {
+            "title": "Responsible Party",
+            "type": "string"
+          }
+        },
+        "required": [
+          "material_requirement_id",
+          "document_role",
+          "material_kind",
+          "operation",
+          "required_fact_kinds",
+          "responsible_party",
+          "allowed_tenant_id",
+          "allowed_source_system_ids",
+          "allowed_workload_identity_ids",
+          "batch_item_count",
+          "batch_closure_required",
+          "integrity_required",
+          "provenance_required",
+          "evidence_eligibility_required"
+        ],
+        "title": "S01IntegratorMaterialRequirement",
+        "type": "object"
+      },
+      "S01IntegratorSupplementRequestView": {
+        "additionalProperties": false,
+        "description": "Closed minimized Integrator projection.  It binds exactly the next\n``submit_attachment_version`` command for the registered source and never\ncarries application, reviewer, finding, run, snapshot or policy internals.",
+        "properties": {
+          "batch": {
+            "$ref": "#/components/schemas/S01IntegratorBatchBinding"
+          },
+          "context_digest": {
+            "title": "Context Digest",
+            "type": "string"
+          },
+          "current": {
+            "title": "Current",
+            "type": "boolean"
+          },
+          "due_at": {
+            "title": "Due At",
+            "type": "integer"
+          },
+          "expected_predecessor_attachment_id": {
+            "title": "Expected Predecessor Attachment Id",
+            "type": "string"
+          },
+          "expected_predecessor_attachment_version": {
+            "title": "Expected Predecessor Attachment Version",
+            "type": "integer"
+          },
+          "expected_predecessor_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Predecessor Revision"
+          },
+          "material_requirement": {
+            "$ref": "#/components/schemas/S01IntegratorMaterialRequirement"
+          },
+          "next_attachment_version": {
+            "title": "Next Attachment Version",
+            "type": "integer"
+          },
+          "next_batch_item_sequence": {
+            "title": "Next Batch Item Sequence",
+            "type": "integer"
+          },
+          "next_request_progress_revision": {
+            "title": "Next Request Progress Revision",
+            "type": "integer"
+          },
+          "next_source_revision": {
+            "title": "Next Source Revision",
+            "type": "integer"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "requested_at": {
+            "title": "Requested At",
+            "type": "integer"
+          },
+          "schema_version": {
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "upstream_application_ref": {
+            "title": "Upstream Application Ref",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "request_id",
+          "status",
+          "current",
+          "requested_at",
+          "due_at",
+          "context_digest",
+          "upstream_application_ref",
+          "material_requirement",
+          "expected_predecessor_attachment_id",
+          "expected_predecessor_attachment_version",
+          "next_attachment_version",
+          "next_request_progress_revision",
+          "next_source_revision",
+          "expected_predecessor_revision",
+          "next_batch_item_sequence",
+          "batch"
+        ],
+        "title": "S01IntegratorSupplementRequestView",
+        "type": "object"
+      },
       "S01NoteMetadata": {
         "properties": {
           "byte_count": {
@@ -2467,6 +3174,363 @@
           "route"
         ],
         "title": "S01SubmitResult",
+        "type": "object"
+      },
+      "S01SupplementMaterialRequirement": {
+        "additionalProperties": false,
+        "description": "The closed material requirement of one supplement request.",
+        "properties": {
+          "allowed_source_system_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Allowed Source System Ids",
+            "type": "array"
+          },
+          "allowed_tenant_id": {
+            "title": "Allowed Tenant Id",
+            "type": "string"
+          },
+          "allowed_workload_identity_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Allowed Workload Identity Ids",
+            "type": "array"
+          },
+          "batch_closure_required": {
+            "title": "Batch Closure Required",
+            "type": "boolean"
+          },
+          "batch_item_count": {
+            "title": "Batch Item Count",
+            "type": "integer"
+          },
+          "document_role": {
+            "title": "Document Role",
+            "type": "string"
+          },
+          "evidence_eligibility_required": {
+            "title": "Evidence Eligibility Required",
+            "type": "boolean"
+          },
+          "integrity_required": {
+            "title": "Integrity Required",
+            "type": "boolean"
+          },
+          "material_kind": {
+            "title": "Material Kind",
+            "type": "string"
+          },
+          "material_requirement_id": {
+            "title": "Material Requirement Id",
+            "type": "string"
+          },
+          "operation": {
+            "title": "Operation",
+            "type": "string"
+          },
+          "provenance_required": {
+            "title": "Provenance Required",
+            "type": "boolean"
+          },
+          "required_fact_kinds": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Required Fact Kinds",
+            "type": "array"
+          },
+          "responsible_party": {
+            "title": "Responsible Party",
+            "type": "string"
+          },
+          "satisfaction_policy_id": {
+            "title": "Satisfaction Policy Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "material_requirement_id",
+          "document_role",
+          "material_kind",
+          "operation",
+          "required_fact_kinds",
+          "responsible_party",
+          "allowed_tenant_id",
+          "allowed_source_system_ids",
+          "allowed_workload_identity_ids",
+          "satisfaction_policy_id",
+          "batch_item_count",
+          "batch_closure_required",
+          "integrity_required",
+          "provenance_required",
+          "evidence_eligibility_required"
+        ],
+        "title": "S01SupplementMaterialRequirement",
+        "type": "object"
+      },
+      "S01SupplementRequestFailure": {
+        "additionalProperties": false,
+        "description": "The closed terminal failure of a supplement request.",
+        "properties": {
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "recovery_action": {
+            "title": "Recovery Action",
+            "type": "string"
+          },
+          "recovery_target": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recovery Target"
+          },
+          "responsible_party": {
+            "title": "Responsible Party",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason_code",
+          "responsible_party",
+          "recovery_action"
+        ],
+        "title": "S01SupplementRequestFailure",
+        "type": "object"
+      },
+      "S01SupplementRequestResult": {
+        "additionalProperties": false,
+        "description": "Closed 200 result of the supplement request command.  Only the\n``accepted`` status reaches 200; every other domain status is mapped to\nthe registered S03 HTTP error before serialization.",
+        "properties": {
+          "application_id": {
+            "title": "Application Id",
+            "type": "string"
+          },
+          "due_at": {
+            "title": "Due At",
+            "type": "integer"
+          },
+          "evidence_revision": {
+            "title": "Evidence Revision",
+            "type": "integer"
+          },
+          "finding_id": {
+            "title": "Finding Id",
+            "type": "string"
+          },
+          "lifecycle_revision": {
+            "title": "Lifecycle Revision",
+            "type": "integer"
+          },
+          "material_requirement_id": {
+            "title": "Material Requirement Id",
+            "type": "string"
+          },
+          "phase": {
+            "title": "Phase",
+            "type": "string"
+          },
+          "replayed": {
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "route": {
+            "title": "Route",
+            "type": "string"
+          },
+          "status": {
+            "const": "accepted",
+            "title": "Status",
+            "type": "string"
+          },
+          "work_item_id": {
+            "title": "Work Item Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "replayed",
+          "application_id",
+          "request_id",
+          "work_item_id",
+          "finding_id",
+          "material_requirement_id",
+          "phase",
+          "route",
+          "due_at",
+          "lifecycle_revision",
+          "evidence_revision"
+        ],
+        "title": "S01SupplementRequestResult",
+        "type": "object"
+      },
+      "S01SupplementRequestView": {
+        "additionalProperties": false,
+        "description": "Closed Reviewer request view; every current wire field is enumerated.",
+        "properties": {
+          "application_id": {
+            "title": "Application Id",
+            "type": "string"
+          },
+          "context_digest": {
+            "title": "Context Digest",
+            "type": "string"
+          },
+          "current": {
+            "title": "Current",
+            "type": "boolean"
+          },
+          "cycle": {
+            "title": "Cycle",
+            "type": "integer"
+          },
+          "due_at": {
+            "title": "Due At",
+            "type": "integer"
+          },
+          "evidence_revision": {
+            "title": "Evidence Revision",
+            "type": "integer"
+          },
+          "expected_predecessor_attachment_id": {
+            "title": "Expected Predecessor Attachment Id",
+            "type": "string"
+          },
+          "expected_predecessor_attachment_version": {
+            "title": "Expected Predecessor Attachment Version",
+            "type": "integer"
+          },
+          "failure": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/S01SupplementRequestFailure"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "finding_id": {
+            "title": "Finding Id",
+            "type": "string"
+          },
+          "finding_reason_code": {
+            "title": "Finding Reason Code",
+            "type": "string"
+          },
+          "finding_verdict": {
+            "title": "Finding Verdict",
+            "type": "string"
+          },
+          "fixed_context": {
+            "additionalProperties": true,
+            "title": "Fixed Context",
+            "type": "object"
+          },
+          "lifecycle_revision": {
+            "title": "Lifecycle Revision",
+            "type": "integer"
+          },
+          "material_requirement": {
+            "$ref": "#/components/schemas/S01SupplementMaterialRequirement"
+          },
+          "phase": {
+            "title": "Phase",
+            "type": "string"
+          },
+          "projection_watermark": {
+            "title": "Projection Watermark",
+            "type": "integer"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "requested_at": {
+            "title": "Requested At",
+            "type": "integer"
+          },
+          "requester_claim_fence": {
+            "title": "Requester Claim Fence",
+            "type": "integer"
+          },
+          "route": {
+            "title": "Route",
+            "type": "string"
+          },
+          "rule_id": {
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "satisfaction_policy_digest": {
+            "title": "Satisfaction Policy Digest",
+            "type": "string"
+          },
+          "schema_version": {
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "source_work_item_id": {
+            "title": "Source Work Item Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "work_item_id": {
+            "title": "Work Item Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "request_id",
+          "work_item_id",
+          "source_work_item_id",
+          "application_id",
+          "cycle",
+          "run_id",
+          "finding_id",
+          "rule_id",
+          "finding_reason_code",
+          "finding_verdict",
+          "requester_claim_fence",
+          "requested_at",
+          "due_at",
+          "fixed_context",
+          "context_digest",
+          "expected_predecessor_attachment_id",
+          "expected_predecessor_attachment_version",
+          "satisfaction_policy_digest",
+          "status",
+          "current",
+          "phase",
+          "route",
+          "lifecycle_revision",
+          "evidence_revision",
+          "projection_watermark",
+          "material_requirement"
+        ],
+        "title": "S01SupplementRequestView",
         "type": "object"
       },
       "S01ValidationErrorItem": {
@@ -5042,28 +6106,126 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "expected_context": {
+                    "additionalProperties": true,
+                    "title": "Expected Context",
+                    "type": "object"
+                  },
+                  "expected_fence": {
+                    "minimum": 1,
+                    "title": "Expected Fence",
+                    "type": "integer"
+                  },
+                  "finding_id": {
+                    "maxLength": 200,
+                    "minLength": 1,
+                    "title": "Finding Id",
+                    "type": "string"
+                  },
+                  "idempotency_key": {
+                    "title": "Idempotency Key",
+                    "type": "string"
+                  },
+                  "predecessor_request_id": {
+                    "anyOf": [
+                      {
+                        "maxLength": 200,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Predecessor Request Id"
+                  },
+                  "reason_code": {
+                    "maxLength": 100,
+                    "minLength": 1,
+                    "title": "Reason Code",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "expected_context",
+                  "expected_fence",
+                  "idempotency_key",
+                  "finding_id",
+                  "reason_code"
+                ],
+                "title": "S05RequestBody",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Controlled S06 Request Supplement Controlled S01 Api Commands Review Work Items  Work Item Id  Supplement Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/S01SupplementRequestResult"
                 }
               }
             },
             "description": "Successful Response"
           },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/S01VerifyErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "summary": "Controlled S06 Request Supplement"
@@ -5552,13 +6714,21 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Controlled S06 Supplement Request View Controlled S01 Api Queries Supplement Requests  Request Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/S01SupplementRequestView"
                 }
               }
             },
             "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
           },
           "422": {
             "content": {
@@ -5929,18 +7099,103 @@
     "/controlled/s02/api/commands/submit-attachment-version": {
       "post": {
         "operationId": "controlled_s06_submit_attachment_version_controlled_s02_api_commands_submit_attachment_version_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "idempotency_key": {
+                    "title": "Idempotency Key",
+                    "type": "string"
+                  },
+                  "submission": {
+                    "additionalProperties": true,
+                    "title": "Submission",
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "idempotency_key",
+                  "submission"
+                ],
+                "title": "S02SubmitBody",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Controlled S06 Submit Attachment Version Controlled S02 Api Commands Submit Attachment Version Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/S01AttachmentSubmissionResponse"
                 }
               }
             },
             "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "summary": "Controlled S06 Submit Attachment Version"
@@ -6146,6 +7401,55 @@
         "summary": "Controlled S03 Review Work Item"
       }
     },
+    "/controlled/s02/api/queries/supplement-requests/{request_id}": {
+      "get": {
+        "operationId": "controlled_s06_integrator_supplement_request_view_controlled_s02_api_queries_supplement_requests__request_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "title": "Request Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01IntegratorSupplementRequestView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S06 Integrator Supplement Request View"
+      }
+    },
     "/controlled/s02/api/session": {
       "post": {
         "operationId": "controlled_s02_session_controlled_s02_api_session_post",
@@ -6155,6 +7459,25 @@
           }
         },
         "summary": "Controlled S02 Session"
+      }
+    },
+    "/controlled/s02/react": {
+      "get": {
+        "description": "The Integrator React shell: same built artifact as the Reviewer shell,\nissuing only the existing S02 session.  A missing or incomplete build is\nan explicit 503; the legacy ``/controlled/s02`` page remains the\nfallback URL.",
+        "operationId": "controlled_s02_react_page_controlled_s02_react_get",
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Controlled S02 React Page"
       }
     }
   }

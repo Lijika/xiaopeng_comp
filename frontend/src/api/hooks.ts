@@ -31,6 +31,14 @@ import {
  * client.ts without extending that file). */
 export type RevealResult = components["schemas"]["S01RevealResult"];
 export type CorrectionResult = components["schemas"]["S01CorrectionResult"];
+export type SupplementRequestResult =
+  components["schemas"]["S01SupplementRequestResult"];
+export type SupplementRequestView =
+  components["schemas"]["S01SupplementRequestView"];
+export type IntegratorSupplementRequestView =
+  components["schemas"]["S01IntegratorSupplementRequestView"];
+export type AttachmentSubmissionResponse =
+  components["schemas"]["S01AttachmentSubmissionResponse"];
 
 export const QUEUE_KEY = ["s01", "queue"] as const;
 export const WORK_KEY = (workId: string) =>
@@ -43,6 +51,10 @@ export const WORKSPACE_KEY = (applicationId: string) =>
   ["s01", "workspace", applicationId] as const;
 export const HISTORY_KEY = (applicationId: string) =>
   ["s01", "history", applicationId] as const;
+export const SUPPLEMENT_REQUEST_KEY = (requestId: string) =>
+  ["s01", "supplement-request", requestId] as const;
+export const INTEGRATOR_REQUEST_KEY = (requestId: string) =>
+  ["s02", "supplement-request", requestId] as const;
 
 /**
  * The S01 manual-review command bodies are bound to the generated OpenAPI
@@ -53,6 +65,13 @@ export type FencedCommand = paths["/controlled/s01/api/commands/review-work-item
 export type SubmitCommand = paths["/controlled/s01/api/commands/review-work-items/{work_item_id}/submit"]["post"]["requestBody"]["content"]["application/json"];
 export type RevealCommand = paths["/controlled/s01/api/commands/review-work-items/{work_item_id}/reveal-field-observation"]["post"]["requestBody"]["content"]["application/json"];
 export type CorrectionCommand = paths["/controlled/s01/api/commands/review-work-items/{work_item_id}/correct-field-observation"]["post"]["requestBody"]["content"]["application/json"];
+
+/**
+ * The T04 commands are bound to the generated OpenAPI request schemas; a
+ * backend contract change fails strict typecheck here.
+ */
+export type SupplementRequestCommand = NonNullable<paths["/controlled/s01/api/commands/review-work-items/{work_item_id}/supplement"]["post"]["requestBody"]>["content"]["application/json"];
+export type AttachmentSubmissionCommand = NonNullable<paths["/controlled/s02/api/commands/submit-attachment-version"]["post"]["requestBody"]>["content"]["application/json"];
 
 /**
  * The VerifyRecovery POST body is bound to the generated OpenAPI request
@@ -251,9 +270,10 @@ export function useCorrectFieldObservation(
  * The authoritative convergence predicate for an accepted evidence revision:
  * current-route and history must agree on exactly one server-current run at
  * or beyond that revision.  Currentness is server data, never a browser
- * timestamp or the newest array entry.
+ * timestamp or the newest array entry.  It is shared by the evidence
+ * correction and the fulfilled supplement flows.
  */
-export function correctionConverged(
+export function evidenceRevisionConverged(
   route: CurrentRouteResponse | undefined,
   history: ApplicationHistoryResponse | undefined,
   acceptedEvidenceRevision: number,
@@ -272,6 +292,9 @@ export function correctionConverged(
   return true;
 }
 
+/** The correction flow's named convergence predicate (generalized). */
+export const correctionConverged = evidenceRevisionConverged;
+
 /** The smallest explicit convergence outcome of an accepted evidence
  * correction: nothing accepted, still reconciling against the authoritative
  * reads, converged to the server-current successor/route, or the bounded
@@ -287,14 +310,15 @@ export type CorrectionConvergence =
   | "terminal";
 
 /**
- * Convergence polling for an accepted evidence correction: while the
- * accepted revision has no server-current successor run, refetch only the
+ * Convergence polling for an accepted evidence revision: while the accepted
+ * revision has no server-current successor run, refetch only the
  * authoritative current-route and history queries and stop on the exact
  * convergence predicate, on unmount/context change, or on a definitive
  * terminal error.  Completion is never inferred from elapsed attempts; the
  * bounded ceiling only turns the outcome into an explicit ``timed_out``.
+ * Shared by the evidence correction and fulfilled supplement flows.
  */
-export function useCorrectionConvergence(
+export function useEvidenceConvergence(
   applicationId: string | null,
   acceptedEvidenceRevision: number | null,
 ): CorrectionConvergence {
@@ -339,7 +363,7 @@ export function useCorrectionConvergence(
         const history = queryClient.getQueryData<ApplicationHistoryResponse>(
           HISTORY_KEY(applicationId),
         );
-        if (correctionConverged(route, history, acceptedEvidenceRevision)) {
+        if (evidenceRevisionConverged(route, history, acceptedEvidenceRevision)) {
           setOutcome("converged");
           return;
         }
@@ -360,6 +384,9 @@ export function useCorrectionConvergence(
   return outcome;
 }
 
+/** The correction flow's named convergence polling (generalized). */
+export const useCorrectionConvergence = useEvidenceConvergence;
+
 export function useVerifyRecovery(
   workId: string,
 ): UseMutationResult<VerifyRecoveryResult, Error, VerifyRecoveryCommand> {
@@ -375,5 +402,65 @@ export function useVerifyRecovery(
       // Returning the promise keeps the mutation pending until the
       // server-owned refetch converges, so the accepted latch cannot race.
       queryClient.invalidateQueries({ queryKey: ["s01"] }),
+  });
+}
+
+/** The Reviewer's authoritative supplement request view for one request id. */
+export function useSupplementRequest(
+  requestId: string | null,
+): UseQueryResult<SupplementRequestView> {
+  return useQuery({
+    queryKey: SUPPLEMENT_REQUEST_KEY(requestId ?? ""),
+    enabled: requestId !== null,
+    queryFn: () =>
+      request<SupplementRequestView>(
+        `/controlled/s01/api/queries/supplement-requests/${encodeURIComponent(requestId ?? "")}`,
+      ),
+    retry: retryPolicy,
+  });
+}
+
+/** The Reviewer's supplement request command; acceptance invalidates the
+ * server-owned S01 queries (the old work item then existence-hides). */
+export function useRequestSupplement(
+  workId: string,
+): UseMutationResult<SupplementRequestResult, Error, SupplementRequestCommand> {
+  return useReviewCommandMutation<SupplementRequestResult, SupplementRequestCommand>(
+    `/controlled/s01/api/commands/review-work-items/${encodeURIComponent(workId)}/supplement`,
+  );
+}
+
+/** The Integrator's minimized current request-binding projection. */
+export function useIntegratorSupplementRequest(
+  requestId: string | null,
+): UseQueryResult<IntegratorSupplementRequestView> {
+  return useQuery({
+    queryKey: INTEGRATOR_REQUEST_KEY(requestId ?? ""),
+    enabled: requestId !== null,
+    queryFn: () =>
+      request<IntegratorSupplementRequestView>(
+        `/controlled/s02/api/queries/supplement-requests/${encodeURIComponent(requestId ?? "")}`,
+      ),
+    retry: retryPolicy,
+  });
+}
+
+/** The attachment-version command for the Integrator; acceptance refetches
+ * the S02 projection so the panel never infers request progress. */
+export function useSubmitAttachmentVersion(): UseMutationResult<
+  AttachmentSubmissionResponse,
+  Error,
+  AttachmentSubmissionCommand
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (command: AttachmentSubmissionCommand) =>
+      request<AttachmentSubmissionResponse>(
+        "/controlled/s02/api/commands/submit-attachment-version",
+        { method: "POST", body: JSON.stringify(command) },
+      ),
+    retry: false,
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["s02"] }),
   });
 }

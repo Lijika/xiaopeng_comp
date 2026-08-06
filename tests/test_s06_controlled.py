@@ -16,6 +16,7 @@ import pytest
 from task4_consistency.controlled.s01 import (
     AdmissionDisposition,
     ControlledScenarioService,
+    QueryNotFound,
     S01CommandPrincipal,
 )
 from task4_consistency.controlled.s02 import ControlledObject, RegisteredSource
@@ -2679,3 +2680,359 @@ def test_worker_fence_invalidates_an_in_flight_supplement_result(
     )
     assert completed.status == "complete"
     assert sum(run["current"] for run in history["runs"]) == 1
+
+
+INTEGRATOR_PROJECTION_KEYS = frozenset(
+    {
+        "schema_version",
+        "request_id",
+        "status",
+        "current",
+        "requested_at",
+        "due_at",
+        "context_digest",
+        "upstream_application_ref",
+        "material_requirement",
+        "expected_predecessor_attachment_id",
+        "expected_predecessor_attachment_version",
+        "next_attachment_version",
+        "next_request_progress_revision",
+        "next_source_revision",
+        "expected_predecessor_revision",
+        "next_batch_item_sequence",
+        "batch",
+    }
+)
+INTEGRATOR_MATERIAL_KEYS = frozenset(
+    {
+        "material_requirement_id",
+        "document_role",
+        "material_kind",
+        "operation",
+        "required_fact_kinds",
+        "responsible_party",
+        "allowed_tenant_id",
+        "allowed_source_system_ids",
+        "allowed_workload_identity_ids",
+        "batch_item_count",
+        "batch_closure_required",
+        "integrity_required",
+        "provenance_required",
+        "evidence_eligibility_required",
+    }
+)
+INTEGRATOR_BATCH_KEYS = frozenset({"batch_id", "manifest_digest", "stream_id"})
+INTEGRATOR_INTERNAL_KEYS = frozenset(
+    {
+        "application_id",
+        "work_item_id",
+        "source_work_item_id",
+        "cycle",
+        "run_id",
+        "finding_id",
+        "rule_id",
+        "finding_reason_code",
+        "finding_verdict",
+        "requester_claim_fence",
+        "fixed_context",
+        "phase",
+        "route",
+        "lifecycle_revision",
+        "evidence_revision",
+        "projection_watermark",
+        "requester_subject",
+        "requester_role",
+        "requester_source_id",
+        "evidence_snapshot_id",
+        "evidence_snapshot_digest",
+        "satisfaction_policy_id",
+        "satisfaction_policy_digest",
+    }
+)
+
+
+def _attachment_submission_from_projection(
+    projection: dict[str, object],
+    source: dict[str, object],
+    *,
+    closed: bool,
+    batch_id: str,
+    stream_id: str,
+) -> dict[str, object]:
+    material = projection["material_requirement"]
+    item_sequence = projection["next_batch_item_sequence"]
+    manifest = {
+        "batch_id": batch_id,
+        "final_sequence": material["batch_item_count"],
+        "item_count": material["batch_item_count"],
+        "scope_mode": "full",
+        "stream_id": stream_id,
+        "supplement_request_id": projection["request_id"],
+    }
+    return {
+        "envelope_id": f"t04-envelope-{item_sequence}",
+        "schema_version": "1.0.0",
+        "semantic_version": "1.0.0",
+        "command_type": "submit_attachment_version",
+        "upstream_application_ref": projection["upstream_application_ref"],
+        "stream_id": stream_id,
+        "source_revision": projection["next_source_revision"],
+        "predecessor_revision": projection["expected_predecessor_revision"],
+        "must_understand": [],
+        "workload_identity_id": material["allowed_workload_identity_ids"][0],
+        "request_binding": {
+            "supplement_request_id": projection["request_id"],
+            "request_context_digest": projection["context_digest"],
+            "material_requirement_id": material["material_requirement_id"],
+            "request_progress_revision": projection[
+                "next_request_progress_revision"
+            ],
+        },
+        "document_binding": {
+            "source_document_ref": "s06-lease-replacement",
+            "document_type": material["material_kind"],
+            "document_role": material["document_role"],
+        },
+        "attachment_lineage": {
+            "operation": material["operation"],
+            "predecessor_attachment_id": projection[
+                "expected_predecessor_attachment_id"
+            ],
+            "predecessor_attachment_version": projection[
+                "expected_predecessor_attachment_version"
+            ],
+            "attachment_version": projection["next_attachment_version"],
+        },
+        "batch": {
+            "batch_id": batch_id,
+            "item_sequence": item_sequence,
+            "item_count": material["batch_item_count"],
+            "final_sequence": material["batch_item_count"],
+            "scope_mode": "full",
+            "closed": closed,
+            "manifest_digest": hashlib.sha256(
+                json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode(
+                    "utf-8"
+                )
+            ).hexdigest(),
+        },
+        "result_object": _descriptor(
+            "s06-result-object", "application/json", source["result"]
+        ),
+        "attachments": [
+            {
+                "source_attachment_ref": "s06-source-attachment-2",
+                "page_ref": "s06-source-page-2",
+                "page_ordinal": 1,
+                "source_name_sha256": hashlib.sha256(
+                    b"lease-page.png"
+                ).hexdigest(),
+                "object": _descriptor("s06-page-object", "image/png", source["page"]),
+            }
+        ],
+        "producer": {
+            "producer_id": "s06-producer",
+            "producer_family": "s06-ocr",
+            "task_id": "s06-lease-field-extraction",
+            "task_version": "1",
+            "run_id": "s06-producer-run-1",
+            "model_id": "s06-model",
+            "model_version": "1",
+            "coordinate_system": {
+                "name": "pixel",
+                "unit": "pixel",
+                "origin": "top_left",
+            },
+            "confidence_semantics": {
+                "minimum": 0.0,
+                "maximum": 1.0,
+                "higher_is": "stronger_detection",
+                "meaning": "producer_detection_score",
+                "granularity": "observation",
+                "calibration": "unknown",
+            },
+        },
+    }
+
+
+def test_integrator_projection_binds_each_next_command_and_hides_scope(
+    tmp_path: Path,
+) -> None:
+    service, application_id, _, request, source = _ready_supplement_request(tmp_path)
+    with pytest.raises(QueryNotFound):
+        service.integrator_supplement_request_view(
+            principal=REVIEWER, request_id=request["request_id"], now=102
+        )
+    with pytest.raises(QueryNotFound):
+        service.integrator_supplement_request_view(
+            principal=S01CommandPrincipal(
+                subject="s06-other-source",
+                role="integrator",
+                scope="R-OBSERVED/c-demo",
+                source_id="s06-other-source",
+            ),
+            request_id=request["request_id"],
+            now=102,
+        )
+    with pytest.raises(QueryNotFound):
+        service.integrator_supplement_request_view(
+            principal=S01CommandPrincipal(
+                subject="s06-other-tenant",
+                role="integrator",
+                scope="R-OBSERVED/other-tenant",
+                source_id="s06-material-source",
+            ),
+            request_id=request["request_id"],
+            now=102,
+        )
+    with pytest.raises(QueryNotFound):
+        service.integrator_supplement_request_view(
+            principal=S01CommandPrincipal(
+                subject="s06-expired",
+                role="integrator",
+                scope="R-OBSERVED/c-demo",
+                source_id="s06-material-source",
+                expires_at=1,
+            ),
+            request_id=request["request_id"],
+            now=102,
+        )
+    with pytest.raises(QueryNotFound):
+        service.integrator_supplement_request_view(
+            principal=SUPPLEMENT_INTEGRATOR,
+            request_id="supplement_request_missing00000000000000000000000",
+            now=102,
+        )
+
+    projection = service.integrator_supplement_request_view(
+        principal=SUPPLEMENT_INTEGRATOR,
+        request_id=request["request_id"],
+        now=102,
+    )
+    assert set(projection) == INTEGRATOR_PROJECTION_KEYS
+    assert set(projection["material_requirement"]) == INTEGRATOR_MATERIAL_KEYS
+    assert set(projection["batch"]) == INTEGRATOR_BATCH_KEYS
+    assert INTEGRATOR_INTERNAL_KEYS.isdisjoint(projection)
+    assert projection["schema_version"] == "supplement-request-integrator/1"
+    assert projection["request_id"] == request["request_id"]
+    assert projection["status"] == "open"
+    assert projection["current"] is True
+    assert projection["requested_at"] == request["requested_at"]
+    assert projection["due_at"] == request["due_at"]
+    assert projection["context_digest"] == request["context_digest"]
+    assert projection["upstream_application_ref"] == "APP-MISS-VINDOC"
+    assert projection["expected_predecessor_attachment_id"] == request[
+        "expected_predecessor_attachment_id"
+    ]
+    assert projection["expected_predecessor_attachment_version"] == request[
+        "expected_predecessor_attachment_version"
+    ]
+    assert projection["next_attachment_version"] == 2
+    assert projection["next_request_progress_revision"] == 1
+    assert projection["next_source_revision"] == 1
+    assert projection["expected_predecessor_revision"] is None
+    assert projection["next_batch_item_sequence"] == 1
+    assert projection["batch"] == {"batch_id": None, "manifest_digest": None, "stream_id": None}
+    material = projection["material_requirement"]
+    assert material["material_requirement_id"] == "c-demo-financing-lease-vin/1"
+    assert material["document_role"] == "financing_lease_contract"
+    assert material["material_kind"] == "financing_lease_contract"
+    assert material["operation"] == "replacement"
+    assert material["responsible_party"] == "application_material_provider"
+    assert material["allowed_tenant_id"] == "c-demo"
+    assert material["allowed_source_system_ids"] == ["s06-material-source"]
+    assert material["allowed_workload_identity_ids"] == ["s06-material-workload"]
+    assert material["batch_item_count"] == 2
+    assert material["batch_closure_required"] is True
+    assert material["integrity_required"] is True
+    assert material["provenance_required"] is True
+    assert material["evidence_eligibility_required"] is True
+
+    progress = service.submit_attachment_version(
+        submission=_attachment_submission_from_projection(
+            projection,
+            source,
+            closed=False,
+            batch_id="s06-batch-1",
+            stream_id="s06-supplement-stream",
+        ),
+        idempotency_key="s06-t04-projection-progress",
+        principal=SUPPLEMENT_INTEGRATOR,
+        now=200,
+    )
+    assert progress.disposition is AdmissionDisposition.ACCEPTED
+    assert progress.request_status == "open"
+
+    after_progress = service.integrator_supplement_request_view(
+        principal=SUPPLEMENT_INTEGRATOR,
+        request_id=request["request_id"],
+        now=201,
+    )
+    assert after_progress["status"] == "open"
+    assert after_progress["current"] is True
+    assert after_progress["next_request_progress_revision"] == 2
+    assert after_progress["next_source_revision"] == 2
+    assert after_progress["expected_predecessor_revision"] == 1
+    assert after_progress["next_batch_item_sequence"] == 2
+    assert after_progress["next_attachment_version"] == 2
+    assert after_progress["batch"]["batch_id"] == "s06-batch-1"
+    assert after_progress["batch"]["stream_id"] == "s06-supplement-stream"
+    expected_manifest_digest = hashlib.sha256(
+        json.dumps(
+            {
+                "batch_id": "s06-batch-1",
+                "final_sequence": 2,
+                "item_count": 2,
+                "scope_mode": "full",
+                "stream_id": "s06-supplement-stream",
+                "supplement_request_id": request["request_id"],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    assert after_progress["batch"]["manifest_digest"] == expected_manifest_digest
+
+    closed_submission = _attachment_submission_from_projection(
+        after_progress,
+        source,
+        closed=True,
+        batch_id="s06-batch-1",
+        stream_id="s06-supplement-stream",
+    )
+    assert (
+        closed_submission["batch"]["manifest_digest"]
+        == after_progress["batch"]["manifest_digest"]
+    )
+    fulfilled = service.submit_attachment_version(
+        submission=closed_submission,
+        idempotency_key="s06-t04-projection-closure",
+        principal=SUPPLEMENT_INTEGRATOR,
+        now=202,
+    )
+    assert fulfilled.disposition is AdmissionDisposition.ACCEPTED
+    assert fulfilled.request_status == "fulfilled"
+
+    terminal = service.integrator_supplement_request_view(
+        principal=SUPPLEMENT_INTEGRATOR,
+        request_id=request["request_id"],
+        now=203,
+    )
+    assert terminal["status"] == "fulfilled"
+    assert terminal["current"] is False
+    assert service.application_history_view(
+        principal=REVIEWER,
+        application_id=application_id,
+    )["attachment_versions"][-1]["current"] is True
+    assert service.process_next_job().status == "complete"
+    service.refresh_projection()
+    history = service.application_history_view(
+        principal=REVIEWER,
+        application_id=application_id,
+    )
+    assert [run["current"] for run in history["runs"]] == [False, True]
+    assert [item["version"] for item in history["attachment_versions"]] == [1, 2]
+    assert [item["current"] for item in history["attachment_versions"]] == [
+        False,
+        True,
+    ]
