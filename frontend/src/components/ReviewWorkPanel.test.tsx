@@ -1,11 +1,16 @@
+import { randomUUID } from "node:crypto";
 import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import ReviewWorkPanel from "./ReviewWorkPanel";
-import { MANUAL_WORK_KEY } from "../api/hooks";
-import { fetchRouter, renderWithQuery } from "../test-utils";
+import { MANUAL_WORK_KEY, WORKSPACE_KEY } from "../api/hooks";
+import {
+  fetchRouter,
+  renderWithQuery,
+  restrictedDigest,
+} from "../test-utils";
 
 const WORK_ID = "work_t02panel1234567890abcdef";
 const APP_ID = "app_t02panel9876543210fedcba";
@@ -28,9 +33,39 @@ const REVEAL_PATH =
 const CORRECT_PATH =
   "/controlled/s01/api/commands/review-work-items/work_t02panel1234567890abcdef/correct-field-observation";
 
-/** The restricted source sentinel of the S01 runtime ground truth.  It may
- * appear only inside the authorized review-reveal-source element. */
-const SOURCE_SENTINEL = "LSVAA4182N5000054";
+const SOURCE_SENTINEL = `restricted-source:${randomUUID()}`;
+const CORRECTION_SENTINEL = `restricted-correction:${randomUUID()}`;
+
+function expectRestrictedEqual(actual: unknown, expected: unknown) {
+  expect(restrictedDigest(actual)).toBe(restrictedDigest(expected));
+}
+
+function expectRestrictedAbsent(haystack: unknown, needle: string) {
+  expect(String(haystack).includes(needle)).toBe(false);
+}
+
+function restrictedElements(testId: string): HTMLElement[] {
+  return Array.from(
+    document.querySelectorAll<HTMLElement>(`[data-testid="${testId}"]`),
+  );
+}
+
+function expectRestrictedElementsAbsent(testId: string) {
+  expect(restrictedElements(testId).length).toBe(0);
+}
+
+function restrictedElement(testId: string): HTMLElement {
+  const elements = restrictedElements(testId);
+  expect(elements.length).toBe(1);
+  return elements[0];
+}
+
+async function findRestrictedElements(testId: string): Promise<HTMLElement[]> {
+  await vi.waitFor(() => {
+    expect(restrictedElements(testId).length).toBeGreaterThan(0);
+  });
+  return restrictedElements(testId);
+}
 
 const CONTEXT = {
   lifecycle_revision: 6,
@@ -356,10 +391,9 @@ describe("ReviewWorkPanel (T02)", () => {
     expect(screen.getByTestId("review-history-decisions")).toHaveTextContent(
       "None",
     );
-    const panelText = screen.getByTestId("review-panel").textContent ?? "";
+    const panelText = restrictedElement("review-panel").textContent ?? "";
     expect(panelText).not.toContain("Verification Completed");
     expect(panelText).not.toContain("human_complete");
-    expect(panelText).not.toContain("S2ENG54A");
     expect(router.calls.filter((call) => call.method === "GET")).toHaveLength(4);
   });
 
@@ -405,8 +439,6 @@ describe("ReviewWorkPanel (T02)", () => {
     expect(screen.getByTestId("review-evidence-eligibility")).toHaveTextContent(
       "REGISTERED_SOURCE_PROVENANCE_VERIFIED",
     );
-    const panelText = screen.getByTestId("review-panel").textContent ?? "";
-    expect(panelText).not.toContain("S2ENG54A");
   });
 
   it("claims with exactly the generated claim contract and acknowledges the accepted fence", async () => {
@@ -542,6 +574,71 @@ describe("ReviewWorkPanel (T02)", () => {
       .map((call) => call.body as { idempotency_key: string });
     expect(bodies).toHaveLength(2);
     expect(bodies[0].idempotency_key).toBe(bodies[1].idempotency_key);
+  });
+
+  it("keeps an unknown non-restricted command when authoritative context changes", async () => {
+    let workRequests = 0;
+    let posts = 0;
+    const changedContext = { ...CONTEXT, current_context: "c".repeat(64) };
+    const router = fetchRouter({
+      ...baseRoutes(),
+      [`GET ${WORK_PATH}`]: () => {
+        workRequests += 1;
+        return jsonResponse(
+          workPayload({
+            status: "claimed",
+            claim_subject: "t02-reviewer",
+            claim_fence: 1,
+            claim_expires_at: LIVE_CLAIM_EXPIRES_AT,
+            command_context: workRequests >= 2 ? changedContext : CONTEXT,
+          }),
+        );
+      },
+      [`GET ${WORKSPACE_PATH}`]: () => jsonResponse(claimedWorkspacePayload()),
+      [`POST ${SUBMIT_PATH}`]: () => {
+        posts += 1;
+        if (posts === 1) {
+          return Promise.reject(new TypeError("fetch failed: connection reset"));
+        }
+        return jsonResponse({
+          status: "accepted",
+          replayed: true,
+          application_id: APP_ID,
+          work_item_id: WORK_ID,
+          decision_id: "decision_t02panel",
+          claim_fence: 1,
+          lifecycle_revision: 7,
+          evidence_revision: 1,
+          route: "human_complete",
+        });
+      },
+    });
+    const { client } = renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    await userEvent.click(screen.getByRole("button", { name: "提交人工核验" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("review-command-status")).toHaveTextContent(
+        "结果未知：网络未确认，重试将使用同一幂等键",
+      ),
+    );
+    const firstBody = router.calls.find(
+      (call) => call.method === "POST",
+    )?.body;
+    await act(async () => {
+      await client.refetchQueries({ queryKey: MANUAL_WORK_KEY(WORK_ID) });
+    });
+    const retry = screen.getByRole("button", { name: "重试" });
+    await userEvent.click(retry);
+    await waitFor(() =>
+      expect(screen.getByTestId("review-command-status")).toHaveTextContent(
+        "核验已接受",
+      ),
+    );
+    const postBodies = router.calls
+      .filter((call) => call.method === "POST")
+      .map((call) => call.body);
+    expect(postBodies.length).toBe(2);
+    expect(JSON.stringify(postBodies[1])).toBe(JSON.stringify(firstBody));
   });
 
   it("locks every action after a definitive 409 and recovers only after a successful reload", async () => {
@@ -753,7 +850,7 @@ describe("ReviewWorkPanel (T02)", () => {
     );
     expect(screen.getByTestId("review-status")).toHaveTextContent("claimed");
     expect(screen.getByTestId("review-claim-fence")).toHaveTextContent("1");
-    expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(1);
+    expect(router.calls.filter((call) => call.method === "POST").length).toBe(1);
   });
 
   it("submits the chosen explicit outcome for the overall and every finding decision", async () => {
@@ -1072,12 +1169,11 @@ describe("ReviewWorkPanel controlled reveal (T03)", () => {
       screen.getAllByRole("button", { name: "更正该字段" }),
     ).toHaveLength(2);
     await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
-    await screen.findByTestId("review-reveal-source");
-    const sources = screen.getAllByTestId("review-reveal-source");
-    expect(sources).toHaveLength(1);
-    expect(sources[0]).toHaveTextContent(SOURCE_SENTINEL);
+    const sources = await findRestrictedElements("review-reveal-source");
+    expect(sources.length).toBe(1);
+    expectRestrictedEqual(sources[0].textContent, SOURCE_SENTINEL);
     // The restricted value exists in exactly one element of the whole panel.
-    const panelText = screen.getByTestId("review-panel").textContent ?? "";
+    const panelText = restrictedElement("review-panel").textContent ?? "";
     expect(panelText.split(SOURCE_SENTINEL).length - 1).toBe(1);
     // The evidence stays masked for both observations.
     for (const masked of screen.getAllByTestId("review-evidence-masked")) {
@@ -1118,8 +1214,9 @@ describe("ReviewWorkPanel controlled reveal (T03)", () => {
     // render for any of them until the authorized response arrives.
     const pendingMarkers = await screen.findAllByTestId("review-reveal-pending");
     expect(pendingMarkers.length).toBeGreaterThanOrEqual(2);
-    expect(screen.queryByTestId("review-reveal-source")).not.toBeInTheDocument();
-    expect(screen.getByTestId("review-panel").textContent ?? "").not.toContain(
+    expectRestrictedElementsAbsent("review-reveal-source");
+    expectRestrictedAbsent(
+      restrictedElement("review-panel").textContent,
       SOURCE_SENTINEL,
     );
     await act(async () => {
@@ -1130,9 +1227,9 @@ describe("ReviewWorkPanel controlled reveal (T03)", () => {
         }),
       );
     });
-    const sources = await screen.findAllByTestId("review-reveal-source");
-    expect(sources).toHaveLength(1);
-    expect(sources[0]).toHaveTextContent(SOURCE_SENTINEL);
+    const sources = await findRestrictedElements("review-reveal-source");
+    expect(sources.length).toBe(1);
+    expectRestrictedEqual(sources[0].textContent, SOURCE_SENTINEL);
   });
 
   it("scrubs the restricted reveal at an authoritative reload and re-reveals with a fresh key", async () => {
@@ -1149,16 +1246,17 @@ describe("ReviewWorkPanel controlled reveal (T03)", () => {
     renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
     await waitForReviewReady();
     await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
-    await screen.findByTestId("review-reveal-source");
+    await findRestrictedElements("review-reveal-source");
     await userEvent.click(screen.getByRole("button", { name: "重新加载" }));
-    await waitFor(() =>
-      expect(screen.queryByTestId("review-reveal-source")).not.toBeInTheDocument(),
+    await vi.waitFor(() =>
+      expectRestrictedElementsAbsent("review-reveal-source"),
     );
-    expect(screen.getByTestId("review-panel").textContent ?? "").not.toContain(
+    expectRestrictedAbsent(
+      restrictedElement("review-panel").textContent,
       SOURCE_SENTINEL,
     );
     await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
-    await screen.findByTestId("review-reveal-source");
+    await findRestrictedElements("review-reveal-source");
     expect(revealPosts).toBe(2);
     const keys = router.calls
       .filter((call) => call.method === "POST")
@@ -1169,8 +1267,9 @@ describe("ReviewWorkPanel controlled reveal (T03)", () => {
     expect(keys[0]).not.toBe(keys[1]);
   });
 
-  it("discards a saved reveal when the live claim context changes", async () => {
+  it("scrubs a saved reveal before a release response settles", async () => {
     let workRequests = 0;
+    let resolveRelease: ((response: Response) => void) | undefined;
     const router = fetchRouter({
       ...baseRoutes(),
       [`GET ${WORK_PATH}`]: () =>
@@ -1180,6 +1279,29 @@ describe("ReviewWorkPanel controlled reveal (T03)", () => {
       [`GET ${WORKSPACE_PATH}`]: () => jsonResponse(t03WorkspacePayload()),
       [`POST ${REVEAL_PATH}`]: () => jsonResponse(revealResultPayload()),
       [`POST ${RELEASE_PATH}`]: () =>
+        new Promise<Response>((resolve) => {
+          resolveRelease = resolve;
+        }),
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    const releaseButton = screen.getByRole("button", { name: "释放" });
+    await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
+    const [revealed] = await findRestrictedElements("review-reveal-source");
+    expectRestrictedEqual(
+      revealed.textContent,
+      SOURCE_SENTINEL,
+    );
+    await userEvent.click(releaseButton);
+    // The command boundary itself scrubs the value; no response or refetch is
+    // needed to end the restricted lifetime.
+    expectRestrictedElementsAbsent("review-reveal-source");
+    expectRestrictedAbsent(
+      restrictedElement("review-panel").textContent,
+      SOURCE_SENTINEL,
+    );
+    await act(async () => {
+      resolveRelease?.(
         jsonResponse({
           status: "released",
           replayed: false,
@@ -1187,28 +1309,100 @@ describe("ReviewWorkPanel controlled reveal (T03)", () => {
           work_item_id: WORK_ID,
           claim_fence: 0,
         }),
+      );
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("review-status")).toHaveTextContent("unclaimed"),
+    );
+    expect(router.calls.filter((call) => call.method === "POST").length).toBe(2);
+  });
+
+  it("scrubs a correction draft before a manual-submit response settles", async () => {
+    let resolveSubmit: ((response: Response) => void) | undefined;
+    fetchRouter({
+      ...baseRoutes(),
+      [`GET ${WORK_PATH}`]: () => jsonResponse(claimedWorkPayload()),
+      [`GET ${WORKSPACE_PATH}`]: () => jsonResponse(t03WorkspacePayload()),
+      [`POST ${SUBMIT_PATH}`]: () =>
+        new Promise<Response>((resolve) => {
+          resolveSubmit = resolve;
+        }),
     });
     renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
     await waitForReviewReady();
-    await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
-    await screen.findByTestId("review-reveal-source");
-    expect(screen.getByTestId("review-reveal-source")).toHaveTextContent(
-      SOURCE_SENTINEL,
+    const submitDecision = screen.getByRole("button", {
+      name: "提交人工核验",
+    });
+    await userEvent.click(
+      screen.getAllByRole("button", { name: "更正该字段" })[0],
     );
-    // Releasing the work item is not a scrub boundary by itself: the saved
-    // reveal must be dropped by the live-context guard once the authoritative
-    // refetch shows the claim is gone (status unclaimed, fence 0).
-    await userEvent.click(screen.getByRole("button", { name: "释放" }));
+    const rawInput = screen.getByTestId("review-correction-raw");
+    await userEvent.type(rawInput, CORRECTION_SENTINEL);
+    await userEvent.click(submitDecision);
+    expectRestrictedElementsAbsent("review-correction-form");
+    expectRestrictedAbsent(
+      restrictedElement("review-panel").textContent,
+      CORRECTION_SENTINEL,
+    );
+    await act(async () => {
+      resolveSubmit?.(
+        jsonResponse({
+          status: "accepted",
+          replayed: false,
+          application_id: APP_ID,
+          work_item_id: WORK_ID,
+          decision_id: "decision_t03panel",
+          claim_fence: 1,
+          lifecycle_revision: 7,
+          evidence_revision: 1,
+          route: "human_complete",
+        }),
+      );
+    });
     await waitFor(() =>
-      expect(screen.queryByTestId("review-reveal-source")).not.toBeInTheDocument(),
+      expect(screen.getByTestId("review-command-status")).toHaveTextContent(
+        "核验已接受",
+      ),
     );
-    expect(screen.getByTestId("review-panel").textContent ?? "").not.toContain(
+  });
+
+  it("scrubs restricted state on owning-read access loss and never restores it", async () => {
+    let workspaceRequests = 0;
+    const router = fetchRouter({
+      ...baseRoutes(),
+      [`GET ${WORK_PATH}`]: () => jsonResponse(claimedWorkPayload()),
+      [`GET ${WORKSPACE_PATH}`]: () => {
+        workspaceRequests += 1;
+        return workspaceRequests === 2
+          ? jsonResponse({ detail: { error: "S03_NOT_FOUND" } }, 404)
+          : jsonResponse(t03WorkspacePayload());
+      },
+      [`POST ${REVEAL_PATH}`]: () => jsonResponse(revealResultPayload()),
+    });
+    const { client } = renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
+    const [revealed] = await findRestrictedElements("review-reveal-source");
+    expectRestrictedEqual(revealed.textContent, SOURCE_SENTINEL);
+    await act(async () => {
+      await client.refetchQueries({ queryKey: WORKSPACE_KEY(APP_ID) });
+    });
+    await screen.findByTestId("review-error");
+    await act(async () => {
+      await client.refetchQueries({ queryKey: WORKSPACE_KEY(APP_ID) });
+    });
+    await waitForReviewReady();
+    expectRestrictedElementsAbsent("review-reveal-source");
+    expectRestrictedAbsent(
+      restrictedElement("review-panel").textContent,
       SOURCE_SENTINEL,
     );
-    expect(screen.getByTestId("review-status")).toHaveTextContent("unclaimed");
-    expect(
-      router.calls.filter((call) => call.method === "POST"),
-    ).toHaveLength(2);
+    const cached = client
+      .getMutationCache()
+      .getAll()
+      .map((mutation) => JSON.stringify(mutation.state));
+    expectRestrictedAbsent(cached.join("\n"), SOURCE_SENTINEL);
+    expect(router.calls.filter((call) => call.method === "POST").length).toBe(1);
   });
 
   it("expiry scrubs the saved reveal and every restricted control without navigation", async () => {
@@ -1230,18 +1424,18 @@ describe("ReviewWorkPanel controlled reveal (T03)", () => {
     renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
     await waitForReviewReady();
     await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
-    await screen.findByTestId("review-reveal-source");
+    await findRestrictedElements("review-reveal-source");
     // The one expiry clock fires without navigation and drops the restricted
     // reveal, the correction draft, and the token.
-    await waitFor(
-      () =>
-        expect(screen.queryByTestId("review-reveal-source")).not.toBeInTheDocument(),
+    await vi.waitFor(
+      () => expectRestrictedElementsAbsent("review-reveal-source"),
       { timeout: 8_000 },
     );
-    expect(screen.getByTestId("review-panel").textContent ?? "").not.toContain(
+    expectRestrictedAbsent(
+      restrictedElement("review-panel").textContent,
       SOURCE_SENTINEL,
     );
-    expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(1);
+    expect(router.calls.filter((call) => call.method === "POST").length).toBe(1);
   });
 
   it("discards a late reveal response that resolves after the claim expires", async () => {
@@ -1269,9 +1463,7 @@ describe("ReviewWorkPanel controlled reveal (T03)", () => {
     await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
     // The reveal was issued under a live (unexpired) token.
     await waitFor(() =>
-      expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(
-        1,
-      ),
+      expect(router.calls.filter((call) => call.method === "POST").length).toBe(1),
     );
     // Let the expiry clock run out with the reveal still in flight; the
     // authorization dies, the pending command is dropped, and the late
@@ -1287,14 +1479,15 @@ describe("ReviewWorkPanel controlled reveal (T03)", () => {
     });
     // The late success was discarded before storage: the restricted text
     // never renders and the panel holds no pending reveal.
-    expect(screen.queryByTestId("review-reveal-source")).not.toBeInTheDocument();
-    expect(screen.getByTestId("review-panel").textContent ?? "").not.toContain(
+    expectRestrictedElementsAbsent("review-reveal-source");
+    expectRestrictedAbsent(
+      restrictedElement("review-panel").textContent,
       SOURCE_SENTINEL,
     );
     expect(
       screen.queryByTestId("review-reveal-pending"),
     ).not.toBeInTheDocument();
-    expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(1);
+    expect(router.calls.filter((call) => call.method === "POST").length).toBe(1);
   });
 
   it("an expired claim disables every restricted control and cannot issue a reveal", async () => {
@@ -1321,8 +1514,8 @@ describe("ReviewWorkPanel controlled reveal (T03)", () => {
       expect(button).toBeDisabled();
     }
     await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
-    expect(screen.queryByTestId("review-reveal-source")).not.toBeInTheDocument();
-    expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(0);
+    expectRestrictedElementsAbsent("review-reveal-source");
+    expect(router.calls.filter((call) => call.method === "POST").length).toBe(0);
   });
 
   it("a same-fence renewal with a new claim expiry scrubs the saved reveal and draft", async () => {
@@ -1358,7 +1551,7 @@ describe("ReviewWorkPanel controlled reveal (T03)", () => {
     renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
     await waitForReviewReady();
     await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
-    await screen.findByTestId("review-reveal-source");
+    await findRestrictedElements("review-reveal-source");
     await userEvent.click(
       screen.getAllByRole("button", { name: "更正该字段" })[0],
     );
@@ -1367,16 +1560,15 @@ describe("ReviewWorkPanel controlled reveal (T03)", () => {
     // issued authorization (which includes the claim expiry) is no longer the
     // live one, so every restricted holder is scrubbed.
     await userEvent.click(screen.getByRole("button", { name: "续期" }));
-    await waitFor(() =>
-      expect(screen.queryByTestId("review-reveal-source")).not.toBeInTheDocument(),
+    await vi.waitFor(() =>
+      expectRestrictedElementsAbsent("review-reveal-source"),
     );
-    expect(
-      screen.queryByTestId("review-correction-form"),
-    ).not.toBeInTheDocument();
-    expect(screen.getByTestId("review-panel").textContent ?? "").not.toContain(
+    expectRestrictedElementsAbsent("review-correction-form");
+    expectRestrictedAbsent(
+      restrictedElement("review-panel").textContent,
       SOURCE_SENTINEL,
     );
-    expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(2);
+    expect(router.calls.filter((call) => call.method === "POST").length).toBe(2);
   });
 
   it("a command_context-only change ends an unknown replay, removes retry, and clears its raw", async () => {
@@ -1406,11 +1598,12 @@ describe("ReviewWorkPanel controlled reveal (T03)", () => {
     await userEvent.click(
       screen.getAllByRole("button", { name: "更正该字段" })[0],
     );
+    const submit = screen.getByRole("button", { name: "提交修正" });
     await userEvent.type(
       screen.getByTestId("review-correction-raw"),
-      "LSVAA4182N500005Z",
+      CORRECTION_SENTINEL,
     );
-    await userEvent.click(screen.getByRole("button", { name: "提交修正" }));
+    await userEvent.click(submit);
     await waitFor(() =>
       expect(screen.getByTestId("review-command-status")).toHaveTextContent(
         "结果未知：网络未确认，重试将使用同一幂等键",
@@ -1428,15 +1621,16 @@ describe("ReviewWorkPanel controlled reveal (T03)", () => {
     expect(
       screen.queryByTestId("review-correction-pending"),
     ).not.toBeInTheDocument();
-    expect(screen.getByTestId("review-panel").textContent ?? "").not.toContain(
-      "LSVAA4182N500005Z",
+    expectRestrictedAbsent(
+      restrictedElement("review-panel").textContent,
+      CORRECTION_SENTINEL,
     );
     const cached = client
       .getMutationCache()
       .getAll()
       .map((mutation) => JSON.stringify(mutation.state.variables ?? {}));
-    expect(cached.join("\n")).not.toContain("LSVAA4182N500005Z");
-    expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(1);
+    expectRestrictedAbsent(cached.join("\n"), CORRECTION_SENTINEL);
+    expect(router.calls.filter((call) => call.method === "POST").length).toBe(1);
   });
 
   it("a reclaimed issuance replaces a deferred reveal A; A is discarded and B alone renders", async () => {
@@ -1461,7 +1655,7 @@ describe("ReviewWorkPanel controlled reveal (T03)", () => {
           pending.push(resolve);
         }),
     });
-    const { client } =     renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    const { client } = renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
     await waitForReviewReady();
     await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
     const pendingMarkers = await screen.findAllByTestId("review-reveal-pending");
@@ -1489,7 +1683,13 @@ describe("ReviewWorkPanel controlled reveal (T03)", () => {
         }),
       );
     });
-    expect(screen.queryByTestId("review-reveal-source")).not.toBeInTheDocument();
+    expectRestrictedElementsAbsent("review-reveal-source");
+    expect(screen.getAllByTestId("review-reveal-pending").length).toBeGreaterThan(
+      0,
+    );
+    expect(screen.getByTestId("review-command-status")).toHaveTextContent(
+      "揭示提交中",
+    );
     await act(async () => {
       pending[1](
         new Response(JSON.stringify(revealResultPayload()), {
@@ -1498,18 +1698,94 @@ describe("ReviewWorkPanel controlled reveal (T03)", () => {
         }),
       );
     });
-    await screen.findByTestId("review-reveal-source");
-    const sources = screen.getAllByTestId("review-reveal-source");
-    expect(sources).toHaveLength(1);
-    expect(sources[0]).toHaveTextContent(SOURCE_SENTINEL);
+    const sources = await findRestrictedElements("review-reveal-source");
+    expect(sources.length).toBe(1);
+    expectRestrictedEqual(sources[0].textContent, SOURCE_SENTINEL);
     // The superseded issuance left nothing behind: no restricted value in
     // the MutationCache and no second reveal source anywhere.
     const cached = client
       .getMutationCache()
       .getAll()
       .map((mutation) => JSON.stringify(mutation.state.variables ?? {}));
-    expect(cached.join("\n")).not.toContain(SOURCE_SENTINEL);
-    expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(2);
+    expectRestrictedAbsent(cached.join("\n"), SOURCE_SENTINEL);
+    expect(router.calls.filter((call) => call.method === "POST").length).toBe(2);
+  });
+
+  it("keeps correction B pending when superseded correction A settles late", async () => {
+    let workRequests = 0;
+    const pending: Array<(response: Response) => void> = [];
+    const router = fetchRouter({
+      ...baseRoutes(),
+      [`GET ${WORK_PATH}`]: () => {
+        workRequests += 1;
+        return jsonResponse(
+          workPayload({
+            status: "claimed",
+            claim_subject: "t02-reviewer",
+            claim_fence: workRequests >= 2 ? 2 : 1,
+            claim_expires_at: LIVE_CLAIM_EXPIRES_AT,
+          }),
+        );
+      },
+      [`GET ${WORKSPACE_PATH}`]: () => jsonResponse(t03WorkspacePayload()),
+      [`GET ${ROUTE_PATH}`]: () =>
+        jsonResponse(
+          routePayload({
+            evidence_revision: 2,
+            current_run_id: "run_t03succ",
+            route: "auto_complete",
+            phase: "Auto Complete",
+          }),
+        ),
+      [`GET ${HISTORY_PATH}`]: () => jsonResponse(t03HistoryPayload()),
+      [`POST ${CORRECT_PATH}`]: () =>
+        new Promise<Response>((resolve) => {
+          pending.push(resolve);
+        }),
+    });
+    const { client } = renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+
+    const issueCorrection = async (raw: string) => {
+      await userEvent.click(
+        screen.getAllByRole("button", { name: "更正该字段" })[0],
+      );
+      const submit = screen.getByRole("button", { name: "提交修正" });
+      await userEvent.type(screen.getByTestId("review-correction-raw"), raw);
+      await userEvent.click(submit);
+    };
+
+    await issueCorrection(`${CORRECTION_SENTINEL}:A`);
+    await waitFor(() => expect(pending.length).toBe(1));
+    await act(async () => {
+      await client.refetchQueries({ queryKey: MANUAL_WORK_KEY(WORK_ID) });
+    });
+    await waitFor(() =>
+      expect(screen.queryByTestId("review-correction-pending")).not.toBeInTheDocument(),
+    );
+    await issueCorrection(`${CORRECTION_SENTINEL}:B`);
+    await waitFor(() => expect(pending.length).toBe(2));
+
+    await act(async () => {
+      pending[0](jsonResponse(correctionResultPayload()));
+    });
+    expect(screen.getByTestId("review-command-status")).toHaveTextContent(
+      "更正提交中",
+    );
+    expect(screen.getByRole("button", { name: "续期" })).toBeDisabled();
+
+    await act(async () => {
+      pending[1](jsonResponse(correctionResultPayload()));
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("review-correction-converged")).toBeInTheDocument(),
+    );
+    const cached = client
+      .getMutationCache()
+      .getAll()
+      .map((mutation) => JSON.stringify(mutation.state));
+    expectRestrictedAbsent(cached.join("\n"), CORRECTION_SENTINEL);
+    expect(router.calls.filter((call) => call.method === "POST").length).toBe(2);
   });
 });
 
@@ -1547,7 +1823,7 @@ describe("ReviewWorkPanel evidence correction rerun (T03)", () => {
     renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
     await waitForReviewReady();
     await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
-    await screen.findByTestId("review-reveal-source");
+    await findRestrictedElements("review-reveal-source");
     await userEvent.click(
       screen.getAllByRole("button", { name: "更正该字段" })[0],
     );
@@ -1555,7 +1831,7 @@ describe("ReviewWorkPanel evidence correction rerun (T03)", () => {
     expect(submit).toBeDisabled();
     // The raw evidence crosses the boundary byte-for-byte: leading/trailing
     // whitespace is part of the entered value, not trimmed by the client.
-    const paddedRaw = "  LSVAA4182N500005Z  ";
+    const paddedRaw = `  ${CORRECTION_SENTINEL}  `;
     await userEvent.type(screen.getByTestId("review-correction-raw"), paddedRaw);
     expect(submit).toBeEnabled();
     await userEvent.click(submit);
@@ -1567,7 +1843,16 @@ describe("ReviewWorkPanel evidence correction rerun (T03)", () => {
     const correctCall = router.calls.filter(
       (call) => call.method === "POST",
     )[1];
-    expect(correctCall?.body).toEqual({
+    const correctBody = correctCall?.body as {
+      application_id: string;
+      expected_fence: number;
+      expected_context: typeof CONTEXT;
+      idempotency_key: string;
+      correction: Record<string, unknown>;
+    };
+    const { raw: submittedRaw, ...correctionWithoutRaw } =
+      correctBody.correction;
+    expect({ ...correctBody, correction: correctionWithoutRaw }).toEqual({
       application_id: APP_ID,
       expected_fence: 1,
       expected_context: CONTEXT,
@@ -1579,7 +1864,6 @@ describe("ReviewWorkPanel evidence correction rerun (T03)", () => {
         document_id: "reg",
         document_role: "机动车登记证书",
         field: "engine_no",
-        raw: paddedRaw,
         source_location: {
           source_sha256: "d".repeat(64),
           source_page: 1,
@@ -1588,7 +1872,8 @@ describe("ReviewWorkPanel evidence correction rerun (T03)", () => {
         reason_code: "SOURCE_VALUE_MISREAD",
       },
     });
-    expect(Object.keys(correctCall?.body ?? {})).toEqual([
+    expectRestrictedEqual(submittedRaw, paddedRaw);
+    expect(Object.keys(correctBody)).toEqual([
       "application_id",
       "expected_fence",
       "expected_context",
@@ -1596,7 +1881,7 @@ describe("ReviewWorkPanel evidence correction rerun (T03)", () => {
       "correction",
     ]);
     expect(
-      Object.keys((correctCall?.body as { correction: object }).correction),
+      Object.keys(correctBody.correction),
     ).toEqual([
       "schema_version",
       "finding_id",
@@ -1610,8 +1895,9 @@ describe("ReviewWorkPanel evidence correction rerun (T03)", () => {
     ]);
     // The restricted reveal was scrubbed before the correction command; the
     // sentinel exists nowhere in the panel.
-    expect(screen.queryByTestId("review-reveal-source")).not.toBeInTheDocument();
-    expect(screen.getByTestId("review-panel").textContent ?? "").not.toContain(
+    expectRestrictedElementsAbsent("review-reveal-source");
+    expectRestrictedAbsent(
+      restrictedElement("review-panel").textContent,
       SOURCE_SENTINEL,
     );
     // The invalidated old workspace/work reads existence-hide (404) but the
@@ -1685,11 +1971,12 @@ describe("ReviewWorkPanel evidence correction rerun (T03)", () => {
     await userEvent.click(
       screen.getAllByRole("button", { name: "更正该字段" })[0],
     );
+    const submit = screen.getByRole("button", { name: "提交修正" });
     await userEvent.type(
       screen.getByTestId("review-correction-raw"),
-      "LSVAA4182N500005Z",
+      CORRECTION_SENTINEL,
     );
-    await userEvent.click(screen.getByRole("button", { name: "提交修正" }));
+    await userEvent.click(submit);
     // The definitive 404 on the authoritative convergence read renders the
     // sanitized terminal outcome (never an elapsed-timeout claim, and never
     // raw error detail).
@@ -1702,10 +1989,11 @@ describe("ReviewWorkPanel evidence correction rerun (T03)", () => {
     expect(
       screen.getByTestId("review-correction-terminal").textContent ?? "",
     ).not.toContain("S03_NOT_FOUND");
-    expect(screen.getByTestId("review-correction-terminal").textContent ?? "").not.toContain(
-      "LSVAA4182N500005Z",
+    expectRestrictedAbsent(
+      screen.getByTestId("review-correction-terminal").textContent,
+      CORRECTION_SENTINEL,
     );
-    expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(1);
+    expect(router.calls.filter((call) => call.method === "POST").length).toBe(1);
   });
 
   it("scrubs the reveal and the correction form on a definitive rejection", async () => {
@@ -1728,15 +2016,16 @@ describe("ReviewWorkPanel evidence correction rerun (T03)", () => {
     const { client } = renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
     await waitForReviewReady();
     await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
-    await screen.findByTestId("review-reveal-source");
+    await findRestrictedElements("review-reveal-source");
     await userEvent.click(
       screen.getAllByRole("button", { name: "更正该字段" })[0],
     );
+    const submit = screen.getByRole("button", { name: "提交修正" });
     await userEvent.type(
       screen.getByTestId("review-correction-raw"),
-      "LSVAA4182N500005Z",
+      CORRECTION_SENTINEL,
     );
-    await userEvent.click(screen.getByRole("button", { name: "提交修正" }));
+    await userEvent.click(submit);
     await waitFor(() =>
       expect(screen.getByTestId("review-command-status")).toHaveTextContent(
         "更正未接受（CORRECTION_REJECTED）：请重新加载权威上下文后再试",
@@ -1744,9 +2033,10 @@ describe("ReviewWorkPanel evidence correction rerun (T03)", () => {
     );
     // A definitive rejection proves no correction committed: the reveal and
     // the form are scrubbed, and no invalidation shell may appear.
-    expect(screen.queryByTestId("review-correction-form")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("review-reveal-source")).not.toBeInTheDocument();
-    expect(screen.getByTestId("review-panel").textContent ?? "").not.toContain(
+    expectRestrictedElementsAbsent("review-correction-form");
+    expectRestrictedElementsAbsent("review-reveal-source");
+    expectRestrictedAbsent(
+      restrictedElement("review-panel").textContent,
       SOURCE_SENTINEL,
     );
     expect(
@@ -1758,7 +2048,7 @@ describe("ReviewWorkPanel evidence correction rerun (T03)", () => {
       .getMutationCache()
       .getAll()
       .map((mutation) => JSON.stringify(mutation.state.variables ?? {}));
-    expect(cached.join("\n")).not.toContain("LSVAA4182N500005Z");
+    expectRestrictedAbsent(cached.join("\n"), CORRECTION_SENTINEL);
     expect(screen.getByTestId("review-reload-note")).toBeInTheDocument();
     for (const button of screen.getAllByRole("button", { name: "查看来源" })) {
       expect(button).toBeDisabled();
@@ -1766,6 +2056,6 @@ describe("ReviewWorkPanel evidence correction rerun (T03)", () => {
     for (const name of ["认领", "续期", "释放", "提交人工核验"]) {
       expect(screen.getByRole("button", { name })).toBeDisabled();
     }
-    expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(2);
+    expect(router.calls.filter((call) => call.method === "POST").length).toBe(2);
   });
 });

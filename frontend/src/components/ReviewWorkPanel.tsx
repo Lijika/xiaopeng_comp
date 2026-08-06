@@ -75,7 +75,7 @@ type IssuedContextToken = {
   applicationId: string;
   workItemId: string;
   observationId: string;
-  expectedContext: Record<string, unknown>;
+  expectedContext: ReviewWorkResponse["command_context"];
   evidenceRevision: number;
   lifecycleRevision: number;
   claimFence: number;
@@ -709,18 +709,26 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
   const issuedRef = useRef<
     (IssuedCommand & { command: RevealCommand | CorrectionCommand }) | null
   >(null);
+  const owningReadsCurrent =
+    work.isSuccess &&
+    workspace.isSuccess &&
+    history.isSuccess &&
+    gate.isSuccess;
 
   useEffect(() => {
     headingRef.current?.focus();
   }, [workId]);
 
-  /** Scrub every restricted surface: the issued token, the pending command,
-   * the saved reveal, the correction draft, and the restricted mutations.
-   * Safe on any access, selection, context, expiry, or definitive-error
-   * boundary. */
+  /** Scrub every restricted surface.  Only reveal/correct pending commands
+   * belong to this lifetime; an unrelated unknown command keeps its exact
+   * replay identity while restricted payloads are removed. */
   const invalidateRestricted = () => {
     issuedRef.current = null;
-    setPendingCommand(null);
+    setPendingCommand((current) =>
+      current?.action === "reveal" || current?.action === "correct"
+        ? null
+        : current,
+    );
     setRevealed(null);
     setCorrectionTarget(null);
     setCorrectionRaw("");
@@ -772,6 +780,10 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
   // replay (the pending restricted command is dropped with its raw) and
   // clears every restricted holder.
   useEffect(() => {
+    if (!owningReadsCurrent) {
+      invalidateRestricted();
+      return;
+    }
     const revealLive =
       revealed === null ||
       revealed.tokenKey === liveTokenKey(revealed.observationId);
@@ -785,7 +797,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     if (!revealLive || !draftLive || !issuedLive) {
       invalidateRestricted();
     }
-  }, [work.data, workId]);
+  }, [work.data, workId, owningReadsCurrent]);
 
   // One expiry clock: the restricted authorization dies at claim expiry
   // without navigation, and any response arriving after that is discarded
@@ -866,15 +878,10 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     invalidateRestricted();
   };
 
-  const owningReadsCurrent =
-    work.isSuccess &&
-    workspace.isSuccess &&
-    history.isSuccess &&
-    gate.isSuccess;
-
   const handleClaim = () => {
     if (work.data === undefined || anyPending || pendingCommand !== null) return;
     if (requiresReload || work.isError || !owningReadsCurrent) return;
+    invalidateRestricted();
     const command: ClaimCommand = {
       expected_context: work.data.command_context,
     };
@@ -890,6 +897,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
   const handleRenew = () => {
     if (work.data === undefined || anyPending || pendingCommand !== null) return;
     if (requiresReload || work.isError || !owningReadsCurrent) return;
+    invalidateRestricted();
     const command: FencedCommand = {
       expected_fence: work.data.claim_fence,
       expected_context: work.data.command_context,
@@ -907,6 +915,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
   const handleRelease = () => {
     if (work.data === undefined || anyPending || pendingCommand !== null) return;
     if (requiresReload || work.isError || !owningReadsCurrent) return;
+    invalidateRestricted();
     const command: FencedCommand = {
       expected_fence: work.data.claim_fence,
       expected_context: work.data.command_context,
@@ -924,6 +933,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
   const handleSubmit = () => {
     if (work.data === undefined || anyPending || pendingCommand !== null) return;
     if (requiresReload || work.isError || !owningReadsCurrent) return;
+    invalidateRestricted();
     const command: SubmitCommand = {
       expected_fence: work.data.claim_fence,
       expected_context: work.data.command_context,
@@ -944,15 +954,10 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
    * discard it before storage otherwise (context change, expiry, access
    * loss, or a newer command). */
   const storeRevealIfIssued = (issuance: IssuedCommand, result: RevealResult) => {
+    if (issuedRef.current !== issuance) return;
     const expectedKey = liveTokenKey(result.observation_id);
-    if (
-      issuedRef.current !== issuance ||
-      expectedKey === null ||
-      issuance.tokenKey !== expectedKey
-    ) {
-      if (issuedRef.current === issuance) issuedRef.current = null;
-      reveal.reset();
-      setPendingCommand(null);
+    if (expectedKey === null || issuance.tokenKey !== expectedKey) {
+      invalidateRestricted();
       return;
     }
     issuedRef.current = null;
@@ -1043,15 +1048,10 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     issuance: IssuedCommand,
     result: CorrectionResult,
   ) => {
+    if (issuedRef.current !== issuance) return;
     const expectedKey = liveTokenKey(issuance.observationId);
-    if (
-      issuedRef.current !== issuance ||
-      expectedKey === null ||
-      issuance.tokenKey !== expectedKey
-    ) {
-      if (issuedRef.current === issuance) issuedRef.current = null;
-      correct.reset();
-      setPendingCommand(null);
+    if (expectedKey === null || issuance.tokenKey !== expectedKey) {
+      invalidateRestricted();
       return;
     }
     issuedRef.current = null;
@@ -1101,12 +1101,10 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
       observationId: correctionTarget.observationId,
       command,
     };
+    // Submission is a restricted boundary: clear the reveal, draft, and old
+    // mutation state before installing the one command allowed for replay.
+    invalidateRestricted();
     issuedRef.current = issuance;
-    // Submission boundary: close the restricted reveal and the draft form up
-    // front so neither may linger in the DOM while the command is in flight.
-    setRevealed(null);
-    setCorrectionTarget(null);
-    setCorrectionRaw("");
     setPendingCommand({ action: "correct", command });
     setLastAccepted(null);
     setRejectedAction(null);

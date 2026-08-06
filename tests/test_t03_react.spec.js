@@ -800,6 +800,7 @@ async function runLostResponseReplayTracer(browser) {
     // part of the entered value.
     const paddedRaw = `  ${sourceValue}  `;
     let correctionAttempts = 0;
+    let upstreamCorrectionAttempts = 0;
     let replayResult = null;
     await reviewer.route("**/correct-field-observation", async (route) => {
       correctionAttempts += 1;
@@ -807,13 +808,15 @@ async function runLostResponseReplayTracer(browser) {
         // The correction executes through FastAPI and commits; only the
         // browser response is lost on the wire, so the transport outcome is
         // unknown while the server has already accepted it.
+        upstreamCorrectionAttempts += 1;
         await route.fetch();
         await route.abort();
         return;
       }
+      upstreamCorrectionAttempts += 1;
       const response = await route.fetch();
       replayResult = await response.json();
-      await route.continue();
+      await route.fulfill({ response });
     });
     await reviewer.getByTestId("review-correct-button").nth(3).click();
     await expect(reviewer.getByTestId("review-correction-form")).toBeVisible();
@@ -842,6 +845,8 @@ async function runLostResponseReplayTracer(browser) {
       entry.url.endsWith("/correct-field-observation"),
     );
     expect(correctionPosts.length).toBe(2);
+    expect(correctionAttempts).toBe(2);
+    expect(upstreamCorrectionAttempts).toBe(2);
     // The replay is the exact original command: same idempotency key and a
     // byte-identical body (proven through digests so a failure prints no
     // raw value), never a reconstruction from current UI state.

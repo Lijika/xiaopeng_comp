@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import type { ReactNode } from "react";
@@ -23,7 +24,11 @@ import {
   type SubmitCommand,
   type VerifyRecoveryCommand,
 } from "./hooks";
-import { createQueryClient, fetchRouter } from "../test-utils";
+import {
+  createQueryClient,
+  fetchRouter,
+  restrictedDigest,
+} from "../test-utils";
 
 function wrap(client: QueryClient) {
   return ({ children }: { children: ReactNode }) => (
@@ -40,6 +45,8 @@ const ROUTE_PATH =
   "/controlled/s01/api/queries/applications/app_t01retry9876543210fedcba/current-route";
 const HISTORY_PATH =
   "/controlled/s01/api/queries/applications/app_t01retry9876543210fedcba/history";
+const RESTRICTED_CORRECTION_RAW = `restricted-correction:${randomUUID()}`;
+const RESTRICTED_SOURCE_TEXT = `restricted-source:${randomUUID()}`;
 
 function workPayload(overrides: Record<string, unknown> = {}) {
   return {
@@ -660,6 +667,44 @@ describe("correction convergence polling (T03)", () => {
     }
   });
 
+  it("gives a current definitive error precedence over retained cached data", async () => {
+    let failRoute = false;
+    const currentHistory = historyPayload();
+    const waitingHistory = historyPayload({
+      runs: currentHistory.runs.map((run) => ({ ...run, current: false })),
+    });
+    const { jsonResponse } = fetchRouter({
+      [`GET ${ROUTE_PATH}`]: () =>
+        failRoute
+          ? jsonResponse({ detail: { error: "S03_NOT_FOUND" } }, 404)
+          : jsonResponse(routePayload()),
+      [`GET ${HISTORY_PATH}`]: () =>
+        jsonResponse(failRoute ? currentHistory : waitingHistory),
+    });
+    const client = createQueryClient();
+    const { result, rerender } = renderHook(
+      ({ acceptedRevision }: { acceptedRevision: number | null }) => ({
+        route: useCurrentRoute(APP_ID),
+        history: useApplicationHistory(APP_ID),
+        converge: useCorrectionConvergence(APP_ID, acceptedRevision),
+      }),
+      {
+        wrapper: wrap(client),
+        initialProps: { acceptedRevision: null as number | null },
+      },
+    );
+    await waitFor(() => expect(result.current.route.isSuccess).toBe(true));
+    await waitFor(() => expect(result.current.history.isSuccess).toBe(true));
+
+    // The route's last successful value looks converged, but its current
+    // refetch is now a definitive 404 while history catches up.  The current
+    // error must win over retained cache data.
+    failRoute = true;
+    rerender({ acceptedRevision: 2 });
+    await waitFor(() => expect(result.current.converge).toBe("terminal"));
+    expect(result.current.route.isError).toBe(true);
+  });
+
   it("cancels the poll timer on unmount", async () => {
     vi.useFakeTimers();
     try {
@@ -775,7 +820,7 @@ describe("reveal and correction mutations (T03)", () => {
       document_id: "reg",
       document_role: "机动车登记证书",
       field: "engine_no",
-      raw: "LSVAA4182N500005Z",
+      raw: RESTRICTED_CORRECTION_RAW,
       source_location: {
         source_sha256: "d".repeat(64),
         source_page: 1,
@@ -797,7 +842,7 @@ describe("reveal and correction mutations (T03)", () => {
         source_page: 1,
         source_region: "region:1",
       },
-      source_text: "LSVAA4182N5000054",
+      source_text: RESTRICTED_SOURCE_TEXT,
       revealed_at: 1786000000,
     };
   }
@@ -830,7 +875,9 @@ describe("reveal and correction mutations (T03)", () => {
     result.current.reveal.mutate(revealCommand);
     await waitFor(() => expect(result.current.reveal.isSuccess).toBe(true));
     expect(revealPosts).toBe(1);
-    expect(result.current.reveal.data?.source_text).toBe("LSVAA4182N5000054");
+    expect(restrictedDigest(result.current.reveal.data?.source_text)).toBe(
+      restrictedDigest(RESTRICTED_SOURCE_TEXT),
+    );
     // The restricted reveal must never invalidate the server-owned S01 cache.
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(queueRequests).toBe(1);
@@ -916,7 +963,7 @@ describe("reveal and correction mutations (T03)", () => {
       .getAll()
       .some((mutation) =>
         JSON.stringify(mutation.state.variables ?? {}).includes(
-          "LSVAA4182N500005Z",
+          RESTRICTED_CORRECTION_RAW,
         ),
       );
     expect(rawRetained).toBe(true);
@@ -927,7 +974,7 @@ describe("reveal and correction mutations (T03)", () => {
       .getAll()
       .some((mutation) =>
         JSON.stringify(mutation.state.variables ?? {}).includes(
-          "LSVAA4182N500005Z",
+          RESTRICTED_CORRECTION_RAW,
         ),
       );
     expect(afterUnmount).toBe(false);

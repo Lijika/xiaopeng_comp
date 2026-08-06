@@ -316,6 +316,19 @@ export function useCorrectionConvergence(
       if (cancelled) return;
       await queryClient.refetchQueries({ queryKey: HISTORY_KEY(applicationId) });
       if (cancelled) return;
+      const routeState = queryClient.getQueryState(ROUTE_KEY(applicationId));
+      const historyState = queryClient.getQueryState(HISTORY_KEY(applicationId));
+      if (
+        (routeState?.error !== undefined &&
+          routeState.error !== null &&
+          isDefinitiveRejection(routeState.error)) ||
+        (historyState?.error !== undefined &&
+          historyState.error !== null &&
+          isDefinitiveRejection(historyState.error))
+      ) {
+        setOutcome("terminal");
+        return;
+      }
       const route = queryClient.getQueryData<CurrentRouteResponse>(
         ROUTE_KEY(applicationId),
       );
@@ -324,19 +337,6 @@ export function useCorrectionConvergence(
       );
       if (correctionConverged(route, history, acceptedEvidenceRevision)) {
         setOutcome("converged");
-        return;
-      }
-      const routeState = queryClient.getQueryState(ROUTE_KEY(applicationId));
-      const historyState = queryClient.getQueryState(HISTORY_KEY(applicationId));
-      if (
-        (routeState?.error !== undefined &&
-          routeState?.error !== null &&
-          isDefinitiveRejection(routeState.error)) ||
-        (historyState?.error !== undefined &&
-          historyState?.error !== null &&
-          isDefinitiveRejection(historyState.error))
-      ) {
-        setOutcome("terminal");
         return;
       }
       // Safety ceiling only: the bounded end is surfaced, never converged.

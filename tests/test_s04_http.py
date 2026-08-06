@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from pathlib import Path
@@ -16,6 +17,10 @@ from tests.test_s01_http import (
 )
 from tests.test_s02_http import _configured_http_source, _open_session
 from tests.test_s03_http import _ready_review
+
+
+def _restricted_digest(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def test_s01_reveal_and_correction_openapi_contracts_are_closed(
@@ -135,6 +140,20 @@ def test_s01_reveal_and_correction_openapi_contracts_are_closed(
 
 def test_correction_rerun_history_and_current_route_over_http(tmp_path: Path) -> None:
     state_path = tmp_path / "target.sqlite3"
+    scenario = json.loads(
+        (
+            Path(__file__).parents[1]
+            / "fixtures"
+            / "applications"
+            / "app_s04_bad_vin.json"
+        ).read_text(encoding="utf-8")
+    )
+    source_raw = next(
+        document
+        for document in scenario["documents"]
+        if document["doc_id"] == "inv"
+    )["fields"]["engine_no"]["raw"]
+    padded_raw = f"  {source_raw}  "
     with s01_test_loopback(
         {
             "TASK4_S01_STATE_PATH": str(state_path),
@@ -184,7 +203,7 @@ def test_correction_rerun_history_and_current_route_over_http(tmp_path: Path) ->
                 # The raw evidence crosses the boundary byte-for-byte: the
                 # leading/trailing whitespace is part of the entered value and
                 # must be accepted and persisted verbatim by the authority.
-                "raw": "  S2ENG54A  ",
+                "raw": padded_raw,
                 "source_location": {
                     key: source[key]
                     for key in ("source_sha256", "source_page", "source_region")
@@ -216,7 +235,8 @@ def test_correction_rerun_history_and_current_route_over_http(tmp_path: Path) ->
             use_session=False,
         )
         malformed = json.loads(json.dumps(command))
-        malformed["correction"]["unexpected"] = "RAW-CORRECTION-SENTINEL"
+        unexpected_raw = f"restricted-invalid:{state_path.name}"
+        malformed["correction"]["unexpected"] = unexpected_raw
         invalid = server.request(
             "POST",
             f"/controlled/s01/api/commands/review-work-items/{work_item_id}/correct-field-observation",
@@ -274,7 +294,8 @@ def test_correction_rerun_history_and_current_route_over_http(tmp_path: Path) ->
     assert hidden_reveal.json()["detail"] == {"error": "S03_NOT_FOUND"}
     assert invalid.status == 422
     assert invalid.json()["detail"]["error"] == "S03_INVALID_COMMAND"
-    assert "RAW-CORRECTION-SENTINEL" not in invalid.text
+    invalid_is_redacted = unexpected_raw not in invalid.text
+    assert invalid_is_redacted
     assert unsupported.status == 422
     assert unsupported.json()["detail"]["error"] == "S03_INVALID_COMMAND"
     assert after_rejection == before_rejection
@@ -287,8 +308,15 @@ def test_correction_rerun_history_and_current_route_over_http(tmp_path: Path) ->
     ).fetchall()
     connection.close()
     successors = []
+    restricted_values = {padded_raw}
     for (payload,) in stored:
         event = json.loads(payload)
+        for document in event.get("payload", {}).get("evidence", []):
+            for observation in document.get("observations", []):
+                for key in ("raw", "raw_lexeme", "source_text"):
+                    value = observation.get(key)
+                    if isinstance(value, str) and value:
+                        restricted_values.add(value)
         if event.get("kind") != "field_correction":
             continue
         successor_id = event["payload"]["correction"]["observation_id"]
@@ -297,8 +325,12 @@ def test_correction_rerun_history_and_current_route_over_http(tmp_path: Path) ->
                 if observation.get("observation_id") == successor_id:
                     successors.append(observation)
     assert len(successors) == 1
-    assert successors[0]["raw"] == "  S2ENG54A  "
-    assert successors[0]["raw_lexeme"] == "  S2ENG54A  "
+    assert _restricted_digest(successors[0]["raw"]) == _restricted_digest(
+        padded_raw
+    )
+    assert _restricted_digest(successors[0]["raw_lexeme"]) == _restricted_digest(
+        padded_raw
+    )
     assert corrected.status == 200
     assert corrected.json()["status"] == "accepted"
     assert pending.status == 200
@@ -312,8 +344,8 @@ def test_correction_rerun_history_and_current_route_over_http(tmp_path: Path) ->
         [corrected.json(), pending.json(), history.json(), current.json()],
         ensure_ascii=False,
     )
-    assert "S2ENG54Z" not in public
-    assert "S2ENG54A" not in public
+    public_is_redacted = all(value not in public for value in restricted_values)
+    assert public_is_redacted
 
 
 def test_registered_source_correction_reruns_to_fresh_review_work_over_http(

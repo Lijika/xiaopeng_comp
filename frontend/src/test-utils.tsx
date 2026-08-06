@@ -1,7 +1,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render } from "@testing-library/react";
+import { createHash } from "node:crypto";
 import type { ReactElement } from "react";
 import { vi } from "vitest";
+
+export function restrictedDigest(value: unknown): string {
+  return createHash("sha256").update(String(value), "utf8").digest("hex");
+}
 
 export function createQueryClient(): QueryClient {
   return new QueryClient({
