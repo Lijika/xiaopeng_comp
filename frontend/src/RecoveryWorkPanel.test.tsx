@@ -586,6 +586,159 @@ describe("RecoveryWorkPanel", () => {
     expect(keys[1]).toBe(originalKey);
   });
 
+  it("keeps the same idempotency key after a POST 500 and a still-open Reload before Retry", async () => {
+    let serverError = true;
+    const router = fetchRouter({
+      [`GET ${WORK_PATH}`]: () =>
+        new Response(JSON.stringify(workPayload({ can_verify: true })), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      [`POST ${VERIFY_PATH}`]: () => {
+        if (serverError) {
+          serverError = false;
+          return new Response(
+            JSON.stringify({ detail: { error: "S01_INTERNAL_ERROR" } }),
+            { status: 500, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            status: "accepted",
+            replayed: false,
+            recovery_work_id: WORK_ID,
+            recovery_fact_id: "fact-t01-500-retry",
+            application_id: APP_ID,
+            phase: "Evidence Ready",
+            lifecycle_revision: 6,
+            evidence_revision: 1,
+            successor_job_id: "job_t01successor00000000000000",
+            successor_fence: 2,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    });
+    renderWithQuery(<RecoveryWorkPanel workId={WORK_ID} />);
+    const verifyButton = () =>
+      screen.getByRole("button", { name: "验证恢复" });
+    await waitFor(() => expect(verifyButton()).toBeEnabled());
+
+    await userEvent.click(verifyButton());
+    await waitFor(() =>
+      expect(screen.getByTestId("recovery-command-status")).toHaveTextContent(
+        "恢复验证被拒绝",
+      ),
+    );
+    const originalKey = (
+      router.calls.find((call) => call.method === "POST")?.body as
+        | Record<string, unknown>
+        | undefined
+    )?.idempotency_key as string;
+
+    await userEvent.click(screen.getByRole("button", { name: "重新加载" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("recovery-command-status")).toHaveTextContent(
+        "恢复验证被拒绝",
+      ),
+    );
+    expect(verifyButton()).toBeEnabled();
+    expect(
+      router.calls.filter((call) => call.method === "POST"),
+    ).toHaveLength(1);
+
+    await userEvent.click(verifyButton());
+    await waitFor(() =>
+      expect(screen.getByTestId("recovery-command-status")).toHaveTextContent(
+        "恢复事实已接受",
+      ),
+    );
+    const keys = router.calls
+      .filter((call) => call.method === "POST")
+      .map((call) => (call.body as Record<string, unknown>).idempotency_key);
+    expect(keys).toHaveLength(2);
+    expect(keys[1]).toBe(originalKey);
+  });
+
+  it("keeps the same idempotency key after a POST 503 and a still-open Reload before Retry", async () => {
+    let serverError = true;
+    const router = fetchRouter({
+      [`GET ${WORK_PATH}`]: () =>
+        new Response(JSON.stringify(workPayload({ can_verify: true })), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      [`POST ${VERIFY_PATH}`]: () => {
+        if (serverError) {
+          serverError = false;
+          return new Response(
+            JSON.stringify({
+              detail: {
+                error: "S07_UNAVAILABLE",
+                reason_code: "recovery.verifier_unavailable",
+              },
+            }),
+            { status: 503, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            status: "accepted",
+            replayed: false,
+            recovery_work_id: WORK_ID,
+            recovery_fact_id: "fact-t01-503-retry",
+            application_id: APP_ID,
+            phase: "Evidence Ready",
+            lifecycle_revision: 6,
+            evidence_revision: 1,
+            successor_job_id: "job_t01successor00000000000000",
+            successor_fence: 2,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    });
+    renderWithQuery(<RecoveryWorkPanel workId={WORK_ID} />);
+    const verifyButton = () =>
+      screen.getByRole("button", { name: "验证恢复" });
+    await waitFor(() => expect(verifyButton()).toBeEnabled());
+
+    await userEvent.click(verifyButton());
+    await waitFor(() =>
+      expect(screen.getByTestId("recovery-command-status")).toHaveTextContent(
+        "recovery.verifier_unavailable",
+      ),
+    );
+    const originalKey = (
+      router.calls.find((call) => call.method === "POST")?.body as
+        | Record<string, unknown>
+        | undefined
+    )?.idempotency_key as string;
+
+    await userEvent.click(screen.getByRole("button", { name: "重新加载" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("recovery-command-status")).toHaveTextContent(
+        "recovery.verifier_unavailable",
+      ),
+    );
+    expect(verifyButton()).toBeEnabled();
+    expect(
+      router.calls.filter((call) => call.method === "POST"),
+    ).toHaveLength(1);
+
+    await userEvent.click(verifyButton());
+    await waitFor(() =>
+      expect(screen.getByTestId("recovery-command-status")).toHaveTextContent(
+        "恢复事实已接受",
+      ),
+    );
+    const keys = router.calls
+      .filter((call) => call.method === "POST")
+      .map((call) => (call.body as Record<string, unknown>).idempotency_key);
+    expect(keys).toHaveLength(2);
+    expect(keys[1]).toBe(originalKey);
+  });
+
   it("latches acceptance locally so a delayed server refetch allows zero extra POSTs", async () => {
     let getCount = 0;
     let postCount = 0;

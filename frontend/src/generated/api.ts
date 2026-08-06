@@ -1558,15 +1558,6 @@ export interface components {
             /** Run Id */
             run_id?: string | null;
         };
-        /** S07VerifyRecoveryBody */
-        S07VerifyRecoveryBody: {
-            /** Expected Criterion Digest */
-            expected_criterion_digest: string;
-            /** Expected Lifecycle Revision */
-            expected_lifecycle_revision: number;
-            /** Idempotency Key */
-            idempotency_key: string;
-        };
         /** ValidationError */
         ValidationError: {
             /** Context */
@@ -2480,7 +2471,14 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["S07VerifyRecoveryBody"];
+                "application/json": {
+                    /** Expected Criterion Digest */
+                    expected_criterion_digest: string;
+                    /** Expected Lifecycle Revision */
+                    expected_lifecycle_revision: number;
+                    /** Idempotency Key */
+                    idempotency_key: string;
+                };
             };
         };
         responses: {
@@ -2504,6 +2502,15 @@ export interface operations {
             };
             /** @description Conflict */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
                 headers: {
                     [name: string]: unknown;
                 };

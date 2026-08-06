@@ -102,6 +102,24 @@ async function stopServer(server) {
   }
 }
 
+/**
+ * Attempts every owned cleanup even when an earlier one rejects, so a failed
+ * context/close or setup step can never skip later cleanup (server stop,
+ * temp-file unlink).  Re-throws the first failure so the original error is
+ * preserved; the callers suppress it when the test body already failed.
+ */
+async function settleCleanup(cleanups) {
+  const failures = [];
+  for (const cleanup of cleanups) {
+    try {
+      await cleanup();
+    } catch (error) {
+      if (failures.length === 0) failures.push(error);
+    }
+  }
+  if (failures.length > 0) throw failures[0];
+}
+
 function restrictedStrings() {
   const fixture = JSON.parse(
     fs.readFileSync(path.join(ROOT, "fixtures", "applications", SCENARIO), "utf8"),
@@ -138,15 +156,17 @@ function assertNoOverflow(page) {
 }
 
 /**
- * Records page errors and console errors against the live arrays (asserted
- * after the flow), filtering only exact expected resource errors (the
- * deliberate stale-command 409 and any named expectations such as the
- * existence-hiding 404 after session expiry) — each counted separately —
- * so any unexpected 404/500/network/console error stays visible.
+ * Records page errors, console errors, and network request failures against
+ * the live arrays (asserted after the flow), filtering only exact expected
+ * resource errors (the deliberate stale-command 409 and named expectations
+ * such as the existence-hiding 404 after session expiry, which may be bound
+ * to an exact work-detail URL) — each counted separately — so any unexpected
+ * 404/500/network/console/page failure stays visible.
  */
 function trackPageDiagnostics(page, expectations = []) {
   const browserErrors = [];
   const consoleErrors = [];
+  const networkErrors = [];
   const counts = { stale409: 0 };
   for (const expectation of expectations) counts[expectation.name] = 0;
   page.on("pageerror", (error) => browserErrors.push(error.message));
@@ -160,7 +180,8 @@ function trackPageDiagnostics(page, expectations = []) {
     }
     for (const expectation of expectations) {
       if (
-        location.includes(expectation.pathFragment) &&
+        expectation.url !== undefined &&
+        location === expectation.url &&
         message.text().includes(expectation.statusText)
       ) {
         counts[expectation.name] += 1;
@@ -169,7 +190,15 @@ function trackPageDiagnostics(page, expectations = []) {
     }
     consoleErrors.push(message.text());
   });
-  return { browserErrors, consoleErrors, counts };
+  page.on("requestfailed", (request) => {
+    const url = request.url();
+    if (url.endsWith("/favicon.ico")) return;
+    networkErrors.push({
+      url,
+      failure: request.failure()?.errorText ?? "failed",
+    });
+  });
+  return { browserErrors, consoleErrors, networkErrors, counts };
 }
 
 async function assertControlsFitAndDoNotOverlap(page, testIds) {
@@ -177,22 +206,26 @@ async function assertControlsFitAndDoNotOverlap(page, testIds) {
   const centerHits = [];
   for (const testId of testIds) {
     const locator = page.getByTestId(testId);
-    if ((await locator.count()) === 0) continue;
-    if (!(await locator.isVisible())) continue;
+    // Every named required control must exist exactly once and be visible:
+    // a missing or hidden locator is a hard failure, never a silent skip.
+    expect(await locator.count(), `${testId} count`).toBe(1);
     await locator.scrollIntoViewIfNeeded();
+    expect(await locator.isVisible(), `${testId} visible`).toBe(true);
     const box = await locator.boundingBox();
-    expect(box, testId).not.toBeNull();
+    expect(box, `${testId} bounding box`).not.toBeNull();
     const scroll = await page.evaluate(() => window.scrollY);
-    boxes.push({
-      testId,
-      box,
-      docTop: box.y + scroll,
-      mustFitViewport: !testId.endsWith("-panel"),
-    });
+    // Hit-test immediately after this element's scroll so a later element's
+    // scroll cannot invalidate the measured box.
     centerHits.push(
-      page.evaluate(({ testId, box }) => {
+      await page.evaluate(({ testId, box }) => {
         const element = document.querySelector(`[data-testid="${testId}"]`);
         if (!element) return null;
+        if (getComputedStyle(element).pointerEvents === "none") {
+          // A deliberately non-interactive (disabled) control is not
+          // hit-testable by design; its visibility, real bounding box, and
+          // non-overlap are still asserted.
+          return true;
+        }
         const hit = document.elementFromPoint(
           box.x + box.width / 2,
           box.y + box.height / 2,
@@ -200,6 +233,12 @@ async function assertControlsFitAndDoNotOverlap(page, testIds) {
         return element.contains(hit);
       }, { testId, box }),
     );
+    boxes.push({
+      testId,
+      box,
+      docTop: box.y + scroll,
+      mustFitViewport: !testId.endsWith("-panel"),
+    });
   }
   const { innerWidth, innerHeight } = await page.evaluate(() => ({
     innerWidth: window.innerWidth,
@@ -258,39 +297,42 @@ async function assertControlsFitAndDoNotOverlap(page, testIds) {
 }
 
 async function runFullChainTracer(browser, viewport, label) {
-  const server = await startServer();
-  const reviewerContext = await browser.newContext({
-    viewport,
-    extraHTTPHeaders: { Authorization: `Bearer ${DEMO_CREDENTIAL}` },
-  });
-  const operatorContext = await browser.newContext({
-    viewport,
-    extraHTTPHeaders: { Authorization: `Bearer ${OPERATOR_CREDENTIAL}` },
-  });
-  const reviewer = await reviewerContext.newPage();
-  const operator = await operatorContext.newPage();
-  const reviewerDiagnostics = trackPageDiagnostics(reviewer);
-  const operatorDiagnostics = trackPageDiagnostics(operator);
-  const restricted = restrictedStrings();
-
-  let verifyPosts = 0;
-  let acceptedPosts = 0;
-  let stalePosts = 0;
-  const verifyBodies = [];
-  const countVerify = (page) =>
-    page.on("request", (request) => {
-      const url = new URL(request.url());
-      if (
-        request.method() === "POST" &&
-        url.pathname.includes("/commands/recovery-work-items/") &&
-        url.pathname.endsWith("/verify")
-      ) {
-        verifyPosts += 1;
-        verifyBodies.push(request.postDataJSON());
-      }
-    });
-
+  const resources = {};
+  let failure;
   try {
+    resources.server = await startServer();
+    const server = resources.server;
+    resources.reviewerContext = await browser.newContext({
+      viewport,
+      extraHTTPHeaders: { Authorization: `Bearer ${DEMO_CREDENTIAL}` },
+    });
+    resources.operatorContext = await browser.newContext({
+      viewport,
+      extraHTTPHeaders: { Authorization: `Bearer ${OPERATOR_CREDENTIAL}` },
+    });
+    const reviewer = await resources.reviewerContext.newPage();
+    const operator = await resources.operatorContext.newPage();
+    const reviewerDiagnostics = trackPageDiagnostics(reviewer);
+    const operatorDiagnostics = trackPageDiagnostics(operator);
+    const restricted = restrictedStrings();
+
+    let verifyPosts = 0;
+    let acceptedPosts = 0;
+    let stalePosts = 0;
+    const verifyBodies = [];
+    const countVerify = (page) =>
+      page.on("request", (request) => {
+        const url = new URL(request.url());
+        if (
+          request.method() === "POST" &&
+          url.pathname.includes("/commands/recovery-work-items/") &&
+          url.pathname.endsWith("/verify")
+        ) {
+          verifyPosts += 1;
+          verifyBodies.push(request.postDataJSON());
+        }
+      });
+
     const shellResponse = await reviewer.goto(`${server.baseURL}${REACT_URL}`, {
       waitUntil: "networkidle",
     });
@@ -376,6 +418,19 @@ async function runFullChainTracer(browser, viewport, label) {
     const authority = await authorityResponse.json();
     const authorityText = JSON.stringify(authority);
     for (const value of restricted) expect(authorityText).not.toContain(value);
+
+    // Reviewer layout while the open Recovery Work and its actionable queue
+    // link are both live: every named control exists exactly once, is
+    // visible, fits the viewport, does not overlap, and is center-hittable.
+    await assertControlsFitAndDoNotOverlap(reviewer, [
+      "queue-panel",
+      "recovery-panel",
+      "recovery-actions",
+      "recovery-command-status",
+      "queue-work-link",
+      "reload-button",
+      "verify-button",
+    ]);
 
     let staleProjectionDelivered = false;
     await operator.route(
@@ -502,14 +557,17 @@ async function runFullChainTracer(browser, viewport, label) {
     expect(bundleText).not.toContain(DEMO_CREDENTIAL);
     expect(bundleText).not.toContain(OPERATOR_CREDENTIAL);
 
-    const legacyResponse = await reviewer.goto(`${server.baseURL}/controlled/s01`);
-    expect(legacyResponse.status()).toBe(200);
-
+    // Layout checks run while both contexts are still on the React page: the
+    // Reviewer authoritative gate and the Operator recovery panel/actions plus
+    // the individual reload/verify buttons, at the active viewport.  The
+    // legacy rollback navigation happens strictly after these.
     await assertControlsFitAndDoNotOverlap(operator, [
       "queue-panel",
       "recovery-panel",
       "recovery-actions",
       "recovery-command-status",
+      "reload-button",
+      "verify-button",
     ]);
     await assertControlsFitAndDoNotOverlap(reviewer, [
       "queue-panel",
@@ -517,17 +575,39 @@ async function runFullChainTracer(browser, viewport, label) {
       "recovery-actions",
       "recovery-command-status",
       "gate-panel",
+      "reload-button",
+      "verify-button",
     ]);
+
+    const legacyResponse = await reviewer.goto(`${server.baseURL}/controlled/s01`);
+    expect(legacyResponse.status()).toBe(200);
 
     expect(reviewerDiagnostics.browserErrors).toEqual([]);
     expect(operatorDiagnostics.browserErrors).toEqual([]);
     expect(reviewerDiagnostics.consoleErrors).toEqual([]);
     expect(operatorDiagnostics.consoleErrors).toEqual([]);
+    expect(reviewerDiagnostics.networkErrors).toEqual([]);
+    expect(operatorDiagnostics.networkErrors).toEqual([]);
     expect(operatorDiagnostics.counts.stale409).toBe(1);
+  } catch (error) {
+    failure = error;
+    throw error;
   } finally {
-    await reviewerContext.close();
-    await operatorContext.close();
-    await stopServer(server);
+    try {
+      await settleCleanup([
+        resources.reviewerContext
+          ? () => resources.reviewerContext.close()
+          : () => Promise.resolve(),
+        resources.operatorContext
+          ? () => resources.operatorContext.close()
+          : () => Promise.resolve(),
+        resources.server
+          ? () => stopServer(resources.server)
+          : () => Promise.resolve(),
+      ]);
+    } catch (cleanupError) {
+      if (failure === undefined) throw cleanupError;
+    }
   }
 }
 
@@ -554,32 +634,34 @@ test("T01 production tracer: expired session shows the explicit expired state an
     `xiaopeng-task4-t01-react-clock-${process.pid}-${Date.now()}.txt`,
   );
   fs.writeFileSync(clockPath, "100", "ascii");
-  const server = await startServer({
-    appTarget: "tests.test_t01_http:create_t01_expiring_app",
-    TASK4_S01_TEST_SESSION_CLOCK_PATH: clockPath,
-    TASK4_S01_TEST_SESSION_TTL_SECONDS: "10",
-  });
-  const reviewerContext = await browser.newContext({
-    viewport: { width: 1280, height: 800 },
-    extraHTTPHeaders: { Authorization: `Bearer ${DEMO_CREDENTIAL}` },
-  });
-  const reviewer = await reviewerContext.newPage();
-  const diagnostics = trackPageDiagnostics(reviewer, [
-    {
-      name: "hiddenWork404",
-      pathFragment: "/queries/recovery-work-items/",
-      statusText: "404",
-    },
-  ]);
-  const restricted = restrictedStrings();
-
+  const resources = {};
+  let failure;
   try {
+    resources.server = await startServer({
+      appTarget: "tests.test_t01_http:create_t01_expiring_app",
+      TASK4_S01_TEST_SESSION_CLOCK_PATH: clockPath,
+      TASK4_S01_TEST_SESSION_TTL_SECONDS: "10",
+    });
+    const server = resources.server;
+    resources.reviewerContext = await browser.newContext({
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: { Authorization: `Bearer ${DEMO_CREDENTIAL}` },
+    });
+    const reviewer = await resources.reviewerContext.newPage();
+    const expiry404 = { name: "hiddenWork404", url: null, statusText: "404" };
+    const diagnostics = trackPageDiagnostics(reviewer, [expiry404]);
+    const restricted = restrictedStrings();
+
     await reviewer.goto(`${server.baseURL}${REACT_URL}`, {
       waitUntil: "networkidle",
     });
     await expect(reviewer.getByTestId("queue-panel")).toBeVisible();
 
     const workId = await installRecoveryWork(server.baseURL, reviewer);
+    // Bind the expected existence-hiding 404 to the exact work-detail URL for
+    // the generated work ID: an unrelated or late work-detail 404 can no
+    // longer substitute for the intended expiry 404.
+    expiry404.url = `${server.baseURL}/controlled/s01/api/queries/recovery-work-items/${encodeURIComponent(workId)}`;
     await reviewer.reload({ waitUntil: "networkidle" });
     await expect(
       reviewer.getByRole("link", { name: new RegExp(workId) }),
@@ -612,12 +694,24 @@ test("T01 production tracer: expired session shows the explicit expired state an
     expect(await assertNoOverflow(reviewer)).toBe(true);
     expect(diagnostics.browserErrors).toEqual([]);
     expect(diagnostics.consoleErrors).toEqual([]);
+    expect(diagnostics.networkErrors).toEqual([]);
     expect(diagnostics.counts.stale409).toBe(0);
     expect(diagnostics.counts.hiddenWork404).toBe(1);
+  } catch (error) {
+    failure = error;
+    throw error;
   } finally {
-    await reviewerContext.close();
-    await stopServer(server);
-    fs.unlinkSync(clockPath);
+    try {
+      await settleCleanup([
+        resources.reviewerContext
+          ? () => resources.reviewerContext.close()
+          : () => Promise.resolve(),
+        resources.server ? () => stopServer(resources.server) : () => Promise.resolve(),
+        () => fs.unlinkSync(clockPath),
+      ]);
+    } catch (cleanupError) {
+      if (failure === undefined) throw cleanupError;
+    }
   }
 });
 
@@ -625,35 +719,38 @@ test("T01 production tracer: a failed authoritative reload keeps the conflict fe
   browser,
 }) => {
   test.setTimeout(120_000);
-  const server = await startServer();
-  const operatorContext = await browser.newContext({
-    viewport: { width: 1280, height: 800 },
-    extraHTTPHeaders: { Authorization: `Bearer ${OPERATOR_CREDENTIAL}` },
-  });
-  const reviewerContext = await browser.newContext({
-    viewport: { width: 1280, height: 800 },
-    extraHTTPHeaders: { Authorization: `Bearer ${DEMO_CREDENTIAL}` },
-  });
-  const operator = await operatorContext.newPage();
-  const reviewer = await reviewerContext.newPage();
-  const operatorDiagnostics = trackPageDiagnostics(operator);
-  const restricted = restrictedStrings();
-  const workPath = "**/controlled/s01/api/queries/recovery-work-items/*";
-
-  let verifyPosts = 0;
-  let acceptedPosts = 0;
-  operator.on("request", (request) => {
-    const url = new URL(request.url());
-    if (
-      request.method() === "POST" &&
-      url.pathname.includes("/commands/recovery-work-items/") &&
-      url.pathname.endsWith("/verify")
-    ) {
-      verifyPosts += 1;
-    }
-  });
-
+  const resources = {};
+  let failure;
   try {
+    resources.server = await startServer();
+    const server = resources.server;
+    resources.operatorContext = await browser.newContext({
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: { Authorization: `Bearer ${OPERATOR_CREDENTIAL}` },
+    });
+    resources.reviewerContext = await browser.newContext({
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: { Authorization: `Bearer ${DEMO_CREDENTIAL}` },
+    });
+    const operator = await resources.operatorContext.newPage();
+    const reviewer = await resources.reviewerContext.newPage();
+    const operatorDiagnostics = trackPageDiagnostics(operator);
+    const restricted = restrictedStrings();
+    const workPath = "**/controlled/s01/api/queries/recovery-work-items/*";
+
+    let verifyPosts = 0;
+    let acceptedPosts = 0;
+    operator.on("request", (request) => {
+      const url = new URL(request.url());
+      if (
+        request.method() === "POST" &&
+        url.pathname.includes("/commands/recovery-work-items/") &&
+        url.pathname.endsWith("/verify")
+      ) {
+        verifyPosts += 1;
+      }
+    });
+
     await reviewer.goto(`${server.baseURL}${REACT_URL}`, {
       waitUntil: "networkidle",
     });
@@ -716,12 +813,50 @@ test("T01 production tracer: a failed authoritative reload keeps the conflict fe
     // Exactly one deliberate 500 (the failed authoritative reload) and one
     // deliberate stale-command 409; nothing else may surface.
     expect(operatorDiagnostics.browserErrors).toEqual([]);
+    expect(operatorDiagnostics.networkErrors).toEqual([]);
     expect(operatorDiagnostics.consoleErrors).toHaveLength(1);
     expect(operatorDiagnostics.consoleErrors[0]).toContain("500");
     expect(operatorDiagnostics.counts.stale409).toBe(1);
+  } catch (error) {
+    failure = error;
+    throw error;
   } finally {
-    await operatorContext.close();
-    await reviewerContext.close();
-    await stopServer(server);
+    try {
+      await settleCleanup([
+        resources.operatorContext
+          ? () => resources.operatorContext.close()
+          : () => Promise.resolve(),
+        resources.reviewerContext
+          ? () => resources.reviewerContext.close()
+          : () => Promise.resolve(),
+        resources.server
+          ? () => stopServer(resources.server)
+          : () => Promise.resolve(),
+      ]);
+    } catch (cleanupError) {
+      if (failure === undefined) throw cleanupError;
+    }
   }
+});
+
+test("cleanup settles every owned resource even when a rejected step would previously skip later cleanup", async () => {
+  // A rejected context.close() (or a rejected setup step) must not skip the
+  // later owned cleanups (stopServer, clock/temp unlink), and the first
+  // failure is preserved so an incidental cleanup error never replaces the
+  // original test failure.
+  const order = [];
+  const settle = settleCleanup([
+    async () => {
+      order.push("context.close");
+      throw new Error("context.close failed");
+    },
+    async () => {
+      order.push("stopServer");
+    },
+    async () => {
+      order.push("clock.unlink");
+    },
+  ]);
+  await expect(settle).rejects.toThrow("context.close failed");
+  expect(order).toEqual(["context.close", "stopServer", "clock.unlink"]);
 });

@@ -15,6 +15,7 @@ function RecoveryItemLink({
         event.preventDefault();
         onOpen(item.recovery_work_id);
       }}
+      data-testid="queue-work-link"
       className="block rounded-md border border-border px-3 py-2 [overflow-wrap:anywhere] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
     >
       <span className="flex min-w-0 items-baseline justify-between gap-2">

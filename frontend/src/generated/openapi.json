@@ -1135,36 +1135,6 @@
         "title": "S01VerifyRoutingContext",
         "type": "object"
       },
-      "S07VerifyRecoveryBody": {
-        "additionalProperties": false,
-        "properties": {
-          "expected_criterion_digest": {
-            "maxLength": 64,
-            "minLength": 64,
-            "pattern": "^[0-9a-f]{64}$",
-            "title": "Expected Criterion Digest",
-            "type": "string"
-          },
-          "expected_lifecycle_revision": {
-            "minimum": 1.0,
-            "title": "Expected Lifecycle Revision",
-            "type": "integer"
-          },
-          "idempotency_key": {
-            "maxLength": 200,
-            "minLength": 1,
-            "title": "Idempotency Key",
-            "type": "string"
-          }
-        },
-        "required": [
-          "expected_lifecycle_revision",
-          "expected_criterion_digest",
-          "idempotency_key"
-        ],
-        "title": "S07VerifyRecoveryBody",
-        "type": "object"
-      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -2223,7 +2193,34 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/S07VerifyRecoveryBody"
+                "additionalProperties": false,
+                "properties": {
+                  "expected_criterion_digest": {
+                    "maxLength": 64,
+                    "minLength": 64,
+                    "pattern": "^[0-9a-f]{64}$",
+                    "title": "Expected Criterion Digest",
+                    "type": "string"
+                  },
+                  "expected_lifecycle_revision": {
+                    "minimum": 1,
+                    "title": "Expected Lifecycle Revision",
+                    "type": "integer"
+                  },
+                  "idempotency_key": {
+                    "maxLength": 200,
+                    "minLength": 1,
+                    "title": "Idempotency Key",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "expected_lifecycle_revision",
+                  "expected_criterion_digest",
+                  "idempotency_key"
+                ],
+                "title": "S07VerifyRecoveryBody",
+                "type": "object"
               }
             }
           },
@@ -2259,6 +2256,16 @@
               }
             },
             "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
           },
           "422": {
             "content": {

@@ -181,6 +181,45 @@ class UvicornLoopback:
         finally:
             connection.close()
 
+    def raw_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        body: bytes = b"",
+        content_type: str = "application/json",
+        headers: dict[str, str] | None = None,
+        use_session: bool = True,
+    ) -> LoopbackResponse:
+        """Send arbitrary raw request bytes (malformed JSON, empty, wrong
+        content type) and read the full response over a real socket."""
+        request_headers = {
+            "Accept": "application/json",
+            "Content-Type": content_type,
+            "Content-Length": str(len(body)),
+        }
+        if use_session and self._session_cookie is not None:
+            request_headers["Cookie"] = self._session_cookie
+        if headers:
+            request_headers.update(headers)
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", self._port, timeout=_REQUEST_TIMEOUT_SECONDS
+        )
+        try:
+            connection.request(method, path, body=body, headers=request_headers)
+            response = connection.getresponse()
+            text = response.read().decode("utf-8", errors="replace")
+            response_headers = {
+                key.lower(): value for key, value in response.getheaders()
+            }
+            return LoopbackResponse(
+                status=response.status,
+                headers=response_headers,
+                text=text,
+            )
+        finally:
+            connection.close()
+
     def send_without_reading(
         self,
         method: str,

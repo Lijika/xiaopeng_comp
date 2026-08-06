@@ -12,12 +12,13 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
 
 import yaml
-from fastapi import Body, Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -270,6 +271,21 @@ async def _lifespan(application: FastAPI):
 app = FastAPI(title="Task4 Consistency Demo", version="1.0.0", lifespan=_lifespan)
 
 
+def _sanitized_validation_detail(
+    errors: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Validation detail items never reflect rejected input, context,
+    credentials, or oversized payload content back to the client."""
+    return [
+        {
+            "loc": list(error.get("loc", ())),
+            "msg": str(error.get("msg", "")),
+            "type": str(error.get("type", "")),
+        }
+        for error in errors
+    ]
+
+
 @app.exception_handler(RequestValidationError)
 async def _sanitized_validation_handler(
     request: Request, exc: RequestValidationError
@@ -278,16 +294,7 @@ async def _sanitized_validation_handler(
     or oversized payload content back to the client."""
     return JSONResponse(
         status_code=422,
-        content={
-            "detail": [
-                {
-                    "loc": list(error.get("loc", ())),
-                    "msg": str(error.get("msg", "")),
-                    "type": str(error.get("type", "")),
-                }
-                for error in exc.errors()
-            ]
-        },
+        content={"detail": _sanitized_validation_detail(exc.errors())},
     )
 
 
@@ -1336,6 +1343,70 @@ def _s07_not_found() -> HTTPException:
     return HTTPException(404, detail={"error": "S07_NOT_FOUND"})
 
 
+def _s07_invalid_command() -> HTTPException:
+    return HTTPException(
+        422,
+        detail={
+            "error": "S07_INVALID_COMMAND",
+            "message": "VerifyRecovery command does not match the contract",
+        },
+    )
+
+
+def _s07_command_too_large() -> HTTPException:
+    return HTTPException(
+        413,
+        detail={
+            "error": "S07_INVALID_COMMAND",
+            "message": "VerifyRecovery command exceeds the allowed size",
+        },
+    )
+
+
+async def _s07_verify_command_body(request: Request) -> S07VerifyRecoveryBody:
+    """Authorized-only bounded manual VerifyRecovery body parse.
+
+    This runs only after ``_s07_operator_principal`` has solved, so raw or
+    malformed wire bytes never reach it for anonymous or Reviewer callers.
+    Reads are bounded, JSON is decoded without reflecting rejected input, and
+    schema violations surface as the same sanitized ``loc``/``msg``/``type``
+    detail items as the application-wide validation handler.
+    """
+    declared_length = request.headers.get("content-length")
+    if declared_length is not None:
+        try:
+            if (
+                int(declared_length) < 0
+                or int(declared_length) > S02_MAX_COMMAND_BYTES
+            ):
+                raise _s07_command_too_large()
+        except ValueError:
+            raise _s07_invalid_command() from None
+    content_type = request.headers.get("content-type")
+    if content_type is not None and "application/json" not in content_type.lower():
+        raise HTTPException(
+            422,
+            detail=[
+                {
+                    "loc": ["body"],
+                    "msg": "expected application/json request content type",
+                    "type": "content_type",
+                }
+            ],
+        )
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > S02_MAX_COMMAND_BYTES:
+            raise _s07_command_too_large()
+        chunks.append(chunk)
+    try:
+        return S07VerifyRecoveryBody.model_validate_json(b"".join(chunks))
+    except ValidationError as error:
+        raise HTTPException(422, detail=_sanitized_validation_detail(error.errors())) from error
+
+
 def _s07_operator_principal(request: Request) -> S01CommandPrincipal:
     if not S01_OPERATOR_SUBJECT or not _s01_has_credential(
         request, S01_OPERATOR_CREDENTIAL
@@ -1759,53 +1830,87 @@ def _controlled_s01_shell_response(request: Request, html: str) -> HTMLResponse:
     return response
 
 
-_REACT_SCRIPT_REFERENCE = re.compile(r'<script\b[^>]*\bsrc="([^"]+)"')
-_REACT_STYLESHEET_REFERENCE = re.compile(
-    r'<link\b[^>]*\brel="stylesheet"[^>]*\bhref="([^"]+)"'
+_REACT_EXECUTABLE_SCRIPT_TYPES = frozenset(
+    {"module", "text/javascript", "application/javascript"}
 )
+
+
+class _ReactIndexReferences(HTMLParser):
+    """Order-independent extraction of browser-loaded script/stylesheet refs.
+
+    Attributes are read from the tag attribute list directly, so attribute
+    order never changes whether a script is an executable module entry or a
+    ``<link>`` is a stylesheet.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.script_srcs: list[str] = []
+        self.executable_script_srcs: list[str] = []
+        self.stylesheet_hrefs: list[str] = []
+
+    def handle_starttag(
+        self, tag: str, attrs: list[tuple[str, str | None]]
+    ) -> None:
+        attributes = dict(attrs)
+        if tag == "script":
+            src = attributes.get("src")
+            if isinstance(src, str) and src:
+                self.script_srcs.append(src)
+                script_type = attributes.get("type")
+                if (
+                    script_type is None
+                    or script_type in _REACT_EXECUTABLE_SCRIPT_TYPES
+                ):
+                    self.executable_script_srcs.append(src)
+        elif tag == "link":
+            rel = attributes.get("rel") or ""
+            href = attributes.get("href")
+            if (
+                "stylesheet" in rel.split()
+                and isinstance(href, str)
+                and href
+            ):
+                self.stylesheet_hrefs.append(href)
+
+
+def _react_local_asset_path_is_clean(root: Path, url_path: str) -> bool:
+    parsed = urlparse(url_path)
+    if (
+        parsed.scheme
+        or parsed.netloc
+        or parsed.query
+        or parsed.fragment
+        or not url_path.startswith("/static/react/")
+    ):
+        return False
+    relative = url_path.removeprefix("/static/react/")
+    if not relative or relative.startswith("/"):
+        return False
+    candidate = (root / relative).resolve()
+    return candidate.is_relative_to(root) and candidate.is_file()
 
 
 def _react_build_is_complete(index_html: str) -> bool:
     """True only for a complete local executable React build.
 
-    Every script and stylesheet reference must be a clean absolute path
-    under ``/static/react/`` with no query/fragment or traversal, must
-    resolve to a file inside the React build root, and at least one
-    executable JavaScript module entry (a ``<script src="...js">``) must be
-    present.
+    Tags are parsed order-independently.  Every browser-loaded local script
+    and stylesheet reference must be a clean absolute path under
+    ``/static/react/`` with no scheme/netloc/query/fragment or traversal,
+    must resolve to a file inside the React build root, and at least one
+    genuine executable ``type="module"`` (or classic) JavaScript entry must
+    be present.
     """
+    parser = _ReactIndexReferences()
+    parser.feed(index_html)
     root = S01_REACT_INDEX.parent.resolve()
     module_entries = [
-        match.group(1)
-        for match in _REACT_SCRIPT_REFERENCE.finditer(index_html)
-        if match.group(1).endswith(".js")
+        src for src in parser.executable_script_srcs if src.endswith(".js")
     ]
     if not module_entries:
         return False
-    references = [
-        match.group(1)
-        for match in _REACT_STYLESHEET_REFERENCE.finditer(index_html)
-        if match.group(1).endswith(".css")
-    ] + module_entries
-    for url_path in references:
-        parsed = urlparse(url_path)
-        if (
-            parsed.scheme
-            or parsed.netloc
-            or parsed.query
-            or parsed.fragment
-            or not url_path.startswith("/static/react/")
-        ):
-            return False
-        relative = url_path.removeprefix("/static/react/")
-        if not relative or relative.startswith("/"):
-            return False
-        candidate = (root / relative).resolve()
-        if not candidate.is_relative_to(root):
-            return False
-        if not candidate.is_file():
-            return False
-    return True
+    references = parser.stylesheet_hrefs + parser.script_srcs
+    return all(_react_local_asset_path_is_clean(root, url) for url in references)
 
 
 @app.get("/controlled/s01", response_class=HTMLResponse)
@@ -1984,18 +2089,29 @@ def _s07_verify_operator_dependency(request: Request) -> S01CommandPrincipal:
     responses={
         404: {"model": S01ErrorResponse},
         409: {"model": S01ErrorResponse},
+        413: {"model": S01ErrorResponse},
         422: {"model": S01VerifyErrorResponse},
         503: {"model": S01ErrorResponse},
     },
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": S07VerifyRecoveryBody.model_json_schema(),
+                }
+            },
+        },
+    },
 )
-def controlled_s07_verify_recovery(
+async def controlled_s07_verify_recovery(
     recovery_work_id: str,
     request: Request,
     response: Response,
     principal: S01CommandPrincipal = Depends(_s07_operator_principal),
-    body: S07VerifyRecoveryBody = Body(...),
 ) -> dict[str, Any]:
     _s01_disable_cache(response)
+    body = await _s07_verify_command_body(request)
     try:
         result = _s01_service().verify_recovery(
             principal=principal,
@@ -2007,13 +2123,7 @@ def controlled_s07_verify_recovery(
     except QueryNotFound as error:
         raise _s07_not_found() from error
     except ValueError as error:
-        raise HTTPException(
-            422,
-            detail={
-                "error": "S07_INVALID_COMMAND",
-                "message": "VerifyRecovery command does not match the contract",
-            },
-        ) from error
+        raise _s07_invalid_command() from error
     return _s07_command_result(result)
 
 

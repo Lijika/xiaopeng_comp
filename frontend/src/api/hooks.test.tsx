@@ -3,7 +3,7 @@ import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import type { ReactNode } from "react";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { components, paths } from "../generated/api";
+import type { paths } from "../generated/api";
 import {
   useCurrentRoute,
   useQueue,
@@ -93,9 +93,10 @@ function workPayload(overrides: Record<string, unknown> = {}) {
 describe("generated request body binding (S2)", () => {
   it("binds the VerifyRecovery command type to the generated OpenAPI request body", () => {
     type GeneratedBody = paths["/controlled/s01/api/commands/recovery-work-items/{recovery_work_id}/verify"]["post"]["requestBody"]["content"]["application/json"];
-    type GeneratedComponent = components["schemas"]["S07VerifyRecoveryBody"];
-    expectTypeOf<GeneratedBody>().toEqualTypeOf<GeneratedComponent>();
     expectTypeOf<VerifyRecoveryCommand>().toEqualTypeOf<GeneratedBody>();
+    expectTypeOf<keyof GeneratedBody>().toEqualTypeOf<
+      "expected_lifecycle_revision" | "expected_criterion_digest" | "idempotency_key"
+    >();
   });
 });
 

@@ -240,13 +240,18 @@ export default function RecoveryWorkPanel({ workId }: { workId: string }) {
       return;
     }
     await queryClient.invalidateQueries({ queryKey: ["s01"] });
-    const knownRejection = verify.isError && verify.error instanceof HttpError;
+    // Only an explicitly contracted definitive conflict/rejection (409 from
+    // the server's stale/conflict/rejected contract) proves the previous key
+    // was never accepted; a fresh semantic key is then safe.  Every other
+    // outcome -- POST-side 500/503, other non-definitive HTTP statuses, and
+    // unknown transport results -- may have committed an effect, so the
+    // original key is retained and a retry replays idempotently.  An
+    // accepted outcome keeps the latch until server-owned detail converges.
+    const knownRejection =
+      verify.isError &&
+      verify.error instanceof HttpError &&
+      verify.error.status === 409;
     if (knownRejection) {
-      // A known server rejection (e.g. 409) proves the previous key was
-      // never accepted; a fresh semantic key is safe.  An unknown transport
-      // outcome keeps the original key so a retry replays idempotently, and
-      // an accepted outcome keeps the latch until server-owned detail
-      // converges.
       setVerifyKey(newIdempotencyKey());
       verify.reset();
       setRequiresReload(false);
@@ -274,10 +279,15 @@ export default function RecoveryWorkPanel({ workId }: { workId: string }) {
           variant="secondary"
           onClick={handleReload}
           disabled={verify.isPending}
+          data-testid="reload-button"
         >
           重新加载
         </Button>
-        <Button onClick={handleVerify} disabled={!canVerify || verify.isPending}>
+        <Button
+          onClick={handleVerify}
+          disabled={!canVerify || verify.isPending}
+          data-testid="verify-button"
+        >
           验证恢复
         </Button>
         {transportUnknown && data.status === "open" && (

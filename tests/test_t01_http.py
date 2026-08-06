@@ -44,6 +44,16 @@ APP_FACTORY = "tests.test_s07_http:create_s07_test_app"
 SCENARIO = "app_r53_bad_engine.json"
 
 
+class _InjectedQueueProjectionFault(RuntimeError):
+    """Unexpected item-local queue projection fault injected by the fixture.
+
+    Raised inside ``_require_application_state_authority`` after the shared
+    accepted-admission preflight succeeds; it is deliberately not an
+    ``_ApplicationStateAuthorityUnavailable`` so the item-local catch must
+    not swallow it.
+    """
+
+
 def create_t01_test_app() -> Any:
     """S07-style test app that also lets T01 pin the React shell directory.
 
@@ -156,15 +166,18 @@ def create_t01_queue_unavailable_app() -> Any:
 
 
 def create_t01_queue_unexpected_app() -> Any:
-    """S07-style test app whose recovery projection hits an unexpected fault.
+    """S07-style test app whose recovery projection faults inside the narrowed
+    item-local authority boundary.
 
     One application is admitted and blocked under a real session principal
-    (producing open Recovery Work visible to that session), then a malformed
-    opened recovery event (no ``primary_reason_code``) is appended for the
-    same application so the recovery projection raises an unexpected
-    exception.  The queue route must surface a minimized explicit error
-    instead of an authoritative-looking empty queue.  The issued session
-    token is written to ``TASK4_S01_TEST_QUEUE_TOKEN_PATH`` for the test.
+    (producing open Recovery Work visible to that session), then an
+    unexpected exception is injected inside ``_require_application_state_authority``
+    after the shared accepted-admission preflight succeeds.  The queue route
+    must surface the minimized bounded 500 for this in-boundary fault rather
+    than HTTP 200/empty; if the item-local catch regressed to the old broad
+    ``except Exception`` the injected fault would be swallowed and the queue
+    would incorrectly return 200.  The issued session token is written to
+    ``TASK4_S01_TEST_QUEUE_TOKEN_PATH`` for the test.
     """
     import task4_consistency.web.app as web
 
@@ -211,16 +224,15 @@ def create_t01_queue_unexpected_app() -> Any:
     )
     assert failed.status == "blocked"
     assert failed.recovery_work_id is not None
-    service._store.recovery_events.append(
-        {
-            "event_id": "t01-attacker-malformed-recovery",
-            "kind": "opened",
-            "recovery_work_id": "recovery_work_t01_malformed",
-            "application_id": admission.application_id,
-            "visibility_scope": session_principal.scope,
-            "opened_at": 10,
-        }
-    )
+    original_require = service._require_application_state_authority
+
+    def _injected_require(app: dict[str, Any] | None) -> None:
+        original_require(app)
+        raise _InjectedQueueProjectionFault(
+            "injected unexpected fault inside the item-local authority"
+        )
+
+    service._require_application_state_authority = _injected_require
     service._store.persist()
     web.S01_SERVICE = service
     web.S01_TEST_DRIVER = None
@@ -496,15 +508,29 @@ def test_openapi_typed_dto_contract_for_migrated_seams(tmp_path: Path) -> None:
         "successor_fence",
     } <= set(verify_success["required"])
 
-    verify_body = components.get("S07VerifyRecoveryBody")
-    assert verify_body is not None
-    assert verify_body.get("additionalProperties") is False
-    assert set(verify_body["required"]) == {
+    request_body = verify_operation.get("requestBody")
+    assert request_body is not None
+    assert request_body.get("required") is True
+    request_schema = resolve(
+        request_body["content"]["application/json"]["schema"]
+    )
+    assert request_schema.get("additionalProperties") is False
+    assert set(request_schema["required"]) == {
         "expected_lifecycle_revision",
         "expected_criterion_digest",
         "idempotency_key",
     }
-    for status in ("404", "409", "503"):
+    assert request_schema["properties"]["expected_lifecycle_revision"].get(
+        "minimum"
+    ) == 1
+    digest_schema = request_schema["properties"]["expected_criterion_digest"]
+    assert digest_schema.get("minLength") == 64
+    assert digest_schema.get("maxLength") == 64
+    assert digest_schema.get("pattern") == "^[0-9a-f]{64}$"
+    key_schema = request_schema["properties"]["idempotency_key"]
+    assert key_schema.get("minLength") == 1
+    assert key_schema.get("maxLength") == 200
+    for status in ("404", "409", "413", "503"):
         error_schema = (
             verify_operation["responses"]
             .get(status, {})
@@ -1166,6 +1192,46 @@ def test_react_shell_falls_back_to_legacy_for_partial_builds(tmp_path: Path) -> 
             '<script type="module" src="/static/react/assets/index.css#entry"></script>'
             "</body></html>"
         ),
+        "non-executable-module": (
+            '<html><head></head><body><div id="root"></div>'
+            '<script type="application/json" src="/static/react/assets/index.js"></script>'
+            "</body></html>"
+        ),
+        "reversed-stylesheet-attr": (
+            '<html><head>'
+            '<link href="/static/react/assets/index-MISSING-CSS.css" rel="stylesheet">'
+            '</head><body><div id="root"></div>'
+            '<script type="module" src="/static/react/assets/index.js"></script>'
+            "</body></html>"
+        ),
+        "valid-module-stylesheet-traversal": (
+            '<html><head>'
+            '<link rel="stylesheet" href="/static/react/../outside.css">'
+            '</head><body><div id="root"></div>'
+            '<script type="module" src="/static/react/assets/index.js"></script>'
+            "</body></html>"
+        ),
+        "valid-module-stylesheet-query": (
+            '<html><head>'
+            '<link rel="stylesheet" href="/static/react/assets/index.css?v=1">'
+            '</head><body><div id="root"></div>'
+            '<script type="module" src="/static/react/assets/index.js"></script>'
+            "</body></html>"
+        ),
+        "valid-module-stylesheet-fragment": (
+            '<html><head>'
+            '<link rel="stylesheet" href="/static/react/assets/index.css#entry">'
+            '</head><body><div id="root"></div>'
+            '<script type="module" src="/static/react/assets/index.js"></script>'
+            "</body></html>"
+        ),
+        "valid-module-stylesheet-missing": (
+            '<html><head>'
+            '<link rel="stylesheet" href="/static/react/assets/index-MISSING-CSS.css">'
+            '</head><body><div id="root"></div>'
+            '<script type="module" src="/static/react/assets/index.js"></script>'
+            "</body></html>"
+        ),
     }
     for case_name, index_html in cases.items():
         react_dir = tmp_path / f"partial-{case_name}"
@@ -1173,6 +1239,7 @@ def test_react_shell_falls_back_to_legacy_for_partial_builds(tmp_path: Path) -> 
         assets_dir = react_dir / "assets"
         assets_dir.mkdir()
         (assets_dir / "index.css").write_text("/* present */", encoding="utf-8")
+        (assets_dir / "index.js").write_text("/* present */", encoding="utf-8")
         (react_dir / "index.html").write_text(index_html, encoding="utf-8")
         env = _create_t01_app_environment(
             state_path, "verified", str(react_dir)
@@ -1323,9 +1390,179 @@ def test_verify_auth_happens_before_validation_and_422_is_sanitized(
             ), (case, "restricted echoed")
 
 
+def test_verify_auth_hides_before_raw_body_parsing(tmp_path: Path) -> None:
+    """Raw wire bodies never reach body parsing for anonymous or Reviewer
+    callers: the existence-hiding Operator gate is solved before any request
+    byte is read.  An authorized Operator still receives a truthful, sanitized
+    422 (or a bounded 413) with no rejected input, context, credential,
+    idempotency value, work ID, or oversized content echoed."""
+    from task4_consistency.web.app import S02_MAX_COMMAND_BYTES
+
+    state_path = tmp_path / "t01-raw-body.sqlite3"
+    with UvicornLoopback(
+        _environment(state_path, "verified"),
+        app_target=APP_FACTORY,
+        app_factory=True,
+    ) as server:
+        blocked = _admit_and_block(server, "t01-raw-body-a", now=10)
+        work_id = blocked["recovery_work_id"]
+        sentinel = "t01-raw-SENTINEL-a1b2c3d4e5"
+        giant = "x" * 65536
+        digest64 = "a" * 64
+        valid_body = (
+            b'{"expected_lifecycle_revision": 1, '
+            b'"expected_criterion_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", '
+            b'"idempotency_key": "t01-raw-body-key"}'
+        )
+        wire_cases = {
+            "malformed-json": (
+                b'{"broken": "t01-raw-SENTINEL-a1b2c3d4e5"',
+                "application/json",
+            ),
+            "empty-body": (b"", "application/json"),
+            "wrong-content-type": (valid_body, "text/plain"),
+            "schema-invalid-json": (
+                (
+                    b'{"expected_lifecycle_revision": "not-an-int", '
+                    b'"expected_criterion_digest": "zzzz", '
+                    b'"idempotency_key": "t01-raw-SENTINEL-a1b2c3d4e5"}'
+                ),
+                "application/json",
+            ),
+            "extra-fields": (
+                (
+                    b'{"expected_lifecycle_revision": 1, '
+                    b'"expected_criterion_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", '
+                    b'"idempotency_key": "t01-raw-SENTINEL-a1b2c3d4e5", '
+                    b'"target": "injected-raw-extra-field"}'
+                ),
+                "application/json",
+            ),
+            "oversized-field": (
+                json.dumps(
+                    {
+                        "expected_lifecycle_revision": 1,
+                        "expected_criterion_digest": digest64,
+                        "idempotency_key": giant,
+                    }
+                ).encode("utf-8"),
+                "application/json",
+            ),
+        }
+        for case, (raw, content_type) in wire_cases.items():
+            for label, auth_headers in (
+                ("anonymous", {}),
+                ("reviewer", headers("reviewer")),
+            ):
+                response = server.raw_request(
+                    "POST",
+                    _verify_path(work_id),
+                    body=raw,
+                    content_type=content_type,
+                    headers=auth_headers,
+                    use_session=False,
+                )
+                assert response.status == 404, (case, label, response.text)
+                assert response.json() == {"detail": {"error": "S07_NOT_FOUND"}}, (
+                    case,
+                    label,
+                    response.text,
+                )
+                assert response.headers["cache-control"] == "no-store", (
+                    case,
+                    label,
+                )
+                assert sentinel not in response.text, (case, label)
+                assert work_id not in response.text, (case, label)
+                assert "injected-raw-extra-field" not in response.text, (case, label)
+                assert giant not in response.text, (case, label)
+
+            operator_response = server.raw_request(
+                "POST",
+                _verify_path(work_id),
+                body=raw,
+                content_type=content_type,
+                headers=operator_auth_headers(),
+                use_session=False,
+            )
+            assert operator_response.status == 422, (case, operator_response.text)
+            payload = operator_response.json()
+            assert isinstance(payload["detail"], list), (case, payload)
+            assert all(
+                {"loc", "msg", "type"} <= set(item) for item in payload["detail"]
+            ), (case, payload)
+            assert '"input"' not in operator_response.text, (case, "input echoed")
+            assert '"ctx"' not in operator_response.text, (case, "ctx echoed")
+            assert sentinel not in operator_response.text, (case, "sentinel echoed")
+            assert giant not in operator_response.text, (case, "oversized echoed")
+            assert work_id not in operator_response.text, (case, "work id echoed")
+            assert "injected-raw-extra-field" not in operator_response.text, (
+                case,
+                "extra echoed",
+            )
+            assert all(
+                value not in operator_response.text
+                for value in _restricted_strings()
+            ), (case, "restricted echoed")
+
+        huge_body = b'{"expected_lifecycle_revision": 1, "idempotency_key": "' + (
+            b"x" * S02_MAX_COMMAND_BYTES
+        ) + b'"}'
+        for label, auth_headers in (
+            ("anonymous", {}),
+            ("reviewer", headers("reviewer")),
+        ):
+            hidden = server.raw_request(
+                "POST",
+                _verify_path(work_id),
+                body=huge_body,
+                headers=auth_headers,
+                use_session=False,
+            )
+            assert hidden.status == 404, (label, hidden.text)
+            assert hidden.json() == {"detail": {"error": "S07_NOT_FOUND"}}, label
+        oversized = server.raw_request(
+            "POST",
+            _verify_path(work_id),
+            body=huge_body,
+            headers=operator_auth_headers(),
+            use_session=False,
+        )
+        assert oversized.status == 413, oversized.text
+        assert oversized.json() == {
+            "detail": {
+                "error": "S07_INVALID_COMMAND",
+                "message": "VerifyRecovery command exceeds the allowed size",
+            }
+        }
+        assert work_id not in oversized.text
+        assert all(
+            value not in oversized.text for value in _restricted_strings()
+        )
+
+        # No raw wire attempt — anonymous, Reviewer, or authorized Operator —
+        # may commit a VerifyRecovery service effect: the work must still be
+        # open with zero recovery facts.
+        work_view = server.request(
+            "GET",
+            _recovery_path(work_id),
+            headers=operator_auth_headers(),
+            use_session=False,
+        )
+        assert work_view.status == 200, work_view.text
+        view_payload = work_view.json()
+        assert view_payload["status"] == "open"
+        assert view_payload["recovery_fact_count"] == 0
+
+
 def test_queue_unexpected_failure_is_bounded_and_not_authoritative_empty(
     tmp_path: Path,
 ) -> None:
+    """An unexpected fault inside the item-local authority boundary (after the
+    shared accepted-admission preflight succeeds) reaches the minimized
+    bounded 500 rather than HTTP 200/empty.  A broadened per-item
+    ``except Exception`` would swallow the injected fault and incorrectly
+    return 200, so this regression pins the narrowed catch boundary."""
     state_path = tmp_path / "t01-unexpected.sqlite3"
     token_path = tmp_path / "t01-unexpected-token.txt"
     env = _environment(state_path, "verified")
@@ -1352,5 +1589,5 @@ def test_queue_unexpected_failure_is_bounded_and_not_authoritative_empty(
             }
         }
         assert queue.headers["cache-control"] == "no-store"
-        assert "recovery_work_t01_malformed" not in queue.text
+        assert "recovery_items" not in queue.text
         assert all(value not in queue.text for value in _restricted_strings())
