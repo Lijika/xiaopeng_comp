@@ -23,6 +23,13 @@ function attemptLabel(attempt: {
   return `${attempt.attempt} · ${attempt.classification} · ${attempt.status}`;
 }
 
+/** The explicitly contracted definitive rejection status: a 409 proves the
+ * command key was never accepted.  Every other HTTP outcome (5xx, other
+ * statuses) may have committed an effect and stays visibly unknown. */
+function isDefinitiveRejection(error: unknown): error is HttpError {
+  return error instanceof HttpError && error.status === 409;
+}
+
 function describeVerifyStatus(
   verify: {
     isPending: boolean;
@@ -38,10 +45,10 @@ function describeVerifyStatus(
     return `恢复验证未接受（${conflictReason}）：请重新加载权威上下文后再试`;
   }
   if (verify.isError) {
-    if (!(verify.error instanceof HttpError)) {
-      return "结果未知：网络未确认，重试将使用同一幂等键";
+    if (isDefinitiveRejection(verify.error)) {
+      return verify.error.reasonCode ?? "恢复验证被拒绝";
     }
-    return verify.error.reasonCode ?? "恢复验证被拒绝";
+    return "结果未知：网络未确认，重试将使用同一幂等键";
   }
   if (verify.isSuccess) return "恢复事实已接受";
   return "等待操作";
@@ -216,7 +223,7 @@ export default function RecoveryWorkPanel({ workId }: { workId: string }) {
     conflictReason,
   );
   const transportUnknown =
-    verify.isError && !(verify.error instanceof HttpError);
+    verify.isError && !isDefinitiveRejection(verify.error);
 
   const handleVerify = () => {
     if (!canVerify) return;

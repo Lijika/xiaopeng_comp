@@ -26,6 +26,30 @@ async function reservePort() {
   return port;
 }
 
+/** Removes exactly this server's owned SQLite state and its -wal/-shm
+ * siblings; every artifact is attempted even if one removal rejects. */
+function cleanupStatePath(statePath) {
+  let firstError;
+  for (const suffix of ["", "-wal", "-shm"]) {
+    try {
+      fs.rmSync(`${statePath}${suffix}`, { force: true });
+    } catch (error) {
+      if (firstError === undefined) firstError = error;
+    }
+  }
+  if (firstError !== undefined) throw firstError;
+}
+
+/** The unique state artifacts this worker process owns in /tmp. */
+function listOwnedStateArtifacts() {
+  return fs
+    .readdirSync("/tmp")
+    .filter((name) =>
+      name.startsWith(`xiaopeng-task4-t01-react-${process.pid}-`),
+    )
+    .sort();
+}
+
 async function startServer({ appTarget, ...extraEnv } = {}) {
   const port = await reservePort();
   const statePath = path.join(
@@ -73,33 +97,61 @@ async function startServer({ appTarget, ...extraEnv } = {}) {
 
   const baseURL = `http://127.0.0.1:${port}`;
   const deadline = Date.now() + 8_000;
+  let ready = false;
   while (Date.now() < deadline && child.exitCode === null) {
     try {
       if ((await fetch(`${baseURL}/api/health`)).ok) {
-        return { baseURL, child, output, statePath };
+        ready = true;
+        break;
       }
     } catch (_) {
       // The bounded readiness loop owns the retry.
     }
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  child.kill("SIGKILL");
+  if (ready) {
+    return { baseURL, child, output, statePath };
+  }
+  // Startup failure fully owns its child and its exact temp state: register
+  // the exit promise before killing, reap the process, then remove the owned
+  // database/-wal/-shm artifacts before throwing.
+  const exited = once(child, "exit");
+  if (child.exitCode === null) {
+    child.kill("SIGKILL");
+    await exited;
+  }
+  cleanupStatePath(statePath);
   throw new Error(`T01 React server did not start: ${output.join("")}`);
 }
 
 async function stopServer(server) {
-  if (server.child.exitCode !== null) return;
-  server.child.kill("SIGTERM");
-  const exited = once(server.child, "exit");
-  if (
-    (await Promise.race([
-      exited,
-      new Promise((resolve) => setTimeout(resolve, 5_000, "timeout")),
-    ])) === "timeout"
-  ) {
-    server.child.kill("SIGKILL");
-    await once(server.child, "exit");
+  const failures = [];
+  // Child reaping is attempted when it is still running; the owned SQLite
+  // state is always cleaned up even if the child already exited or one
+  // cleanup step rejects, and the original failure is preserved.
+  try {
+    const exited = once(server.child, "exit");
+    if (server.child.exitCode === null) {
+      server.child.kill("SIGTERM");
+      if (
+        (await Promise.race([
+          exited,
+          new Promise((resolve) => setTimeout(resolve, 5_000, "timeout")),
+        ])) === "timeout"
+      ) {
+        server.child.kill("SIGKILL");
+        await exited;
+      }
+    }
+  } catch (error) {
+    failures.push(error);
   }
+  try {
+    cleanupStatePath(server.statePath);
+  } catch (error) {
+    failures.push(error);
+  }
+  if (failures.length > 0) throw failures[0];
 }
 
 /**
@@ -213,6 +265,30 @@ async function assertControlsFitAndDoNotOverlap(page, testIds) {
     expect(await locator.isVisible(), `${testId} visible`).toBe(true);
     const box = await locator.boundingBox();
     expect(box, `${testId} bounding box`).not.toBeNull();
+    // Non-vacuous content/clipping check: a control must not hide its own
+    // text/content.  Panels are exempt from the vertical check only because
+    // their content is intentionally taller.
+    const clip = await page.evaluate((id) => {
+      const el = document.querySelector(`[data-testid="${id}"]`);
+      if (!el) return null;
+      return {
+        scrollWidth: el.scrollWidth,
+        clientWidth: el.clientWidth,
+        scrollHeight: el.scrollHeight,
+        clientHeight: el.clientHeight,
+      };
+    }, testId);
+    expect(clip, `${testId} clip metrics`).not.toBeNull();
+    expect(
+      clip.scrollWidth,
+      `${testId} horizontal clipping`,
+    ).toBeLessThanOrEqual(clip.clientWidth + 1);
+    if (!testId.endsWith("-panel")) {
+      expect(
+        clip.scrollHeight,
+        `${testId} vertical clipping`,
+      ).toBeLessThanOrEqual(clip.clientHeight + 1);
+    }
     const scroll = await page.evaluate(() => window.scrollY);
     // Hit-test immediately after this element's scroll so a later element's
     // scroll cannot invalidate the measured box.
@@ -221,10 +297,13 @@ async function assertControlsFitAndDoNotOverlap(page, testIds) {
         const element = document.querySelector(`[data-testid="${testId}"]`);
         if (!element) return null;
         if (getComputedStyle(element).pointerEvents === "none") {
-          // A deliberately non-interactive (disabled) control is not
-          // hit-testable by design; its visibility, real bounding box, and
-          // non-overlap are still asserted.
-          return true;
+          // Only a control with real disabled semantics is exempt from the
+          // hit test; a merely pointer-events-none/occluded enabled control
+          // is an occlusion blind spot and must fail.
+          const disabled =
+            element.hasAttribute("disabled") ||
+            element.getAttribute("aria-disabled") === "true";
+          return disabled;
         }
         const hit = document.elementFromPoint(
           box.x + box.width / 2,
@@ -859,4 +938,51 @@ test("cleanup settles every owned resource even when a rejected step would previ
   ]);
   await expect(settle).rejects.toThrow("context.close failed");
   expect(order).toEqual(["context.close", "stopServer", "clock.unlink"]);
+});
+
+test("layout oracle distinguishes a semantically disabled control from a merely occluded enabled one", async ({
+  page,
+}) => {
+  // A genuinely disabled control is exempt from the center-hit check, but a
+  // merely pointer-events-none/occluded enabled control must fail (no silent
+  // occlusion blind spot).
+  await page.setViewportSize({ width: 500, height: 400 });
+  await page.setContent(`
+    <style>
+      .stage { position: relative; width: 460px; height: 200px; }
+      .occluder { position: absolute; top: 60px; left: 0; width: 460px; height: 90px; }
+      .occluded { position: absolute; top: 70px; left: 20px; pointer-events: none; }
+    </style>
+    <div class="stage">
+      <button data-testid="disabled-button" disabled>恢复验证</button>
+      <div class="occluder" data-testid="occluder"></div>
+      <button class="occluded" data-testid="occluded-button">验证恢复</button>
+    </div>
+  `);
+  await assertControlsFitAndDoNotOverlap(page, ["disabled-button"]);
+  await expect(
+    assertControlsFitAndDoNotOverlap(page, ["occluded-button"]),
+  ).rejects.toThrow();
+});
+
+test("cleanupStatePath removes the owned database and its -wal/-shm siblings even when one artifact is missing", () => {
+  const base = path.join(
+    "/tmp",
+    `xiaopeng-task4-t01-react-${process.pid}-${Date.now()}-selfcheck.sqlite3`,
+  );
+  fs.writeFileSync(base, "db");
+  fs.writeFileSync(`${base}-wal`, "wal");
+  cleanupStatePath(base);
+  expect(fs.existsSync(base)).toBe(false);
+  expect(fs.existsSync(`${base}-wal`)).toBe(false);
+  expect(fs.existsSync(`${base}-shm`)).toBe(false);
+});
+
+test("a failed server startup is reaped and leaves no owned state artifacts", async () => {
+  const before = listOwnedStateArtifacts();
+  await expect(
+    startServer({ appTarget: "tests.test_t01_http:no_such_test_factory" }),
+  ).rejects.toThrow(/did not start/);
+  const after = listOwnedStateArtifacts();
+  expect(after).toEqual(before);
 });

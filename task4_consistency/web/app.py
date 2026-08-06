@@ -12,6 +12,7 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
+from email.message import Message
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable
@@ -1343,6 +1344,25 @@ def _s07_not_found() -> HTTPException:
     return HTTPException(404, detail={"error": "S07_NOT_FOUND"})
 
 
+def _s07_request_is_json(content_type: str | None) -> bool:
+    """True only when the request Content-Type media-type essence is exactly
+    ``application/json``.
+
+    Uses the stdlib RFC 2045 media-type parser so substring lookalikes
+    (``text/plain; note=application/json``, ``application/json-patch+json``,
+    ``application/jsonx``) and a missing header are rejected while a
+    case-normalized essence with valid parameters is accepted.
+    """
+    if not content_type:
+        return False
+    message = Message()
+    try:
+        message["content-type"] = content_type
+    except (TypeError, ValueError):
+        return False
+    return message.get_content_type() == "application/json"
+
+
 def _s07_invalid_command() -> HTTPException:
     return HTTPException(
         422,
@@ -1368,22 +1388,13 @@ async def _s07_verify_command_body(request: Request) -> S07VerifyRecoveryBody:
 
     This runs only after ``_s07_operator_principal`` has solved, so raw or
     malformed wire bytes never reach it for anonymous or Reviewer callers.
-    Reads are bounded, JSON is decoded without reflecting rejected input, and
-    schema violations surface as the same sanitized ``loc``/``msg``/``type``
-    detail items as the application-wide validation handler.
+    The exact ``application/json`` media-type essence is required before any
+    body byte is read; reads are bounded, JSON is decoded without reflecting
+    rejected input, and schema violations surface as the same sanitized
+    ``loc``/``msg``/``type`` detail items as the application-wide validation
+    handler.
     """
-    declared_length = request.headers.get("content-length")
-    if declared_length is not None:
-        try:
-            if (
-                int(declared_length) < 0
-                or int(declared_length) > S02_MAX_COMMAND_BYTES
-            ):
-                raise _s07_command_too_large()
-        except ValueError:
-            raise _s07_invalid_command() from None
-    content_type = request.headers.get("content-type")
-    if content_type is not None and "application/json" not in content_type.lower():
+    if not _s07_request_is_json(request.headers.get("content-type")):
         raise HTTPException(
             422,
             detail=[
@@ -1394,6 +1405,16 @@ async def _s07_verify_command_body(request: Request) -> S07VerifyRecoveryBody:
                 }
             ],
         )
+    declared_length = request.headers.get("content-length")
+    if declared_length is not None:
+        try:
+            if (
+                int(declared_length) < 0
+                or int(declared_length) > S02_MAX_COMMAND_BYTES
+            ):
+                raise _s07_command_too_large()
+        except ValueError:
+            raise _s07_invalid_command() from None
     chunks: list[bytes] = []
     size = 0
     async for chunk in request.stream():
@@ -1830,44 +1851,51 @@ def _controlled_s01_shell_response(request: Request, html: str) -> HTMLResponse:
     return response
 
 
-_REACT_EXECUTABLE_SCRIPT_TYPES = frozenset(
-    {"module", "text/javascript", "application/javascript"}
-)
+_REACT_MODULE_ENTRY_TYPE = "module"
 
 
 class _ReactIndexReferences(HTMLParser):
-    """Order-independent extraction of browser-loaded script/stylesheet refs.
+    """Order-independent, fail-closed extraction of browser-loaded
+    script/stylesheet references.
 
-    Attributes are read from the tag attribute list directly, so attribute
-    order never changes whether a script is an executable module entry or a
-    ``<link>`` is a stylesheet.
+    Attribute names are ASCII case-insensitive and any duplicated attribute
+    is rejected as ambiguous (browsers keep the first duplicate while a
+    dictionary keeps the last).  Link-type tokens are ASCII case-insensitive
+    and the module-entry keyword is normalized before comparison.
     """
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.script_srcs: list[str] = []
-        self.executable_script_srcs: list[str] = []
         self.stylesheet_hrefs: list[str] = []
+        self.module_entry_srcs: list[str] = []
+        self.ambiguous: bool = False
 
     def handle_starttag(
         self, tag: str, attrs: list[tuple[str, str | None]]
     ) -> None:
-        attributes = dict(attrs)
+        names = [name.lower() for name, _value in attrs]
+        if len(names) != len(set(names)):
+            self.ambiguous = True
+            return
+        attributes = {name: value for name, value in attrs}
         if tag == "script":
             src = attributes.get("src")
             if isinstance(src, str) and src:
                 self.script_srcs.append(src)
                 script_type = attributes.get("type")
                 if (
-                    script_type is None
-                    or script_type in _REACT_EXECUTABLE_SCRIPT_TYPES
+                    isinstance(script_type, str)
+                    and script_type.strip().lower() == _REACT_MODULE_ENTRY_TYPE
+                    and src.endswith(".js")
                 ):
-                    self.executable_script_srcs.append(src)
+                    self.module_entry_srcs.append(src)
         elif tag == "link":
-            rel = attributes.get("rel") or ""
+            rel = attributes.get("rel")
             href = attributes.get("href")
             if (
-                "stylesheet" in rel.split()
+                isinstance(rel, str)
+                and "stylesheet" in rel.lower().split()
                 and isinstance(href, str)
                 and href
             ):
@@ -1892,22 +1920,21 @@ def _react_local_asset_path_is_clean(root: Path, url_path: str) -> bool:
 
 
 def _react_build_is_complete(index_html: str) -> bool:
-    """True only for a complete local executable React build.
+    """True only for a complete local Vite production React build.
 
-    Tags are parsed order-independently.  Every browser-loaded local script
-    and stylesheet reference must be a clean absolute path under
+    Tags are parsed order-independently and fail closed on ambiguous
+    (duplicated) attributes.  Every browser-loaded local script and
+    stylesheet reference must be a clean absolute path under
     ``/static/react/`` with no scheme/netloc/query/fragment or traversal,
     must resolve to a file inside the React build root, and at least one
-    genuine executable ``type="module"`` (or classic) JavaScript entry must
-    be present.
+    unambiguous ``type="module"`` JavaScript entry must be present — absent,
+    classic, or ``text/javascript`` scripts do not satisfy the entry
+    requirement for the Vite production shell.
     """
     parser = _ReactIndexReferences()
     parser.feed(index_html)
     root = S01_REACT_INDEX.parent.resolve()
-    module_entries = [
-        src for src in parser.executable_script_srcs if src.endswith(".js")
-    ]
-    if not module_entries:
+    if parser.ambiguous or not parser.module_entry_srcs:
         return False
     references = parser.stylesheet_hrefs + parser.script_srcs
     return all(_react_local_asset_path_is_clean(root, url) for url in references)

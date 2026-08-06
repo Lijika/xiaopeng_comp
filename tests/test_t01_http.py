@@ -1232,6 +1232,86 @@ def test_react_shell_falls_back_to_legacy_for_partial_builds(tmp_path: Path) -> 
             '<script type="module" src="/static/react/assets/index.js"></script>'
             "</body></html>"
         ),
+        "duplicate-script-src": (
+            '<html><head></head><body><div id="root"></div>'
+            '<script type="module" src="/static/react/assets/missing.js" '
+            'src="/static/react/assets/existing.js"></script>'
+            "</body></html>"
+        ),
+        "duplicate-link-href": (
+            '<html><head>'
+            '<link rel="stylesheet" href="/static/react/assets/missing.css" '
+            'href="/static/react/assets/existing.css">'
+            '</head><body><div id="root"></div>'
+            '<script type="module" src="/static/react/assets/index.js"></script>'
+            "</body></html>"
+        ),
+        "duplicate-type": (
+            '<html><head></head><body><div id="root"></div>'
+            '<script type="module" type="module" src="/static/react/assets/index.js"></script>'
+            "</body></html>"
+        ),
+        "duplicate-rel": (
+            '<html><head>'
+            '<link rel="stylesheet" rel="stylesheet" href="/static/react/assets/index.css">'
+            '</head><body><div id="root"></div>'
+            '<script type="module" src="/static/react/assets/index.js"></script>'
+            "</body></html>"
+        ),
+        "uppercase-stylesheet": (
+            '<html><head>'
+            '<link rel="STYLESHEET" href="/static/react/assets/index-MISSING-CSS.css">'
+            '</head><body><div id="root"></div>'
+            '<script type="module" src="/static/react/assets/index.js"></script>'
+            "</body></html>"
+        ),
+        "absent-type-entry": (
+            '<html><head></head><body><div id="root"></div>'
+            '<script src="/static/react/assets/index.js"></script>'
+            "</body></html>"
+        ),
+        "classic-entry": (
+            '<html><head></head><body><div id="root"></div>'
+            '<script type="text/javascript" src="/static/react/assets/index.js"></script>'
+            "</body></html>"
+        ),
+        "valid-module-script-traversal": (
+            '<html><head></head><body><div id="root"></div>'
+            '<script type="module" src="/static/react/assets/index.js"></script>'
+            '<script src="/static/react/../outside.js"></script>'
+            "</body></html>"
+        ),
+        "valid-module-script-query": (
+            '<html><head></head><body><div id="root"></div>'
+            '<script type="module" src="/static/react/assets/index.js"></script>'
+            '<script src="/static/react/assets/index.js?v=1"></script>'
+            "</body></html>"
+        ),
+        "valid-module-script-fragment": (
+            '<html><head></head><body><div id="root"></div>'
+            '<script type="module" src="/static/react/assets/index.js"></script>'
+            '<script src="/static/react/assets/index.js#entry"></script>'
+            "</body></html>"
+        ),
+        "valid-module-script-missing": (
+            '<html><head></head><body><div id="root"></div>'
+            '<script type="module" src="/static/react/assets/index.js"></script>'
+            '<script src="/static/react/assets/index-MISSING-JS.js"></script>'
+            "</body></html>"
+        ),
+        "external-script-url": (
+            '<html><head></head><body><div id="root"></div>'
+            '<script type="module" src="/static/react/assets/index.js"></script>'
+            '<script src="https://evil.example/index.js"></script>'
+            "</body></html>"
+        ),
+        "external-stylesheet-url": (
+            '<html><head>'
+            '<link rel="stylesheet" href="https://evil.example/index.css">'
+            '</head><body><div id="root"></div>'
+            '<script type="module" src="/static/react/assets/index.js"></script>'
+            "</body></html>"
+        ),
     }
     for case_name, index_html in cases.items():
         react_dir = tmp_path / f"partial-{case_name}"
@@ -1240,6 +1320,10 @@ def test_react_shell_falls_back_to_legacy_for_partial_builds(tmp_path: Path) -> 
         assets_dir.mkdir()
         (assets_dir / "index.css").write_text("/* present */", encoding="utf-8")
         (assets_dir / "index.js").write_text("/* present */", encoding="utf-8")
+        (assets_dir / "existing.css").write_text("/* present */", encoding="utf-8")
+        (assets_dir / "existing.js").write_text("/* present */", encoding="utf-8")
+        outside_js = tmp_path / "outside.js"
+        outside_js.write_text("/* outside */", encoding="utf-8")
         (react_dir / "index.html").write_text(index_html, encoding="utf-8")
         env = _create_t01_app_environment(
             state_path, "verified", str(react_dir)
@@ -1553,6 +1637,123 @@ def test_verify_auth_hides_before_raw_body_parsing(tmp_path: Path) -> None:
         view_payload = work_view.json()
         assert view_payload["status"] == "open"
         assert view_payload["recovery_fact_count"] == 0
+
+
+def test_verify_rejects_non_json_media_types_before_service(tmp_path: Path) -> None:
+    """The VerifyRecovery media-type gate accepts only the exact
+    ``application/json`` essence (case-normalized, parameters allowed) and
+    rejects missing, disguised, and lookalike content types before any
+    service call, with a sanitized authorized 422 and zero service effect."""
+    state_path = tmp_path / "t01-media-type.sqlite3"
+    with UvicornLoopback(
+        _environment(state_path, "verified"),
+        app_target=APP_FACTORY,
+        app_factory=True,
+    ) as server:
+        blocked = _admit_and_block(server, "t01-media-type-a", now=10)
+        work_id = blocked["recovery_work_id"]
+        sentinel = "t01-media-SENTINEL-0f1e2d3c4b5a"
+        valid_body = (
+            b'{"expected_lifecycle_revision": 1, '
+            b'"expected_criterion_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", '
+            b'"idempotency_key": "t01-media-type-key"}'
+        )
+        media_type_cases = {
+            "missing-content-type": (valid_body, None),
+            "disguised-param": (valid_body, "text/plain; note=application/json"),
+            "lookalike-patch": (valid_body, "application/json-patch+json"),
+            "lookalike-jsonx": (valid_body, "application/jsonx"),
+            "plain-text": (valid_body, "text/plain"),
+        }
+        for case, (raw, content_type) in media_type_cases.items():
+            for label, auth_headers in (
+                ("anonymous", {}),
+                ("reviewer", headers("reviewer")),
+            ):
+                response = server.raw_request(
+                    "POST",
+                    _verify_path(work_id),
+                    body=raw,
+                    content_type=content_type,
+                    headers=auth_headers,
+                    use_session=False,
+                )
+                assert response.status == 404, (case, label, response.text)
+                assert response.json() == {"detail": {"error": "S07_NOT_FOUND"}}, (
+                    case,
+                    label,
+                    response.text,
+                )
+                assert response.headers["cache-control"] == "no-store", (
+                    case,
+                    label,
+                )
+                assert work_id not in response.text, (case, label)
+
+            operator_response = server.raw_request(
+                "POST",
+                _verify_path(work_id),
+                body=raw,
+                content_type=content_type,
+                headers=operator_auth_headers(),
+                use_session=False,
+            )
+            assert operator_response.status == 422, (case, operator_response.text)
+            payload = operator_response.json()
+            assert isinstance(payload["detail"], list), (case, payload)
+            assert payload["detail"] == [
+                {
+                    "loc": ["body"],
+                    "msg": "expected application/json request content type",
+                    "type": "content_type",
+                }
+            ], (case, payload)
+            assert '"input"' not in operator_response.text, (case, "input echoed")
+            assert '"ctx"' not in operator_response.text, (case, "ctx echoed")
+            assert work_id not in operator_response.text, (case, "work id echoed")
+            assert all(
+                value not in operator_response.text
+                for value in _restricted_strings()
+            ), (case, "restricted echoed")
+
+        # A case-normalized JSON essence with valid parameters IS accepted:
+        # the request reaches business handling (a deterministic stale 409,
+        # which commits no effect) instead of a media-type 422.
+        work_view = server.request(
+            "GET",
+            _recovery_path(work_id),
+            headers=operator_auth_headers(),
+            use_session=False,
+        ).json()
+        real_revision = work_view["lifecycle_revision"]
+        for accepted_type in ("Application/JSON", "application/json; charset=utf-8"):
+            accepted = server.raw_request(
+                "POST",
+                _verify_path(work_id),
+                body=json.dumps(
+                    {
+                        "expected_lifecycle_revision": real_revision + 100,
+                        "expected_criterion_digest": "a" * 64,
+                        "idempotency_key": sentinel,
+                    }
+                ).encode("utf-8"),
+                content_type=accepted_type,
+                headers=operator_auth_headers(),
+                use_session=False,
+            )
+            assert accepted.status == 409, (accepted_type, accepted.text)
+            assert "S07_STALE" in accepted.text, (accepted_type, accepted.text)
+
+        # Direct zero-service-call proof: none of the media-type attempts —
+        # rejected or accepted-but-stale — committed a VerifyRecovery effect.
+        final_view = server.request(
+            "GET",
+            _recovery_path(work_id),
+            headers=operator_auth_headers(),
+            use_session=False,
+        ).json()
+        assert final_view["status"] == "open"
+        assert final_view["recovery_fact_count"] == 0
 
 
 def test_queue_unexpected_failure_is_bounded_and_not_authoritative_empty(

@@ -187,17 +187,16 @@ class UvicornLoopback:
         path: str,
         *,
         body: bytes = b"",
-        content_type: str = "application/json",
+        content_type: str | None = "application/json",
         headers: dict[str, str] | None = None,
         use_session: bool = True,
     ) -> LoopbackResponse:
-        """Send arbitrary raw request bytes (malformed JSON, empty, wrong
-        content type) and read the full response over a real socket."""
-        request_headers = {
-            "Accept": "application/json",
-            "Content-Type": content_type,
-            "Content-Length": str(len(body)),
-        }
+        """Send arbitrary raw request bytes (malformed JSON, empty, wrong or
+        missing content type) and read the full response over a real socket."""
+        request_headers = {"Accept": "application/json"}
+        if content_type is not None:
+            request_headers["Content-Type"] = content_type
+        request_headers["Content-Length"] = str(len(body))
         if use_session and self._session_cookie is not None:
             request_headers["Cookie"] = self._session_cookie
         if headers:

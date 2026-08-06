@@ -627,9 +627,12 @@ describe("RecoveryWorkPanel", () => {
     await userEvent.click(verifyButton());
     await waitFor(() =>
       expect(screen.getByTestId("recovery-command-status")).toHaveTextContent(
-        "恢复验证被拒绝",
+        "结果未知",
       ),
     );
+    // A non-definitive 500 is presented as an unknown/unconfirmed outcome
+    // with the same-key retry affordance, never as a definitive rejection.
+    expect(screen.getByRole("button", { name: "重试" })).toBeInTheDocument();
     const originalKey = (
       router.calls.find((call) => call.method === "POST")?.body as
         | Record<string, unknown>
@@ -639,15 +642,15 @@ describe("RecoveryWorkPanel", () => {
     await userEvent.click(screen.getByRole("button", { name: "重新加载" }));
     await waitFor(() =>
       expect(screen.getByTestId("recovery-command-status")).toHaveTextContent(
-        "恢复验证被拒绝",
+        "结果未知",
       ),
     );
-    expect(verifyButton()).toBeEnabled();
+    expect(screen.getByRole("button", { name: "重试" })).toBeInTheDocument();
     expect(
       router.calls.filter((call) => call.method === "POST"),
     ).toHaveLength(1);
 
-    await userEvent.click(verifyButton());
+    await userEvent.click(screen.getByRole("button", { name: "重试" }));
     await waitFor(() =>
       expect(screen.getByTestId("recovery-command-status")).toHaveTextContent(
         "恢复事实已接受",
@@ -706,9 +709,10 @@ describe("RecoveryWorkPanel", () => {
     await userEvent.click(verifyButton());
     await waitFor(() =>
       expect(screen.getByTestId("recovery-command-status")).toHaveTextContent(
-        "recovery.verifier_unavailable",
+        "结果未知",
       ),
     );
+    expect(screen.getByRole("button", { name: "重试" })).toBeInTheDocument();
     const originalKey = (
       router.calls.find((call) => call.method === "POST")?.body as
         | Record<string, unknown>
@@ -718,15 +722,15 @@ describe("RecoveryWorkPanel", () => {
     await userEvent.click(screen.getByRole("button", { name: "重新加载" }));
     await waitFor(() =>
       expect(screen.getByTestId("recovery-command-status")).toHaveTextContent(
-        "recovery.verifier_unavailable",
+        "结果未知",
       ),
     );
-    expect(verifyButton()).toBeEnabled();
+    expect(screen.getByRole("button", { name: "重试" })).toBeInTheDocument();
     expect(
       router.calls.filter((call) => call.method === "POST"),
     ).toHaveLength(1);
 
-    await userEvent.click(verifyButton());
+    await userEvent.click(screen.getByRole("button", { name: "重试" }));
     await waitFor(() =>
       expect(screen.getByTestId("recovery-command-status")).toHaveTextContent(
         "恢复事实已接受",
