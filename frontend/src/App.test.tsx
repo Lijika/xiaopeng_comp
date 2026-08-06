@@ -1,6 +1,6 @@
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import App from "./App";
 import { fetchRouter, renderWithQuery } from "./test-utils";
@@ -204,6 +204,56 @@ describe("queue shell (App)", () => {
       "alert",
     );
     expect(router.calls).toHaveLength(1);
+  });
+
+  it("syncs panel selection on popstate and removes the listener on unmount", async () => {
+    const REVIEW_ID = "work_t03history1234567890abcdef";
+    const addListener = vi.spyOn(window, "addEventListener");
+    const removeListener = vi.spyOn(window, "removeEventListener");
+    fetchRouter({
+      "GET /controlled/s01/api/queries/queue": () =>
+        new Response(JSON.stringify(queuePayload()), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      "GET /controlled/s01/api/queries/recovery-work-items/recovery_work_t01queue1234567890abcdef":
+        () =>
+          new Response(JSON.stringify(workPayload()), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+      [`GET /controlled/s01/api/queries/review-work-items/${REVIEW_ID}`]: () =>
+        new Promise(() => {
+          // The loading panel is enough to prove the URL-selected owner mounted.
+        }),
+    });
+    window.history.replaceState(null, "", `?work=${encodeURIComponent(WORK_ID)}`);
+    const view = renderWithQuery(<App />);
+    await waitFor(() =>
+      expect(screen.getByTestId("recovery-panel")).toBeInTheDocument(),
+    );
+
+    const popstateListener = addListener.mock.calls.find(
+      ([type]) => type === "popstate",
+    )?.[1];
+    expect(popstateListener).toBeTypeOf("function");
+
+    window.history.pushState(null, "", `?review=${encodeURIComponent(REVIEW_ID)}`);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    await waitFor(() => {
+      expect(screen.getByTestId("review-panel")).toBeInTheDocument();
+      expect(screen.queryByTestId("recovery-panel")).not.toBeInTheDocument();
+    });
+
+    window.history.pushState(null, "", `?work=${encodeURIComponent(WORK_ID)}`);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    await waitFor(() => {
+      expect(screen.getByTestId("recovery-panel")).toBeInTheDocument();
+      expect(screen.queryByTestId("review-panel")).not.toBeInTheDocument();
+    });
+
+    view.unmount();
+    expect(removeListener).toHaveBeenCalledWith("popstate", popstateListener);
   });
 
   it("lists server-owned recovery items and opens the work view on click", async () => {

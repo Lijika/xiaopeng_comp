@@ -47,6 +47,25 @@ function expectByteEqual(actual, expected) {
   expect(digest(actual)).toBe(digest(expected));
 }
 
+/** Updates React's controlled input without putting restricted text in a
+ * Playwright action description or failure log. */
+async function setRestrictedInput(locator, value) {
+  await locator.evaluate((input, nextValue) => {
+    if (!(input instanceof HTMLInputElement)) {
+      throw new Error("restricted input is not an HTMLInputElement");
+    }
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )?.set;
+    if (setter === undefined) {
+      throw new Error("native input value setter is unavailable");
+    }
+    setter.call(input, nextValue);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }, value);
+}
+
 /** Minimal S02 registered-source runtime so the legacy Reviewer shell serves
  * 200 on the same test app (the C-DEMO flow itself never touches S02). */
 function createS02Fixture() {
@@ -480,9 +499,10 @@ async function runRevealCorrectionTracer(browser, viewport, label) {
     ).toBe(uuid(5));
     await reviewer.getByTestId("review-correct-button").nth(3).click();
     await expect(reviewer.getByTestId("review-correction-form")).toBeVisible();
-    await reviewer
-      .getByTestId("review-correction-raw")
-      .fill(sourceValue);
+    await setRestrictedInput(
+      reviewer.getByTestId("review-correction-raw"),
+      sourceValue,
+    );
     await expect(reviewer.getByTestId("review-correction-reason")).toHaveValue(
       "SOURCE_VALUE_MISREAD",
     );
@@ -770,6 +790,78 @@ const isInvoiceCorrectFocused = (reviewer) =>
     return listItem !== null && listItem.textContent.includes("inv");
   });
 
+async function runHistoryBoundaryTracer(browser) {
+  const resources = {};
+  let failure;
+  try {
+    const { sourceValue, misreadValue } = loadScenarioRestrictedValues();
+    resources.server = await startServer();
+    const server = resources.server;
+    resources.reviewerContext = await browser.newContext({
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: { Authorization: `Bearer ${DEMO_CREDENTIAL}` },
+    });
+    const reviewer = await resources.reviewerContext.newPage();
+    let revealRequests = 0;
+    reviewer.on("request", (request) => {
+      if (
+        request.method() === "POST" &&
+        new URL(request.url()).pathname.endsWith("/reveal-field-observation")
+      ) {
+        revealRequests += 1;
+      }
+    });
+    const { diagnostics } = await openClaimedReviewPanel(reviewer, server);
+
+    await reviewer.getByTestId("review-reveal-button").nth(3).click();
+    expectByteEqual(
+      await reviewer.getByTestId("review-reveal-source").textContent(),
+      sourceValue,
+    );
+    expect(revealRequests).toBe(1);
+
+    await reviewer.goBack();
+    await expect(reviewer.getByTestId("review-panel")).toHaveCount(0);
+    await assertSentinelAbsentEverywhere(reviewer, sourceValue);
+    await assertSentinelAbsentEverywhere(reviewer, misreadValue);
+    expect(revealRequests).toBe(1);
+
+    await reviewer.goForward();
+    await expect(reviewer.getByTestId("review-panel")).toBeVisible();
+    await expect(reviewer.getByTestId("review-evidence-masked")).toHaveCount(4);
+    await assertSentinelAbsentEverywhere(reviewer, sourceValue);
+    await assertSentinelAbsentEverywhere(reviewer, misreadValue);
+    expect(revealRequests).toBe(1);
+
+    await reviewer.getByTestId("review-reveal-button").nth(3).click();
+    expectByteEqual(
+      await reviewer.getByTestId("review-reveal-source").textContent(),
+      sourceValue,
+    );
+    expect(revealRequests).toBe(2);
+    await assertOnlyOneSentinelElement(reviewer, sourceValue);
+    expect(diagnostics.browserErrors).toEqual([]);
+    expect(diagnostics.consoleErrors).toEqual([]);
+    expect(diagnostics.networkErrors).toEqual([]);
+  } catch (error) {
+    failure = error;
+    throw error;
+  } finally {
+    try {
+      await settleCleanup([
+        resources.reviewerContext
+          ? () => resources.reviewerContext.close()
+          : () => Promise.resolve(),
+        resources.server
+          ? () => stopServer(resources.server)
+          : () => Promise.resolve(),
+      ]);
+    } catch (cleanupError) {
+      if (failure === undefined) throw cleanupError;
+    }
+  }
+}
+
 async function runLostResponseReplayTracer(browser) {
   const resources = {};
   let failure;
@@ -820,7 +912,10 @@ async function runLostResponseReplayTracer(browser) {
     });
     await reviewer.getByTestId("review-correct-button").nth(3).click();
     await expect(reviewer.getByTestId("review-correction-form")).toBeVisible();
-    await reviewer.getByTestId("review-correction-raw").fill(paddedRaw);
+    await setRestrictedInput(
+      reviewer.getByTestId("review-correction-raw"),
+      paddedRaw,
+    );
     await reviewer.getByTestId("review-correction-submit").click();
     await expect(reviewer.getByTestId("review-command-status")).toContainText(
       "结果未知：网络未确认，重试将使用同一幂等键",
@@ -956,7 +1051,10 @@ async function runStaleCorrectionReloadTracer(browser) {
     // the registered sanitized stale rejection.
     await reviewer.getByTestId("review-correct-button").nth(3).click();
     await expect(reviewer.getByTestId("review-correction-form")).toBeVisible();
-    await reviewer.getByTestId("review-correction-raw").fill(sourceValue);
+    await setRestrictedInput(
+      reviewer.getByTestId("review-correction-raw"),
+      sourceValue,
+    );
     await reviewer.getByTestId("review-correction-submit").click();
     await expect(reviewer.getByTestId("review-command-status")).toContainText(
       "更正未接受（STALE_WORK_ITEM_CLAIM）：请重新加载权威上下文后再试",
@@ -994,7 +1092,10 @@ async function runStaleCorrectionReloadTracer(browser) {
     );
     await reviewer.getByTestId("review-correct-button").nth(3).click();
     await expect(reviewer.getByTestId("review-correction-form")).toBeVisible();
-    await reviewer.getByTestId("review-correction-raw").fill(sourceValue);
+    await setRestrictedInput(
+      reviewer.getByTestId("review-correction-raw"),
+      sourceValue,
+    );
     await reviewer.getByTestId("review-correction-submit").click();
     await expect(
       reviewer
@@ -1164,6 +1265,11 @@ if (process.env.T03_DEBUG_EXPORTS === "1") {
       await runRevealCorrectionTracer(browser, viewport, viewport.label);
     });
   }
+
+  test("T03 browser history ends the reveal lifetime", async ({ browser }) => {
+    test.setTimeout(180_000);
+    await runHistoryBoundaryTracer(browser);
+  });
 
   test("T03 lost-response replay keeps the exact idempotency key and byte-identical body", async ({
     browser,

@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { useQueue } from "./api/hooks";
 import QueuePanel from "./components/QueuePanel";
@@ -16,6 +16,16 @@ export default function App() {
   );
   const queue = useQueue();
   const accessEnded = queue.data?.access_ended === true;
+
+  useEffect(() => {
+    const syncSelection = () => {
+      const nextReviewId = readParam("review");
+      setReviewId(nextReviewId);
+      setWorkId(nextReviewId === null ? readParam("work") : null);
+    };
+    window.addEventListener("popstate", syncSelection);
+    return () => window.removeEventListener("popstate", syncSelection);
+  }, []);
 
   // The two panels are mutually exclusive: opening one clears the other, so
   // the URL and the mounted panel always agree.
