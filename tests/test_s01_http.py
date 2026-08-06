@@ -1108,7 +1108,7 @@ def test_loopback_manual_review_lifecycle_typed_contract_over_http(
         f"/controlled/s01/api/commands/review-work-items/{work_item_id}/renew",
         body={
             "expected_fence": 2,
-            "expected_context": {"lifecycle_revision": 0},
+            "expected_context": {**context, "current_context": "0" * 64},
             "idempotency_key": "t02-http-drifted",
         },
         headers=headers("reviewer"),
@@ -1118,6 +1118,20 @@ def test_loopback_manual_review_lifecycle_typed_contract_over_http(
         "error": "S03_STALE",
         "reason_code": "STALE_REVIEW_CONTEXT",
     }
+    partial_context = loopback.request(
+        "POST",
+        f"/controlled/s01/api/commands/review-work-items/{work_item_id}/renew",
+        body={
+            "expected_fence": 2,
+            "expected_context": {"lifecycle_revision": 0},
+            "idempotency_key": "t02-http-partial-context",
+        },
+        headers=headers("reviewer"),
+    )
+    # The migrated command contract is closed: a partial context cannot carry a
+    # hidden revision, so it is rejected at the boundary as malformed.
+    assert partial_context.status == 422
+    assert partial_context.json()["detail"]["error"] == "S03_INVALID_COMMAND"
     invalid = loopback.request(
         "POST",
         f"/controlled/s01/api/commands/review-work-items/{work_item_id}/renew",
@@ -1308,6 +1322,188 @@ def test_loopback_manual_review_audit_fault_returns_503_without_side_effects() -
     assert after.status == 200
     assert after.json() == before
     assert queue_after.json() == queue_before
+
+
+def test_s01_manual_review_openapi_contract_is_closed() -> None:
+    """The migrated S01 manual-review command bodies, work-item response, and
+    history response expose closed schemas: no generic ``additionalProperties``
+    on the nested context/verification/decision/history shapes, and the live
+    payload keeps its exact current shape."""
+    with UvicornLoopback() as server:
+        openapi = server.request("GET", "/openapi.json").json()
+        schemas = openapi["components"]["schemas"]
+
+        def assert_closed(schema_name: str) -> None:
+            schema = schemas.get(schema_name)
+            assert schema is not None, schema_name
+            assert "additionalProperties" not in schema or schema[
+                "additionalProperties"
+            ] is not True, schema_name
+
+        for name in (
+            "S01ReviewCommandContext",
+            "S01FindingDecision",
+            "S01HumanDecision",
+            "S01HumanDecisionCompatibility",
+            "S01HumanDecisionCompatibilityTargetContext",
+            "S01HumanDecisionCompatibilityFactCounts",
+            "S01NoteMetadata",
+            "S01HistoryReconciliation",
+            "S01HistorySourceLocation",
+            "S01HistoryCorrection",
+            "S01HistoryBusinessException",
+            "S01HistoryAttachmentVersion",
+            "S01HistoryRun",
+            "S01ApplicationHistoryResponse",
+            "S01ReviewWorkItemResponse",
+        ):
+            assert_closed(name)
+
+        # The migrated command request bodies are emitted inline by
+        # ``openapi_extra`` (self-contained, with ``$defs`` inlined); walk the
+        # four command paths and prove their nested schemas are closed (no
+        # generic ``additionalProperties``).
+        for method, path_template in (
+            ("post", "/controlled/s01/api/commands/review-work-items/{work_item_id}/claim"),
+            ("post", "/controlled/s01/api/commands/review-work-items/{work_item_id}/renew"),
+            ("post", "/controlled/s01/api/commands/review-work-items/{work_item_id}/release"),
+            ("post", "/controlled/s01/api/commands/review-work-items/{work_item_id}/submit"),
+        ):
+            operation = openapi["paths"][path_template][method]
+            request_schema = operation["requestBody"]["content"]["application/json"]["schema"]
+            assert "additionalProperties" not in request_schema or request_schema[
+                "additionalProperties"
+            ] is not True, path_template
+            context = request_schema["properties"]["expected_context"]
+            assert "additionalProperties" not in context or context[
+                "additionalProperties"
+            ] is not True, path_template
+            assert set(context["required"]) == {
+                "current_context",
+                "evidence_revision",
+                "lifecycle_revision",
+                "projection_watermark",
+                "run_id",
+            }, path_template
+            if path_template.endswith("/submit"):
+                verification = request_schema["properties"]["verification"]
+                assert "additionalProperties" not in verification or verification[
+                    "additionalProperties"
+                ] is not True
+                assert set(verification["required"]) == {
+                    "finding_decisions",
+                    "outcome",
+                    "reason_code",
+                    "schema_version",
+                }
+                decisions = verification["properties"]["finding_decisions"]
+                assert "additionalProperties" not in decisions or decisions[
+                    "additionalProperties"
+                ] is not True
+                finding_decision = decisions["items"]
+                assert set(finding_decision["required"]) == {"finding_id", "outcome"}
+                assert "additionalProperties" not in finding_decision or finding_decision[
+                    "additionalProperties"
+                ] is not True
+
+        admission = submit(server, "http-t02-openapi-closed").json()
+        item = wait_for_projected_queue_item(server, admission["application_id"])
+        work_item_id = item["work_item_id"]
+        work = server.request(
+            "GET",
+            f"/controlled/s01/api/queries/review-work-items/{work_item_id}",
+            headers=headers("reviewer"),
+        ).json()
+        assert set(work["command_context"]) == {
+            "lifecycle_revision",
+            "evidence_revision",
+            "run_id",
+            "projection_watermark",
+            "current_context",
+        }
+        claimed = server.request(
+            "POST",
+            f"/controlled/s01/api/commands/review-work-items/{work_item_id}/claim",
+            body={"expected_context": work["command_context"]},
+            headers=headers("reviewer"),
+        )
+        assert claimed.status == 200
+        verification = {
+            "schema_version": "human-decision/1",
+            "outcome": "confirmed",
+            "reason_code": "HUMAN_REVIEW_COMPLETED",
+            "finding_decisions": [
+                {"finding_id": finding["finding_id"], "outcome": "confirmed"}
+                for finding in work["automatic_findings"]
+            ],
+        }
+        submitted = server.request(
+            "POST",
+            f"/controlled/s01/api/commands/review-work-items/{work_item_id}/submit",
+            body={
+                "expected_fence": 1,
+                "expected_context": work["command_context"],
+                "idempotency_key": "t02-http-openapi-submit",
+                "verification": verification,
+            },
+            headers=headers("reviewer"),
+        )
+        assert submitted.status == 200
+        work_after = server.request(
+            "GET",
+            f"/controlled/s01/api/queries/review-work-items/{work_item_id}",
+            headers=headers("reviewer"),
+        ).json()
+        decisions = work_after["decisions"]
+        assert len(decisions) == 1
+        # The exposed human decision keeps its exact current closed shape: the
+        # legacy-oracle compatibility summary (present in the frozen-admission
+        # flow) is typed, and the absent note metadata is never synthesized.
+        assert set(decisions[0]) == {
+            "decision_id",
+            "schema_version",
+            "outcome",
+            "reason_code",
+            "finding_decisions",
+            "reviewer_subject",
+            "reviewer_role",
+            "reviewer_source_id",
+            "assigned_subject",
+            "cycle",
+            "finding_ids",
+            "evidence_snapshot_id",
+            "release_id",
+            "fixed_context",
+            "claim_fence",
+            "submitted_at",
+            "compatibility",
+        }
+        assert decisions[0]["outcome"] == "confirmed"
+        assert set(decisions[0]["finding_decisions"][0]) == {"finding_id", "outcome"}
+        assert set(decisions[0]["fixed_context"]) == set(work["command_context"])
+        compatibility = decisions[0]["compatibility"]
+        assert set(compatibility) == {
+            "schema_version",
+            "differential_source",
+            "intent",
+            "target_reason_code",
+            "conformance",
+            "target_context",
+            "fact_counts",
+            "semantic_differential_digest",
+        }
+        assert set(compatibility["target_context"]) == {
+            "run_id",
+            "evidence_snapshot_id",
+            "release_id",
+            "source_sha256",
+        }
+        assert set(compatibility["fact_counts"]) == {
+            "legacy_checks",
+            "target_findings",
+            "checks_compared",
+            "mismatches",
+        }
 
 
 @pytest.mark.parametrize(

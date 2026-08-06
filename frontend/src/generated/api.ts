@@ -1265,17 +1265,11 @@ export interface components {
             /** Application Id */
             application_id: string;
             /** Attachment Versions */
-            attachment_versions: {
-                [key: string]: unknown;
-            }[];
+            attachment_versions: components["schemas"]["S01HistoryAttachmentVersion"][];
             /** Business Exceptions */
-            business_exceptions: {
-                [key: string]: unknown;
-            }[];
+            business_exceptions: components["schemas"]["S01HistoryBusinessException"][];
             /** Corrections */
-            corrections: {
-                [key: string]: unknown;
-            }[];
+            corrections: components["schemas"]["S01HistoryCorrection"][];
             /** Current Run Id */
             current_run_id?: string | null;
             /** Runs */
@@ -1404,6 +1398,112 @@ export interface components {
             /** Value State */
             value_state: string;
         };
+        /** S01FindingDecision */
+        S01FindingDecision: {
+            /** Finding Id */
+            finding_id: string;
+            /** Outcome */
+            outcome: string;
+        };
+        /** S01HistoryAttachmentVersion */
+        S01HistoryAttachmentVersion: {
+            /** Attachment Id */
+            attachment_id: string;
+            /** Current */
+            current: boolean;
+            /** Document Id */
+            document_id: string;
+            /** Document Role */
+            document_role: string;
+            /** Evidence Revision */
+            evidence_revision: number;
+            /** Page Ids */
+            page_ids: string[];
+            /** Producer Result Id */
+            producer_result_id?: string | null;
+            /** Supersedes Attachment Id */
+            supersedes_attachment_id?: string | null;
+            /** Version */
+            version: string;
+        };
+        /** S01HistoryBusinessException */
+        S01HistoryBusinessException: {
+            /** Completion Basis */
+            completion_basis?: string | null;
+            /** Current */
+            current: boolean;
+            /** Decision */
+            decision?: string | null;
+            /** Decision Id */
+            decision_id?: string | null;
+            /** Expires At */
+            expires_at?: number | null;
+            /** Finding Id */
+            finding_id: string;
+            /** Machine Verdict */
+            machine_verdict: string;
+            /** Request Id */
+            request_id: string;
+            /** Request Reason */
+            request_reason: string;
+            /** Requested At */
+            requested_at: number;
+            /** Route */
+            route?: string | null;
+            /** Routed */
+            routed: boolean;
+            /** Rule Id */
+            rule_id: string;
+            /** Run Id */
+            run_id: string;
+            /** Scope */
+            scope: string;
+            /** Status */
+            status: string;
+        };
+        /** S01HistoryCorrection */
+        S01HistoryCorrection: {
+            /** Actor */
+            actor: string;
+            /** Correction Id */
+            correction_id: string;
+            /** Document Id */
+            document_id: string;
+            /** Document Role */
+            document_role: string;
+            /** Evidence Revision */
+            evidence_revision: number;
+            /** Field */
+            field: string;
+            /** Invalidated Decision Ids */
+            invalidated_decision_ids: string[];
+            /** Invalidated Exception Ids */
+            invalidated_exception_ids: string[];
+            /** Reason Code */
+            reason_code: string;
+            /** Recorded At */
+            recorded_at: number;
+            source_location: components["schemas"]["S01HistorySourceLocation"];
+            /** Successor Observation Id */
+            successor_observation_id: string;
+            /** Superseded Observation Id */
+            superseded_observation_id: string;
+        };
+        /** S01HistoryReconciliation */
+        S01HistoryReconciliation: {
+            /** Attempt */
+            attempt?: number | null;
+            /** Logical Operation Id */
+            logical_operation_id: string;
+            /** Max Attempts */
+            max_attempts?: number | null;
+            /** Result Digest */
+            result_digest?: string | null;
+            /** Result Id */
+            result_id?: string | null;
+            /** Status */
+            status: string;
+        };
         /** S01HistoryRun */
         S01HistoryRun: {
             /** Applicable Decision Ids */
@@ -1413,9 +1513,7 @@ export interface components {
             /** Authority Digest */
             authority_digest: string;
             /** Cas Mismatches */
-            cas_mismatches: {
-                [key: string]: unknown;
-            }[];
+            cas_mismatches: string[];
             /** Checker Build */
             checker_build?: string | null;
             /** Current */
@@ -1442,10 +1540,7 @@ export interface components {
             invalidated_exception_ids: string[];
             /** Lifecycle Revision */
             lifecycle_revision: number;
-            /** Reconciliation */
-            reconciliation?: {
-                [key: string]: unknown;
-            } | null;
+            reconciliation?: components["schemas"]["S01HistoryReconciliation"] | null;
             /** Release Digest */
             release_digest?: string | null;
             /** Release Id */
@@ -1456,6 +1551,106 @@ export interface components {
             selected_observation_ids: string[];
             /** Status */
             status: string;
+        };
+        /** S01HistorySourceLocation */
+        S01HistorySourceLocation: {
+            /** Source Page */
+            source_page?: number | null;
+            /** Source Region */
+            source_region?: string | null;
+            /** Source Sha256 */
+            source_sha256: string;
+        };
+        /**
+         * S01HumanDecision
+         * @description The exposed human decision record (``review_work_item_view``).  The two
+         *     legacy-oracle fields are serialized only when the owning record carries
+         *     them, so the migrated C-DEMO payload keeps its exact shape.
+         */
+        S01HumanDecision: {
+            /** Assigned Subject */
+            assigned_subject: string;
+            /** Claim Fence */
+            claim_fence: number;
+            compatibility?: components["schemas"]["S01HumanDecisionCompatibility"] | null;
+            /** Cycle */
+            cycle: number;
+            /** Decision Id */
+            decision_id: string;
+            /** Evidence Snapshot Id */
+            evidence_snapshot_id: string;
+            /** Finding Decisions */
+            finding_decisions: components["schemas"]["S01FindingDecision"][];
+            /** Finding Ids */
+            finding_ids: string[];
+            fixed_context: components["schemas"]["S01ReviewCommandContext"];
+            note_metadata?: components["schemas"]["S01NoteMetadata"] | null;
+            /** Outcome */
+            outcome: string;
+            /** Reason Code */
+            reason_code: string;
+            /** Release Id */
+            release_id: string;
+            /** Reviewer Role */
+            reviewer_role: string;
+            /** Reviewer Source Id */
+            reviewer_source_id: string;
+            /** Reviewer Subject */
+            reviewer_subject: string;
+            /** Schema Version */
+            schema_version: string;
+            /** Submitted At */
+            submitted_at: number;
+        };
+        /** S01HumanDecisionCompatibility */
+        S01HumanDecisionCompatibility: {
+            /** Conformance */
+            conformance: string;
+            /** Differential Source */
+            differential_source: string;
+            fact_counts: components["schemas"]["S01HumanDecisionCompatibilityFactCounts"];
+            /** Intent */
+            intent: string;
+            /** Schema Version */
+            schema_version: string;
+            /** Semantic Differential Digest */
+            semantic_differential_digest: string;
+            target_context: components["schemas"]["S01HumanDecisionCompatibilityTargetContext"];
+            /** Target Reason Code */
+            target_reason_code: string;
+        };
+        /** S01HumanDecisionCompatibilityFactCounts */
+        S01HumanDecisionCompatibilityFactCounts: {
+            /** Checks Compared */
+            checks_compared: number;
+            /** Legacy Checks */
+            legacy_checks: number;
+            /** Mismatches */
+            mismatches: number;
+            /** Target Findings */
+            target_findings: number;
+        };
+        /** S01HumanDecisionCompatibilityTargetContext */
+        S01HumanDecisionCompatibilityTargetContext: {
+            /** Evidence Snapshot Id */
+            evidence_snapshot_id: string;
+            /** Release Id */
+            release_id: string;
+            /** Run Id */
+            run_id: string;
+            /** Source Sha256 */
+            source_sha256: string;
+        };
+        /** S01NoteMetadata */
+        S01NoteMetadata: {
+            /** Byte Count */
+            byte_count: number;
+            /** Character Count */
+            character_count: number;
+            /** Present */
+            present: boolean;
+            /** Sha256 */
+            sha256: string;
         };
         /** S01ProcessBody */
         S01ProcessBody: {
@@ -1710,6 +1905,25 @@ export interface components {
             /** Retry Offsets Seconds */
             retry_offsets_seconds: number[];
         };
+        /**
+         * S01ReviewCommandContext
+         * @description The closed review command context.  The domain compares it by exact
+         *     equality (``_review_context_matches``), so a partial context is a semantic
+         *     staleness; the schema here closes the shape so no arbitrary keys can hide
+         *     a missing revision inside a migrated request or response.
+         */
+        S01ReviewCommandContext: {
+            /** Current Context */
+            current_context: string;
+            /** Evidence Revision */
+            evidence_revision: number;
+            /** Lifecycle Revision */
+            lifecycle_revision: number;
+            /** Projection Watermark */
+            projection_watermark: number;
+            /** Run Id */
+            run_id: string;
+        };
         /** S01ReviewWorkItemResponse */
         S01ReviewWorkItemResponse: {
             /** Application Id */
@@ -1722,20 +1936,12 @@ export interface components {
             claim_fence: number;
             /** Claim Subject */
             claim_subject?: string | null;
-            /** Command Context */
-            command_context: {
-                [key: string]: unknown;
-            };
+            command_context: components["schemas"]["S01ReviewCommandContext"];
             /** Completed Finding Ids */
             completed_finding_ids: string[];
-            /** Decision */
-            decision?: {
-                [key: string]: unknown;
-            } | null;
+            decision?: components["schemas"]["S01HumanDecision"] | null;
             /** Decisions */
-            decisions: {
-                [key: string]: unknown;
-            }[];
+            decisions: components["schemas"]["S01HumanDecision"][];
             /** Evidence Revision */
             evidence_revision: number;
             /** Lifecycle Revision */
@@ -2924,9 +3130,24 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": {
-                    /** Expected Context */
+                    /**
+                     * S01ReviewCommandContext
+                     * @description The closed review command context.  The domain compares it by exact
+                     *     equality (``_review_context_matches``), so a partial context is a semantic
+                     *     staleness; the schema here closes the shape so no arbitrary keys can hide
+                     *     a missing revision inside a migrated request or response.
+                     */
                     expected_context: {
-                        [key: string]: unknown;
+                        /** Current Context */
+                        current_context: string;
+                        /** Evidence Revision */
+                        evidence_revision: number;
+                        /** Lifecycle Revision */
+                        lifecycle_revision: number;
+                        /** Projection Watermark */
+                        projection_watermark: number;
+                        /** Run Id */
+                        run_id: string;
                     };
                 };
             };
@@ -3033,9 +3254,24 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": {
-                    /** Expected Context */
+                    /**
+                     * S01ReviewCommandContext
+                     * @description The closed review command context.  The domain compares it by exact
+                     *     equality (``_review_context_matches``), so a partial context is a semantic
+                     *     staleness; the schema here closes the shape so no arbitrary keys can hide
+                     *     a missing revision inside a migrated request or response.
+                     */
                     expected_context: {
-                        [key: string]: unknown;
+                        /** Current Context */
+                        current_context: string;
+                        /** Evidence Revision */
+                        evidence_revision: number;
+                        /** Lifecycle Revision */
+                        lifecycle_revision: number;
+                        /** Projection Watermark */
+                        projection_watermark: number;
+                        /** Run Id */
+                        run_id: string;
                     };
                     /** Expected Fence */
                     expected_fence: number;
@@ -3113,9 +3349,24 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": {
-                    /** Expected Context */
+                    /**
+                     * S01ReviewCommandContext
+                     * @description The closed review command context.  The domain compares it by exact
+                     *     equality (``_review_context_matches``), so a partial context is a semantic
+                     *     staleness; the schema here closes the shape so no arbitrary keys can hide
+                     *     a missing revision inside a migrated request or response.
+                     */
                     expected_context: {
-                        [key: string]: unknown;
+                        /** Current Context */
+                        current_context: string;
+                        /** Evidence Revision */
+                        evidence_revision: number;
+                        /** Lifecycle Revision */
+                        lifecycle_revision: number;
+                        /** Projection Watermark */
+                        projection_watermark: number;
+                        /** Run Id */
+                        run_id: string;
                     };
                     /** Expected Fence */
                     expected_fence: number;
@@ -3226,17 +3477,50 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": {
-                    /** Expected Context */
+                    /**
+                     * S01ReviewCommandContext
+                     * @description The closed review command context.  The domain compares it by exact
+                     *     equality (``_review_context_matches``), so a partial context is a semantic
+                     *     staleness; the schema here closes the shape so no arbitrary keys can hide
+                     *     a missing revision inside a migrated request or response.
+                     */
                     expected_context: {
-                        [key: string]: unknown;
+                        /** Current Context */
+                        current_context: string;
+                        /** Evidence Revision */
+                        evidence_revision: number;
+                        /** Lifecycle Revision */
+                        lifecycle_revision: number;
+                        /** Projection Watermark */
+                        projection_watermark: number;
+                        /** Run Id */
+                        run_id: string;
                     };
                     /** Expected Fence */
                     expected_fence: number;
                     /** Idempotency Key */
                     idempotency_key: string;
-                    /** Verification */
+                    /**
+                     * S01ManualVerification
+                     * @description The structured manual verification the Reviewer submits.  The optional
+                     *     ``note`` is allowed by the domain contract; this ticket adds no note UI.
+                     */
                     verification: {
-                        [key: string]: unknown;
+                        /** Finding Decisions */
+                        finding_decisions: {
+                            /** Finding Id */
+                            finding_id: string;
+                            /** Outcome */
+                            outcome: string;
+                        }[];
+                        /** Note */
+                        note?: string | null;
+                        /** Outcome */
+                        outcome: string;
+                        /** Reason Code */
+                        reason_code: string;
+                        /** Schema Version */
+                        schema_version: string;
                     };
                 };
             };

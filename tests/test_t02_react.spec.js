@@ -91,7 +91,8 @@ function cleanupStatePath(statePath) {
 
 async function startServer(extraEnv = {}, options = {}) {
   const port = await reservePort();
-  const s02Fixture = createS02Fixture();
+  const s02Fixture =
+    options.s02Fixture ?? createS02Fixture();
   const statePath =
     options.statePath ??
     path.join(
@@ -297,12 +298,15 @@ function trackPageDiagnostics(page, expectations = []) {
   return { browserErrors, consoleErrors, networkErrors, counts };
 }
 
+/** A test-id entry may pin a specific occurrence (per-evidence-link facts). */
 async function assertControlsFitAndDoNotOverlap(page, testIds) {
   const boxes = [];
   const centerHits = [];
-  for (const testId of testIds) {
-    const locator = page.getByTestId(testId);
-    expect(await locator.count(), `${testId} count`).toBe(1);
+  for (const entry of testIds) {
+    const testId = typeof entry === "string" ? entry : entry.testId;
+    const index = typeof entry === "string" ? 0 : entry.index;
+    let locator = page.getByTestId(testId).nth(index);
+    expect(await locator.count(), `${testId} count`).toBeGreaterThan(0);
     await locator.scrollIntoViewIfNeeded();
     expect(await locator.isVisible(), `${testId} visible`).toBe(true);
     const box = await locator.boundingBox();
@@ -329,23 +333,30 @@ async function assertControlsFitAndDoNotOverlap(page, testIds) {
       ).toBeLessThanOrEqual(clip.clientHeight + 1);
     }
     const scroll = await page.evaluate(() => window.scrollY);
-    centerHits.push(
-      await page.evaluate(({ testId, box }) => {
-        const element = document.querySelector(`[data-testid="${testId}"]`);
-        if (!element) return null;
-        if (getComputedStyle(element).pointerEvents === "none") {
-          const disabled =
-            element.hasAttribute("disabled") ||
-            element.getAttribute("aria-disabled") === "true";
-          return disabled;
-        }
-        const hit = document.elementFromPoint(
-          box.x + box.width / 2,
-          box.y + box.height / 2,
-        );
-        return element.contains(hit);
-      }, { testId, box }),
-    );
+    // Container panels may extend far below the fold; their center is not a
+    // meaningful pointer target (the clipping checks below already cover
+    // them).  Only interactive controls must be center-hittable.
+    if (testId.endsWith("-panel")) {
+      centerHits.push(Promise.resolve(true));
+    } else {
+      centerHits.push(
+        await page.evaluate(({ testId, box }) => {
+          const element = document.querySelector(`[data-testid="${testId}"]`);
+          if (!element) return null;
+          if (getComputedStyle(element).pointerEvents === "none") {
+            const disabled =
+              element.hasAttribute("disabled") ||
+              element.getAttribute("aria-disabled") === "true";
+            return disabled;
+          }
+          const hit = document.elementFromPoint(
+            box.x + box.width / 2,
+            box.y + box.height / 2,
+          );
+          return element.contains(hit);
+        }, { testId, box }),
+      );
+    }
     boxes.push({
       testId,
       box,
@@ -404,8 +415,10 @@ async function assertControlsFitAndDoNotOverlap(page, testIds) {
       expect(overlap, `${a.testId} overlaps ${b.testId}`).toBe(false);
     }
   }
-  for (const hit of centerHits) {
-    expect(await hit).toBe(true);
+  for (let index = 0; index < centerHits.length; index += 1) {
+    expect(await centerHits[index], `${boxes[index].testId} center hit`).toBe(
+      true,
+    );
   }
 }
 
@@ -501,6 +514,34 @@ async function runFullChainTracer(browser, viewport, label) {
     );
     const runDigestBefore = await reviewer.getByTestId("review-run-digest").innerText();
 
+    // Lease freshness, current revisions, and the projection watermark are
+    // server facts the Reviewer must be able to read before deciding.
+    await expect(reviewer.getByTestId("review-claim-expiry")).toHaveText("0");
+    await expect(reviewer.getByTestId("review-lifecycle-revision")).toHaveText(
+      "6",
+    );
+    await expect(reviewer.getByTestId("review-evidence-revision")).toHaveText(
+      "1",
+    );
+    await expect(reviewer.getByTestId("review-workspace-expiry")).toHaveText(
+      "0",
+    );
+    await expect(reviewer.getByTestId("review-workspace-lifecycle")).toHaveText(
+      "6",
+    );
+    await expect(
+      reviewer.getByTestId("review-workspace-evidence-revision"),
+    ).toHaveText("1");
+    await expect(reviewer.getByTestId("review-workspace-watermark")).toHaveText(
+      "1",
+    );
+    await expect(reviewer.getByTestId("review-workspace-current-run")).toHaveText(
+      /^run_/,
+    );
+    await expect(reviewer.getByTestId("review-workspace-snapshot")).toHaveText(
+      /^snapshot_/,
+    );
+
     // Finding-first workspace: the automatic finding with masked evidence.
     await expect(reviewer.getByTestId("review-workspace-rule")).toHaveText(
       "R_ENGINE_CROSS",
@@ -514,6 +555,22 @@ async function runFullChainTracer(browser, viewport, label) {
       .all()) {
       await expect(masked).toHaveText("[REDACTED]");
     }
+    // Masked evidence carries safe provenance and eligibility facts.
+    await expect(reviewer.getByTestId("review-evidence-role").first()).toHaveText(
+      "机动车登记证书",
+    );
+    await expect(
+      reviewer.getByTestId("review-evidence-source-page").first(),
+    ).toHaveText("1");
+    await expect(
+      reviewer.getByTestId("review-evidence-source-region").first(),
+    ).toHaveText("region:1");
+    await expect(
+      reviewer.getByTestId("review-evidence-provenance").first(),
+    ).toHaveText(/^[0-9a-f]{64}$/);
+    await expect(
+      reviewer.getByTestId("review-evidence-eligibility").first(),
+    ).toHaveText("REGISTERED_SOURCE_PROVENANCE_VERIFIED");
     await expect(reviewer.getByTestId("gate-phase")).toHaveText(
       "Manual Review",
     );
@@ -532,6 +589,20 @@ async function runFullChainTracer(browser, viewport, label) {
       "renew-button",
       "release-button",
       "submit-button",
+      "review-claim-expiry",
+      "review-lifecycle-revision",
+      "review-evidence-revision",
+      "review-workspace-expiry",
+      "review-workspace-lifecycle",
+      "review-workspace-evidence-revision",
+      "review-workspace-watermark",
+      "review-workspace-current-run",
+      "review-workspace-snapshot",
+      { testId: "review-evidence-role", index: 0 },
+      { testId: "review-evidence-source-page", index: 0 },
+      { testId: "review-evidence-source-region", index: 0 },
+      { testId: "review-evidence-provenance", index: 0 },
+      { testId: "review-evidence-eligibility", index: 0 },
     ]);
 
     // Claim -> authoritative refetch -> renew -> release -> reclaim: the fence
@@ -570,8 +641,25 @@ async function runFullChainTracer(browser, viewport, label) {
     );
     await expect(reviewer.getByTestId("review-claim-fence")).toHaveText("2");
 
-    // One allowed manual verification; the POST body is exactly the generated
-    // contract fields and the verification carries no automatic verdict.
+    // One allowed manual verification.  The Reviewer explicitly chooses the
+    // structured disposition (never silently fixed by the UI); the POST body
+    // is exactly the generated contract fields, the chosen outcome is bound
+    // to the overall and every per-finding decision, and the verification
+    // carries no automatic verdict.
+    await expect(reviewer.getByTestId("review-outcome")).toHaveValue(
+      "confirmed",
+    );
+    await reviewer.getByTestId("review-outcome").selectOption("inconclusive");
+    await expect(reviewer.getByTestId("review-outcome")).toHaveValue(
+      "inconclusive",
+    );
+    await assertControlsFitAndDoNotOverlap(reviewer, [
+      "review-outcome",
+      "submit-button",
+      "renew-button",
+      "release-button",
+      "review-command-status",
+    ]);
     await reviewer.getByRole("button", { name: "提交人工核验" }).click();
     await expect(reviewer.getByTestId("review-command-status")).toContainText(
       "核验已接受",
@@ -624,6 +712,11 @@ async function runFullChainTracer(browser, viewport, label) {
       "reason_code",
       "schema_version",
     ]);
+    expect(submitBody.verification.outcome).toBe("inconclusive");
+    expect(submitBody.verification.finding_decisions.length).toBeGreaterThan(0);
+    for (const decision of submitBody.verification.finding_decisions) {
+      expect(decision.outcome).toBe("inconclusive");
+    }
     const serializedVerification = JSON.stringify(submitBody.verification);
     expect(serializedVerification).not.toContain("verdict");
     expect(serializedVerification).not.toContain("route");
@@ -637,6 +730,8 @@ async function runFullChainTracer(browser, viewport, label) {
     await expect(reviewer.getByTestId("review-run-digest")).toHaveText(
       runDigestBefore,
     );
+    // The automatic finding is the server authority: its verdict is exactly
+    // what it was before the human workflow ran, never rewritten by it.
     await expect(reviewer.getByTestId("review-finding-verdict")).toHaveText(
       "inconsistent",
     );
@@ -691,6 +786,9 @@ async function runFullChainTracer(browser, viewport, label) {
       "gate-panel",
       "history-panel",
       "reload-button",
+      "review-claim-expiry",
+      "review-lifecycle-revision",
+      "review-evidence-revision",
     ]);
 
     // Rollback smoke: both legacy shells still serve on the same app.
@@ -1001,6 +1099,245 @@ test("T02 production tracer: a lost claim response reconciles through refetch wi
           ? () => resources.reviewerContext.close()
           : () => Promise.resolve(),
         resources.server ? () => stopServer(resources.server) : () => Promise.resolve(),
+      ]);
+    } catch (cleanupError) {
+      if (failure === undefined) throw cleanupError;
+    }
+  }
+});
+
+test("T02 production tracer: a real stale fence keeps every write fenced until an authoritative reload", async ({
+  browser,
+}) => {
+  test.setTimeout(120_000);
+  const resources = {};
+  let failure;
+  try {
+    resources.server = await startServer();
+    const server = resources.server;
+    resources.reviewerContext = await browser.newContext({
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: { Authorization: `Bearer ${DEMO_CREDENTIAL}` },
+    });
+    const reviewer = await resources.reviewerContext.newPage();
+    const stale409 = { name: "staleRenew409", url: null, statusText: "409" };
+    const diagnostics = trackPageDiagnostics(reviewer, [stale409]);
+
+    await reviewer.goto(`${server.baseURL}${REACT_URL}`, {
+      waitUntil: "networkidle",
+    });
+    const item = await installManualWork(server.baseURL, reviewer);
+    const workId = item.work_item_id;
+    stale409.url = `${server.baseURL}/controlled/s01/api/commands/review-work-items/${encodeURIComponent(workId)}/renew`;
+    await reviewer.reload({ waitUntil: "networkidle" });
+    await reviewer.getByRole("link", { name: new RegExp(workId) }).click();
+    await expect(reviewer.getByTestId("review-panel")).toBeVisible();
+    await expect(reviewer.getByTestId("review-status")).toHaveText("unclaimed");
+
+    const renewPosts = [];
+    reviewer.on("request", (request) => {
+      const url = new URL(request.url());
+      if (request.method() === "POST" && url.pathname.endsWith("/renew")) {
+        renewPosts.push(request.postDataJSON());
+      }
+    });
+
+    // Claim inside the browser: fence 1 on the real authority.
+    await reviewer.getByRole("button", { name: "认领" }).click();
+    await expect(reviewer.getByTestId("review-command-status")).toContainText(
+      "认领已接受",
+    );
+    await expect(reviewer.getByTestId("review-status")).toHaveText("claimed");
+    await expect(reviewer.getByTestId("review-claim-fence")).toHaveText("1");
+
+    // The same session releases the item through a second client, so the
+    // browser's loaded claim data is stale against the real authority.
+    const workNow = await reviewer
+      .context()
+      .request.get(
+        `${server.baseURL}/controlled/s01/api/queries/review-work-items/${encodeURIComponent(workId)}`,
+      );
+    expect(workNow.ok()).toBeTruthy();
+    const workBody = await workNow.json();
+    expect(workBody.status).toBe("claimed");
+    const releaseResponse = await reviewer
+      .context()
+      .request.post(
+        `${server.baseURL}/controlled/s01/api/commands/review-work-items/${encodeURIComponent(workId)}/release`,
+        {
+          data: {
+            expected_fence: 1,
+            expected_context: workBody.command_context,
+            idempotency_key: "t02-stale-external-release",
+          },
+        },
+      );
+    expect(releaseResponse.ok()).toBeTruthy();
+
+    // The browser renew carries the stale fence: the real FastAPI authority
+    // answers the registered 409 S03_STALE without any route interception.
+    await reviewer.getByRole("button", { name: "续期" }).click();
+    await expect(reviewer.getByTestId("review-command-status")).toContainText(
+      "续期未接受（STALE_WORK_ITEM_CLAIM）：请重新加载权威上下文后再试",
+    );
+    await expect(reviewer.getByTestId("review-claim-fence")).toHaveText("1");
+    // No optimistic ownership, every write (including claim) fenced, and a
+    // definitive 409 exposes no retry.
+    for (const name of ["认领", "续期", "释放", "提交人工核验"]) {
+      await expect(reviewer.getByRole("button", { name })).toBeDisabled();
+    }
+    await expect(reviewer.getByTestId("retry-button")).toHaveCount(0);
+
+    // Recovery only after the authoritative reload: the refetched state shows
+    // released and the ordinary claim path re-opens.
+    await reviewer.getByRole("button", { name: "重新加载" }).click();
+    await expect(reviewer.getByTestId("review-status")).toHaveText("released");
+    await expect(reviewer.getByRole("button", { name: "认领" })).toBeEnabled();
+    await reviewer.getByRole("button", { name: "认领" }).click();
+    await expect(reviewer.getByTestId("review-command-status")).toContainText(
+      "认领已接受",
+    );
+    await expect(reviewer.getByTestId("review-claim-fence")).toHaveText("2");
+
+    expect(renewPosts).toHaveLength(1);
+    expect(Object.keys(renewPosts[0]).sort()).toEqual([
+      "expected_context",
+      "expected_fence",
+      "idempotency_key",
+    ]);
+    expect(diagnostics.browserErrors).toEqual([]);
+    expect(diagnostics.consoleErrors).toEqual([]);
+    expect(diagnostics.networkErrors).toEqual([]);
+    expect(diagnostics.counts.staleRenew409).toBe(1);
+  } catch (error) {
+    failure = error;
+    throw error;
+  } finally {
+    try {
+      await settleCleanup([
+        resources.reviewerContext
+          ? () => resources.reviewerContext.close()
+          : () => Promise.resolve(),
+        resources.server
+          ? () => stopServer(resources.server)
+          : () => Promise.resolve(),
+      ]);
+    } catch (cleanupError) {
+      if (failure === undefined) throw cleanupError;
+    }
+  }
+});
+
+test("T02 production tracer: the deterministic audit fault yields a real 503 with zero side effect and recovery after authority recovery", async ({
+  browser,
+}) => {
+  test.setTimeout(120_000);
+  const resources = {};
+  let failure;
+  try {
+    resources.server = await startServer();
+    const server = resources.server;
+    // A second FastAPI authority on the same state file injects the
+    // deterministic review.audit fault.  The browser's claim is forwarded to
+    // it, so the 503 is a real registered S03 response, never a stub.
+    resources.faultServer = await startServer(
+      { TASK4_S03_TEST_FAULT_POINT: "review.audit" },
+      { statePath: server.statePath, s02Fixture: server.s02Fixture },
+    );
+    const faultServer = resources.faultServer;
+    resources.reviewerContext = await browser.newContext({
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: { Authorization: `Bearer ${DEMO_CREDENTIAL}` },
+    });
+    const reviewer = await resources.reviewerContext.newPage();
+    const audit503 = { name: "auditClaim503", url: null, statusText: "503" };
+    const diagnostics = trackPageDiagnostics(reviewer, [audit503]);
+
+    await reviewer.goto(`${server.baseURL}${REACT_URL}`, {
+      waitUntil: "networkidle",
+    });
+    const item = await installManualWork(server.baseURL, reviewer);
+    const workId = item.work_item_id;
+    audit503.url = `${server.baseURL}/controlled/s01/api/commands/review-work-items/${encodeURIComponent(workId)}/claim`;
+    await reviewer.reload({ waitUntil: "networkidle" });
+    await reviewer.getByRole("link", { name: new RegExp(workId) }).click();
+    await expect(reviewer.getByTestId("review-panel")).toBeVisible();
+    await expect(reviewer.getByTestId("review-status")).toHaveText("unclaimed");
+
+    let claimPosts = 0;
+    reviewer.on("request", (request) => {
+      const url = new URL(request.url());
+      if (request.method() === "POST" && url.pathname.endsWith("/claim")) {
+        claimPosts += 1;
+      }
+    });
+
+    const claimUrl = "**/controlled/s01/api/commands/review-work-items/*/claim";
+    await reviewer.route(claimUrl, async (route) => {
+      const request = route.request();
+      const forwarded = await reviewer
+        .context()
+        .request.fetch(
+          `${faultServer.baseURL}${new URL(request.url()).pathname}`,
+          {
+            method: request.method(),
+            headers: request.headers(),
+            data: request.postDataJSON(),
+          },
+        );
+      await route.fulfill({ response: forwarded });
+    });
+    await reviewer.getByRole("button", { name: "认领" }).click();
+    await expect(reviewer.getByTestId("review-command-status")).toContainText(
+      "认领未接受（AUDIT_UNAVAILABLE）：请重新加载权威上下文后再试",
+    );
+    await expect(reviewer.getByTestId("review-status")).toHaveText("unclaimed");
+    await expect(reviewer.getByTestId("review-claim-fence")).toHaveText("0");
+    // Zero business side effect on the real authority: the work item is still
+    // unclaimed and the claim button stays fenced with no retry (the
+    // structured 503 proves the lease was never created).
+    const after = await reviewer
+      .context()
+      .request.get(
+        `${server.baseURL}/controlled/s01/api/queries/review-work-items/${encodeURIComponent(workId)}`,
+      );
+    expect(after.ok()).toBeTruthy();
+    expect((await after.json()).status).toBe("unclaimed");
+    await expect(reviewer.getByRole("button", { name: "认领" })).toBeDisabled();
+    await expect(reviewer.getByTestId("retry-button")).toHaveCount(0);
+    await reviewer.unroute(claimUrl);
+
+    // Authority recovers: the authoritative reload refetches the main
+    // authority and the allowed next action completes against it.
+    await reviewer.getByRole("button", { name: "重新加载" }).click();
+    await expect(reviewer.getByRole("button", { name: "认领" })).toBeEnabled();
+    await reviewer.getByRole("button", { name: "认领" }).click();
+    await expect(reviewer.getByTestId("review-command-status")).toContainText(
+      "认领已接受",
+    );
+    await expect(reviewer.getByTestId("review-status")).toHaveText("claimed");
+    await expect(reviewer.getByTestId("review-claim-fence")).toHaveText("1");
+
+    expect(claimPosts).toBe(2);
+    expect(diagnostics.browserErrors).toEqual([]);
+    expect(diagnostics.consoleErrors).toEqual([]);
+    expect(diagnostics.networkErrors).toEqual([]);
+    expect(diagnostics.counts.auditClaim503).toBe(1);
+  } catch (error) {
+    failure = error;
+    throw error;
+  } finally {
+    try {
+      await settleCleanup([
+        resources.reviewerContext
+          ? () => resources.reviewerContext.close()
+          : () => Promise.resolve(),
+        resources.faultServer
+          ? () => stopServer(resources.faultServer)
+          : () => Promise.resolve(),
+        resources.server
+          ? () => stopServer(resources.server)
+          : () => Promise.resolve(),
       ]);
     } catch (cleanupError) {
       if (failure === undefined) throw cleanupError;

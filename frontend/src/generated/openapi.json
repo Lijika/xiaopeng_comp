@@ -136,24 +136,21 @@
           },
           "attachment_versions": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/S01HistoryAttachmentVersion"
             },
             "title": "Attachment Versions",
             "type": "array"
           },
           "business_exceptions": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/S01HistoryBusinessException"
             },
             "title": "Business Exceptions",
             "type": "array"
           },
           "corrections": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/S01HistoryCorrection"
             },
             "title": "Corrections",
             "type": "array"
@@ -627,6 +624,351 @@
         "title": "S01EvidenceLink",
         "type": "object"
       },
+      "S01FindingDecision": {
+        "additionalProperties": false,
+        "properties": {
+          "finding_id": {
+            "title": "Finding Id",
+            "type": "string"
+          },
+          "outcome": {
+            "title": "Outcome",
+            "type": "string"
+          }
+        },
+        "required": [
+          "finding_id",
+          "outcome"
+        ],
+        "title": "S01FindingDecision",
+        "type": "object"
+      },
+      "S01HistoryAttachmentVersion": {
+        "properties": {
+          "attachment_id": {
+            "title": "Attachment Id",
+            "type": "string"
+          },
+          "current": {
+            "title": "Current",
+            "type": "boolean"
+          },
+          "document_id": {
+            "title": "Document Id",
+            "type": "string"
+          },
+          "document_role": {
+            "title": "Document Role",
+            "type": "string"
+          },
+          "evidence_revision": {
+            "title": "Evidence Revision",
+            "type": "integer"
+          },
+          "page_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Page Ids",
+            "type": "array"
+          },
+          "producer_result_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Producer Result Id"
+          },
+          "supersedes_attachment_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supersedes Attachment Id"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "attachment_id",
+          "version",
+          "document_id",
+          "document_role",
+          "page_ids",
+          "evidence_revision",
+          "current"
+        ],
+        "title": "S01HistoryAttachmentVersion",
+        "type": "object"
+      },
+      "S01HistoryBusinessException": {
+        "properties": {
+          "completion_basis": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completion Basis"
+          },
+          "current": {
+            "title": "Current",
+            "type": "boolean"
+          },
+          "decision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decision"
+          },
+          "decision_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decision Id"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "finding_id": {
+            "title": "Finding Id",
+            "type": "string"
+          },
+          "machine_verdict": {
+            "title": "Machine Verdict",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "request_reason": {
+            "title": "Request Reason",
+            "type": "string"
+          },
+          "requested_at": {
+            "title": "Requested At",
+            "type": "integer"
+          },
+          "route": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Route"
+          },
+          "routed": {
+            "title": "Routed",
+            "type": "boolean"
+          },
+          "rule_id": {
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "run_id",
+          "finding_id",
+          "rule_id",
+          "machine_verdict",
+          "status",
+          "current",
+          "request_reason",
+          "scope",
+          "requested_at",
+          "routed"
+        ],
+        "title": "S01HistoryBusinessException",
+        "type": "object"
+      },
+      "S01HistoryCorrection": {
+        "properties": {
+          "actor": {
+            "title": "Actor",
+            "type": "string"
+          },
+          "correction_id": {
+            "title": "Correction Id",
+            "type": "string"
+          },
+          "document_id": {
+            "title": "Document Id",
+            "type": "string"
+          },
+          "document_role": {
+            "title": "Document Role",
+            "type": "string"
+          },
+          "evidence_revision": {
+            "title": "Evidence Revision",
+            "type": "integer"
+          },
+          "field": {
+            "title": "Field",
+            "type": "string"
+          },
+          "invalidated_decision_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Invalidated Decision Ids",
+            "type": "array"
+          },
+          "invalidated_exception_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Invalidated Exception Ids",
+            "type": "array"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "recorded_at": {
+            "title": "Recorded At",
+            "type": "integer"
+          },
+          "source_location": {
+            "$ref": "#/components/schemas/S01HistorySourceLocation"
+          },
+          "successor_observation_id": {
+            "title": "Successor Observation Id",
+            "type": "string"
+          },
+          "superseded_observation_id": {
+            "title": "Superseded Observation Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "correction_id",
+          "superseded_observation_id",
+          "successor_observation_id",
+          "document_id",
+          "document_role",
+          "field",
+          "source_location",
+          "reason_code",
+          "actor",
+          "recorded_at",
+          "invalidated_decision_ids",
+          "invalidated_exception_ids",
+          "evidence_revision"
+        ],
+        "title": "S01HistoryCorrection",
+        "type": "object"
+      },
+      "S01HistoryReconciliation": {
+        "properties": {
+          "attempt": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attempt"
+          },
+          "logical_operation_id": {
+            "title": "Logical Operation Id",
+            "type": "string"
+          },
+          "max_attempts": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Attempts"
+          },
+          "result_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result Digest"
+          },
+          "result_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result Id"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "logical_operation_id"
+        ],
+        "title": "S01HistoryReconciliation",
+        "type": "object"
+      },
       "S01HistoryRun": {
         "properties": {
           "applicable_decision_ids": {
@@ -649,8 +991,7 @@
           },
           "cas_mismatches": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "type": "string"
             },
             "title": "Cas Mismatches",
             "type": "array"
@@ -746,14 +1087,12 @@
           "reconciliation": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/S01HistoryReconciliation"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Reconciliation"
+            ]
           },
           "release_digest": {
             "anyOf": [
@@ -813,6 +1152,286 @@
           "invalidated_exception_ids"
         ],
         "title": "S01HistoryRun",
+        "type": "object"
+      },
+      "S01HistorySourceLocation": {
+        "properties": {
+          "source_page": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Page"
+          },
+          "source_region": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Region"
+          },
+          "source_sha256": {
+            "title": "Source Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_sha256"
+        ],
+        "title": "S01HistorySourceLocation",
+        "type": "object"
+      },
+      "S01HumanDecision": {
+        "additionalProperties": false,
+        "description": "The exposed human decision record (``review_work_item_view``).  The two\nlegacy-oracle fields are serialized only when the owning record carries\nthem, so the migrated C-DEMO payload keeps its exact shape.",
+        "properties": {
+          "assigned_subject": {
+            "title": "Assigned Subject",
+            "type": "string"
+          },
+          "claim_fence": {
+            "title": "Claim Fence",
+            "type": "integer"
+          },
+          "compatibility": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/S01HumanDecisionCompatibility"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cycle": {
+            "title": "Cycle",
+            "type": "integer"
+          },
+          "decision_id": {
+            "title": "Decision Id",
+            "type": "string"
+          },
+          "evidence_snapshot_id": {
+            "title": "Evidence Snapshot Id",
+            "type": "string"
+          },
+          "finding_decisions": {
+            "items": {
+              "$ref": "#/components/schemas/S01FindingDecision"
+            },
+            "title": "Finding Decisions",
+            "type": "array"
+          },
+          "finding_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Finding Ids",
+            "type": "array"
+          },
+          "fixed_context": {
+            "$ref": "#/components/schemas/S01ReviewCommandContext"
+          },
+          "note_metadata": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/S01NoteMetadata"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "outcome": {
+            "title": "Outcome",
+            "type": "string"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "release_id": {
+            "title": "Release Id",
+            "type": "string"
+          },
+          "reviewer_role": {
+            "title": "Reviewer Role",
+            "type": "string"
+          },
+          "reviewer_source_id": {
+            "title": "Reviewer Source Id",
+            "type": "string"
+          },
+          "reviewer_subject": {
+            "title": "Reviewer Subject",
+            "type": "string"
+          },
+          "schema_version": {
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "submitted_at": {
+            "title": "Submitted At",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "decision_id",
+          "schema_version",
+          "outcome",
+          "reason_code",
+          "finding_decisions",
+          "reviewer_subject",
+          "reviewer_role",
+          "reviewer_source_id",
+          "assigned_subject",
+          "cycle",
+          "finding_ids",
+          "evidence_snapshot_id",
+          "release_id",
+          "fixed_context",
+          "claim_fence",
+          "submitted_at"
+        ],
+        "title": "S01HumanDecision",
+        "type": "object"
+      },
+      "S01HumanDecisionCompatibility": {
+        "properties": {
+          "conformance": {
+            "title": "Conformance",
+            "type": "string"
+          },
+          "differential_source": {
+            "title": "Differential Source",
+            "type": "string"
+          },
+          "fact_counts": {
+            "$ref": "#/components/schemas/S01HumanDecisionCompatibilityFactCounts"
+          },
+          "intent": {
+            "title": "Intent",
+            "type": "string"
+          },
+          "schema_version": {
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "semantic_differential_digest": {
+            "title": "Semantic Differential Digest",
+            "type": "string"
+          },
+          "target_context": {
+            "$ref": "#/components/schemas/S01HumanDecisionCompatibilityTargetContext"
+          },
+          "target_reason_code": {
+            "title": "Target Reason Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "differential_source",
+          "intent",
+          "target_reason_code",
+          "conformance",
+          "target_context",
+          "fact_counts",
+          "semantic_differential_digest"
+        ],
+        "title": "S01HumanDecisionCompatibility",
+        "type": "object"
+      },
+      "S01HumanDecisionCompatibilityFactCounts": {
+        "properties": {
+          "checks_compared": {
+            "title": "Checks Compared",
+            "type": "integer"
+          },
+          "legacy_checks": {
+            "title": "Legacy Checks",
+            "type": "integer"
+          },
+          "mismatches": {
+            "title": "Mismatches",
+            "type": "integer"
+          },
+          "target_findings": {
+            "title": "Target Findings",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "legacy_checks",
+          "target_findings",
+          "checks_compared",
+          "mismatches"
+        ],
+        "title": "S01HumanDecisionCompatibilityFactCounts",
+        "type": "object"
+      },
+      "S01HumanDecisionCompatibilityTargetContext": {
+        "properties": {
+          "evidence_snapshot_id": {
+            "title": "Evidence Snapshot Id",
+            "type": "string"
+          },
+          "release_id": {
+            "title": "Release Id",
+            "type": "string"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "source_sha256": {
+            "title": "Source Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "evidence_snapshot_id",
+          "release_id",
+          "source_sha256"
+        ],
+        "title": "S01HumanDecisionCompatibilityTargetContext",
+        "type": "object"
+      },
+      "S01NoteMetadata": {
+        "properties": {
+          "byte_count": {
+            "title": "Byte Count",
+            "type": "integer"
+          },
+          "character_count": {
+            "title": "Character Count",
+            "type": "integer"
+          },
+          "present": {
+            "title": "Present",
+            "type": "boolean"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "present",
+          "character_count",
+          "byte_count",
+          "sha256"
+        ],
+        "title": "S01NoteMetadata",
         "type": "object"
       },
       "S01ProcessBody": {
@@ -1458,6 +2077,41 @@
         "title": "S01RetryPolicy",
         "type": "object"
       },
+      "S01ReviewCommandContext": {
+        "additionalProperties": false,
+        "description": "The closed review command context.  The domain compares it by exact\nequality (``_review_context_matches``), so a partial context is a semantic\nstaleness; the schema here closes the shape so no arbitrary keys can hide\na missing revision inside a migrated request or response.",
+        "properties": {
+          "current_context": {
+            "title": "Current Context",
+            "type": "string"
+          },
+          "evidence_revision": {
+            "title": "Evidence Revision",
+            "type": "integer"
+          },
+          "lifecycle_revision": {
+            "title": "Lifecycle Revision",
+            "type": "integer"
+          },
+          "projection_watermark": {
+            "title": "Projection Watermark",
+            "type": "integer"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "lifecycle_revision",
+          "evidence_revision",
+          "run_id",
+          "projection_watermark",
+          "current_context"
+        ],
+        "title": "S01ReviewCommandContext",
+        "type": "object"
+      },
       "S01ReviewWorkItemResponse": {
         "properties": {
           "application_id": {
@@ -1491,9 +2145,7 @@
             "title": "Claim Subject"
           },
           "command_context": {
-            "additionalProperties": true,
-            "title": "Command Context",
-            "type": "object"
+            "$ref": "#/components/schemas/S01ReviewCommandContext"
           },
           "completed_finding_ids": {
             "items": {
@@ -1505,19 +2157,16 @@
           "decision": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/S01HumanDecision"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Decision"
+            ]
           },
           "decisions": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/S01HumanDecision"
             },
             "title": "Decisions",
             "type": "array"
@@ -3230,17 +3879,48 @@
             "application/json": {
               "schema": {
                 "additionalProperties": false,
+                "description": "The migrated S01 claim body.  Unlike the shared S03 body (whose open\n``expected_context`` is also inherited by the S04/S05 command families),\nthis closes the migrated review command contract.",
                 "properties": {
                   "expected_context": {
-                    "additionalProperties": true,
-                    "title": "Expected Context",
+                    "additionalProperties": false,
+                    "description": "The closed review command context.  The domain compares it by exact\nequality (``_review_context_matches``), so a partial context is a semantic\nstaleness; the schema here closes the shape so no arbitrary keys can hide\na missing revision inside a migrated request or response.",
+                    "properties": {
+                      "current_context": {
+                        "title": "Current Context",
+                        "type": "string"
+                      },
+                      "evidence_revision": {
+                        "title": "Evidence Revision",
+                        "type": "integer"
+                      },
+                      "lifecycle_revision": {
+                        "title": "Lifecycle Revision",
+                        "type": "integer"
+                      },
+                      "projection_watermark": {
+                        "title": "Projection Watermark",
+                        "type": "integer"
+                      },
+                      "run_id": {
+                        "title": "Run Id",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "lifecycle_revision",
+                      "evidence_revision",
+                      "run_id",
+                      "projection_watermark",
+                      "current_context"
+                    ],
+                    "title": "S01ReviewCommandContext",
                     "type": "object"
                   }
                 },
                 "required": [
                   "expected_context"
                 ],
-                "title": "S03ClaimBody",
+                "title": "S01ReviewClaimBody",
                 "type": "object"
               }
             }
@@ -3374,8 +4054,38 @@
                 "additionalProperties": false,
                 "properties": {
                   "expected_context": {
-                    "additionalProperties": true,
-                    "title": "Expected Context",
+                    "additionalProperties": false,
+                    "description": "The closed review command context.  The domain compares it by exact\nequality (``_review_context_matches``), so a partial context is a semantic\nstaleness; the schema here closes the shape so no arbitrary keys can hide\na missing revision inside a migrated request or response.",
+                    "properties": {
+                      "current_context": {
+                        "title": "Current Context",
+                        "type": "string"
+                      },
+                      "evidence_revision": {
+                        "title": "Evidence Revision",
+                        "type": "integer"
+                      },
+                      "lifecycle_revision": {
+                        "title": "Lifecycle Revision",
+                        "type": "integer"
+                      },
+                      "projection_watermark": {
+                        "title": "Projection Watermark",
+                        "type": "integer"
+                      },
+                      "run_id": {
+                        "title": "Run Id",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "lifecycle_revision",
+                      "evidence_revision",
+                      "run_id",
+                      "projection_watermark",
+                      "current_context"
+                    ],
+                    "title": "S01ReviewCommandContext",
                     "type": "object"
                   },
                   "expected_fence": {
@@ -3393,7 +4103,7 @@
                   "expected_fence",
                   "idempotency_key"
                 ],
-                "title": "S03FencedBody",
+                "title": "S01ReviewFencedBody",
                 "type": "object"
               }
             }
@@ -3486,8 +4196,38 @@
                 "additionalProperties": false,
                 "properties": {
                   "expected_context": {
-                    "additionalProperties": true,
-                    "title": "Expected Context",
+                    "additionalProperties": false,
+                    "description": "The closed review command context.  The domain compares it by exact\nequality (``_review_context_matches``), so a partial context is a semantic\nstaleness; the schema here closes the shape so no arbitrary keys can hide\na missing revision inside a migrated request or response.",
+                    "properties": {
+                      "current_context": {
+                        "title": "Current Context",
+                        "type": "string"
+                      },
+                      "evidence_revision": {
+                        "title": "Evidence Revision",
+                        "type": "integer"
+                      },
+                      "lifecycle_revision": {
+                        "title": "Lifecycle Revision",
+                        "type": "integer"
+                      },
+                      "projection_watermark": {
+                        "title": "Projection Watermark",
+                        "type": "integer"
+                      },
+                      "run_id": {
+                        "title": "Run Id",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "lifecycle_revision",
+                      "evidence_revision",
+                      "run_id",
+                      "projection_watermark",
+                      "current_context"
+                    ],
+                    "title": "S01ReviewCommandContext",
                     "type": "object"
                   },
                   "expected_fence": {
@@ -3505,7 +4245,7 @@
                   "expected_fence",
                   "idempotency_key"
                 ],
-                "title": "S03FencedBody",
+                "title": "S01ReviewFencedBody",
                 "type": "object"
               }
             }
@@ -3639,8 +4379,38 @@
                 "additionalProperties": false,
                 "properties": {
                   "expected_context": {
-                    "additionalProperties": true,
-                    "title": "Expected Context",
+                    "additionalProperties": false,
+                    "description": "The closed review command context.  The domain compares it by exact\nequality (``_review_context_matches``), so a partial context is a semantic\nstaleness; the schema here closes the shape so no arbitrary keys can hide\na missing revision inside a migrated request or response.",
+                    "properties": {
+                      "current_context": {
+                        "title": "Current Context",
+                        "type": "string"
+                      },
+                      "evidence_revision": {
+                        "title": "Evidence Revision",
+                        "type": "integer"
+                      },
+                      "lifecycle_revision": {
+                        "title": "Lifecycle Revision",
+                        "type": "integer"
+                      },
+                      "projection_watermark": {
+                        "title": "Projection Watermark",
+                        "type": "integer"
+                      },
+                      "run_id": {
+                        "title": "Run Id",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "lifecycle_revision",
+                      "evidence_revision",
+                      "run_id",
+                      "projection_watermark",
+                      "current_context"
+                    ],
+                    "title": "S01ReviewCommandContext",
                     "type": "object"
                   },
                   "expected_fence": {
@@ -3653,8 +4423,63 @@
                     "type": "string"
                   },
                   "verification": {
-                    "additionalProperties": true,
-                    "title": "Verification",
+                    "additionalProperties": false,
+                    "description": "The structured manual verification the Reviewer submits.  The optional\n``note`` is allowed by the domain contract; this ticket adds no note UI.",
+                    "properties": {
+                      "finding_decisions": {
+                        "items": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "finding_id": {
+                              "title": "Finding Id",
+                              "type": "string"
+                            },
+                            "outcome": {
+                              "title": "Outcome",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "finding_id",
+                            "outcome"
+                          ],
+                          "title": "S01FindingDecision",
+                          "type": "object"
+                        },
+                        "title": "Finding Decisions",
+                        "type": "array"
+                      },
+                      "note": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Note"
+                      },
+                      "outcome": {
+                        "title": "Outcome",
+                        "type": "string"
+                      },
+                      "reason_code": {
+                        "title": "Reason Code",
+                        "type": "string"
+                      },
+                      "schema_version": {
+                        "title": "Schema Version",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "schema_version",
+                      "outcome",
+                      "reason_code",
+                      "finding_decisions"
+                    ],
+                    "title": "S01ManualVerification",
                     "type": "object"
                   }
                 },
@@ -3664,7 +4489,7 @@
                   "idempotency_key",
                   "verification"
                 ],
-                "title": "S03SubmitBody",
+                "title": "S01ReviewSubmitBody",
                 "type": "object"
               }
             }

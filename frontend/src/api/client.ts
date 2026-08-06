@@ -42,24 +42,42 @@ export class HttpError extends Error {
  * The statuses that prove a command was never accepted: any of them makes the
  * pending idempotency key safe to rotate.  Every other HTTP outcome (5xx,
  * other statuses) may have committed an effect and stays visibly unknown
- * with the same key retained.  The review panel treats 404/409/422/503 as
- * definitive (the domain returns them only before any commit); the recovery
- * panel deliberately keeps 503 in the unknown set because its verifier may
- * have committed.
+ * with the same key retained.
+ *
+ * 503 is special: an intermediary/generic 503 is not proof that the S03
+ * authority rejected before commit, so it is definitive only when the body
+ * carries the registered S03 pre-command code.  The review panel's command
+ * surface is exactly the S03 authority, so its status set includes 503 and
+ * the classifier narrows it; the recovery panel keeps 503 in its unknown set
+ * because its verifier may have committed.
  */
 export const REVIEW_DEFINITIVE_STATUSES: ReadonlySet<number> = new Set([
   404,
   409,
+  413,
   422,
   503,
 ]);
 export const RECOVERY_DEFINITIVE_STATUSES: ReadonlySet<number> = new Set([409]);
+/** The structured S03 codes that prove a 503 was rejected before any commit. */
+const REVIEW_503_DEFINITIVE_ERROR_CODES: ReadonlySet<string> = new Set([
+  "S03_STOPPED",
+  "S03_UNAVAILABLE",
+]);
 
 export function isDefinitiveRejection(
   error: unknown,
   statuses: ReadonlySet<number> = REVIEW_DEFINITIVE_STATUSES,
 ): error is HttpError {
-  return error instanceof HttpError && statuses.has(error.status);
+  if (!(error instanceof HttpError)) return false;
+  if (error.status === 503) {
+    return (
+      statuses.has(503) &&
+      error.errorCode !== undefined &&
+      REVIEW_503_DEFINITIVE_ERROR_CODES.has(error.errorCode)
+    );
+  }
+  return statuses.has(error.status);
 }
 
 /**

@@ -1,4 +1,4 @@
-import { useQueryClient } from "@tanstack/react-query";
+import { useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 
 import {
@@ -12,6 +12,7 @@ import {
   MANUAL_WORK_KEY,
   useApplicationHistory,
   useClaimWorkItem,
+  useCurrentRoute,
   useManualWork,
   useReleaseWorkItem,
   useRenewWorkItem,
@@ -30,6 +31,14 @@ function newIdempotencyKey(): string {
 
 type Action = "claim" | "renew" | "release" | "submit";
 
+type Outcome = "confirmed" | "not_confirmed" | "inconclusive";
+
+const OUTCOMES: readonly Outcome[] = [
+  "confirmed",
+  "not_confirmed",
+  "inconclusive",
+];
+
 type PendingCommand = {
   action: Action;
   command: ClaimCommand | FencedCommand | SubmitCommand;
@@ -42,16 +51,20 @@ const ACTION_LABELS: Record<Action, string> = {
   submit: "核验",
 };
 
+/** Builds the structured manual verification from the Reviewer's explicit
+ * outcome choice; every finding decision carries that same chosen value and
+ * no automatic verdict/route/target is ever copied into the decision. */
 function buildVerification(
   work: ReviewWorkResponse,
+  outcome: Outcome,
 ): SubmitCommand["verification"] {
   return {
     schema_version: "human-decision/1",
-    outcome: "confirmed",
+    outcome,
     reason_code: "HUMAN_REVIEW_COMPLETED",
     finding_decisions: work.automatic_findings.map((finding) => ({
       finding_id: finding.finding_id,
-      outcome: "confirmed",
+      outcome,
     })),
   };
 }
@@ -76,6 +89,22 @@ function WorkFacts({ work }: { work: ReviewWorkResponse }) {
         <div>
           <dt>认领围栏</dt>
           <dd data-testid="review-claim-fence">{work.claim_fence}</dd>
+        </div>
+        <div>
+          <dt>认领过期（epoch）</dt>
+          <dd data-testid="review-claim-expiry">{work.claim_expires_at}</dd>
+        </div>
+        <div>
+          <dt>生命周期修订</dt>
+          <dd data-testid="review-lifecycle-revision">
+            {work.lifecycle_revision}
+          </dd>
+        </div>
+        <div>
+          <dt>证据修订</dt>
+          <dd data-testid="review-evidence-revision">
+            {work.evidence_revision}
+          </dd>
         </div>
       </dl>
       <h4>自动发现（不改写）</h4>
@@ -109,7 +138,7 @@ function WorkspaceSection({
   workspace,
 }: {
   work: ReviewWorkResponse;
-  workspace: WorkspaceResponse | undefined;
+  workspace: UseQueryResult<WorkspaceResponse>;
 }) {
   if (work.status === "completed") {
     return (
@@ -120,17 +149,64 @@ function WorkspaceSection({
       </section>
     );
   }
-  if (workspace === undefined) {
+  if (workspace.isPending) {
     return (
       <section data-testid="review-workspace-loading">
         <p>工作区加载中…</p>
       </section>
     );
   }
-  const finding = workspace.selected_finding ?? null;
+  if (workspace.isError || workspace.data === undefined) {
+    const notFound =
+      workspace.error instanceof HttpError && workspace.error.status === 404;
+    return (
+      <section data-testid="review-workspace-error">
+        <p>{notFound ? "工作区未找到或无权访问" : "工作区不可用"}</p>
+      </section>
+    );
+  }
+  const finding = workspace.data.selected_finding ?? null;
   return (
     <section aria-labelledby="review-workspace-title">
       <h3 id="review-workspace-title">最小工作区（发现优先）</h3>
+      <dl className="facts">
+        <div>
+          <dt>认领过期（epoch）</dt>
+          <dd data-testid="review-workspace-expiry">
+            {workspace.data.claim_expires_at}
+          </dd>
+        </div>
+        <div>
+          <dt>生命周期修订</dt>
+          <dd data-testid="review-workspace-lifecycle">
+            {workspace.data.lifecycle_revision}
+          </dd>
+        </div>
+        <div>
+          <dt>证据修订</dt>
+          <dd data-testid="review-workspace-evidence-revision">
+            {workspace.data.evidence_revision}
+          </dd>
+        </div>
+        <div>
+          <dt>投影水位</dt>
+          <dd data-testid="review-workspace-watermark">
+            {workspace.data.projection_watermark}
+          </dd>
+        </div>
+        <div>
+          <dt>当前运行</dt>
+          <dd data-testid="review-workspace-current-run">
+            {workspace.data.current_run_id ?? "None"}
+          </dd>
+        </div>
+        <div>
+          <dt>证据快照</dt>
+          <dd data-testid="review-workspace-snapshot">
+            {workspace.data.evidence_snapshot_id ?? "None"}
+          </dd>
+        </div>
+      </dl>
       {finding === null ? (
         <p data-testid="review-workspace-empty" className="text-sm text-muted-foreground">
           无可复核发现
@@ -163,6 +239,40 @@ function WorkspaceSection({
                 <span data-testid="review-evidence-masked">
                   {link.raw_masked ?? link.value_state}
                 </span>
+                <dl className="facts">
+                  <div>
+                    <dt>文档角色</dt>
+                    <dd data-testid="review-evidence-role">
+                      {link.document_role}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>来源页</dt>
+                    <dd data-testid="review-evidence-source-page">
+                      {link.source_page ?? "None"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>来源区域</dt>
+                    <dd data-testid="review-evidence-source-region">
+                      {link.source_region ?? "None"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>来源出处摘要</dt>
+                    <dd data-testid="review-evidence-provenance">
+                      {link.provenance_manifest_digest ?? "None"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>证据资格</dt>
+                    <dd data-testid="review-evidence-eligibility">
+                      {link.evidence_eligible === true
+                        ? (link.eligibility_reason ?? "eligible")
+                        : "ineligible"}
+                    </dd>
+                  </div>
+                </dl>
               </li>
             ))}
           </ul>
@@ -175,17 +285,26 @@ function WorkspaceSection({
 function HistorySection({
   history,
 }: {
-  history: ApplicationHistoryResponse | undefined;
+  history: UseQueryResult<ApplicationHistoryResponse>;
 }) {
-  if (history === undefined) {
+  if (history.isPending) {
     return <p data-testid="review-history-loading">历史加载中…</p>;
   }
-  const current = history.runs.find((run) => run.current === true);
+  if (history.isError || history.data === undefined) {
+    const notFound =
+      history.error instanceof HttpError && history.error.status === 404;
+    return (
+      <p data-testid="review-history-error">
+        {notFound ? "历史未找到或无权访问" : "历史不可用"}
+      </p>
+    );
+  }
+  const current = history.data.runs.find((run) => run.current === true);
   return (
     <section className="panel" data-testid="history-panel" aria-labelledby="review-history-title">
       <h3 id="review-history-title">历史（服务端权威）</h3>
       <ol data-testid="review-history-runs">
-        {history.runs.map((run) => (
+        {history.data.runs.map((run) => (
           <li key={run.run_id}>
             {run.run_id}
             {" · "}
@@ -220,6 +339,9 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
       : null,
   );
   const history = useApplicationHistory(work.data?.application_id ?? null);
+  // The route query is hoisted so action gating can require a current
+  // authoritative route read; GateSection observes the same shared query.
+  const gate = useCurrentRoute(work.data?.application_id ?? null);
 
   const claim = useClaimWorkItem(workId);
   const renew = useRenewWorkItem(workId);
@@ -236,6 +358,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
   const [conflictReason, setConflictReason] = useState<string | null>(null);
   const [lastAccepted, setLastAccepted] = useState<Action | null>(null);
   const [rejectedAction, setRejectedAction] = useState<Action | null>(null);
+  const [outcome, setOutcome] = useState<Outcome>("confirmed");
 
   useEffect(() => {
     headingRef.current?.focus();
@@ -260,11 +383,6 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     activeMutation !== undefined &&
     activeMutation.isError &&
     !isDefinitiveRejection(activeMutation.error);
-  const definitiveRejected =
-    active !== null &&
-    activeMutation !== undefined &&
-    activeMutation.isError &&
-    isDefinitiveRejection(activeMutation.error);
 
   const keyRotations: Record<Action, () => void> = {
     claim: () => {},
@@ -285,6 +403,9 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     keyRotations[action]();
   };
 
+  /** A definitive rejection proves the semantic key was never accepted, so
+   * the key rotates once at that proof and the rejected action stays latched
+   * until the owning work-item refetch succeeds (FIX-1). */
   const rejected = (action: Action) => (error: Error) => {
     if (!isDefinitiveRejection(error)) return;
     keyRotations[action]();
@@ -294,8 +415,15 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     setConflictReason(error.reasonCode ?? "conflict");
   };
 
+  const owningReadsCurrent =
+    work.isSuccess &&
+    workspace.isSuccess &&
+    history.isSuccess &&
+    gate.isSuccess;
+
   const handleClaim = () => {
-    if (work.data === undefined || anyPending) return;
+    if (work.data === undefined || anyPending || pendingCommand !== null) return;
+    if (requiresReload || work.isError || !owningReadsCurrent) return;
     const command: ClaimCommand = {
       expected_context: work.data.command_context,
     };
@@ -309,7 +437,8 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
   };
 
   const handleRenew = () => {
-    if (work.data === undefined || anyPending) return;
+    if (work.data === undefined || anyPending || pendingCommand !== null) return;
+    if (requiresReload || work.isError || !owningReadsCurrent) return;
     const command: FencedCommand = {
       expected_fence: work.data.claim_fence,
       expected_context: work.data.command_context,
@@ -325,7 +454,8 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
   };
 
   const handleRelease = () => {
-    if (work.data === undefined || anyPending) return;
+    if (work.data === undefined || anyPending || pendingCommand !== null) return;
+    if (requiresReload || work.isError || !owningReadsCurrent) return;
     const command: FencedCommand = {
       expected_fence: work.data.claim_fence,
       expected_context: work.data.command_context,
@@ -341,12 +471,13 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
   };
 
   const handleSubmit = () => {
-    if (work.data === undefined || anyPending) return;
+    if (work.data === undefined || anyPending || pendingCommand !== null) return;
+    if (requiresReload || work.isError || !owningReadsCurrent) return;
     const command: SubmitCommand = {
       expected_fence: work.data.claim_fence,
       expected_context: work.data.command_context,
       idempotency_key: submitKey,
-      verification: buildVerification(work.data),
+      verification: buildVerification(work.data, outcome),
     };
     setPendingCommand({ action: "submit", command });
     setLastAccepted(null);
@@ -414,7 +545,8 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     if (anyPending) return;
     // Authoritative reload.  A failed refetch must never clear the conflict
     // fence nor rotate the semantic idempotency keys, so the refetch throws
-    // and the fence is kept on failure.
+    // and the fence is kept on failure.  The rejection latch clears only
+    // after the owning work-item refetch succeeds.
     try {
       await queryClient.refetchQueries(
         { queryKey: MANUAL_WORK_KEY(workId) },
@@ -424,17 +556,9 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
       return;
     }
     await queryClient.invalidateQueries({ queryKey: ["s01"] });
-    // Only an explicitly contracted definitive rejection proves the previous
-    // key was never accepted; a fresh semantic key is then safe.  Every other
-    // outcome may have committed an effect, so the original key is retained
-    // and a retry replays idempotently.
-    if (definitiveRejected && active !== null) {
-      keyRotations[active]();
-      setPendingCommand(null);
-      setRejectedAction(null);
-      setRequiresReload(false);
-      setConflictReason(null);
-    }
+    setRejectedAction(null);
+    setRequiresReload(false);
+    setConflictReason(null);
   };
 
   let statusText = "等待操作";
@@ -452,9 +576,25 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     statusText = `${ACTION_LABELS[lastAccepted]}已接受`;
   }
 
-  if (work.isPending || work.data === undefined) {
+  if (work.isPending || work.isError || work.data === undefined) {
+    if (work.isPending) {
+      return (
+        <section
+          className="panel"
+          data-testid="review-panel"
+          aria-labelledby="review-title"
+        >
+          <h2 id="review-title" tabIndex={-1} ref={headingRef}>
+            人工核验
+          </h2>
+          <p data-testid="review-loading">工作项加载中…</p>
+        </section>
+      );
+    }
     const notFound =
-      work.isError && work.error instanceof HttpError && work.error.status === 404;
+      work.isError &&
+      work.error instanceof HttpError &&
+      work.error.status === 404;
     return (
       <section
         className="panel"
@@ -464,28 +604,31 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
         <h2 id="review-title" tabIndex={-1} ref={headingRef}>
           人工核验
         </h2>
-        {work.isPending ? (
-          <p data-testid="review-loading">工作项加载中…</p>
-        ) : (
-          <p data-testid="review-error">
-            {notFound ? "未找到或无权访问" : "工作项不可用"}
-          </p>
-        )}
+        <p data-testid="review-error">
+          {notFound ? "未找到或无权访问" : "工作项不可用"}
+        </p>
       </section>
     );
   }
 
   const data = work.data;
   const claimed = data.status === "claimed";
-  const canClaim = data.status !== "claimed" && data.status !== "completed";
+  const commandBlocked =
+    pendingCommand !== null || transportUnknown || requiresReload;
+  const canClaim =
+    data.status !== "claimed" &&
+    data.status !== "completed" &&
+    !commandBlocked &&
+    !work.isError &&
+    owningReadsCurrent;
   const canFenced =
-    claimed && !requiresReload && !transportUnknown && !definitiveRejected;
+    claimed && !commandBlocked && !work.isError && owningReadsCurrent;
   const canSubmit =
     claimed &&
     data.automatic_findings.length > 0 &&
-    !requiresReload &&
-    !transportUnknown &&
-    !definitiveRejected;
+    !commandBlocked &&
+    !work.isError &&
+    owningReadsCurrent;
 
   return (
     <section
@@ -497,9 +640,9 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
         人工核验
       </h2>
       <WorkFacts work={data} />
-      <WorkspaceSection work={data} workspace={workspace.data} />
+      <WorkspaceSection work={data} workspace={workspace} />
       <GateSection applicationId={data.application_id} />
-      <HistorySection history={history.data} />
+      <HistorySection history={history} />
       <div className="recovery-actions" data-testid="review-actions">
         <Button
           variant="secondary"
@@ -530,6 +673,23 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
         >
           释放
         </Button>
+        {claimed && (
+          <label className="text-sm">
+            核验结论
+            <select
+              data-testid="review-outcome"
+              value={outcome}
+              onChange={(event) => setOutcome(event.target.value as Outcome)}
+              disabled={!canSubmit || anyPending}
+            >
+              {OUTCOMES.map((value) => (
+                <option key={value} value={value}>
+                  {value}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <Button
           onClick={handleSubmit}
           disabled={!canSubmit || anyPending}
@@ -549,14 +709,6 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
       {requiresReload && (
         <p className="text-sm text-muted-foreground" data-testid="review-reload-note">
           请重新加载权威上下文后再试
-        </p>
-      )}
-      {work.isError && (
-        <p
-          className="text-sm text-muted-foreground"
-          data-testid="review-refetch-error"
-        >
-          状态刷新失败：显示上次已确认的服务端状态
         </p>
       )}
     </section>

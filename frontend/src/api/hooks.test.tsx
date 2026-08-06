@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { paths } from "../generated/api";
+import { HttpError, isDefinitiveRejection } from "./client";
 import {
   useClaimWorkItem,
   useCurrentRoute,
@@ -278,7 +279,15 @@ describe("manual-review mutations never retry and invalidate the S01 cache (T02)
       }),
       { wrapper: wrap(client) },
     );
-    result.current.claim.mutate({ expected_context: { current_context: "ctx" } });
+    result.current.claim.mutate({
+      expected_context: {
+        lifecycle_revision: 6,
+        evidence_revision: 1,
+        run_id: "run_t02hooks",
+        projection_watermark: 1,
+        current_context: "ctx",
+      },
+    });
     await waitFor(() => expect(result.current.claim.isSuccess).toBe(true));
     expect(claimPosts).toBe(1);
     expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(1);
@@ -305,7 +314,13 @@ describe("manual-review mutations never retry and invalidate the S01 cache (T02)
     );
     result.current.mutate({
       expected_fence: 1,
-      expected_context: { current_context: "ctx" },
+      expected_context: {
+        lifecycle_revision: 6,
+        evidence_revision: 1,
+        run_id: "run_t02hooks",
+        projection_watermark: 1,
+        current_context: "ctx",
+      },
       idempotency_key: "t02-hooks-key",
       verification: {
         schema_version: "human-decision/1",
@@ -318,5 +333,51 @@ describe("manual-review mutations never retry and invalidate the S01 cache (T02)
     expect(submitPosts).toBe(1);
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(submitPosts).toBe(1);
+  });
+});
+
+describe("structured rejection classifier (FIX-3)", () => {
+  const recoverySet: ReadonlySet<number> = new Set([409]);
+
+  it("treats 413 as a definitive pre-command rejection", () => {
+    const error = new HttpError(413, { error: "S03_COMMAND_TOO_LARGE" });
+    expect(isDefinitiveRejection(error)).toBe(true);
+  });
+
+  it("treats a structured S03 503 as definitive for the review panel", () => {
+    for (const code of ["S03_STOPPED", "S03_UNAVAILABLE"]) {
+      const error = new HttpError(503, {
+        error: code,
+        reason_code: "AUDIT_UNAVAILABLE",
+      });
+      expect(isDefinitiveRejection(error)).toBe(true);
+    }
+  });
+
+  it("keeps a generic or non-S03 503 transport-unknown", () => {
+    const generic = new HttpError(503, { message: "upstream" });
+    expect(isDefinitiveRejection(generic)).toBe(false);
+    const nonJson = new HttpError(503, null);
+    expect(isDefinitiveRejection(nonJson)).toBe(false);
+    const intermediary = new HttpError(503, { error: "S07_UNAVAILABLE" });
+    expect(isDefinitiveRejection(intermediary)).toBe(false);
+  });
+
+  it("keeps the recovery 409-only policy unchanged", () => {
+    const structured503 = new HttpError(503, { error: "S03_UNAVAILABLE" });
+    expect(isDefinitiveRejection(structured503, recoverySet)).toBe(false);
+    const stale = new HttpError(409, { error: "S03_STALE" });
+    expect(isDefinitiveRejection(stale, recoverySet)).toBe(true);
+  });
+
+  it("still classifies 404/409/422 as definitive for the review panel", () => {
+    for (const [status, code] of [
+      [404, "S03_NOT_FOUND"],
+      [409, "S03_STALE"],
+      [422, "S03_INVALID_COMMAND"],
+    ] as const) {
+      const error = new HttpError(status, { error: code });
+      expect(isDefinitiveRejection(error)).toBe(true);
+    }
   });
 });

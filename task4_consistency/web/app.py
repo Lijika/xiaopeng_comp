@@ -24,7 +24,14 @@ from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_serializer,
+)
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from task4_consistency.audit import audit_log_path, audit_status, read_audit_tail, write_audit
@@ -808,6 +815,109 @@ class S01RunAuthority(BaseModel):
     authority_digest: str
 
 
+class S01ReviewCommandContext(BaseModel):
+    """The closed review command context.  The domain compares it by exact
+    equality (``_review_context_matches``), so a partial context is a semantic
+    staleness; the schema here closes the shape so no arbitrary keys can hide
+    a missing revision inside a migrated request or response."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    lifecycle_revision: int
+    evidence_revision: int
+    run_id: str
+    projection_watermark: int
+    current_context: str
+
+
+class S01FindingDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    finding_id: str
+    outcome: str
+
+
+class S01ManualVerification(BaseModel):
+    """The structured manual verification the Reviewer submits.  The optional
+    ``note`` is allowed by the domain contract; this ticket adds no note UI."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str
+    outcome: str
+    reason_code: str
+    finding_decisions: list[S01FindingDecision]
+    note: str | None = None
+
+
+class S01HumanDecisionCompatibilityTargetContext(BaseModel):
+    run_id: str
+    evidence_snapshot_id: str
+    release_id: str
+    source_sha256: str
+
+
+class S01HumanDecisionCompatibilityFactCounts(BaseModel):
+    legacy_checks: int
+    target_findings: int
+    checks_compared: int
+    mismatches: int
+
+
+class S01HumanDecisionCompatibility(BaseModel):
+    schema_version: str
+    differential_source: str
+    intent: str
+    target_reason_code: str
+    conformance: str
+    target_context: S01HumanDecisionCompatibilityTargetContext
+    fact_counts: S01HumanDecisionCompatibilityFactCounts
+    semantic_differential_digest: str
+
+
+class S01NoteMetadata(BaseModel):
+    present: bool
+    character_count: int
+    byte_count: int
+    sha256: str
+
+
+class S01HumanDecision(BaseModel):
+    """The exposed human decision record (``review_work_item_view``).  The two
+    legacy-oracle fields are serialized only when the owning record carries
+    them, so the migrated C-DEMO payload keeps its exact shape."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    decision_id: str
+    schema_version: str
+    outcome: str
+    reason_code: str
+    finding_decisions: list[S01FindingDecision]
+    reviewer_subject: str
+    reviewer_role: str
+    reviewer_source_id: str
+    assigned_subject: str
+    cycle: int
+    finding_ids: list[str]
+    evidence_snapshot_id: str
+    release_id: str
+    fixed_context: S01ReviewCommandContext
+    claim_fence: int
+    submitted_at: int
+    compatibility: S01HumanDecisionCompatibility | None = None
+    note_metadata: S01NoteMetadata | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_dropping_absent_legacy(self, handler, info):
+        dumped = handler(self)
+        return {
+            key: value
+            for key, value in dumped.items()
+            if key not in {"compatibility", "note_metadata"} or value is not None
+        }
+
+
 class S01ReviewWorkItemResponse(BaseModel):
     status: str
     application_id: str
@@ -819,11 +929,11 @@ class S01ReviewWorkItemResponse(BaseModel):
     route: str
     lifecycle_revision: int
     evidence_revision: int
-    command_context: dict[str, Any]
+    command_context: S01ReviewCommandContext
     automatic_findings: list[S01AutomaticFinding]
     run_authority: S01RunAuthority
-    decision: dict[str, Any] | None = None
-    decisions: list[dict[str, Any]]
+    decision: S01HumanDecision | None = None
+    decisions: list[S01HumanDecision]
     completed_finding_ids: list[str]
 
 
@@ -874,6 +984,68 @@ class S01WorkspaceResponse(BaseModel):
     actions: list[str]
 
 
+class S01HistoryReconciliation(BaseModel):
+    status: str
+    logical_operation_id: str
+    result_id: str | None = None
+    result_digest: str | None = None
+    attempt: int | None = None
+    max_attempts: int | None = None
+
+
+class S01HistorySourceLocation(BaseModel):
+    source_sha256: str
+    source_page: int | None = None
+    source_region: str | None = None
+
+
+class S01HistoryCorrection(BaseModel):
+    correction_id: str
+    superseded_observation_id: str
+    successor_observation_id: str
+    document_id: str
+    document_role: str
+    field: str
+    source_location: S01HistorySourceLocation
+    reason_code: str
+    actor: str
+    recorded_at: int
+    invalidated_decision_ids: list[str]
+    invalidated_exception_ids: list[str]
+    evidence_revision: int
+
+
+class S01HistoryBusinessException(BaseModel):
+    request_id: str
+    run_id: str
+    finding_id: str
+    rule_id: str
+    machine_verdict: str
+    status: str
+    current: bool
+    request_reason: str
+    scope: str
+    requested_at: int
+    expires_at: int | None = None
+    decision_id: str | None = None
+    decision: str | None = None
+    routed: bool
+    route: str | None = None
+    completion_basis: str | None = None
+
+
+class S01HistoryAttachmentVersion(BaseModel):
+    attachment_id: str
+    version: str
+    document_id: str
+    document_role: str
+    supersedes_attachment_id: str | None = None
+    page_ids: list[str]
+    producer_result_id: str | None = None
+    evidence_revision: int
+    current: bool
+
+
 class S01HistoryRun(BaseModel):
     run_id: str
     status: str
@@ -889,7 +1061,7 @@ class S01HistoryRun(BaseModel):
     release_digest: str | None = None
     checker_build: str | None = None
     finding_ids: list[str]
-    cas_mismatches: list[dict[str, Any]]
+    cas_mismatches: list[str]
     selected_observation_ids: list[str]
     decision_ids: list[str]
     exception_ids: list[str]
@@ -897,7 +1069,7 @@ class S01HistoryRun(BaseModel):
     applicable_exception_ids: list[str]
     invalidated_decision_ids: list[str]
     invalidated_exception_ids: list[str]
-    reconciliation: dict[str, Any] | None = None
+    reconciliation: S01HistoryReconciliation | None = None
 
 
 class S01ApplicationHistoryResponse(BaseModel):
@@ -905,9 +1077,9 @@ class S01ApplicationHistoryResponse(BaseModel):
     application_id: str
     current_run_id: str | None = None
     runs: list[S01HistoryRun]
-    corrections: list[dict[str, Any]]
-    business_exceptions: list[dict[str, Any]]
-    attachment_versions: list[dict[str, Any]]
+    corrections: list[S01HistoryCorrection]
+    business_exceptions: list[S01HistoryBusinessException]
+    attachment_versions: list[S01HistoryAttachmentVersion]
 
 
 class S01ClaimResult(BaseModel):
@@ -948,6 +1120,25 @@ class S01SubmitResult(BaseModel):
     lifecycle_revision: int
     evidence_revision: int
     route: str
+
+
+class S01ReviewClaimBody(BaseModel):
+    """The migrated S01 claim body.  Unlike the shared S03 body (whose open
+    ``expected_context`` is also inherited by the S04/S05 command families),
+    this closes the migrated review command contract."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_context: S01ReviewCommandContext
+
+
+class S01ReviewFencedBody(S01ReviewClaimBody):
+    expected_fence: int = Field(ge=0, strict=True)
+    idempotency_key: str
+
+
+class S01ReviewSubmitBody(S01ReviewFencedBody):
+    verification: S01ManualVerification
 
 
 class S02SubmitBody(BaseModel):
@@ -1354,6 +1545,33 @@ def _s05_router_principal(request: Request) -> S01CommandPrincipal:
         scope=principal.scope,
         source_id="c-demo-exception-router",
     )
+
+
+def _inline_openapi_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Expand a Pydantic JSON schema's ``$defs`` refs into the schema itself.
+
+    ``openapi_extra`` request bodies are emitted inline under the path, so
+    document-root ``$ref`` targets cannot address them; openapi-typescript
+    rejects unresolvable refs.  Inlining keeps the closed nested shapes while
+    producing a fully self-contained schema."""
+
+    def resolve(node: Any) -> Any:
+        if isinstance(node, dict):
+            ref = node.get("$ref")
+            if isinstance(ref, str) and ref.startswith("#/$defs/"):
+                name = ref.rsplit("/", 1)[-1]
+                return resolve(defs[name])
+            return {
+                key: resolve(value)
+                for key, value in node.items()
+                if key != "$defs"
+            }
+        if isinstance(node, list):
+            return [resolve(item) for item in node]
+        return node
+
+    defs = schema.get("$defs", {})
+    return resolve(schema)
 
 
 async def _s03_command_body(request: Request, model: type[BaseModel]) -> BaseModel:
@@ -2469,7 +2687,7 @@ def controlled_s04_demo_review_work_item(
             "required": True,
             "content": {
                 "application/json": {
-                    "schema": S03ClaimBody.model_json_schema(),
+                    "schema": _inline_openapi_schema(S01ReviewClaimBody.model_json_schema()),
                 }
             },
         },
@@ -2482,13 +2700,13 @@ async def controlled_s04_demo_claim_review_work_item(
 ) -> dict[str, Any]:
     _s01_disable_cache(response)
     principal = _s04_demo_reviewer_principal(request)
-    body = await _s03_command_body(request, S03ClaimBody)
-    assert isinstance(body, S03ClaimBody)
+    body = await _s03_command_body(request, S01ReviewClaimBody)
+    assert isinstance(body, S01ReviewClaimBody)
     try:
         result = _s01_service().claim_review_work_item(
             principal=principal,
             work_item_id=work_item_id,
-            expected_context=body.expected_context,
+            expected_context=body.expected_context.model_dump(mode="json"),
             now=S01_SESSION_CLOCK(),
         )
     except QueryNotFound as error:
@@ -2512,7 +2730,7 @@ async def controlled_s04_demo_claim_review_work_item(
             "required": True,
             "content": {
                 "application/json": {
-                    "schema": S03FencedBody.model_json_schema(),
+                    "schema": _inline_openapi_schema(S01ReviewFencedBody.model_json_schema()),
                 }
             },
         },
@@ -2525,14 +2743,14 @@ async def controlled_s04_demo_renew_review_work_item(
 ) -> dict[str, Any]:
     _s01_disable_cache(response)
     principal = _s04_demo_reviewer_principal(request)
-    body = await _s03_command_body(request, S03FencedBody)
-    assert isinstance(body, S03FencedBody)
+    body = await _s03_command_body(request, S01ReviewFencedBody)
+    assert isinstance(body, S01ReviewFencedBody)
     try:
         result = _s01_service().renew_review_work_item(
             principal=principal,
             work_item_id=work_item_id,
             expected_fence=body.expected_fence,
-            expected_context=body.expected_context,
+            expected_context=body.expected_context.model_dump(mode="json"),
             idempotency_key=body.idempotency_key,
             now=S01_SESSION_CLOCK(),
         )
@@ -2559,7 +2777,7 @@ async def controlled_s04_demo_renew_review_work_item(
             "required": True,
             "content": {
                 "application/json": {
-                    "schema": S03FencedBody.model_json_schema(),
+                    "schema": _inline_openapi_schema(S01ReviewFencedBody.model_json_schema()),
                 }
             },
         },
@@ -2572,14 +2790,14 @@ async def controlled_s04_demo_release_review_work_item(
 ) -> dict[str, Any]:
     _s01_disable_cache(response)
     principal = _s04_demo_reviewer_principal(request)
-    body = await _s03_command_body(request, S03FencedBody)
-    assert isinstance(body, S03FencedBody)
+    body = await _s03_command_body(request, S01ReviewFencedBody)
+    assert isinstance(body, S01ReviewFencedBody)
     try:
         result = _s01_service().release_review_work_item(
             principal=principal,
             work_item_id=work_item_id,
             expected_fence=body.expected_fence,
-            expected_context=body.expected_context,
+            expected_context=body.expected_context.model_dump(mode="json"),
             idempotency_key=body.idempotency_key,
             now=S01_SESSION_CLOCK(),
         )
@@ -2606,7 +2824,7 @@ async def controlled_s04_demo_release_review_work_item(
             "required": True,
             "content": {
                 "application/json": {
-                    "schema": S03SubmitBody.model_json_schema(),
+                    "schema": _inline_openapi_schema(S01ReviewSubmitBody.model_json_schema()),
                 }
             },
         },
@@ -2619,16 +2837,16 @@ async def controlled_s04_demo_submit_review_work_item(
 ) -> dict[str, Any]:
     _s01_disable_cache(response)
     principal = _s04_demo_reviewer_principal(request)
-    body = await _s03_command_body(request, S03SubmitBody)
-    assert isinstance(body, S03SubmitBody)
+    body = await _s03_command_body(request, S01ReviewSubmitBody)
+    assert isinstance(body, S01ReviewSubmitBody)
     try:
         result = _s01_service().submit_review_work_item(
             principal=principal,
             work_item_id=work_item_id,
             expected_fence=body.expected_fence,
-            expected_context=body.expected_context,
+            expected_context=body.expected_context.model_dump(mode="json"),
             idempotency_key=body.idempotency_key,
-            verification=body.verification,
+            verification=body.verification.model_dump(mode="json", exclude_none=True),
             now=S01_SESSION_CLOCK(),
         )
     except QueryNotFound as error:

@@ -712,4 +712,60 @@ describe("queue shell (App)", () => {
     expect(window.location.search).toContain(encodeURIComponent(WORK_ID_MANUAL));
     expect(window.location.search).toContain("review=");
   });
+
+  it("protects the Recovery gate error branch: a route failure renders the explicit error state", async () => {
+    const RESOLVED_ID = "recovery_work_t01gate1234567890abcd";
+    const RESOLVED_APP = "app_t01gate9876543210fedcba";
+    fetchRouter({
+      "GET /controlled/s01/api/queries/queue": () =>
+        new Response(
+          JSON.stringify({
+            items: [],
+            recovery_items: [
+              {
+                recovery_work_id: RESOLVED_ID,
+                application_id: RESOLVED_APP,
+                status: "resolved",
+                phase: "Unprocessable",
+                primary_reason_code: "configuration.checker_unavailable",
+                responsible_party: "policy_owner",
+                lifecycle_revision: 5,
+                projection_watermark: 1,
+              },
+            ],
+            projection_watermark: 1,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      [`GET /controlled/s01/api/queries/recovery-work-items/${RESOLVED_ID}`]:
+        () =>
+          new Response(
+            JSON.stringify({
+              ...workPayload({ status: "resolved", can_verify: false }),
+              recovery_work_id: RESOLVED_ID,
+              application_id: RESOLVED_APP,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+      [`GET /controlled/s01/api/queries/applications/${RESOLVED_APP}/current-route`]:
+        () =>
+          new Response(
+            JSON.stringify({ detail: { error: "S01_NOT_FOUND" } }),
+            { status: 404, headers: { "Content-Type": "application/json" } },
+          ),
+    });
+    renderWithQuery(<App />);
+    const link = await screen.findByRole("link", {
+      name: new RegExp(RESOLVED_ID),
+    });
+    await userEvent.click(link);
+    // The shared GateSection checks isError before missing data, so an
+    // initial 404 renders the explicit error state instead of loading forever.
+    await waitFor(() =>
+      expect(screen.getByTestId("gate-error")).toHaveTextContent(
+        "当前路由未找到或无权访问",
+      ),
+    );
+    expect(screen.queryByTestId("gate-loading")).not.toBeInTheDocument();
+  });
 });
