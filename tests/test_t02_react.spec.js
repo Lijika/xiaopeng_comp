@@ -14,7 +14,7 @@ const S02_CREDENTIAL = "t02-registered-s02-credential";
 const S02_SUBJECT = "t02-registered-s02-reviewer";
 const S02_TENANT = "tenant-t02-react";
 const S02_SOURCE = "registered-t02-react-source";
-const SCENARIO = "app_r53_bad_engine.json";
+const SCENARIO = "app_uncertain_ocr_noise.json";
 const REACT_URL = "/controlled/s01/react";
 
 /** Minimal S02 registered-source runtime so the legacy Reviewer shell serves
@@ -131,12 +131,14 @@ async function startServer(extraEnv = {}, options = {}) {
         TASK4_S01_DEMO_SUBJECT: "t02-browser-reviewer",
         TASK4_S01_OPERATOR_CREDENTIAL: OPERATOR_CREDENTIAL,
         TASK4_S01_OPERATOR_SUBJECT: "t02-browser-operator",
+        TASK4_S01_TEST_SCENARIO_ID: SCENARIO,
         TASK4_S02_CREDENTIAL: S02_CREDENTIAL,
         TASK4_S02_SUBJECT: S02_SUBJECT,
         TASK4_S02_TENANT_ID: S02_TENANT,
         TASK4_S02_SOURCE_SYSTEM_ID: S02_SOURCE,
         TASK4_S02_TEST_REGISTRY_PATH: s02Fixture.registryPath,
         TASK4_S02_TEST_OBJECT_ROOT: s02Fixture.objectRoot,
+        TASK4_S02_TEST_SCENARIO_ID: SCENARIO,
         ...extraEnv,
       },
       stdio: ["ignore", "pipe", "pipe"],
@@ -498,17 +500,29 @@ async function runFullChainTracer(browser, viewport, label) {
     await expect(reviewer.getByTestId("review-panel")).toBeVisible();
     await expect(reviewer.locator(":focus")).toHaveText("人工核验");
 
+    const workBeforeResponse = await reviewer.request.get(
+      `${server.baseURL}/controlled/s01/api/queries/review-work-items/${encodeURIComponent(workId)}`,
+    );
+    expect(workBeforeResponse.ok()).toBeTruthy();
+    const workBefore = await workBeforeResponse.json();
+    const automaticFindingsBefore = workBefore.automatic_findings;
+    expect(
+      automaticFindingsBefore.find(
+        (finding) => finding.rule_id === "R_ENGINE_CROSS",
+      )?.verdict,
+    ).toBe("uncertain");
+
     // Server-owned work-item facts, no Lifecycle derivation.
     await expect(reviewer.getByTestId("review-status")).toHaveText("unclaimed");
     await expect(reviewer.getByTestId("review-phase")).toHaveText("Manual Review");
     await expect(reviewer.getByTestId("review-route")).toHaveText("manual_review");
     await expect(reviewer.getByTestId("review-claim-fence")).toHaveText("0");
-    await expect(reviewer.getByTestId("review-finding-rule")).toHaveText(
-      "R_ENGINE_CROSS",
-    );
-    await expect(reviewer.getByTestId("review-finding-verdict")).toHaveText(
-      "inconsistent",
-    );
+    const uncertainFinding = reviewer
+      .getByTestId("review-finding")
+      .filter({ hasText: "R_ENGINE_CROSS" });
+    await expect(uncertainFinding).toHaveCount(1);
+    await expect(uncertainFinding).toContainText("uncertain");
+    const uncertainFindingBefore = await uncertainFinding.innerText();
     await expect(reviewer.getByTestId("review-run-digest")).toHaveText(
       /^[0-9a-f]{64}$/,
     );
@@ -544,12 +558,12 @@ async function runFullChainTracer(browser, viewport, label) {
 
     // Finding-first workspace: the automatic finding with masked evidence.
     await expect(reviewer.getByTestId("review-workspace-rule")).toHaveText(
-      "R_ENGINE_CROSS",
+      "R_VIN_CROSS",
     );
     await expect(reviewer.getByTestId("review-workspace-verdict")).toHaveText(
-      "inconsistent",
+      "uncertain",
     );
-    await expect(reviewer.getByTestId("review-evidence-masked")).toHaveCount(3);
+    await expect(reviewer.getByTestId("review-evidence-masked")).toHaveCount(4);
     for (const masked of await reviewer
       .getByTestId("review-evidence-masked")
       .all()) {
@@ -564,13 +578,13 @@ async function runFullChainTracer(browser, viewport, label) {
     ).toHaveText("1");
     await expect(
       reviewer.getByTestId("review-evidence-source-region").first(),
-    ).toHaveText("region:1");
+    ).toHaveText("None");
     await expect(
       reviewer.getByTestId("review-evidence-provenance").first(),
-    ).toHaveText(/^[0-9a-f]{64}$/);
+    ).toHaveText("None");
     await expect(
       reviewer.getByTestId("review-evidence-eligibility").first(),
-    ).toHaveText("REGISTERED_SOURCE_PROVENANCE_VERIFIED");
+    ).toHaveText("ineligible");
     await expect(reviewer.getByTestId("gate-phase")).toHaveText(
       "Manual Review",
     );
@@ -713,8 +727,15 @@ async function runFullChainTracer(browser, viewport, label) {
       "schema_version",
     ]);
     expect(submitBody.verification.outcome).toBe("inconclusive");
-    expect(submitBody.verification.finding_decisions.length).toBeGreaterThan(0);
+    expect(
+      submitBody.verification.finding_decisions
+        .map((decision) => decision.finding_id)
+        .sort(),
+    ).toEqual(
+      automaticFindingsBefore.map((finding) => finding.finding_id).sort(),
+    );
     for (const decision of submitBody.verification.finding_decisions) {
+      expect(Object.keys(decision).sort()).toEqual(["finding_id", "outcome"]);
       expect(decision.outcome).toBe("inconclusive");
     }
     const serializedVerification = JSON.stringify(submitBody.verification);
@@ -730,10 +751,15 @@ async function runFullChainTracer(browser, viewport, label) {
     await expect(reviewer.getByTestId("review-run-digest")).toHaveText(
       runDigestBefore,
     );
-    // The automatic finding is the server authority: its verdict is exactly
-    // what it was before the human workflow ran, never rewritten by it.
-    await expect(reviewer.getByTestId("review-finding-verdict")).toHaveText(
-      "inconsistent",
+    // The automatic uncertain finding is server authority: its complete
+    // visible fact stays byte-for-byte unchanged after human completion.
+    await expect(uncertainFinding).toHaveText(uncertainFindingBefore);
+    const workAfterResponse = await reviewer.request.get(
+      `${server.baseURL}/controlled/s01/api/queries/review-work-items/${encodeURIComponent(workId)}`,
+    );
+    expect(workAfterResponse.ok()).toBeTruthy();
+    expect((await workAfterResponse.json()).automatic_findings).toEqual(
+      automaticFindingsBefore,
     );
     await expect(reviewer.getByTestId("gate-phase")).toHaveText(
       "Verification Completed",

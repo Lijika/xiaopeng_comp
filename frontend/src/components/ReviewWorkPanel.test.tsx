@@ -864,38 +864,40 @@ describe("ReviewWorkPanel (T02)", () => {
     ).toBeDisabled();
   });
 
-  it("renders an explicit workspace error instead of an endless load for an initial 404", async () => {
-    fetchRouter({
-      ...baseRoutes(),
-      [`GET ${WORKSPACE_PATH}`]: () =>
-        jsonResponse({ detail: { error: "S03_NOT_FOUND" } }, 404),
-    });
-    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
-    await waitFor(() =>
-      expect(screen.getByTestId("review-workspace-error")).toHaveTextContent(
-        "工作区未找到或无权访问",
-      ),
-    );
-    expect(
-      screen.queryByTestId("review-workspace-loading"),
-    ).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "认领" })).toBeDisabled();
-  });
-
-  it("renders an explicit history error and keeps writes fenced on an initial 404", async () => {
-    fetchRouter({
-      ...baseRoutes(),
-      [`GET ${HISTORY_PATH}`]: () =>
-        jsonResponse({ detail: { error: "S03_NOT_FOUND" } }, 404),
-    });
-    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
-    await waitFor(() =>
-      expect(screen.getByTestId("review-history-error")).toHaveTextContent(
-        "历史未找到或无权访问",
-      ),
-    );
-    expect(screen.getByRole("button", { name: "认领" })).toBeDisabled();
-  });
+  it.each([
+    ["workspace 404", WORKSPACE_PATH, 404, "S03_NOT_FOUND", "未找到或无权访问"],
+    ["history 404", HISTORY_PATH, 404, "S03_NOT_FOUND", "未找到或无权访问"],
+    ["route 404", ROUTE_PATH, 404, "S03_NOT_FOUND", "未找到或无权访问"],
+    ["workspace 503", WORKSPACE_PATH, 503, "S03_UNAVAILABLE", "相关权威不可用"],
+  ])(
+    "fails closed and hides protected data when %s fails",
+    async (_label, path, status, error, message) => {
+      const router = fetchRouter({
+        ...baseRoutes(),
+        [`GET ${path}`]: () => jsonResponse({ detail: { error } }, status),
+      });
+      renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+      await waitFor(
+        () =>
+          expect(screen.getByTestId("review-error")).toHaveTextContent(message),
+        { timeout: 8_000 },
+      );
+      expect(screen.queryByTestId("review-status")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("review-finding")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("review-claim-fence")).not.toBeInTheDocument();
+      expect(
+        screen.queryByTestId("review-evidence-provenance"),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByTestId("review-history-decisions"),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "认领" }),
+      ).not.toBeInTheDocument();
+      expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(0);
+    },
+    10_000,
+  );
 
   it("hides cached work data after a terminal 404 refetch", async () => {
     let workRequests = 0;

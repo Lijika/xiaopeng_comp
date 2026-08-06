@@ -576,7 +576,12 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     statusText = `${ACTION_LABELS[lastAccepted]}已接受`;
   }
 
-  if (work.isPending || work.isError || work.data === undefined) {
+  const workspaceRequired =
+    work.data !== undefined && work.data.status !== "completed";
+  const dependentError =
+    (workspaceRequired && workspace.isError) || history.isError || gate.isError;
+
+  if (work.isPending || work.isError || work.data === undefined || dependentError) {
     if (work.isPending) {
       return (
         <section
@@ -591,10 +596,12 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
         </section>
       );
     }
-    const notFound =
-      work.isError &&
-      work.error instanceof HttpError &&
-      work.error.status === 404;
+    const notFound = [
+      work.error,
+      workspaceRequired ? workspace.error : null,
+      history.error,
+      gate.error,
+    ].some((error) => error instanceof HttpError && error.status === 404);
     return (
       <section
         className="panel"
@@ -605,7 +612,11 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
           人工核验
         </h2>
         <p data-testid="review-error">
-          {notFound ? "未找到或无权访问" : "工作项不可用"}
+          {notFound
+            ? "未找到或无权访问"
+            : work.isError
+              ? "工作项不可用"
+              : "相关权威不可用"}
         </p>
       </section>
     );
