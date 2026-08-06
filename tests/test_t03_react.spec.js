@@ -329,6 +329,13 @@ function trackPageDiagnostics(page, expectations = []) {
   return { browserErrors, consoleErrors, networkErrors, counts };
 }
 
+/** Count-only assertions keep captured diagnostic payloads out of failures. */
+function assertNoDiagnostics(diagnostics) {
+  expect(diagnostics.browserErrors.length).toBe(0);
+  expect(diagnostics.consoleErrors.length).toBe(0);
+  expect(diagnostics.networkErrors.length).toBe(0);
+}
+
 async function assertNoOverflow(page) {
   return page.evaluate(
     () => document.documentElement.scrollWidth <= window.innerWidth + 1,
@@ -643,9 +650,7 @@ async function runRevealCorrectionTracer(browser, viewport, label) {
 
     // Layout stays usable on both viewports.
     expect(await assertNoOverflow(reviewer)).toBe(true);
-    expect(diagnostics.browserErrors).toEqual([]);
-    expect(diagnostics.consoleErrors).toEqual([]);
-    expect(diagnostics.networkErrors).toEqual([]);
+    assertNoDiagnostics(diagnostics);
     expect(diagnostics.counts.workspaceGone404).toBeGreaterThan(0);
   } catch (error) {
     failure = error;
@@ -746,9 +751,9 @@ async function assertCleanDiagnostics(diagnostics, faultedUrlPart) {
   const unexpectedNetwork = diagnostics.networkErrors.filter(
     (entry) => !entry.url.includes(faultedUrlPart),
   );
-  expect(diagnostics.browserErrors).toEqual([]);
-  expect(unexpectedConsole).toEqual([]);
-  expect(unexpectedNetwork).toEqual([]);
+  expect(diagnostics.browserErrors.length).toBe(0);
+  expect(unexpectedConsole.length).toBe(0);
+  expect(unexpectedNetwork.length).toBe(0);
 }
 
 /** Tabs until the active element satisfies the predicate; returns the active
@@ -840,9 +845,7 @@ async function runHistoryBoundaryTracer(browser) {
     );
     expect(revealRequests).toBe(2);
     await assertOnlyOneSentinelElement(reviewer, sourceValue);
-    expect(diagnostics.browserErrors).toEqual([]);
-    expect(diagnostics.consoleErrors).toEqual([]);
-    expect(diagnostics.networkErrors).toEqual([]);
+    assertNoDiagnostics(diagnostics);
   } catch (error) {
     failure = error;
     throw error;
@@ -1225,9 +1228,7 @@ async function runKeyboardTracer(browser, viewport) {
     await assertSentinelAbsentEverywhere(reviewer, sourceValue);
     await assertSentinelAbsentEverywhere(reviewer, misreadValue);
     expect(await assertNoOverflow(reviewer)).toBe(true);
-    expect(diagnostics.browserErrors).toEqual([]);
-    expect(diagnostics.consoleErrors).toEqual([]);
-    expect(diagnostics.networkErrors).toEqual([]);
+    assertNoDiagnostics(diagnostics);
   } catch (error) {
     failure = error;
     throw error;
