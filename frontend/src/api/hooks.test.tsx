@@ -1,4 +1,4 @@
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import type { ReactNode } from "react";
 
@@ -6,13 +6,20 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { paths } from "../generated/api";
 import { HttpError, isDefinitiveRejection } from "./client";
 import {
+  correctionConverged,
+  useApplicationHistory,
   useClaimWorkItem,
+  useCorrectFieldObservation,
+  useCorrectionConvergence,
   useCurrentRoute,
   useQueue,
   useRecoveryWork,
+  useRevealFieldObservation,
   useSubmitVerification,
   type ClaimCommand,
+  type CorrectionCommand,
   type FencedCommand,
+  type RevealCommand,
   type SubmitCommand,
   type VerifyRecoveryCommand,
 } from "./hooks";
@@ -31,6 +38,8 @@ const WORK_PATH =
 const QUEUE_PATH = "/controlled/s01/api/queries/queue";
 const ROUTE_PATH =
   "/controlled/s01/api/queries/applications/app_t01retry9876543210fedcba/current-route";
+const HISTORY_PATH =
+  "/controlled/s01/api/queries/applications/app_t01retry9876543210fedcba/history";
 
 function workPayload(overrides: Record<string, unknown> = {}) {
   return {
@@ -118,6 +127,19 @@ describe("generated request body binding (S2)", () => {
     >();
     expectTypeOf<keyof SubmitBody>().toEqualTypeOf<
       "expected_context" | "expected_fence" | "idempotency_key" | "verification"
+    >();
+  });
+
+  it("binds the T03 reveal and correction command types to the generated OpenAPI bodies", () => {
+    type RevealBody = paths["/controlled/s01/api/commands/review-work-items/{work_item_id}/reveal-field-observation"]["post"]["requestBody"]["content"]["application/json"];
+    type CorrectBody = paths["/controlled/s01/api/commands/review-work-items/{work_item_id}/correct-field-observation"]["post"]["requestBody"]["content"]["application/json"];
+    expectTypeOf<RevealCommand>().toEqualTypeOf<RevealBody>();
+    expectTypeOf<CorrectionCommand>().toEqualTypeOf<CorrectBody>();
+    expectTypeOf<keyof RevealBody>().toEqualTypeOf<
+      "application_id" | "observation_id" | "expected_fence" | "expected_context" | "idempotency_key"
+    >();
+    expectTypeOf<keyof CorrectBody>().toEqualTypeOf<
+      "application_id" | "expected_fence" | "expected_context" | "idempotency_key" | "correction"
     >();
   });
 });
@@ -379,5 +401,422 @@ describe("structured rejection classifier (FIX-3)", () => {
       const error = new HttpError(status, { error: code });
       expect(isDefinitiveRejection(error)).toBe(true);
     }
+  });
+});
+
+const T03_REVEAL_PATH =
+  "/controlled/s01/api/commands/review-work-items/recovery_work_t01retry1234567890abcdef/reveal-field-observation";
+const T03_CORRECT_PATH =
+  "/controlled/s01/api/commands/review-work-items/recovery_work_t01retry1234567890abcdef/correct-field-observation";
+
+function routePayload(overrides: Record<string, unknown> = {}) {
+  return {
+    schema_version: "s04-current-route/1",
+    application_id: APP_ID,
+    phase: "Auto Complete",
+    route: "auto_complete",
+    current_run_id: "run_succ",
+    cycle: 2,
+    lifecycle_revision: 7,
+    evidence_revision: 2,
+    evidence_snapshot_id: "snapshot_succ",
+    evidence_snapshot_digest: "a".repeat(64),
+    release_id: "auto_lease@1.9.0",
+    release_digest: "b".repeat(64),
+    checker_build: "s01-target-checker/7",
+    currentness_reason: "CURRENT_CONTEXT_MATCH",
+    completion_basis: null,
+    exception_id: null,
+    exception_decision_id: null,
+    exception_expires_at: null,
+    failure: null,
+    ...overrides,
+  };
+}
+
+function historyPayload(overrides: Record<string, unknown> = {}) {
+  const run = {
+    run_id: "run_succ",
+    status: "complete",
+    authority_digest: "c".repeat(64),
+    current: true,
+    currentness_reason: "CURRENT_CONTEXT_MATCH",
+    cycle: 2,
+    lifecycle_revision: 7,
+    evidence_revision: 2,
+    evidence_snapshot_id: "snapshot_succ",
+    evidence_snapshot_digest: "a".repeat(64),
+    release_id: "auto_lease@1.9.0",
+    release_digest: "b".repeat(64),
+    checker_build: "s01-target-checker/7",
+    finding_ids: [],
+    cas_mismatches: [],
+    selected_observation_ids: [],
+    decision_ids: [],
+    exception_ids: [],
+    applicable_decision_ids: [],
+    applicable_exception_ids: [],
+    invalidated_decision_ids: [],
+    invalidated_exception_ids: [],
+  };
+  return {
+    schema_version: "s04-application-history/1",
+    application_id: APP_ID,
+    current_run_id: "run_succ",
+    runs: [
+      { ...run, run_id: "run_old", current: false, currentness_reason: "SUPERSEDED_BY_EVIDENCE_REVISION", evidence_revision: 1 },
+      run,
+    ],
+    corrections: [],
+    business_exceptions: [],
+    attachment_versions: [],
+    ...overrides,
+  };
+}
+
+describe("correction convergence predicate (T03)", () => {
+  it("refuses convergence without an authoritative route or history", () => {
+    expect(correctionConverged(undefined, undefined, 2)).toBe(false);
+    expect(correctionConverged(routePayload(), undefined, 2)).toBe(false);
+    expect(correctionConverged(undefined, historyPayload(), 2)).toBe(false);
+  });
+
+  it("refuses convergence before the accepted evidence revision is server-current", () => {
+    expect(
+      correctionConverged(
+        routePayload({ evidence_revision: 1 }),
+        historyPayload(),
+        2,
+      ),
+    ).toBe(false);
+  });
+
+  it("refuses convergence while the route has no server-current run", () => {
+    expect(
+      correctionConverged(routePayload({ current_run_id: null }), historyPayload(), 2),
+    ).toBe(false);
+  });
+
+  it("requires exactly one server-current run matching the route run", () => {
+    const runs = historyPayload().runs;
+    const noCurrent = historyPayload({
+      runs: runs.map((run) => ({ ...run, current: false })),
+    });
+    expect(correctionConverged(routePayload(), noCurrent, 2)).toBe(false);
+    const twoCurrent = historyPayload({
+      runs: runs.map((run) => ({ ...run, current: true })),
+    });
+    expect(correctionConverged(routePayload(), twoCurrent, 2)).toBe(false);
+    const mismatched = historyPayload({
+      runs: [{ ...runs[0], run_id: "run_other", current: true }],
+    });
+    expect(correctionConverged(routePayload(), mismatched, 2)).toBe(false);
+  });
+
+  it("converges only on exact agreement between route and history", () => {
+    expect(correctionConverged(routePayload(), historyPayload(), 2)).toBe(true);
+    expect(correctionConverged(routePayload(), historyPayload(), 3)).toBe(false);
+  });
+});
+
+describe("correction convergence polling (T03)", () => {
+  // refetchQueries uses cancelRefetch, so an in-flight mount route fetch may
+  // be replaced by the first poll's refetch and the route request count is
+  // racy.  The history fetch is never cancelled (the route refetch awaits
+  // before the history refetch starts), so history request N + 1 is exactly
+  // poll N and all polling assertions are pinned to the history count.
+  it("polls only the authoritative reads and stops at exact convergence", async () => {
+    vi.useFakeTimers();
+    try {
+      let routeRequests = 0;
+      let historyRequests = 0;
+      const { jsonResponse } = fetchRouter({
+        [`GET ${ROUTE_PATH}`]: () => {
+          routeRequests += 1;
+          return jsonResponse(
+            routePayload({
+              // Poll 1 always precedes any second history request; poll 2
+              // observes the poll-1 history refetch and must see the successor.
+              current_run_id: historyRequests >= 2 ? "run_succ" : "run_old",
+            }),
+          );
+        },
+        [`GET ${HISTORY_PATH}`]: () => {
+          historyRequests += 1;
+          const runs = historyPayload().runs;
+          return jsonResponse(
+            historyPayload({
+              runs:
+                historyRequests >= 3
+                  ? runs
+                  : runs.map((run) => ({ ...run, current: false })),
+            }),
+          );
+        },
+      });
+      const client = createQueryClient();
+      renderHook(
+        () => ({
+          route: useCurrentRoute(APP_ID),
+          history: useApplicationHistory(APP_ID),
+          converge: useCorrectionConvergence(APP_ID, 2),
+        }),
+        { wrapper: wrap(client) },
+      );
+      // Poll 1 (history request 2): not converged, so the 1.5s timer runs.
+      await settleWithTimers(() => historyRequests >= 2);
+      // Poll 2 (history request 3) observes convergence and must stop polling.
+      await settleWithTimers(() => historyRequests >= 3);
+      const routeAtConvergence = routeRequests;
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(historyRequests).toBe(3);
+      expect(routeRequests).toBe(routeAtConvergence);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops polling on a definitive terminal rejection", async () => {
+    vi.useFakeTimers();
+    try {
+      let routeRequests = 0;
+      let historyRequests = 0;
+      const { jsonResponse } = fetchRouter({
+        [`GET ${ROUTE_PATH}`]: () => {
+          routeRequests += 1;
+          return jsonResponse({ detail: { error: "S03_NOT_FOUND" } }, 404);
+        },
+        [`GET ${HISTORY_PATH}`]: () => {
+          historyRequests += 1;
+          return jsonResponse(historyPayload());
+        },
+      });
+      const client = createQueryClient();
+      renderHook(
+        () => ({
+          route: useCurrentRoute(APP_ID),
+          history: useApplicationHistory(APP_ID),
+          converge: useCorrectionConvergence(APP_ID, 2),
+        }),
+        { wrapper: wrap(client) },
+      );
+      // Poll 1 ends on the definitive route error: no timer may be scheduled.
+      await settleWithTimers(() => historyRequests >= 2);
+      const routeAtRejection = routeRequests;
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(historyRequests).toBe(2);
+      expect(routeRequests).toBe(routeAtRejection);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels the poll timer on unmount", async () => {
+    vi.useFakeTimers();
+    try {
+      let routeRequests = 0;
+      let historyRequests = 0;
+      const { jsonResponse } = fetchRouter({
+        [`GET ${ROUTE_PATH}`]: () => {
+          routeRequests += 1;
+          return jsonResponse(routePayload({ current_run_id: "run_old" }));
+        },
+        [`GET ${HISTORY_PATH}`]: () => {
+          historyRequests += 1;
+          return jsonResponse(
+            historyPayload({
+              runs: historyPayload().runs.map((run) => ({ ...run, current: false })),
+            }),
+          );
+        },
+      });
+      const client = createQueryClient();
+      const { unmount } = renderHook(
+        () => ({
+          route: useCurrentRoute(APP_ID),
+          history: useApplicationHistory(APP_ID),
+          converge: useCorrectionConvergence(APP_ID, 2),
+        }),
+        { wrapper: wrap(client) },
+      );
+      // Poll 1 is not converged and schedules the next poll.
+      await settleWithTimers(() => historyRequests >= 2);
+      unmount();
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(historyRequests).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("reveal and correction mutations (T03)", () => {
+  const revealCommand: RevealCommand = {
+    application_id: APP_ID,
+    observation_id: "observation_t03hook",
+    expected_fence: 1,
+    expected_context: {
+      lifecycle_revision: 6,
+      evidence_revision: 1,
+      run_id: "run_t03hook",
+      projection_watermark: 1,
+      current_context: "ctx",
+    },
+    idempotency_key: "t03-reveal-key",
+  };
+
+  const correctionCommand: CorrectionCommand = {
+    application_id: APP_ID,
+    expected_fence: 1,
+    expected_context: {
+      lifecycle_revision: 6,
+      evidence_revision: 1,
+      run_id: "run_t03hook",
+      projection_watermark: 1,
+      current_context: "ctx",
+    },
+    idempotency_key: "t03-correct-key",
+    correction: {
+      schema_version: "field-observation-correction/1",
+      finding_id: "finding_t03hook",
+      observation_id: "observation_t03hook",
+      document_id: "reg",
+      document_role: "机动车登记证书",
+      field: "engine_no",
+      raw: "LSVAA4182N500005Z",
+      source_location: {
+        source_sha256: "d".repeat(64),
+        source_page: 1,
+        source_region: "region:1",
+      },
+      reason_code: "SOURCE_VALUE_MISREAD",
+    },
+  };
+
+  function revealResult() {
+    return {
+      status: "revealed",
+      replayed: false,
+      application_id: APP_ID,
+      work_item_id: WORK_ID,
+      observation_id: "observation_t03hook",
+      source_location: {
+        source_sha256: "d".repeat(64),
+        source_page: 1,
+        source_region: "region:1",
+      },
+      source_text: "LSVAA4182N5000054",
+      revealed_at: 1786000000,
+    };
+  }
+
+  it("reveals with exactly one POST and never invalidates the S01 cache", async () => {
+    let revealPosts = 0;
+    let queueRequests = 0;
+    const { jsonResponse } = fetchRouter({
+      [`POST ${T03_REVEAL_PATH}`]: () => {
+        revealPosts += 1;
+        return jsonResponse(revealResult());
+      },
+      "GET /controlled/s01/api/queries/queue": () => {
+        queueRequests += 1;
+        return jsonResponse({
+          items: [],
+          recovery_items: [],
+          projection_watermark: 0,
+        });
+      },
+    });
+    const client = createQueryClient();
+    const { result } = renderHook(
+      () => ({
+        reveal: useRevealFieldObservation(WORK_ID),
+        queue: useQueue(),
+      }),
+      { wrapper: wrap(client) },
+    );
+    result.current.reveal.mutate(revealCommand);
+    await waitFor(() => expect(result.current.reveal.isSuccess).toBe(true));
+    expect(revealPosts).toBe(1);
+    expect(result.current.reveal.data?.source_text).toBe("LSVAA4182N5000054");
+    // The restricted reveal must never invalidate the server-owned S01 cache.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(queueRequests).toBe(1);
+  });
+
+  it("corrects with exactly one POST and invalidates the S01 cache on acceptance", async () => {
+    let correctPosts = 0;
+    let queueRequests = 0;
+    const { jsonResponse } = fetchRouter({
+      [`POST ${T03_CORRECT_PATH}`]: () => {
+        correctPosts += 1;
+        return jsonResponse({
+          status: "accepted",
+          replayed: false,
+          application_id: APP_ID,
+          work_item_id: WORK_ID,
+          correction_id: "correction_t03hook",
+          observation_id: "observation_t03hook",
+          invalidated_run_id: "run_t03hook",
+          job_id: "job_t03hook",
+          phase: "Auto Complete",
+          route: "auto_complete",
+          lifecycle_revision: 7,
+          evidence_revision: 2,
+          invalidated_exception_ids: [],
+        });
+      },
+      "GET /controlled/s01/api/queries/queue": () => {
+        queueRequests += 1;
+        return jsonResponse({
+          items: [],
+          recovery_items: [],
+          projection_watermark: 0,
+        });
+      },
+    });
+    const client = createQueryClient();
+    const { result } = renderHook(
+      () => ({
+        correct: useCorrectFieldObservation(WORK_ID),
+        queue: useQueue(),
+      }),
+      { wrapper: wrap(client) },
+    );
+    result.current.correct.mutate(correctionCommand);
+    await waitFor(() => expect(result.current.correct.isSuccess).toBe(true));
+    expect(correctPosts).toBe(1);
+    expect(result.current.correct.data?.evidence_revision).toBe(2);
+    // Acceptance invalidates the server-owned S01 queries: the queue refetches.
+    await waitFor(() => expect(queueRequests).toBeGreaterThan(1));
+  });
+
+  it("discards a late reveal response after unmount without a retry", async () => {
+    let revealPosts = 0;
+    let resolveReveal: ((response: Response) => void) | undefined;
+    fetchRouter({
+      [`POST ${T03_REVEAL_PATH}`]: () => {
+        revealPosts += 1;
+        return new Promise<Response>((resolve) => {
+          resolveReveal = resolve;
+        });
+      },
+    });
+    const { result, unmount } = renderHook(
+      () => useRevealFieldObservation(WORK_ID),
+      { wrapper: wrap(createQueryClient()) },
+    );
+    result.current.mutate(revealCommand);
+    await waitFor(() => expect(result.current.isPending).toBe(true));
+    unmount();
+    await act(async () => {
+      resolveReveal?.(
+        new Response(JSON.stringify(revealResult()), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    });
+    expect(revealPosts).toBe(1);
   });
 });

@@ -11,6 +11,7 @@ module.exports = defineConfig({
     "test_s07_browser.spec.js",
     "test_t01_react.spec.js",
     "test_t02_react.spec.js",
+    "test_t03_react.spec.js",
   ],
   fullyParallel: false,
   workers: 1,

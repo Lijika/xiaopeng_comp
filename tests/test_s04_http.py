@@ -17,6 +17,111 @@ from tests.test_s02_http import _configured_http_source, _open_session
 from tests.test_s03_http import _ready_review
 
 
+def test_s01_reveal_and_correction_openapi_contracts_are_closed(
+    tmp_path: Path,
+) -> None:
+    """The migrated S01 commands are consumable through generated types: the
+    operations declare a required, closed request body and a closed 200
+    schema instead of ``requestBody?: never`` and an open dictionary."""
+    state_path = tmp_path / "openapi.sqlite3"
+    with s01_test_loopback({"TASK4_S01_STATE_PATH": str(state_path)}) as server:
+        document = server.request("GET", "/openapi.json").json()
+    reveal = document["paths"][
+        "/controlled/s01/api/commands/review-work-items/{work_item_id}/"
+        "reveal-field-observation"
+    ]["post"]
+    correct = document["paths"][
+        "/controlled/s01/api/commands/review-work-items/{work_item_id}/"
+        "correct-field-observation"
+    ]["post"]
+    for operation in (reveal, correct):
+        request_body = operation["requestBody"]
+        assert request_body["required"] is True
+        schema = request_body["content"]["application/json"]["schema"]
+        assert schema["additionalProperties"] is False
+        context = schema["properties"]["expected_context"]
+        assert context["additionalProperties"] is False
+        assert set(context["properties"]) == {
+            "lifecycle_revision",
+            "evidence_revision",
+            "run_id",
+            "projection_watermark",
+            "current_context",
+        }
+        success = operation["responses"]["200"]["content"]["application/json"]["schema"]
+        assert "$ref" in success
+        assert set(operation["responses"]) == {"200", "404", "409", "413", "422", "503"}
+        for status in ("404", "409", "413", "503"):
+            assert (
+                operation["responses"][status]["content"]["application/json"]["schema"][
+                    "$ref"
+                ]
+                == "#/components/schemas/S01ErrorResponse"
+            )
+    reveal_body = reveal["requestBody"]["content"]["application/json"]["schema"]
+    assert set(reveal_body["properties"]) == {
+        "application_id",
+        "expected_context",
+        "expected_fence",
+        "idempotency_key",
+        "observation_id",
+    }
+    assert reveal_body["properties"]["expected_fence"]["minimum"] == 1
+    correction_body = correct["requestBody"]["content"]["application/json"]["schema"]
+    assert set(correction_body["properties"]) == {
+        "application_id",
+        "correction",
+        "expected_context",
+        "expected_fence",
+        "idempotency_key",
+    }
+    assert correction_body["properties"]["expected_fence"]["minimum"] == 1
+    nested = correction_body["properties"]["correction"]
+    assert nested["additionalProperties"] is False
+    assert set(nested["properties"]) == {
+        "schema_version",
+        "finding_id",
+        "observation_id",
+        "document_id",
+        "document_role",
+        "field",
+        "raw",
+        "source_location",
+        "reason_code",
+    }
+    source_location = nested["properties"]["source_location"]
+    assert source_location["additionalProperties"] is False
+    assert set(source_location["properties"]) == {
+        "source_sha256",
+        "source_page",
+        "source_region",
+    }
+    reveal_result = document["components"]["schemas"]["S01RevealResult"]
+    assert reveal_result.get("additionalProperties") is False
+    assert set(reveal_result["properties"]) == {
+        "status",
+        "replayed",
+        "application_id",
+        "work_item_id",
+        "observation_id",
+        "source_location",
+        "source_text",
+        "revealed_at",
+    }
+    correction_result = document["components"]["schemas"]["S01CorrectionResult"]
+    assert correction_result.get("additionalProperties") is False
+    assert {
+        "correction_id",
+        "observation_id",
+        "invalidated_run_id",
+        "job_id",
+        "phase",
+        "route",
+        "lifecycle_revision",
+        "evidence_revision",
+    }.issubset(set(correction_result["properties"]))
+
+
 def test_correction_rerun_history_and_current_route_over_http(tmp_path: Path) -> None:
     state_path = tmp_path / "target.sqlite3"
     with s01_test_loopback({"TASK4_S01_STATE_PATH": str(state_path)}) as server:

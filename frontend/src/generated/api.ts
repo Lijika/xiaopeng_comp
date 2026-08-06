@@ -1305,6 +1305,40 @@ export interface components {
             /** Work Item Id */
             work_item_id: string;
         };
+        /**
+         * S01CorrectionResult
+         * @description Command acceptance of an evidence correction.  Acceptance is not proof
+         *     that the asynchronous successor run is already current; the client must
+         *     read current-route/history for convergence.
+         */
+        S01CorrectionResult: {
+            /** Application Id */
+            application_id: string;
+            /** Correction Id */
+            correction_id: string;
+            /** Evidence Revision */
+            evidence_revision: number;
+            /** Invalidated Exception Ids */
+            invalidated_exception_ids?: string[] | null;
+            /** Invalidated Run Id */
+            invalidated_run_id: string;
+            /** Job Id */
+            job_id: string;
+            /** Lifecycle Revision */
+            lifecycle_revision: number;
+            /** Observation Id */
+            observation_id: string;
+            /** Phase */
+            phase: string;
+            /** Replayed */
+            replayed: boolean;
+            /** Route */
+            route: string;
+            /** Status */
+            status: string;
+            /** Work Item Id */
+            work_item_id: string;
+        };
         /** S01CurrentRouteFailure */
         S01CurrentRouteFailure: {
             /** Reason Code */
@@ -1904,6 +1938,39 @@ export interface components {
             max_attempts: number;
             /** Retry Offsets Seconds */
             retry_offsets_seconds: number[];
+        };
+        /**
+         * S01RevealResult
+         * @description The authorized reveal response.  ``source_text`` is restricted data:
+         *     it exists only in this command response and the exact live panel state
+         *     authorized to display it.  A replay returns the same reveal for the same
+         *     principal and command.
+         */
+        S01RevealResult: {
+            /** Application Id */
+            application_id: string;
+            /** Observation Id */
+            observation_id: string;
+            /** Replayed */
+            replayed: boolean;
+            /** Revealed At */
+            revealed_at: number;
+            source_location: components["schemas"]["S01RevealSourceLocation"];
+            /** Source Text */
+            source_text: string;
+            /** Status */
+            status: string;
+            /** Work Item Id */
+            work_item_id: string;
+        };
+        /** S01RevealSourceLocation */
+        S01RevealSourceLocation: {
+            /** Source Page */
+            source_page: number;
+            /** Source Region */
+            source_region: string;
+            /** Source Sha256 */
+            source_sha256: string;
         };
         /**
          * S01ReviewCommandContext
@@ -3218,7 +3285,76 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** Application Id */
+                    application_id: string;
+                    /**
+                     * S01FieldObservationCorrection
+                     * @description The closed source-backed correction payload.  The domain rejects any
+                     *     key set or schema version other than the registered contract; this schema
+                     *     closes the shape so generated clients can never invent a field the
+                     *     authority will reject.
+                     */
+                    correction: {
+                        /** Document Id */
+                        document_id: string;
+                        /** Document Role */
+                        document_role: string;
+                        /** Field */
+                        field: string;
+                        /** Finding Id */
+                        finding_id: string;
+                        /** Observation Id */
+                        observation_id: string;
+                        /** Raw */
+                        raw: string;
+                        /** Reason Code */
+                        reason_code: string;
+                        /** Schema Version */
+                        schema_version: string;
+                        /**
+                         * S01FieldCorrectionSourceLocation
+                         * @description The closed source location a field correction must prove.  The domain
+                         *     compares it exactly to the projected public observation, so the schema
+                         *     mirrors the registered contract instead of an open dictionary.
+                         */
+                        source_location: {
+                            /** Source Page */
+                            source_page: number;
+                            /** Source Region */
+                            source_region: string;
+                            /** Source Sha256 */
+                            source_sha256: string;
+                        };
+                    };
+                    /**
+                     * S01ReviewCommandContext
+                     * @description The closed review command context.  The domain compares it by exact
+                     *     equality (``_review_context_matches``), so a partial context is a semantic
+                     *     staleness; the schema here closes the shape so no arbitrary keys can hide
+                     *     a missing revision inside a migrated request or response.
+                     */
+                    expected_context: {
+                        /** Current Context */
+                        current_context: string;
+                        /** Evidence Revision */
+                        evidence_revision: number;
+                        /** Lifecycle Revision */
+                        lifecycle_revision: number;
+                        /** Projection Watermark */
+                        projection_watermark: number;
+                        /** Run Id */
+                        run_id: string;
+                    };
+                    /** Expected Fence */
+                    expected_fence: number;
+                    /** Idempotency Key */
+                    idempotency_key: string;
+                };
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -3226,18 +3362,52 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["S01CorrectionResult"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["S01VerifyErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
                 };
             };
         };
@@ -3441,7 +3611,39 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** Application Id */
+                    application_id: string;
+                    /**
+                     * S01ReviewCommandContext
+                     * @description The closed review command context.  The domain compares it by exact
+                     *     equality (``_review_context_matches``), so a partial context is a semantic
+                     *     staleness; the schema here closes the shape so no arbitrary keys can hide
+                     *     a missing revision inside a migrated request or response.
+                     */
+                    expected_context: {
+                        /** Current Context */
+                        current_context: string;
+                        /** Evidence Revision */
+                        evidence_revision: number;
+                        /** Lifecycle Revision */
+                        lifecycle_revision: number;
+                        /** Projection Watermark */
+                        projection_watermark: number;
+                        /** Run Id */
+                        run_id: string;
+                    };
+                    /** Expected Fence */
+                    expected_fence: number;
+                    /** Idempotency Key */
+                    idempotency_key: string;
+                    /** Observation Id */
+                    observation_id: string;
+                };
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -3449,18 +3651,52 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["S01RevealResult"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["S01VerifyErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
                 };
             };
         };

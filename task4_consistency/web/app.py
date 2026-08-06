@@ -1141,6 +1141,105 @@ class S01ReviewSubmitBody(S01ReviewFencedBody):
     verification: S01ManualVerification
 
 
+class S01FieldCorrectionSourceLocation(BaseModel):
+    """The closed source location a field correction must prove.  The domain
+    compares it exactly to the projected public observation, so the schema
+    mirrors the registered contract instead of an open dictionary."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$", strict=True)
+    source_page: int = Field(ge=1, strict=True)
+    source_region: str = Field(pattern=r"^region:[0-9]+$", strict=True)
+
+
+class S01FieldObservationCorrection(BaseModel):
+    """The closed source-backed correction payload.  The domain rejects any
+    key set or schema version other than the registered contract; this schema
+    closes the shape so generated clients can never invent a field the
+    authority will reject."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str
+    finding_id: str
+    observation_id: str
+    document_id: str
+    document_role: str
+    field: str
+    raw: str
+    source_location: S01FieldCorrectionSourceLocation
+    reason_code: str
+
+
+class S01ReviewRevealBody(S01ReviewFencedBody):
+    """The migrated S01 reveal command.  ``expected_fence`` is bounded at 1
+    because the domain rejects an unclaimed (fence 0) reveal as invalid; the
+    wire status for that violation is the same 422 the domain raises today."""
+
+    expected_fence: int = Field(ge=1, strict=True)
+    application_id: str = Field(min_length=1, max_length=200, strict=True)
+    observation_id: str = Field(min_length=1, max_length=200, strict=True)
+
+
+class S01ReviewCorrectionBody(S01ReviewFencedBody):
+    """The migrated S01 correction command.  ``expected_fence`` is bounded at
+    1 because the domain rejects a fence below 1 as invalid; the wire status
+    is the same 422 the domain raises today."""
+
+    expected_fence: int = Field(ge=1, strict=True)
+    application_id: str = Field(min_length=1, max_length=200, strict=True)
+    correction: S01FieldObservationCorrection
+
+
+class S01RevealSourceLocation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_sha256: str
+    source_page: int
+    source_region: str
+
+
+class S01RevealResult(BaseModel):
+    """The authorized reveal response.  ``source_text`` is restricted data:
+    it exists only in this command response and the exact live panel state
+    authorized to display it.  A replay returns the same reveal for the same
+    principal and command."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: str
+    replayed: bool
+    application_id: str
+    work_item_id: str
+    observation_id: str
+    source_location: S01RevealSourceLocation
+    source_text: str
+    revealed_at: int
+
+
+class S01CorrectionResult(BaseModel):
+    """Command acceptance of an evidence correction.  Acceptance is not proof
+    that the asynchronous successor run is already current; the client must
+    read current-route/history for convergence."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: str
+    replayed: bool
+    application_id: str
+    work_item_id: str
+    correction_id: str
+    observation_id: str
+    invalidated_run_id: str
+    job_id: str
+    phase: str
+    route: str
+    lifecycle_revision: int
+    evidence_revision: int
+    invalidated_exception_ids: list[str] | None = None
+
+
 class S02SubmitBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1167,13 +1266,6 @@ class S03SubmitBody(S03FencedBody):
 class S04CorrectionBody(S03FencedBody):
     application_id: str = Field(min_length=1, max_length=200, strict=True)
     correction: dict[str, Any]
-
-
-class S04RevealBody(S03ClaimBody):
-    application_id: str = Field(min_length=1, max_length=200, strict=True)
-    observation_id: str = Field(min_length=1, max_length=200, strict=True)
-    expected_fence: int = Field(ge=1, strict=True)
-    idempotency_key: str
 
 
 class S05RequestBody(S03FencedBody):
@@ -2858,7 +2950,28 @@ async def controlled_s04_demo_submit_review_work_item(
 
 @app.post(
     "/controlled/s01/api/commands/review-work-items/"
-    "{work_item_id}/reveal-field-observation"
+    "{work_item_id}/reveal-field-observation",
+    response_model=S01RevealResult,
+    response_model_exclude_none=True,
+    responses={
+        404: {"model": S01ErrorResponse},
+        409: {"model": S01ErrorResponse},
+        413: {"model": S01ErrorResponse},
+        422: {"model": S01VerifyErrorResponse},
+        503: {"model": S01ErrorResponse},
+    },
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": _inline_openapi_schema(
+                        S01ReviewRevealBody.model_json_schema()
+                    ),
+                }
+            },
+        },
+    },
 )
 async def controlled_s04_demo_reveal_field_observation(
     work_item_id: str,
@@ -2867,8 +2980,8 @@ async def controlled_s04_demo_reveal_field_observation(
 ) -> dict[str, Any]:
     _s01_disable_cache(response)
     principal = _s04_demo_reviewer_principal(request)
-    body = await _s03_command_body(request, S04RevealBody)
-    assert isinstance(body, S04RevealBody)
+    body = await _s03_command_body(request, S01ReviewRevealBody)
+    assert isinstance(body, S01ReviewRevealBody)
     try:
         result = _s01_service().reveal_field_observation(
             principal=principal,
@@ -2876,7 +2989,7 @@ async def controlled_s04_demo_reveal_field_observation(
             work_item_id=work_item_id,
             observation_id=body.observation_id,
             expected_fence=body.expected_fence,
-            expected_context=body.expected_context,
+            expected_context=body.expected_context.model_dump(mode="json"),
             idempotency_key=body.idempotency_key,
             now=S01_SESSION_CLOCK(),
         )
@@ -2891,7 +3004,28 @@ async def controlled_s04_demo_reveal_field_observation(
 
 @app.post(
     "/controlled/s01/api/commands/review-work-items/"
-    "{work_item_id}/correct-field-observation"
+    "{work_item_id}/correct-field-observation",
+    response_model=S01CorrectionResult,
+    response_model_exclude_none=True,
+    responses={
+        404: {"model": S01ErrorResponse},
+        409: {"model": S01ErrorResponse},
+        413: {"model": S01ErrorResponse},
+        422: {"model": S01VerifyErrorResponse},
+        503: {"model": S01ErrorResponse},
+    },
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": _inline_openapi_schema(
+                        S01ReviewCorrectionBody.model_json_schema()
+                    ),
+                }
+            },
+        },
+    },
 )
 async def controlled_s04_demo_correct_field_observation(
     work_item_id: str,
@@ -2900,17 +3034,17 @@ async def controlled_s04_demo_correct_field_observation(
 ) -> dict[str, Any]:
     _s01_disable_cache(response)
     principal = _s04_demo_reviewer_principal(request)
-    body = await _s03_command_body(request, S04CorrectionBody)
-    assert isinstance(body, S04CorrectionBody)
+    body = await _s03_command_body(request, S01ReviewCorrectionBody)
+    assert isinstance(body, S01ReviewCorrectionBody)
     try:
         result = _s01_service().correct_field_observation(
             principal=principal,
             application_id=body.application_id,
             work_item_id=work_item_id,
             expected_fence=body.expected_fence,
-            expected_context=body.expected_context,
+            expected_context=body.expected_context.model_dump(mode="json"),
             idempotency_key=body.idempotency_key,
-            correction=body.correction,
+            correction=body.correction.model_dump(mode="json"),
             now=S01_SESSION_CLOCK(),
         )
     except QueryNotFound as error:

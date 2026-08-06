@@ -266,6 +266,90 @@
         "title": "S01ClaimResult",
         "type": "object"
       },
+      "S01CorrectionResult": {
+        "additionalProperties": false,
+        "description": "Command acceptance of an evidence correction.  Acceptance is not proof\nthat the asynchronous successor run is already current; the client must\nread current-route/history for convergence.",
+        "properties": {
+          "application_id": {
+            "title": "Application Id",
+            "type": "string"
+          },
+          "correction_id": {
+            "title": "Correction Id",
+            "type": "string"
+          },
+          "evidence_revision": {
+            "title": "Evidence Revision",
+            "type": "integer"
+          },
+          "invalidated_exception_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Invalidated Exception Ids"
+          },
+          "invalidated_run_id": {
+            "title": "Invalidated Run Id",
+            "type": "string"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "lifecycle_revision": {
+            "title": "Lifecycle Revision",
+            "type": "integer"
+          },
+          "observation_id": {
+            "title": "Observation Id",
+            "type": "string"
+          },
+          "phase": {
+            "title": "Phase",
+            "type": "string"
+          },
+          "replayed": {
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "route": {
+            "title": "Route",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "work_item_id": {
+            "title": "Work Item Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "replayed",
+          "application_id",
+          "work_item_id",
+          "correction_id",
+          "observation_id",
+          "invalidated_run_id",
+          "job_id",
+          "phase",
+          "route",
+          "lifecycle_revision",
+          "evidence_revision"
+        ],
+        "title": "S01CorrectionResult",
+        "type": "object"
+      },
       "S01CurrentRouteFailure": {
         "properties": {
           "reason_code": {
@@ -2075,6 +2159,79 @@
           "jitter"
         ],
         "title": "S01RetryPolicy",
+        "type": "object"
+      },
+      "S01RevealResult": {
+        "additionalProperties": false,
+        "description": "The authorized reveal response.  ``source_text`` is restricted data:\nit exists only in this command response and the exact live panel state\nauthorized to display it.  A replay returns the same reveal for the same\nprincipal and command.",
+        "properties": {
+          "application_id": {
+            "title": "Application Id",
+            "type": "string"
+          },
+          "observation_id": {
+            "title": "Observation Id",
+            "type": "string"
+          },
+          "replayed": {
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "revealed_at": {
+            "title": "Revealed At",
+            "type": "integer"
+          },
+          "source_location": {
+            "$ref": "#/components/schemas/S01RevealSourceLocation"
+          },
+          "source_text": {
+            "title": "Source Text",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "work_item_id": {
+            "title": "Work Item Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "replayed",
+          "application_id",
+          "work_item_id",
+          "observation_id",
+          "source_location",
+          "source_text",
+          "revealed_at"
+        ],
+        "title": "S01RevealResult",
+        "type": "object"
+      },
+      "S01RevealSourceLocation": {
+        "additionalProperties": false,
+        "properties": {
+          "source_page": {
+            "title": "Source Page",
+            "type": "integer"
+          },
+          "source_region": {
+            "title": "Source Region",
+            "type": "string"
+          },
+          "source_sha256": {
+            "title": "Source Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_sha256",
+          "source_page",
+          "source_region"
+        ],
+        "title": "S01RevealSourceLocation",
         "type": "object"
       },
       "S01ReviewCommandContext": {
@@ -4006,28 +4163,217 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "The migrated S01 correction command.  ``expected_fence`` is bounded at\n1 because the domain rejects a fence below 1 as invalid; the wire status\nis the same 422 the domain raises today.",
+                "properties": {
+                  "application_id": {
+                    "maxLength": 200,
+                    "minLength": 1,
+                    "title": "Application Id",
+                    "type": "string"
+                  },
+                  "correction": {
+                    "additionalProperties": false,
+                    "description": "The closed source-backed correction payload.  The domain rejects any\nkey set or schema version other than the registered contract; this schema\ncloses the shape so generated clients can never invent a field the\nauthority will reject.",
+                    "properties": {
+                      "document_id": {
+                        "title": "Document Id",
+                        "type": "string"
+                      },
+                      "document_role": {
+                        "title": "Document Role",
+                        "type": "string"
+                      },
+                      "field": {
+                        "title": "Field",
+                        "type": "string"
+                      },
+                      "finding_id": {
+                        "title": "Finding Id",
+                        "type": "string"
+                      },
+                      "observation_id": {
+                        "title": "Observation Id",
+                        "type": "string"
+                      },
+                      "raw": {
+                        "title": "Raw",
+                        "type": "string"
+                      },
+                      "reason_code": {
+                        "title": "Reason Code",
+                        "type": "string"
+                      },
+                      "schema_version": {
+                        "title": "Schema Version",
+                        "type": "string"
+                      },
+                      "source_location": {
+                        "additionalProperties": false,
+                        "description": "The closed source location a field correction must prove.  The domain\ncompares it exactly to the projected public observation, so the schema\nmirrors the registered contract instead of an open dictionary.",
+                        "properties": {
+                          "source_page": {
+                            "minimum": 1,
+                            "title": "Source Page",
+                            "type": "integer"
+                          },
+                          "source_region": {
+                            "pattern": "^region:[0-9]+$",
+                            "title": "Source Region",
+                            "type": "string"
+                          },
+                          "source_sha256": {
+                            "pattern": "^[0-9a-f]{64}$",
+                            "title": "Source Sha256",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "source_sha256",
+                          "source_page",
+                          "source_region"
+                        ],
+                        "title": "S01FieldCorrectionSourceLocation",
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "schema_version",
+                      "finding_id",
+                      "observation_id",
+                      "document_id",
+                      "document_role",
+                      "field",
+                      "raw",
+                      "source_location",
+                      "reason_code"
+                    ],
+                    "title": "S01FieldObservationCorrection",
+                    "type": "object"
+                  },
+                  "expected_context": {
+                    "additionalProperties": false,
+                    "description": "The closed review command context.  The domain compares it by exact\nequality (``_review_context_matches``), so a partial context is a semantic\nstaleness; the schema here closes the shape so no arbitrary keys can hide\na missing revision inside a migrated request or response.",
+                    "properties": {
+                      "current_context": {
+                        "title": "Current Context",
+                        "type": "string"
+                      },
+                      "evidence_revision": {
+                        "title": "Evidence Revision",
+                        "type": "integer"
+                      },
+                      "lifecycle_revision": {
+                        "title": "Lifecycle Revision",
+                        "type": "integer"
+                      },
+                      "projection_watermark": {
+                        "title": "Projection Watermark",
+                        "type": "integer"
+                      },
+                      "run_id": {
+                        "title": "Run Id",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "lifecycle_revision",
+                      "evidence_revision",
+                      "run_id",
+                      "projection_watermark",
+                      "current_context"
+                    ],
+                    "title": "S01ReviewCommandContext",
+                    "type": "object"
+                  },
+                  "expected_fence": {
+                    "minimum": 1,
+                    "title": "Expected Fence",
+                    "type": "integer"
+                  },
+                  "idempotency_key": {
+                    "title": "Idempotency Key",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "expected_context",
+                  "expected_fence",
+                  "idempotency_key",
+                  "application_id",
+                  "correction"
+                ],
+                "title": "S01ReviewCorrectionBody",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Controlled S04 Demo Correct Field Observation Controlled S01 Api Commands Review Work Items  Work Item Id  Correct Field Observation Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/S01CorrectionResult"
                 }
               }
             },
             "description": "Successful Response"
           },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/S01VerifyErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "summary": "Controlled S04 Demo Correct Field Observation"
@@ -4331,28 +4677,144 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "The migrated S01 reveal command.  ``expected_fence`` is bounded at 1\nbecause the domain rejects an unclaimed (fence 0) reveal as invalid; the\nwire status for that violation is the same 422 the domain raises today.",
+                "properties": {
+                  "application_id": {
+                    "maxLength": 200,
+                    "minLength": 1,
+                    "title": "Application Id",
+                    "type": "string"
+                  },
+                  "expected_context": {
+                    "additionalProperties": false,
+                    "description": "The closed review command context.  The domain compares it by exact\nequality (``_review_context_matches``), so a partial context is a semantic\nstaleness; the schema here closes the shape so no arbitrary keys can hide\na missing revision inside a migrated request or response.",
+                    "properties": {
+                      "current_context": {
+                        "title": "Current Context",
+                        "type": "string"
+                      },
+                      "evidence_revision": {
+                        "title": "Evidence Revision",
+                        "type": "integer"
+                      },
+                      "lifecycle_revision": {
+                        "title": "Lifecycle Revision",
+                        "type": "integer"
+                      },
+                      "projection_watermark": {
+                        "title": "Projection Watermark",
+                        "type": "integer"
+                      },
+                      "run_id": {
+                        "title": "Run Id",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "lifecycle_revision",
+                      "evidence_revision",
+                      "run_id",
+                      "projection_watermark",
+                      "current_context"
+                    ],
+                    "title": "S01ReviewCommandContext",
+                    "type": "object"
+                  },
+                  "expected_fence": {
+                    "minimum": 1,
+                    "title": "Expected Fence",
+                    "type": "integer"
+                  },
+                  "idempotency_key": {
+                    "title": "Idempotency Key",
+                    "type": "string"
+                  },
+                  "observation_id": {
+                    "maxLength": 200,
+                    "minLength": 1,
+                    "title": "Observation Id",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "expected_context",
+                  "expected_fence",
+                  "idempotency_key",
+                  "application_id",
+                  "observation_id"
+                ],
+                "title": "S01ReviewRevealBody",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Controlled S04 Demo Reveal Field Observation Controlled S01 Api Commands Review Work Items  Work Item Id  Reveal Field Observation Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/S01RevealResult"
                 }
               }
             },
             "description": "Successful Response"
           },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/S01VerifyErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "summary": "Controlled S04 Demo Reveal Field Observation"

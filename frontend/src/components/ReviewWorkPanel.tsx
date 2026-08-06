@@ -1,6 +1,7 @@
 import { useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 
+import type { components } from "../generated/api";
 import {
   HttpError,
   isDefinitiveRejection,
@@ -12,14 +13,21 @@ import {
   MANUAL_WORK_KEY,
   useApplicationHistory,
   useClaimWorkItem,
+  useCorrectFieldObservation,
+  useCorrectionConvergence,
   useCurrentRoute,
   useManualWork,
   useReleaseWorkItem,
   useRenewWorkItem,
+  useRevealFieldObservation,
   useSubmitVerification,
   useWorkspace,
   type ClaimCommand,
+  type CorrectionCommand,
+  type CorrectionResult,
   type FencedCommand,
+  type RevealCommand,
+  type RevealResult,
   type SubmitCommand,
 } from "../api/hooks";
 import { Button } from "./ui/button";
@@ -29,9 +37,19 @@ function newIdempotencyKey(): string {
   return crypto.randomUUID();
 }
 
-type Action = "claim" | "renew" | "release" | "submit";
+type S01EvidenceLink = components["schemas"]["S01EvidenceLink"];
+
+type Action =
+  | "claim"
+  | "renew"
+  | "release"
+  | "submit"
+  | "reveal"
+  | "correct";
 
 type Outcome = "confirmed" | "not_confirmed" | "inconclusive";
+
+type CorrectionReason = "SOURCE_VALUE_MISREAD" | "SOURCE_VALUE_MISSING";
 
 const OUTCOMES: readonly Outcome[] = [
   "confirmed",
@@ -39,9 +57,42 @@ const OUTCOMES: readonly Outcome[] = [
   "inconclusive",
 ];
 
+/** The registered correction reasons of the S01 domain authority. */
+const CORRECTION_REASONS: readonly CorrectionReason[] = [
+  "SOURCE_VALUE_MISREAD",
+  "SOURCE_VALUE_MISSING",
+];
+
+/** The restricted reveal payload, keyed to the exact composite context it
+ * was issued against.  It may render only while that context is still live;
+ * it is never stored in a query cache, URL, or storage. */
+type RevealState = {
+  epoch: number;
+  contextKey: string;
+  observationId: string;
+  sourceText: string;
+};
+
+/** The source-backed correction target pinned to one workspace observation. */
+type CorrectionTarget = {
+  findingId: string;
+  observationId: string;
+  documentId: string;
+  documentRole: string;
+  field: string;
+  sourceSha256: string;
+  sourcePage: number;
+  sourceRegion: string;
+};
+
 type PendingCommand = {
   action: Action;
-  command: ClaimCommand | FencedCommand | SubmitCommand;
+  command:
+    | ClaimCommand
+    | FencedCommand
+    | SubmitCommand
+    | RevealCommand
+    | CorrectionCommand;
 };
 
 const ACTION_LABELS: Record<Action, string> = {
@@ -49,6 +100,8 @@ const ACTION_LABELS: Record<Action, string> = {
   renew: "续期",
   release: "释放",
   submit: "核验",
+  reveal: "揭示",
+  correct: "更正",
 };
 
 /** Builds the structured manual verification from the Reviewer's explicit
@@ -136,9 +189,43 @@ function WorkFacts({ work }: { work: ReviewWorkResponse }) {
 function WorkspaceSection({
   work,
   workspace,
+  claimed,
+  liveContextKey,
+  revealEpoch,
+  revealed,
+  correctionTarget,
+  correctionRaw,
+  correctionReason,
+  correctionReasons,
+  revealPending,
+  correctPending,
+  controlsDisabled,
+  onReveal,
+  onStartCorrection,
+  onCorrectionRawChange,
+  onCorrectionReasonChange,
+  onSubmitCorrection,
+  onCancelCorrection,
 }: {
   work: ReviewWorkResponse;
   workspace: UseQueryResult<WorkspaceResponse>;
+  claimed: boolean;
+  liveContextKey: string | null;
+  revealEpoch: number;
+  revealed: RevealState | null;
+  correctionTarget: CorrectionTarget | null;
+  correctionRaw: string;
+  correctionReason: CorrectionReason;
+  correctionReasons: readonly CorrectionReason[];
+  revealPending: boolean;
+  correctPending: boolean;
+  controlsDisabled: boolean;
+  onReveal: (link: S01EvidenceLink) => void;
+  onStartCorrection: (link: S01EvidenceLink, findingId: string) => void;
+  onCorrectionRawChange: (raw: string) => void;
+  onCorrectionReasonChange: (reason: CorrectionReason) => void;
+  onSubmitCorrection: () => void;
+  onCancelCorrection: () => void;
 }) {
   if (work.status === "completed") {
     return (
@@ -166,6 +253,7 @@ function WorkspaceSection({
     );
   }
   const finding = workspace.data.selected_finding ?? null;
+  const findingId = finding?.finding_id ?? null;
   return (
     <section aria-labelledby="review-workspace-title">
       <h3 id="review-workspace-title">最小工作区（发现优先）</h3>
@@ -207,7 +295,7 @@ function WorkspaceSection({
           </dd>
         </div>
       </dl>
-      {finding === null ? (
+      {finding === null || findingId === null ? (
         <p data-testid="review-workspace-empty" className="text-sm text-muted-foreground">
           无可复核发现
         </p>
@@ -233,48 +321,160 @@ function WorkspaceSection({
           </dl>
           <h4>证据（已掩码）</h4>
           <ul data-testid="review-evidence-links">
-            {finding.evidence_links.map((link) => (
-              <li key={link.observation_id} data-testid="review-evidence-link">
-                {link.document_id} · {link.field} ·{" "}
-                <span data-testid="review-evidence-masked">
-                  {link.raw_masked ?? link.value_state}
-                </span>
-                <dl className="facts">
-                  <div>
-                    <dt>文档角色</dt>
-                    <dd data-testid="review-evidence-role">
-                      {link.document_role}
-                    </dd>
+            {finding.evidence_links.map((link) => {
+              const revealedHere =
+                revealed !== null &&
+                liveContextKey !== null &&
+                revealed.epoch === revealEpoch &&
+                revealed.contextKey === liveContextKey &&
+                revealed.observationId === link.observation_id;
+              const correctable =
+                typeof link.source_sha256 === "string" &&
+                typeof link.source_page === "number" &&
+                typeof link.source_region === "string";
+              const formHere =
+                correctionTarget !== null &&
+                correctionTarget.observationId === link.observation_id;
+              return (
+                <li
+                  key={link.observation_id}
+                  data-testid="review-evidence-link"
+                >
+                  {link.document_id} · {link.field} ·{" "}
+                  <span data-testid="review-evidence-masked">
+                    {link.raw_masked ?? link.value_state}
+                  </span>
+                  <dl className="facts">
+                    <div>
+                      <dt>文档角色</dt>
+                      <dd data-testid="review-evidence-role">
+                        {link.document_role}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>来源页</dt>
+                      <dd data-testid="review-evidence-source-page">
+                        {link.source_page ?? "None"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>来源区域</dt>
+                      <dd data-testid="review-evidence-source-region">
+                        {link.source_region ?? "None"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>来源出处摘要</dt>
+                      <dd data-testid="review-evidence-provenance">
+                        {link.provenance_manifest_digest ?? "None"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>证据资格</dt>
+                      <dd data-testid="review-evidence-eligibility">
+                        {link.evidence_eligible === true
+                          ? (link.eligibility_reason ?? "eligible")
+                          : "ineligible"}
+                      </dd>
+                    </div>
+                  </dl>
+                  <div className="evidence-actions">
+                    {claimed && (
+                      <>
+                        {revealPending ? (
+                          <span data-testid="review-reveal-pending">
+                            来源读取中…
+                          </span>
+                        ) : (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            data-testid="review-reveal-button"
+                            disabled={controlsDisabled}
+                            onClick={() => onReveal(link)}
+                          >
+                            查看来源
+                          </Button>
+                        )}
+                        {revealedHere && (
+                          <p
+                            className="text-sm"
+                            data-testid="review-reveal-source"
+                          >
+                            {revealed.sourceText}
+                          </p>
+                        )}
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          data-testid="review-correct-button"
+                          disabled={controlsDisabled || !correctable}
+                          onClick={() => onStartCorrection(link, findingId)}
+                        >
+                          更正该字段
+                        </Button>
+                        {formHere && (
+                          <div
+                            className="evidence-correction"
+                            data-testid="review-correction-form"
+                          >
+                            <label className="text-sm">
+                              修正值
+                              <input
+                                data-testid="review-correction-raw"
+                                value={correctionRaw}
+                                onChange={(event) =>
+                                  onCorrectionRawChange(event.target.value)
+                                }
+                                disabled={correctPending}
+                              />
+                            </label>
+                            <label className="text-sm">
+                              原因
+                              <select
+                                data-testid="review-correction-reason"
+                                value={correctionReason}
+                                onChange={(event) =>
+                                  onCorrectionReasonChange(
+                                    event.target.value as CorrectionReason,
+                                  )
+                                }
+                                disabled={correctPending}
+                              >
+                                {correctionReasons.map((reason) => (
+                                  <option key={reason} value={reason}>
+                                    {reason}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            <Button
+                              size="sm"
+                              data-testid="review-correction-submit"
+                              disabled={
+                                correctPending || correctionRaw.trim() === ""
+                              }
+                              onClick={onSubmitCorrection}
+                            >
+                              {correctPending ? "提交中…" : "提交修正"}
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              data-testid="review-correction-cancel"
+                              disabled={correctPending}
+                              onClick={onCancelCorrection}
+                            >
+                              取消
+                            </Button>
+                          </div>
+                        )}
+                      </>
+                    )}
                   </div>
-                  <div>
-                    <dt>来源页</dt>
-                    <dd data-testid="review-evidence-source-page">
-                      {link.source_page ?? "None"}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>来源区域</dt>
-                    <dd data-testid="review-evidence-source-region">
-                      {link.source_region ?? "None"}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>来源出处摘要</dt>
-                    <dd data-testid="review-evidence-provenance">
-                      {link.provenance_manifest_digest ?? "None"}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>证据资格</dt>
-                    <dd data-testid="review-evidence-eligibility">
-                      {link.evidence_eligible === true
-                        ? (link.eligibility_reason ?? "eligible")
-                        : "ineligible"}
-                    </dd>
-                  </div>
-                </dl>
-              </li>
-            ))}
+                </li>
+              );
+            })}
           </ul>
         </>
       )}
@@ -311,10 +511,39 @@ function HistorySection({
             {run.status}
             {" · "}
             {run.currentness_reason}
-            {run.current === true ? " · 当前" : ""}
+            {run.current === true ? " · 当前" : " · 非当前"}
           </li>
         ))}
       </ol>
+      {history.data.corrections.length > 0 && (
+        <>
+          <h4>证据更正</h4>
+          <ul data-testid="review-history-corrections">
+            {history.data.corrections.map((correction) => (
+              <li
+                key={correction.correction_id}
+                data-testid="review-history-correction"
+              >
+                {correction.correction_id}
+                {" · "}
+                {correction.superseded_observation_id}
+                {" → "}
+                {correction.successor_observation_id}
+                {" · "}
+                {correction.document_id}
+                {" · "}
+                {correction.field}
+                {" · "}
+                {correction.reason_code}
+                {" · "}
+                {correction.actor}
+                {" · "}
+                证据修订 {correction.evidence_revision}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
       <dl className="facts">
         <div>
           <dt>当前运行决策</dt>
@@ -333,24 +562,41 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
   const headingRef = useRef<HTMLHeadingElement>(null);
   const queryClient = useQueryClient();
   const work = useManualWork(workId);
+  // After an accepted correction the old work item is invalidated and its
+  // query existence-hides; the last known application id keeps the
+  // authoritative current-route/history reads alive during convergence.
+  const [acceptedCorrection, setAcceptedCorrection] = useState<{
+    evidenceRevision: number;
+    applicationId: string;
+  } | null>(null);
+  const applicationId =
+    work.data?.application_id ?? acceptedCorrection?.applicationId ?? null;
   const workspace = useWorkspace(
     work.data !== undefined && work.data.status !== "completed"
       ? work.data.application_id
-      : null,
+      : acceptedCorrection?.applicationId ?? null,
   );
-  const history = useApplicationHistory(work.data?.application_id ?? null);
+  const history = useApplicationHistory(applicationId);
   // The route query is hoisted so action gating can require a current
   // authoritative route read; GateSection observes the same shared query.
-  const gate = useCurrentRoute(work.data?.application_id ?? null);
+  const gate = useCurrentRoute(applicationId);
+  useCorrectionConvergence(
+    applicationId,
+    acceptedCorrection?.evidenceRevision ?? null,
+  );
 
   const claim = useClaimWorkItem(workId);
   const renew = useRenewWorkItem(workId);
   const release = useReleaseWorkItem(workId);
   const submit = useSubmitVerification(workId);
+  const reveal = useRevealFieldObservation(workId);
+  const correct = useCorrectFieldObservation(workId);
 
   const [renewKey, setRenewKey] = useState(newIdempotencyKey);
   const [releaseKey, setReleaseKey] = useState(newIdempotencyKey);
   const [submitKey, setSubmitKey] = useState(newIdempotencyKey);
+  const [revealKey, setRevealKey] = useState(newIdempotencyKey);
+  const [correctionKey, setCorrectionKey] = useState(newIdempotencyKey);
   const [pendingCommand, setPendingCommand] = useState<PendingCommand | null>(
     null,
   );
@@ -359,13 +605,32 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
   const [lastAccepted, setLastAccepted] = useState<Action | null>(null);
   const [rejectedAction, setRejectedAction] = useState<Action | null>(null);
   const [outcome, setOutcome] = useState<Outcome>("confirmed");
+  const [revealed, setRevealed] = useState<RevealState | null>(null);
+  const [correctionTarget, setCorrectionTarget] =
+    useState<CorrectionTarget | null>(null);
+  const [correctionRaw, setCorrectionRaw] = useState("");
+  const [correctionReason, setCorrectionReason] =
+    useState<CorrectionReason>("SOURCE_VALUE_MISREAD");
+  // Every scrub boundary bumps the reveal epoch; a late reveal response is
+  // discarded unless it was issued in the current epoch (and context).
+  const [revealEpoch, setRevealEpoch] = useState(0);
 
   useEffect(() => {
     headingRef.current?.focus();
   }, [workId]);
 
+  // Unmount boundary: drop the restricted reveal payload with the panel.
+  useEffect(() => {
+    return () => setRevealed(null);
+  }, []);
+
   const anyPending =
-    claim.isPending || renew.isPending || release.isPending || submit.isPending;
+    claim.isPending ||
+    renew.isPending ||
+    release.isPending ||
+    submit.isPending ||
+    reveal.isPending ||
+    correct.isPending;
 
   const mutations: Record<
     Action,
@@ -375,6 +640,8 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     renew,
     release,
     submit,
+    reveal,
+    correct,
   };
   const active = pendingCommand === null ? null : pendingCommand.action;
   const activeMutation = active === null ? undefined : mutations[active];
@@ -389,6 +656,8 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     renew: () => setRenewKey(newIdempotencyKey()),
     release: () => setReleaseKey(newIdempotencyKey()),
     submit: () => setSubmitKey(newIdempotencyKey()),
+    reveal: () => setRevealKey(newIdempotencyKey()),
+    correct: () => setCorrectionKey(newIdempotencyKey()),
   };
 
   const accepted = (action: Action) => () => {
@@ -488,6 +757,151 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     });
   };
 
+  /** The composite context a reveal was issued against.  A saved reveal may
+   * render only while this exact live context is still current. */
+  const liveRevealContextKey =
+    work.data !== undefined && work.data.status === "claimed"
+      ? [
+          work.data.application_id,
+          workId,
+          work.data.evidence_revision,
+          work.data.lifecycle_revision,
+          work.data.claim_fence,
+        ].join("|")
+      : null;
+
+  // Render-time guard: drop any saved reveal whose issued context no longer
+  // matches the live application/work/observation/evidence/fence context.
+  useEffect(() => {
+    setRevealed((current) =>
+      current === null || current.contextKey === liveRevealContextKey
+        ? current
+        : null,
+    );
+  }, [liveRevealContextKey, revealEpoch]);
+
+  /** Scrub boundary for the restricted reveal: clear rendered state, bump
+   * the epoch so in-flight/late responses can never render. */
+  const scrubReveal = () => {
+    setRevealed(null);
+    setRevealEpoch((epoch) => epoch + 1);
+  };
+
+  const handleReveal = (link: S01EvidenceLink) => {
+    if (work.data === undefined || anyPending || pendingCommand !== null) return;
+    if (requiresReload || work.isError || !owningReadsCurrent) return;
+    if (liveRevealContextKey === null) return;
+    const command: RevealCommand = {
+      application_id: work.data.application_id,
+      observation_id: link.observation_id,
+      expected_fence: work.data.claim_fence,
+      expected_context: work.data.command_context,
+      idempotency_key: revealKey,
+    };
+    setPendingCommand({ action: "reveal", command });
+    setLastAccepted(null);
+    setRejectedAction(null);
+    reveal.mutate(command, {
+      onSuccess: (result: RevealResult) => {
+        // Handle and immediately reset the restricted mutation so the source
+        // text is retained only in the exact panel state that may show it.
+        accepted("reveal")();
+        setRevealed({
+          epoch: revealEpoch,
+          contextKey: liveRevealContextKey,
+          observationId: result.observation_id,
+          sourceText: result.source_text,
+        });
+        reveal.reset();
+      },
+      onError: rejected("reveal"),
+    });
+  };
+
+  const handleStartCorrection = (
+    link: S01EvidenceLink,
+    findingId: string,
+  ) => {
+    if (work.data === undefined || anyPending || pendingCommand !== null) return;
+    if (requiresReload || work.isError || !owningReadsCurrent) return;
+    if (
+      typeof link.source_sha256 !== "string" ||
+      typeof link.source_page !== "number" ||
+      typeof link.source_region !== "string"
+    ) {
+      return;
+    }
+    setCorrectionTarget({
+      findingId,
+      observationId: link.observation_id,
+      documentId: link.document_id,
+      documentRole: link.document_role,
+      field: link.field,
+      sourceSha256: link.source_sha256,
+      sourcePage: link.source_page,
+      sourceRegion: link.source_region,
+    });
+    setCorrectionRaw("");
+    setCorrectionReason("SOURCE_VALUE_MISREAD");
+  };
+
+  const handleCancelCorrection = () => {
+    if (correct.isPending) return;
+    setCorrectionTarget(null);
+    setCorrectionRaw("");
+  };
+
+  const handleCorrectionSubmit = () => {
+    if (work.data === undefined || anyPending || pendingCommand !== null) return;
+    if (requiresReload || work.isError || !owningReadsCurrent) return;
+    if (correctionTarget === null || correctionRaw.trim() === "") return;
+    // Submission boundary: scrub the restricted reveal and close the typed
+    // correction form up front so neither may linger in the DOM while the
+    // command is in flight.
+    scrubReveal();
+    setCorrectionTarget(null);
+    setCorrectionRaw("");
+    const command: CorrectionCommand = {
+      application_id: work.data.application_id,
+      expected_fence: work.data.claim_fence,
+      expected_context: work.data.command_context,
+      idempotency_key: correctionKey,
+      correction: {
+        schema_version: "field-observation-correction/1",
+        finding_id: correctionTarget.findingId,
+        observation_id: correctionTarget.observationId,
+        document_id: correctionTarget.documentId,
+        document_role: correctionTarget.documentRole,
+        field: correctionTarget.field,
+        raw: correctionRaw.trim(),
+        source_location: {
+          source_sha256: correctionTarget.sourceSha256,
+          source_page: correctionTarget.sourcePage,
+          source_region: correctionTarget.sourceRegion,
+        },
+        reason_code: correctionReason,
+      },
+    };
+    setPendingCommand({ action: "correct", command });
+    setLastAccepted(null);
+    setRejectedAction(null);
+    correct.mutate(command, {
+      onSuccess: (result: CorrectionResult) => {
+        // Acceptance is command acceptance only: currentness and the
+        // successor run remain server-owned reads.
+        accepted("correct")();
+        setAcceptedCorrection({
+          evidenceRevision: result.evidence_revision,
+          applicationId: result.application_id,
+        });
+        correct.reset();
+      },
+      onError: (error: Error) => {
+        rejected("correct")(error);
+      },
+    });
+  };
+
   /** Reconciling retry: a claim has no idempotency key, so its unknown
    * outcome is resolved by an authoritative refetch that identifies the live
    * lease instead of blindly issuing a second business effect. */
@@ -530,6 +944,34 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
         onSuccess: accepted("release"),
         onError: rejected("release"),
       });
+    } else if (pendingCommand.action === "reveal") {
+      // Unknown outcome: replay the exact same key and fingerprint; the
+      // restricted reveal stays masked until an authorized response arrives.
+      reveal.mutate(command as RevealCommand, {
+        onSuccess: (result: RevealResult) => {
+          accepted("reveal")();
+          setRevealed({
+            epoch: revealEpoch,
+            contextKey: liveRevealContextKey ?? "",
+            observationId: result.observation_id,
+            sourceText: result.source_text,
+          });
+          reveal.reset();
+        },
+        onError: rejected("reveal"),
+      });
+    } else if (pendingCommand.action === "correct") {
+      correct.mutate(command as CorrectionCommand, {
+        onSuccess: (result: CorrectionResult) => {
+          accepted("correct")();
+          setAcceptedCorrection({
+            evidenceRevision: result.evidence_revision,
+            applicationId: result.application_id,
+          });
+          correct.reset();
+        },
+        onError: rejected("correct"),
+      });
     } else {
       submit.mutate(command as SubmitCommand, {
         onSuccess: accepted("submit"),
@@ -543,6 +985,11 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     // fresh semantic key, and an accepted outcome must never be cleared by a
     // reload.
     if (anyPending) return;
+    // Authoritative reload boundary: scrub the restricted reveal up front so
+    // it cannot outlive the interaction that authorized it even while the
+    // refetch is in flight.  The epoch bump also discards any in-flight late
+    // response; the next explicit reveal re-issues from the live context.
+    scrubReveal();
     // Authoritative reload.  A failed refetch must never clear the conflict
     // fence nor rotate the semantic idempotency keys, so the refetch throws
     // and the fence is kept on failure.  The rejection latch clears only
@@ -556,6 +1003,8 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
       return;
     }
     await queryClient.invalidateQueries({ queryKey: ["s01"] });
+    setCorrectionTarget(null);
+    setCorrectionRaw("");
     setRejectedAction(null);
     setRequiresReload(false);
     setConflictReason(null);
@@ -574,12 +1023,20 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     statusText = "结果未知：网络未确认，重试将使用同一幂等键";
   } else if (lastAccepted !== null) {
     statusText = `${ACTION_LABELS[lastAccepted]}已接受`;
+  } else if (acceptedCorrection !== null) {
+    statusText = "等待服务端后续运行";
   }
 
+  const correctionAccepted = acceptedCorrection !== null;
   const workspaceRequired =
     work.data !== undefined && work.data.status !== "completed";
+  // After an accepted correction the invalidated old workspace existence-hides
+  // (404) while the successor converges; that dependent read must not take
+  // down the review shell, current-route, or history.
   const dependentError =
-    (workspaceRequired && workspace.isError) || history.isError || gate.isError;
+    (workspaceRequired && workspace.isError && !correctionAccepted) ||
+    history.isError ||
+    gate.isError;
 
   if (work.isPending || work.isError || work.data === undefined || dependentError) {
     if (work.isPending) {
@@ -593,6 +1050,31 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
             人工核验
           </h2>
           <p data-testid="review-loading">工作项加载中…</p>
+        </section>
+      );
+    }
+    if (correctionAccepted) {
+      // The corrected work item is invalidated: keep the review shell, the
+      // correction progress, the authoritative current route, and history
+      // usable while the successor run converges.
+      return (
+        <section
+          className="panel"
+          data-testid="review-panel"
+          aria-labelledby="review-title"
+        >
+          <h2 id="review-title" tabIndex={-1} ref={headingRef}>
+            人工核验
+          </h2>
+          <p
+            role="status"
+            aria-live="polite"
+            data-testid="review-correction-pending"
+          >
+            更正已接受（证据修订 {acceptedCorrection.evidenceRevision}）：等待服务端后续运行收敛…
+          </p>
+          <GateSection applicationId={acceptedCorrection.applicationId} />
+          <HistorySection history={history} />
         </section>
       );
     }
@@ -629,14 +1111,17 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
   const canClaim =
     data.status !== "claimed" &&
     data.status !== "completed" &&
+    !correctionAccepted &&
     !commandBlocked &&
     !work.isError &&
     owningReadsCurrent;
   const canFenced =
-    claimed && !commandBlocked && !work.isError && owningReadsCurrent;
+    claimed && !correctionAccepted && !commandBlocked && !work.isError &&
+    owningReadsCurrent;
   const canSubmit =
     claimed &&
     data.automatic_findings.length > 0 &&
+    !correctionAccepted &&
     !commandBlocked &&
     !work.isError &&
     owningReadsCurrent;
@@ -650,70 +1135,103 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
       <h2 id="review-title" tabIndex={-1} ref={headingRef}>
         人工核验
       </h2>
+      {correctionAccepted && (
+        <p
+          role="status"
+          aria-live="polite"
+          data-testid="review-correction-pending"
+        >
+          更正已接受（证据修订 {acceptedCorrection.evidenceRevision}）：等待服务端后续运行收敛…
+        </p>
+      )}
       <WorkFacts work={data} />
-      <WorkspaceSection work={data} workspace={workspace} />
+      <WorkspaceSection
+        work={data}
+        workspace={workspace}
+        claimed={claimed && !correctionAccepted}
+        liveContextKey={liveRevealContextKey}
+        revealEpoch={revealEpoch}
+        revealed={revealed}
+        correctionTarget={correctionTarget}
+        correctionRaw={correctionRaw}
+        correctionReason={correctionReason}
+        correctionReasons={CORRECTION_REASONS}
+        revealPending={active === "reveal"}
+        correctPending={active === "correct"}
+        controlsDisabled={
+          !claimed || correctionAccepted || commandBlocked || !owningReadsCurrent
+        }
+        onReveal={handleReveal}
+        onStartCorrection={handleStartCorrection}
+        onCorrectionRawChange={setCorrectionRaw}
+        onCorrectionReasonChange={setCorrectionReason}
+        onSubmitCorrection={handleCorrectionSubmit}
+        onCancelCorrection={handleCancelCorrection}
+      />
       <GateSection applicationId={data.application_id} />
       <HistorySection history={history} />
-      <div className="recovery-actions" data-testid="review-actions">
-        <Button
-          variant="secondary"
-          onClick={handleReload}
-          disabled={anyPending}
-          data-testid="reload-button"
-        >
-          重新加载
-        </Button>
-        <Button
-          onClick={handleClaim}
-          disabled={!canClaim || anyPending}
-          data-testid="claim-button"
-        >
-          认领
-        </Button>
-        <Button
-          onClick={handleRenew}
-          disabled={!canFenced || anyPending}
-          data-testid="renew-button"
-        >
-          续期
-        </Button>
-        <Button
-          onClick={handleRelease}
-          disabled={!canFenced || anyPending}
-          data-testid="release-button"
-        >
-          释放
-        </Button>
-        {claimed && (
-          <label className="text-sm">
-            核验结论
-            <select
-              data-testid="review-outcome"
-              value={outcome}
-              onChange={(event) => setOutcome(event.target.value as Outcome)}
-              disabled={!canSubmit || anyPending}
-            >
-              {OUTCOMES.map((value) => (
-                <option key={value} value={value}>
-                  {value}
-                </option>
-              ))}
-            </select>
-          </label>
-        )}
-        <Button
-          onClick={handleSubmit}
-          disabled={!canSubmit || anyPending}
-          data-testid="submit-button"
-        >
-          提交人工核验
-        </Button>
-        {transportUnknown && (
-          <Button variant="outline" onClick={handleRetry} data-testid="retry-button">
-            重试
+      {!correctionAccepted && (
+        <div className="recovery-actions" data-testid="review-actions">
+          <Button
+            variant="secondary"
+            onClick={handleReload}
+            disabled={anyPending}
+            data-testid="reload-button"
+          >
+            重新加载
           </Button>
-        )}
-      </div>
+          <Button
+            onClick={handleClaim}
+            disabled={!canClaim || anyPending}
+            data-testid="claim-button"
+          >
+            认领
+          </Button>
+          <Button
+            onClick={handleRenew}
+            disabled={!canFenced || anyPending}
+            data-testid="renew-button"
+          >
+            续期
+          </Button>
+          <Button
+            onClick={handleRelease}
+            disabled={!canFenced || anyPending}
+            data-testid="release-button"
+          >
+            释放
+          </Button>
+          {claimed && (
+            <label className="text-sm">
+              核验结论
+              <select
+                data-testid="review-outcome"
+                value={outcome}
+                onChange={(event) => setOutcome(event.target.value as Outcome)}
+                disabled={!canSubmit || anyPending}
+              >
+                {OUTCOMES.map((value) => (
+                  <option key={value} value={value}>
+                    {value}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          <Button
+            onClick={handleSubmit}
+            disabled={!canSubmit || anyPending}
+            data-testid="submit-button"
+          >
+            提交人工核验
+          </Button>
+          {transportUnknown && (
+            <Button variant="outline" onClick={handleRetry} data-testid="retry-button">
+              重试
+            </Button>
+          )}
+        </div>
+      )}
       <p role="status" aria-live="polite" data-testid="review-command-status">
         {statusText}
       </p>

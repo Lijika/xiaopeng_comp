@@ -6,10 +6,13 @@ import {
   type UseQueryResult,
 } from "@tanstack/react-query";
 
-import type { paths } from "../generated/api";
+import { useEffect } from "react";
+
+import type { paths, components } from "../generated/api";
 import {
   request,
   HttpError,
+  isDefinitiveRejection,
   type ApplicationHistoryResponse,
   type ClaimResult,
   type CurrentRouteResponse,
@@ -22,6 +25,12 @@ import {
   type VerifyRecoveryResult,
   type WorkspaceResponse,
 } from "./client";
+
+/** The restricted reveal and evidence-correction command results, bound to
+ * the generated OpenAPI schemas (mirrors the sibling result aliases in
+ * client.ts without extending that file). */
+export type RevealResult = components["schemas"]["S01RevealResult"];
+export type CorrectionResult = components["schemas"]["S01CorrectionResult"];
 
 export const QUEUE_KEY = ["s01", "queue"] as const;
 export const WORK_KEY = (workId: string) =>
@@ -42,6 +51,8 @@ export const HISTORY_KEY = (applicationId: string) =>
 export type ClaimCommand = paths["/controlled/s01/api/commands/review-work-items/{work_item_id}/claim"]["post"]["requestBody"]["content"]["application/json"];
 export type FencedCommand = paths["/controlled/s01/api/commands/review-work-items/{work_item_id}/renew"]["post"]["requestBody"]["content"]["application/json"];
 export type SubmitCommand = paths["/controlled/s01/api/commands/review-work-items/{work_item_id}/submit"]["post"]["requestBody"]["content"]["application/json"];
+export type RevealCommand = paths["/controlled/s01/api/commands/review-work-items/{work_item_id}/reveal-field-observation"]["post"]["requestBody"]["content"]["application/json"];
+export type CorrectionCommand = paths["/controlled/s01/api/commands/review-work-items/{work_item_id}/correct-field-observation"]["post"]["requestBody"]["content"]["application/json"];
 
 /**
  * The VerifyRecovery POST body is bound to the generated OpenAPI request
@@ -187,6 +198,114 @@ export function useSubmitVerification(
   return useReviewCommandMutation<SubmitResult, SubmitCommand>(
     `/controlled/s01/api/commands/review-work-items/${encodeURIComponent(workId)}/submit`,
   );
+}
+
+/**
+ * The restricted reveal mutation.  Its success payload carries ``source_text``
+ * that may exist only in the exact live panel state authorized to display it,
+ * so the mutation never invalidates the S01 cache and retains nothing:
+ * ``gcTime: 0`` drops the cached entry as soon as the panel resets it.
+ */
+export function useRevealFieldObservation(
+  workId: string,
+): UseMutationResult<RevealResult, Error, RevealCommand> {
+  return useMutation({
+    mutationFn: (command: RevealCommand) =>
+      request<RevealResult>(
+        `/controlled/s01/api/commands/review-work-items/${encodeURIComponent(workId)}/reveal-field-observation`,
+        { method: "POST", body: JSON.stringify(command) },
+      ),
+    retry: false,
+    gcTime: 0,
+  });
+}
+
+/** The evidence correction command.  Acceptance invalidates the server-owned
+ * S01 queries; the successor run converges through current-route/history. */
+export function useCorrectFieldObservation(
+  workId: string,
+): UseMutationResult<CorrectionResult, Error, CorrectionCommand> {
+  return useReviewCommandMutation<CorrectionResult, CorrectionCommand>(
+    `/controlled/s01/api/commands/review-work-items/${encodeURIComponent(workId)}/correct-field-observation`,
+  );
+}
+
+/**
+ * The authoritative convergence predicate for an accepted evidence revision:
+ * current-route and history must agree on exactly one server-current run at
+ * or beyond that revision.  Currentness is server data, never a browser
+ * timestamp or the newest array entry.
+ */
+export function correctionConverged(
+  route: CurrentRouteResponse | undefined,
+  history: ApplicationHistoryResponse | undefined,
+  acceptedEvidenceRevision: number,
+): boolean {
+  if (route === undefined || history === undefined) return false;
+  if (route.evidence_revision < acceptedEvidenceRevision) return false;
+  if (route.current_run_id === null || route.current_run_id === undefined) {
+    return false;
+  }
+  const currentRuns = history.runs.filter((run) => run.current === true);
+  return (
+    currentRuns.length === 1 &&
+    currentRuns[0].run_id === route.current_run_id
+  );
+}
+
+/**
+ * Convergence polling for an accepted evidence correction: while the
+ * accepted revision has no server-current successor run, refetch only the
+ * authoritative current-route and history queries and stop on the exact
+ * convergence predicate, on unmount/context change, or on a definitive
+ * terminal error.  Completion is never inferred from elapsed attempts.
+ */
+export function useCorrectionConvergence(
+  applicationId: string | null,
+  acceptedEvidenceRevision: number | null,
+): void {
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    if (applicationId === null || acceptedEvidenceRevision === null) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let attempts = 0;
+    const poll = async () => {
+      if (cancelled) return;
+      attempts += 1;
+      await queryClient.refetchQueries({ queryKey: ROUTE_KEY(applicationId) });
+      if (cancelled) return;
+      await queryClient.refetchQueries({ queryKey: HISTORY_KEY(applicationId) });
+      if (cancelled) return;
+      const route = queryClient.getQueryData<CurrentRouteResponse>(
+        ROUTE_KEY(applicationId),
+      );
+      const history = queryClient.getQueryData<ApplicationHistoryResponse>(
+        HISTORY_KEY(applicationId),
+      );
+      if (correctionConverged(route, history, acceptedEvidenceRevision)) return;
+      const routeState = queryClient.getQueryState(ROUTE_KEY(applicationId));
+      const historyState = queryClient.getQueryState(HISTORY_KEY(applicationId));
+      if (
+        (routeState?.error !== undefined &&
+          routeState?.error !== null &&
+          isDefinitiveRejection(routeState.error)) ||
+        (historyState?.error !== undefined &&
+          historyState?.error !== null &&
+          isDefinitiveRejection(historyState.error))
+      ) {
+        return;
+      }
+      // Safety ceiling only: stopping here never claims convergence.
+      if (attempts >= 240) return;
+      timer = setTimeout(poll, 1_500);
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) clearTimeout(timer);
+    };
+  }, [applicationId, acceptedEvidenceRevision, queryClient]);
 }
 
 export function useVerifyRecovery(

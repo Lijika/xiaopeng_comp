@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react";
+import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { describe, expect, it } from "vitest";
@@ -20,6 +20,16 @@ const RENEW_PATH =
   "/controlled/s01/api/commands/review-work-items/work_t02panel1234567890abcdef/renew";
 const SUBMIT_PATH =
   "/controlled/s01/api/commands/review-work-items/work_t02panel1234567890abcdef/submit";
+const RELEASE_PATH =
+  "/controlled/s01/api/commands/review-work-items/work_t02panel1234567890abcdef/release";
+const REVEAL_PATH =
+  "/controlled/s01/api/commands/review-work-items/work_t02panel1234567890abcdef/reveal-field-observation";
+const CORRECT_PATH =
+  "/controlled/s01/api/commands/review-work-items/work_t02panel1234567890abcdef/correct-field-observation";
+
+/** The restricted source sentinel of the S01 runtime ground truth.  It may
+ * appear only inside the authorized review-reveal-source element. */
+const SOURCE_SENTINEL = "LSVAA4182N5000054";
 
 const CONTEXT = {
   lifecycle_revision: 6,
@@ -921,5 +931,455 @@ describe("ReviewWorkPanel (T02)", () => {
     );
     expect(screen.queryByTestId("review-status")).not.toBeInTheDocument();
     expect(screen.queryByTestId("review-claim-fence")).not.toBeInTheDocument();
+  });
+});
+
+/** Claimed workspace with two source-backed evidence observations so the
+ * reveal can be pinned to exactly one of them. */
+function t03WorkspacePayload() {
+  const base = workspacePayload();
+  const link = base.selected_finding.evidence_links[0];
+  return workspacePayload({
+    claim_fence: 1,
+    selected_finding: {
+      ...base.selected_finding,
+      evidence_links: [
+        link,
+        {
+          ...link,
+          document_id: "pol",
+          document_role: "行驶证",
+          observation_id: "observation_t02panel2",
+        },
+      ],
+    },
+  });
+}
+
+/** Post-correction history: one superseded run and exactly one server-current
+ * successor run plus the recorded correction. */
+function t03HistoryPayload() {
+  const first = historyPayload().runs[0];
+  return historyPayload({
+    current_run_id: "run_t03succ",
+    runs: [
+      {
+        ...first,
+        run_id: "run_t02panel",
+        current: false,
+        currentness_reason: "SUPERSEDED_BY_EVIDENCE_REVISION",
+        evidence_revision: 1,
+        decision_ids: [],
+      },
+      {
+        ...first,
+        run_id: "run_t03succ",
+        current: true,
+        currentness_reason: "CURRENT_CONTEXT_MATCH",
+        evidence_revision: 2,
+        decision_ids: [],
+      },
+    ],
+    corrections: [
+      {
+        correction_id: "correction_t03panel",
+        superseded_observation_id: "observation_t02panel",
+        successor_observation_id: "observation_t02panel_succ",
+        document_id: "reg",
+        document_role: "机动车登记证书",
+        field: "engine_no",
+        reason_code: "SOURCE_VALUE_MISREAD",
+        actor: "t03-reviewer",
+        evidence_revision: 2,
+        recorded_at: 1786000000,
+        invalidated_decision_ids: [],
+        invalidated_exception_ids: [],
+        source_location: {
+          source_sha256: "d".repeat(64),
+          source_page: 1,
+          source_region: "region:1",
+        },
+      },
+    ],
+  });
+}
+
+function revealResultPayload(overrides: Record<string, unknown> = {}) {
+  return {
+    status: "revealed",
+    replayed: false,
+    application_id: APP_ID,
+    work_item_id: WORK_ID,
+    observation_id: "observation_t02panel",
+    source_location: {
+      source_sha256: "d".repeat(64),
+      source_page: 1,
+      source_region: "region:1",
+    },
+    source_text: SOURCE_SENTINEL,
+    revealed_at: 1786000000,
+    ...overrides,
+  };
+}
+
+function correctionResultPayload(overrides: Record<string, unknown> = {}) {
+  return {
+    status: "accepted",
+    replayed: false,
+    application_id: APP_ID,
+    work_item_id: WORK_ID,
+    correction_id: "correction_t03panel",
+    observation_id: "observation_t02panel",
+    invalidated_run_id: "run_t02panel",
+    job_id: "job_t03panel",
+    phase: "Auto Complete",
+    route: "auto_complete",
+    lifecycle_revision: 7,
+    evidence_revision: 2,
+    invalidated_exception_ids: [],
+    ...overrides,
+  };
+}
+
+describe("ReviewWorkPanel controlled reveal (T03)", () => {
+  it("reveals the restricted source for exactly the clicked observation and nowhere else", async () => {
+    const router = fetchRouter({
+      ...baseRoutes(),
+      [`GET ${WORK_PATH}`]: () => jsonResponse(claimedWorkPayload()),
+      [`GET ${WORKSPACE_PATH}`]: () => jsonResponse(t03WorkspacePayload()),
+      [`POST ${REVEAL_PATH}`]: () => jsonResponse(revealResultPayload()),
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    expect(screen.getAllByRole("button", { name: "查看来源" })).toHaveLength(2);
+    // Every source-backed observation carries its own correction control;
+    // the reveal stays restricted to the explicitly revealed observation.
+    expect(
+      screen.getAllByRole("button", { name: "更正该字段" }),
+    ).toHaveLength(2);
+    await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
+    await screen.findByTestId("review-reveal-source");
+    const sources = screen.getAllByTestId("review-reveal-source");
+    expect(sources).toHaveLength(1);
+    expect(sources[0]).toHaveTextContent(SOURCE_SENTINEL);
+    // The restricted value exists in exactly one element of the whole panel.
+    const panelText = screen.getByTestId("review-panel").textContent ?? "";
+    expect(panelText.split(SOURCE_SENTINEL).length - 1).toBe(1);
+    // The evidence stays masked for both observations.
+    for (const masked of screen.getAllByTestId("review-evidence-masked")) {
+      expect(masked).toHaveTextContent("[REDACTED]");
+    }
+    const revealCall = router.calls.find((call) => call.method === "POST");
+    expect(revealCall?.body).toEqual({
+      application_id: APP_ID,
+      observation_id: "observation_t02panel",
+      expected_fence: 1,
+      expected_context: CONTEXT,
+      idempotency_key: expect.any(String),
+    });
+    expect(Object.keys(revealCall?.body ?? {})).toEqual([
+      "application_id",
+      "observation_id",
+      "expected_fence",
+      "expected_context",
+      "idempotency_key",
+    ]);
+  });
+
+  it("keeps the source masked while a reveal is in flight and renders only on the authorized response", async () => {
+    let resolveReveal: ((response: Response) => void) | undefined;
+    fetchRouter({
+      ...baseRoutes(),
+      [`GET ${WORK_PATH}`]: () => jsonResponse(claimedWorkPayload()),
+      [`GET ${WORKSPACE_PATH}`]: () => jsonResponse(t03WorkspacePayload()),
+      [`POST ${REVEAL_PATH}`]: () =>
+        new Promise<Response>((resolve) => {
+          resolveReveal = resolve;
+        }),
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
+    // Every evidence link shows the in-flight reveal marker; no source may
+    // render for any of them until the authorized response arrives.
+    const pendingMarkers = await screen.findAllByTestId("review-reveal-pending");
+    expect(pendingMarkers.length).toBeGreaterThanOrEqual(2);
+    expect(screen.queryByTestId("review-reveal-source")).not.toBeInTheDocument();
+    expect(screen.getByTestId("review-panel").textContent ?? "").not.toContain(
+      SOURCE_SENTINEL,
+    );
+    await act(async () => {
+      resolveReveal?.(
+        new Response(JSON.stringify(revealResultPayload()), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    });
+    const sources = await screen.findAllByTestId("review-reveal-source");
+    expect(sources).toHaveLength(1);
+    expect(sources[0]).toHaveTextContent(SOURCE_SENTINEL);
+  });
+
+  it("scrubs the restricted reveal at an authoritative reload and re-reveals with a fresh key", async () => {
+    let revealPosts = 0;
+    const router = fetchRouter({
+      ...baseRoutes(),
+      [`GET ${WORK_PATH}`]: () => jsonResponse(claimedWorkPayload()),
+      [`GET ${WORKSPACE_PATH}`]: () => jsonResponse(t03WorkspacePayload()),
+      [`POST ${REVEAL_PATH}`]: () => {
+        revealPosts += 1;
+        return jsonResponse(revealResultPayload());
+      },
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
+    await screen.findByTestId("review-reveal-source");
+    await userEvent.click(screen.getByRole("button", { name: "重新加载" }));
+    await waitFor(() =>
+      expect(screen.queryByTestId("review-reveal-source")).not.toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("review-panel").textContent ?? "").not.toContain(
+      SOURCE_SENTINEL,
+    );
+    await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
+    await screen.findByTestId("review-reveal-source");
+    expect(revealPosts).toBe(2);
+    const keys = router.calls
+      .filter((call) => call.method === "POST")
+      .map((call) => (call.body as { idempotency_key: string }).idempotency_key);
+    expect(keys).toHaveLength(2);
+    // The accepted reveal rotated its semantic key; the re-issued reveal is a
+    // new logical command with a fresh key.
+    expect(keys[0]).not.toBe(keys[1]);
+  });
+
+  it("discards a saved reveal when the live claim context changes", async () => {
+    let workRequests = 0;
+    const router = fetchRouter({
+      ...baseRoutes(),
+      [`GET ${WORK_PATH}`]: () =>
+        jsonResponse(
+          workRequests++ === 0 ? claimedWorkPayload() : workPayload(),
+        ),
+      [`GET ${WORKSPACE_PATH}`]: () => jsonResponse(t03WorkspacePayload()),
+      [`POST ${REVEAL_PATH}`]: () => jsonResponse(revealResultPayload()),
+      [`POST ${RELEASE_PATH}`]: () =>
+        jsonResponse({
+          status: "released",
+          replayed: false,
+          application_id: APP_ID,
+          work_item_id: WORK_ID,
+          claim_fence: 0,
+        }),
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
+    await screen.findByTestId("review-reveal-source");
+    expect(screen.getByTestId("review-reveal-source")).toHaveTextContent(
+      SOURCE_SENTINEL,
+    );
+    // Releasing the work item is not a scrub boundary by itself: the saved
+    // reveal must be dropped by the live-context guard once the authoritative
+    // refetch shows the claim is gone (status unclaimed, fence 0).
+    await userEvent.click(screen.getByRole("button", { name: "释放" }));
+    await waitFor(() =>
+      expect(screen.queryByTestId("review-reveal-source")).not.toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("review-panel").textContent ?? "").not.toContain(
+      SOURCE_SENTINEL,
+    );
+    expect(screen.getByTestId("review-status")).toHaveTextContent("unclaimed");
+    expect(
+      router.calls.filter((call) => call.method === "POST"),
+    ).toHaveLength(2);
+  });
+});
+
+describe("ReviewWorkPanel evidence correction rerun (T03)", () => {
+  it("posts the exact correction command, scrubs the reveal, and keeps the shell with history until convergence", async () => {
+    let workRequests = 0;
+    let workspaceRequests = 0;
+    const router = fetchRouter({
+      ...baseRoutes(),
+      [`GET ${WORK_PATH}`]: () => {
+        workRequests += 1;
+        return workRequests === 1
+          ? jsonResponse(claimedWorkPayload())
+          : jsonResponse({ detail: { error: "S03_NOT_FOUND" } }, 404);
+      },
+      [`GET ${WORKSPACE_PATH}`]: () => {
+        workspaceRequests += 1;
+        return workspaceRequests === 1
+          ? jsonResponse(t03WorkspacePayload())
+          : jsonResponse({ detail: { error: "S03_NOT_FOUND" } }, 404);
+      },
+      [`GET ${ROUTE_PATH}`]: () =>
+        jsonResponse(
+          routePayload({
+            evidence_revision: 2,
+            current_run_id: "run_t03succ",
+            route: "auto_complete",
+            phase: "Auto Complete",
+          }),
+        ),
+      [`GET ${HISTORY_PATH}`]: () => jsonResponse(t03HistoryPayload()),
+      [`POST ${REVEAL_PATH}`]: () => jsonResponse(revealResultPayload()),
+      [`POST ${CORRECT_PATH}`]: () => jsonResponse(correctionResultPayload()),
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
+    await screen.findByTestId("review-reveal-source");
+    await userEvent.click(
+      screen.getAllByRole("button", { name: "更正该字段" })[0],
+    );
+    const submit = screen.getByRole("button", { name: "提交修正" });
+    expect(submit).toBeDisabled();
+    await userEvent.type(
+      screen.getByTestId("review-correction-raw"),
+      "LSVAA4182N500005Z",
+    );
+    expect(submit).toBeEnabled();
+    await userEvent.click(submit);
+    await waitFor(() =>
+      expect(screen.getByTestId("review-correction-pending")).toHaveTextContent(
+        "证据修订 2",
+      ),
+    );
+    const correctCall = router.calls.filter(
+      (call) => call.method === "POST",
+    )[1];
+    expect(correctCall?.body).toEqual({
+      application_id: APP_ID,
+      expected_fence: 1,
+      expected_context: CONTEXT,
+      idempotency_key: expect.any(String),
+      correction: {
+        schema_version: "field-observation-correction/1",
+        finding_id: FINDING_ID,
+        observation_id: "observation_t02panel",
+        document_id: "reg",
+        document_role: "机动车登记证书",
+        field: "engine_no",
+        raw: "LSVAA4182N500005Z",
+        source_location: {
+          source_sha256: "d".repeat(64),
+          source_page: 1,
+          source_region: "region:1",
+        },
+        reason_code: "SOURCE_VALUE_MISREAD",
+      },
+    });
+    expect(Object.keys(correctCall?.body ?? {})).toEqual([
+      "application_id",
+      "expected_fence",
+      "expected_context",
+      "idempotency_key",
+      "correction",
+    ]);
+    expect(
+      Object.keys((correctCall?.body as { correction: object }).correction),
+    ).toEqual([
+      "schema_version",
+      "finding_id",
+      "observation_id",
+      "document_id",
+      "document_role",
+      "field",
+      "raw",
+      "source_location",
+      "reason_code",
+    ]);
+    // The restricted reveal was scrubbed before the correction command; the
+    // sentinel exists nowhere in the panel.
+    expect(screen.queryByTestId("review-reveal-source")).not.toBeInTheDocument();
+    expect(screen.getByTestId("review-panel").textContent ?? "").not.toContain(
+      SOURCE_SENTINEL,
+    );
+    // The invalidated old workspace/work reads existence-hide (404) but the
+    // review shell, the authoritative gate, and history stay usable.
+    expect(screen.getByTestId("review-correction-pending")).toBeInTheDocument();
+    expect(screen.getByTestId("gate-phase")).toHaveTextContent("Auto Complete");
+    expect(screen.getByTestId("review-history-corrections")).toHaveTextContent(
+      "correction_t03panel",
+    );
+    expect(screen.getByTestId("review-history-corrections")).toHaveTextContent(
+      "observation_t02panel → observation_t02panel_succ",
+    );
+    expect(screen.getByTestId("review-history-corrections")).toHaveTextContent(
+      "SOURCE_VALUE_MISREAD",
+    );
+    expect(screen.getByTestId("review-history-corrections")).toHaveTextContent(
+      "证据修订 2",
+    );
+    const runsText = screen.getByTestId("review-history-runs").textContent ?? "";
+    expect(runsText).toContain("run_t02panel");
+    expect(runsText).toContain("run_t03succ");
+    expect(runsText.match(/· 当前/g)).toHaveLength(1);
+    expect(runsText.match(/· 非当前/g)).toHaveLength(1);
+    // All manual-review writes are fenced while the successor run converges.
+    expect(
+      screen.queryByRole("button", { name: "查看来源" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "提交人工核验" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("scrubs the reveal and the correction form on a definitive rejection", async () => {
+    const router = fetchRouter({
+      ...baseRoutes(),
+      [`GET ${WORK_PATH}`]: () => jsonResponse(claimedWorkPayload()),
+      [`GET ${WORKSPACE_PATH}`]: () => jsonResponse(t03WorkspacePayload()),
+      [`POST ${REVEAL_PATH}`]: () => jsonResponse(revealResultPayload()),
+      [`POST ${CORRECT_PATH}`]: () =>
+        jsonResponse(
+          {
+            detail: {
+              error: "S03_INVALID_COMMAND",
+              reason_code: "CORRECTION_REJECTED",
+            },
+          },
+          422,
+        ),
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
+    await screen.findByTestId("review-reveal-source");
+    await userEvent.click(
+      screen.getAllByRole("button", { name: "更正该字段" })[0],
+    );
+    await userEvent.type(
+      screen.getByTestId("review-correction-raw"),
+      "LSVAA4182N500005Z",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "提交修正" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("review-command-status")).toHaveTextContent(
+        "更正未接受（CORRECTION_REJECTED）：请重新加载权威上下文后再试",
+      ),
+    );
+    // A definitive rejection proves no correction committed: the reveal and
+    // the form are scrubbed, and no invalidation shell may appear.
+    expect(screen.queryByTestId("review-correction-form")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("review-reveal-source")).not.toBeInTheDocument();
+    expect(screen.getByTestId("review-panel").textContent ?? "").not.toContain(
+      SOURCE_SENTINEL,
+    );
+    expect(
+      screen.queryByTestId("review-correction-pending"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByTestId("review-reload-note")).toBeInTheDocument();
+    for (const button of screen.getAllByRole("button", { name: "查看来源" })) {
+      expect(button).toBeDisabled();
+    }
+    for (const name of ["认领", "续期", "释放", "提交人工核验"]) {
+      expect(screen.getByRole("button", { name })).toBeDisabled();
+    }
+    expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(2);
   });
 });
