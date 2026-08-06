@@ -1348,7 +1348,7 @@ def _s07_not_found() -> HTTPException:
 _S07_MEDIA_POLICY = email.policy.default
 _S07_JSON_MEDIA_TYPE_PATTERN = re.compile(
     r"""
-    application/json
+    (?P<essence>application/json)
     (?:
         [\t ]* ; [\t ]*
         [!#$%&'*+\-.^_`|~0-9A-Za-z]+
@@ -1373,25 +1373,24 @@ def _s07_request_is_json(content_type: str | None) -> bool:
     """True only when the request Content-Type media-type essence is exactly
     ``application/json`` with well-formed parameters.
 
-    The stdlib structured parser rejects MIME defects; the whole-value matcher
-    additionally enforces HTTP token/quoted-string parameter grammar because
-    the MIME parser permissively accepts comments and non-ASCII bare tokens.
-    Only SP/HTAB OWS around semicolons is allowed.  Valid quoted values retain
-    spaces, escaped characters, and opaque Latin-1 ``obs-text``.
+    The whole-value matcher enforces HTTP token/quoted-string parameter grammar.
+    The stdlib structured parser then validates and normalizes the matched
+    essence without applying its different MIME parameter grammar.  Only
+    SP/HTAB OWS around semicolons is allowed.  Valid quoted values retain spaces,
+    escaped characters, and opaque Latin-1 ``obs-text``.
     """
     if not content_type:
         return False
+    media_type = _S07_JSON_MEDIA_TYPE_PATTERN.fullmatch(content_type)
+    if media_type is None:
+        return False
     message = Message(policy=_S07_MEDIA_POLICY)
     try:
-        message["content-type"] = content_type
+        message["content-type"] = media_type.group("essence")
     except (TypeError, ValueError):
         return False
     header = message["Content-Type"]
-    if (
-        header is None
-        or header.defects
-        or _S07_JSON_MEDIA_TYPE_PATTERN.fullmatch(content_type) is None
-    ):
+    if header is None or header.defects:
         return False
     return message.get_content_type() == "application/json"
 
@@ -2135,11 +2134,6 @@ def controlled_s07_recovery_work(
         )
     except QueryNotFound as error:
         raise _s07_not_found() from error
-
-
-def _s07_verify_operator_dependency(request: Request) -> S01CommandPrincipal:
-    """Existence-hiding Operator gate, solved before body validation."""
-    return _s07_operator_principal(request)
 
 
 @app.post(

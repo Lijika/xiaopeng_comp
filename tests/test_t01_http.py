@@ -1797,6 +1797,9 @@ def test_verify_rejects_non_json_media_types_before_service(tmp_path: Path) -> N
         for accepted_type in (
             "Application/JSON",
             "application/json; charset=utf-8",
+            "application/json; a%=b%",
+            "application/json; a'=b'",
+            "application/json; a*=b*",
             'application/json; note="hello world"',
             'application/json; note="a\\"b"',
             "application/json \t;\tcharset=utf-8",
@@ -1819,7 +1822,7 @@ def test_verify_rejects_non_json_media_types_before_service(tmp_path: Path) -> N
             )
             assert accepted.status == 409, (accepted_type, accepted.text)
             assert "S07_STALE" in accepted.text, (accepted_type, accepted.text)
-        assert verify_call_count() == 7, (
+        assert verify_call_count() == 10, (
             "valid media types must reach verify_recovery",
         )
 
