@@ -236,7 +236,14 @@ export function useCorrectFieldObservation(
       ),
     retry: false,
     gcTime: 0,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["s01"] }),
+    // The invalidation must not be awaited inside the mutation settlement:
+    // the accepted correction invalidates the old work item, and the panel's
+    // own acceptance callback has to run against the still-live issued token
+    // before that refetch lands, or the context guard would scrub the
+    // settling command and lose the acceptance.
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["s01"] });
+    },
   });
 }
 
@@ -256,23 +263,28 @@ export function correctionConverged(
   if (route.current_run_id === null || route.current_run_id === undefined) {
     return false;
   }
+  if (history.current_run_id !== route.current_run_id) return false;
   const currentRuns = history.runs.filter((run) => run.current === true);
-  return (
-    currentRuns.length === 1 &&
-    currentRuns[0].run_id === route.current_run_id
-  );
+  if (currentRuns.length !== 1) return false;
+  const currentRun = currentRuns[0];
+  if (currentRun.run_id !== route.current_run_id) return false;
+  if (currentRun.evidence_revision < acceptedEvidenceRevision) return false;
+  return true;
 }
 
 /** The smallest explicit convergence outcome of an accepted evidence
  * correction: nothing accepted, still reconciling against the authoritative
  * reads, converged to the server-current successor/route, or the bounded
- * poll ended without convergence (including a definitive terminal error).
- * Currentness is never derived locally; every state follows server data. */
+ * poll ended without convergence.  ``terminal`` means an authoritative read
+ * definitively rejected (sanitized, never an elapsed-timeout claim);
+ * ``timed_out`` is reserved for the attempt ceiling.  Currentness is never
+ * derived locally; every state follows server data. */
 export type CorrectionConvergence =
   | "idle"
   | "waiting"
   | "converged"
-  | "timed_out";
+  | "timed_out"
+  | "terminal";
 
 /**
  * Convergence polling for an accepted evidence correction: while the
@@ -324,7 +336,7 @@ export function useCorrectionConvergence(
           historyState?.error !== null &&
           isDefinitiveRejection(historyState.error))
       ) {
-        setOutcome("timed_out");
+        setOutcome("terminal");
         return;
       }
       // Safety ceiling only: the bounded end is surfaced, never converged.

@@ -4,6 +4,7 @@ import { StrictMode } from "react";
 import { describe, expect, it } from "vitest";
 
 import ReviewWorkPanel from "./ReviewWorkPanel";
+import { MANUAL_WORK_KEY } from "../api/hooks";
 import { fetchRouter, renderWithQuery } from "../test-utils";
 
 const WORK_ID = "work_t02panel1234567890abcdef";
@@ -217,9 +218,11 @@ function jsonResponse(payload: unknown, status = 200): Response {
   });
 }
 
-/** A live claim far in the future: the issued token must be unexpired for
- * the restricted reveal/correction flow. */
-const LIVE_CLAIM_EXPIRES_AT = 4_102_444_800;
+/** A live claim with a realistic relative expiry (the production claim TTL
+ * is 900 seconds): the issued token must be unexpired for the restricted
+ * reveal/correction flow, and the expiry timer must stay inside the
+ * JavaScript timer ceiling so no overflow warning or 1ms clamp occurs. */
+const LIVE_CLAIM_EXPIRES_AT = Math.floor(Date.now() / 1000) + 900;
 
 function claimedWorkPayload() {
   return workPayload({
@@ -1321,6 +1324,193 @@ describe("ReviewWorkPanel controlled reveal (T03)", () => {
     expect(screen.queryByTestId("review-reveal-source")).not.toBeInTheDocument();
     expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(0);
   });
+
+  it("a same-fence renewal with a new claim expiry scrubs the saved reveal and draft", async () => {
+    let workRequests = 0;
+    const renewedExpiry = Math.floor(Date.now() / 1000) + 1800;
+    const router = fetchRouter({
+      ...baseRoutes(),
+      [`GET ${WORK_PATH}`]: () => {
+        workRequests += 1;
+        return jsonResponse(
+          workPayload({
+            status: "claimed",
+            claim_subject: "t02-reviewer",
+            claim_fence: 1,
+            claim_expires_at:
+              workRequests >= 2 ? renewedExpiry : LIVE_CLAIM_EXPIRES_AT,
+          }),
+        );
+      },
+      [`GET ${WORKSPACE_PATH}`]: () => jsonResponse(t03WorkspacePayload()),
+      [`POST ${REVEAL_PATH}`]: () => jsonResponse(revealResultPayload()),
+      [`POST ${RENEW_PATH}`]: () =>
+        jsonResponse({
+          status: "renewed",
+          replayed: false,
+          application_id: APP_ID,
+          work_item_id: WORK_ID,
+          claim_subject: "t02-reviewer",
+          claim_fence: 1,
+          claim_expires_at: renewedExpiry,
+        }),
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
+    await screen.findByTestId("review-reveal-source");
+    await userEvent.click(
+      screen.getAllByRole("button", { name: "更正该字段" })[0],
+    );
+    expect(screen.getByTestId("review-correction-form")).toBeInTheDocument();
+    // The renewal extends the claim expiry without touching the fence: the
+    // issued authorization (which includes the claim expiry) is no longer the
+    // live one, so every restricted holder is scrubbed.
+    await userEvent.click(screen.getByRole("button", { name: "续期" }));
+    await waitFor(() =>
+      expect(screen.queryByTestId("review-reveal-source")).not.toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByTestId("review-correction-form"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByTestId("review-panel").textContent ?? "").not.toContain(
+      SOURCE_SENTINEL,
+    );
+    expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(2);
+  });
+
+  it("a command_context-only change ends an unknown replay, removes retry, and clears its raw", async () => {
+    let workRequests = 0;
+    const changedContext = { ...CONTEXT, current_context: "b".repeat(64) };
+    const router = fetchRouter({
+      ...baseRoutes(),
+      [`GET ${WORK_PATH}`]: () => {
+        workRequests += 1;
+        return jsonResponse(
+          workPayload({
+            status: "claimed",
+            claim_subject: "t02-reviewer",
+            claim_fence: 1,
+            claim_expires_at: LIVE_CLAIM_EXPIRES_AT,
+            command_context:
+              workRequests >= 2 ? changedContext : CONTEXT,
+          }),
+        );
+      },
+      [`GET ${WORKSPACE_PATH}`]: () => jsonResponse(t03WorkspacePayload()),
+      [`POST ${CORRECT_PATH}`]: () =>
+        Promise.reject(new TypeError("fetch failed: connection reset")),
+    });
+    const { client } = renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    await userEvent.click(
+      screen.getAllByRole("button", { name: "更正该字段" })[0],
+    );
+    await userEvent.type(
+      screen.getByTestId("review-correction-raw"),
+      "LSVAA4182N500005Z",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "提交修正" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("review-command-status")).toHaveTextContent(
+        "结果未知：网络未确认，重试将使用同一幂等键",
+      ),
+    );
+    expect(screen.getByTestId("retry-button")).toBeInTheDocument();
+    // An authoritative context change (only the command context differs)
+    // while the outcome is unknown must end the replay and clear its raw.
+    await act(async () => {
+      await client.refetchQueries({ queryKey: MANUAL_WORK_KEY(WORK_ID) });
+    });
+    await waitFor(() =>
+      expect(screen.queryByTestId("retry-button")).not.toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByTestId("review-correction-pending"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByTestId("review-panel").textContent ?? "").not.toContain(
+      "LSVAA4182N500005Z",
+    );
+    const cached = client
+      .getMutationCache()
+      .getAll()
+      .map((mutation) => JSON.stringify(mutation.state.variables ?? {}));
+    expect(cached.join("\n")).not.toContain("LSVAA4182N500005Z");
+    expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(1);
+  });
+
+  it("a reclaimed issuance replaces a deferred reveal A; A is discarded and B alone renders", async () => {
+    let workRequests = 0;
+    const pending: Array<(response: Response) => void> = [];
+    const router = fetchRouter({
+      ...baseRoutes(),
+      [`GET ${WORK_PATH}`]: () => {
+        workRequests += 1;
+        return jsonResponse(
+          workPayload({
+            status: "claimed",
+            claim_subject: "t02-reviewer",
+            claim_fence: workRequests >= 2 ? 2 : 1,
+            claim_expires_at: LIVE_CLAIM_EXPIRES_AT,
+          }),
+        );
+      },
+      [`GET ${WORKSPACE_PATH}`]: () => jsonResponse(t03WorkspacePayload()),
+      [`POST ${REVEAL_PATH}`]: () =>
+        new Promise<Response>((resolve) => {
+          pending.push(resolve);
+        }),
+    });
+    const { client } =     renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
+    const pendingMarkers = await screen.findAllByTestId("review-reveal-pending");
+    expect(pendingMarkers.length).toBeGreaterThanOrEqual(2);
+    expect(pending).toHaveLength(1);
+    // Reclaim advances the fence: an authoritative refetch invalidates the
+    // first issuance so a second reveal can be issued under the new context.
+    await act(async () => {
+      await client.refetchQueries({ queryKey: MANUAL_WORK_KEY(WORK_ID) });
+    });
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("review-reveal-pending"),
+      ).not.toBeInTheDocument(),
+    );
+    await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
+    await waitFor(() => expect(pending).toHaveLength(2));
+    // Resolve the first (superseded) issuance first: it must be discarded
+    // before storage, then the current issuance alone may render.
+    await act(async () => {
+      pending[0](
+        new Response(JSON.stringify(revealResultPayload()), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    });
+    expect(screen.queryByTestId("review-reveal-source")).not.toBeInTheDocument();
+    await act(async () => {
+      pending[1](
+        new Response(JSON.stringify(revealResultPayload()), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    });
+    await screen.findByTestId("review-reveal-source");
+    const sources = screen.getAllByTestId("review-reveal-source");
+    expect(sources).toHaveLength(1);
+    expect(sources[0]).toHaveTextContent(SOURCE_SENTINEL);
+    // The superseded issuance left nothing behind: no restricted value in
+    // the MutationCache and no second reveal source anywhere.
+    const cached = client
+      .getMutationCache()
+      .getAll()
+      .map((mutation) => JSON.stringify(mutation.state.variables ?? {}));
+    expect(cached.join("\n")).not.toContain(SOURCE_SENTINEL);
+    expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(2);
+  });
 });
 
 describe("ReviewWorkPanel evidence correction rerun (T03)", () => {
@@ -1461,6 +1651,61 @@ describe("ReviewWorkPanel evidence correction rerun (T03)", () => {
     expect(
       screen.queryByRole("button", { name: "提交人工核验" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("renders the sanitized terminal outcome when the authoritative convergence read definitively fails", async () => {
+    let routeRequests = 0;
+    let workRequestsForTerminal = 0;
+    let workspaceRequestsForTerminal = 0;
+    const router = fetchRouter({
+      ...baseRoutes(),
+      [`GET ${WORK_PATH}`]: () => {
+        workRequestsForTerminal += 1;
+        return workRequestsForTerminal === 1
+          ? jsonResponse(claimedWorkPayload())
+          : jsonResponse({ detail: { error: "S03_NOT_FOUND" } }, 404);
+      },
+      [`GET ${WORKSPACE_PATH}`]: () => {
+        workspaceRequestsForTerminal += 1;
+        return workspaceRequestsForTerminal === 1
+          ? jsonResponse(t03WorkspacePayload())
+          : jsonResponse({ detail: { error: "S03_NOT_FOUND" } }, 404);
+      },
+      [`GET ${ROUTE_PATH}`]: () => {
+        routeRequests += 1;
+        return routeRequests === 1
+          ? jsonResponse(routePayload())
+          : jsonResponse({ detail: { error: "S03_NOT_FOUND" } }, 404);
+      },
+      [`GET ${HISTORY_PATH}`]: () => jsonResponse(t03HistoryPayload()),
+      [`POST ${CORRECT_PATH}`]: () => jsonResponse(correctionResultPayload()),
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    await userEvent.click(
+      screen.getAllByRole("button", { name: "更正该字段" })[0],
+    );
+    await userEvent.type(
+      screen.getByTestId("review-correction-raw"),
+      "LSVAA4182N500005Z",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "提交修正" }));
+    // The definitive 404 on the authoritative convergence read renders the
+    // sanitized terminal outcome (never an elapsed-timeout claim, and never
+    // raw error detail).
+    await waitFor(() =>
+      expect(screen.getByTestId("review-correction-terminal")).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByTestId("review-correction-timeout"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByTestId("review-correction-terminal").textContent ?? "",
+    ).not.toContain("S03_NOT_FOUND");
+    expect(screen.getByTestId("review-correction-terminal").textContent ?? "").not.toContain(
+      "LSVAA4182N500005Z",
+    );
+    expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(1);
   });
 
   it("scrubs the reveal and the correction form on a definitive rejection", async () => {

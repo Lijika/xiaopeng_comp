@@ -17,12 +17,35 @@ const S02_SOURCE = "registered-t03-react-source";
 const SCENARIO = "app_s04_bad_vin.json";
 const REACT_URL = "/controlled/s01/react";
 
-/** The OCR misread raw VIN (restricted) and the true source text that only an
- * explicit authorized reveal may display (restricted).  Both are runtime
- * fixture values; neither may survive into history, URL, storage, status,
- * error, or any durable artifact. */
-const MISREAD_SENTINEL = "LSVAA4182N500005Z";
-const SOURCE_SENTINEL = "LSVAA4182N5000054";
+/** The restricted values come from the runtime scenario fixture, never from
+ * literals in this file: the OCR misread raw VIN and the true source text
+ * that only an explicit authorized reveal may display.  They must never
+ * survive into history, URL, storage, status, error, reporter output, or any
+ * durable artifact, so every comparison below goes through byte-equality
+ * digests or booleans that print only sanitized data on failure. */
+function loadScenarioRestrictedValues() {
+  const fixture = JSON.parse(
+    fs.readFileSync(
+      path.join(ROOT, "fixtures", "applications", SCENARIO),
+      "utf8",
+    ),
+  );
+  return {
+    sourceValue: fixture.documents[3].fields.vin.source_text,
+    misreadValue: fixture.documents[3].fields.vin.raw,
+  };
+}
+
+/** Byte equality through a non-reversible digest: a failure prints only the
+ * two digests, never the restricted value. */
+function expectByteEqual(actual, expected) {
+  const digest = (value) =>
+    require("node:crypto")
+      .createHash("sha256")
+      .update(String(value), "utf8")
+      .digest("hex");
+  expect(digest(actual)).toBe(digest(expected));
+}
 
 /** Minimal S02 registered-source runtime so the legacy Reviewer shell serves
  * 200 on the same test app (the C-DEMO flow itself never touches S02). */
@@ -293,9 +316,9 @@ async function assertNoOverflow(page) {
   );
 }
 
-/** The reveal region must be the ONLY element carrying the source sentinel. */
-async function assertOnlyOneSentinelElement(page, sentinel) {
-  const matches = await page.evaluate((value) => {
+/** The reveal region must be the ONLY element carrying the source value. */
+async function assertOnlyOneSentinelElement(page, value) {
+  const matches = await page.evaluate((needle) => {
     const results = [];
     const walker = document.createTreeWalker(
       document.body,
@@ -303,36 +326,39 @@ async function assertOnlyOneSentinelElement(page, sentinel) {
     );
     let node = walker.nextNode();
     while (node !== null) {
-      if (node.textContent && node.textContent.includes(value)) {
+      if (node.textContent && node.textContent.includes(needle)) {
         const parent = node.parentElement;
         if (parent) results.push(parent.dataset.testid ?? null);
       }
       node = walker.nextNode();
     }
     return results;
-  }, sentinel);
-  expect(matches, `elements containing ${sentinel}`).toHaveLength(1);
+  }, value);
+  expect(matches).toHaveLength(1);
   expect(matches[0]).toBe("review-reveal-source");
 }
 
-async function assertSentinelAbsentEverywhere(page, sentinel) {
+/** Existence checks stay boolean so a failure can never print the restricted
+ * value through the reporter's expected/actual rendering. */
+async function assertSentinelAbsentEverywhere(page, value) {
   const bodyText = await page.locator("body").innerText();
-  expect(bodyText).not.toContain(sentinel);
+  expect(bodyText.includes(value)).toBe(false);
   const dom = await page.evaluate(() => document.body.innerHTML);
-  expect(dom).not.toContain(sentinel);
+  expect(dom.includes(value)).toBe(false);
   const url = await page.evaluate(() => `${location.href}${location.search}`);
-  expect(url).not.toContain(sentinel);
+  expect(url.includes(value)).toBe(false);
   const storage = await page.evaluate(() => ({
     local: { ...localStorage },
     session: { ...sessionStorage },
   }));
-  expect(JSON.stringify(storage)).not.toContain(sentinel);
+  expect(JSON.stringify(storage).includes(value)).toBe(false);
 }
 
 async function runRevealCorrectionTracer(browser, viewport, label) {
   const resources = {};
   let failure;
   try {
+    const { sourceValue, misreadValue } = loadScenarioRestrictedValues();
     resources.server = await startServer();
     const server = resources.server;
     resources.reviewerContext = await browser.newContext({
@@ -397,8 +423,8 @@ async function runRevealCorrectionTracer(browser, viewport, label) {
 
     // 1. Masked before any action: the sentinels must not exist in visible
     // text, DOM, URL, or web storage.
-    await assertSentinelAbsentEverywhere(reviewer, SOURCE_SENTINEL);
-    await assertSentinelAbsentEverywhere(reviewer, MISREAD_SENTINEL);
+    await assertSentinelAbsentEverywhere(reviewer, sourceValue);
+    await assertSentinelAbsentEverywhere(reviewer, misreadValue);
     await expect(reviewer.getByTestId("review-evidence-masked")).toHaveCount(4);
     for (const masked of await reviewer
       .getByTestId("review-evidence-masked")
@@ -421,29 +447,33 @@ async function runRevealCorrectionTracer(browser, viewport, label) {
     await expect(reviewer.getByTestId("review-command-status")).toContainText(
       "揭示已接受",
     );
-    await expect(reviewer.getByTestId("review-reveal-source")).toHaveText(
-      SOURCE_SENTINEL,
+    expectByteEqual(
+      await reviewer.getByTestId("review-reveal-source").textContent(),
+      sourceValue,
     );
-    await assertOnlyOneSentinelElement(reviewer, SOURCE_SENTINEL);
+    await assertOnlyOneSentinelElement(reviewer, sourceValue);
     // The other three observations stay masked.
     const revealPosts = posts.filter((entry) =>
       entry.url.endsWith("/reveal-field-observation"),
     );
-    expect(revealPosts).toHaveLength(1);
+    expect(revealPosts.length).toBe(1);
     expect(revealPosts[0].body.idempotency_key).toBe(uuid(3));
 
     // Authoritative reload scrubs the reveal and returns to masked.
     await reviewer.getByRole("button", { name: "重新加载" }).click();
     await expect(reviewer.getByTestId("review-evidence-masked")).toHaveCount(4);
-    await assertSentinelAbsentEverywhere(reviewer, SOURCE_SENTINEL);
+    await assertSentinelAbsentEverywhere(reviewer, sourceValue);
 
     // 3. Reveal once more and submit one valid correction with the fixed
     // idempotency key; the restricted reveal disappears as submission starts.
     await reviewer.getByTestId("review-reveal-button").nth(3).click();
-    await expect(reviewer.getByTestId("review-reveal-source")).toHaveText(
-      SOURCE_SENTINEL,
+    expectByteEqual(
+      await reviewer.getByTestId("review-reveal-source").textContent(),
+      sourceValue,
     );
-    expect(posts.filter((entry) => entry.url.endsWith("/reveal-field-observation"))).toHaveLength(2);
+    expect(
+      posts.filter((entry) => entry.url.endsWith("/reveal-field-observation")).length,
+    ).toBe(2);
     expect(
       posts.filter((entry) => entry.url.endsWith("/reveal-field-observation"))[1]
         .body.idempotency_key,
@@ -452,27 +482,30 @@ async function runRevealCorrectionTracer(browser, viewport, label) {
     await expect(reviewer.getByTestId("review-correction-form")).toBeVisible();
     await reviewer
       .getByTestId("review-correction-raw")
-      .fill(SOURCE_SENTINEL);
+      .fill(sourceValue);
     await expect(reviewer.getByTestId("review-correction-reason")).toHaveValue(
       "SOURCE_VALUE_MISREAD",
     );
     await reviewer.getByTestId("review-correction-submit").click();
-    await assertSentinelAbsentEverywhere(reviewer, SOURCE_SENTINEL);
+    await assertSentinelAbsentEverywhere(reviewer, sourceValue);
 
     const correctionPosts = posts.filter((entry) =>
       entry.url.endsWith("/correct-field-observation"),
     );
-    expect(correctionPosts).toHaveLength(1);
+    expect(correctionPosts.length).toBe(1);
     const correctionBody = correctionPosts[0].body;
     expect(correctionBody.idempotency_key).toBe(uuid(4));
-    expect(correctionBody.correction).toEqual({
+    // The closed command shape is asserted without the restricted raw; the
+    // raw itself is proven byte-exact through a digest so a failure prints
+    // only sanitized data.
+    const { raw: correctionRaw, ...correctionShape } = correctionBody.correction;
+    expect(correctionShape).toEqual({
       schema_version: "field-observation-correction/1",
       finding_id: expect.any(String),
       observation_id: expect.any(String),
       document_id: "inv",
       document_role: "发票",
       field: "vin",
-      raw: SOURCE_SENTINEL,
       source_location: {
         source_sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
         source_page: 4,
@@ -480,6 +513,7 @@ async function runRevealCorrectionTracer(browser, viewport, label) {
       },
       reason_code: "SOURCE_VALUE_MISREAD",
     });
+    expectByteEqual(correctionRaw, sourceValue);
 
     // 4. Command acceptance and the pending/reconciling surface; the
     // invalidated old workspace may become unavailable without losing the
@@ -515,7 +549,7 @@ async function runRevealCorrectionTracer(browser, viewport, label) {
     const predecessor = history.runs[0];
     const successor = history.runs[1];
     expect(predecessor.currentness_reason).toContain("EVIDENCE_CORRECTION_ACCEPTED");
-    expect(history.corrections).toHaveLength(1);
+    expect(history.corrections.length).toBe(1);
     const correction = history.corrections[0];
     expect(correction.superseded_observation_id).not.toBe(
       correction.successor_observation_id,
@@ -564,25 +598,28 @@ async function runRevealCorrectionTracer(browser, viewport, label) {
       route.route,
     );
     await expect(reviewer.getByTestId("review-correction-timeout")).toHaveCount(0);
+    await expect(reviewer.getByTestId("review-correction-terminal")).toHaveCount(0);
 
     // 6. No restricted sentinel survives in any surface after convergence.
-    await assertSentinelAbsentEverywhere(reviewer, SOURCE_SENTINEL);
-    await assertSentinelAbsentEverywhere(reviewer, MISREAD_SENTINEL);
+    await assertSentinelAbsentEverywhere(reviewer, sourceValue);
+    await assertSentinelAbsentEverywhere(reviewer, misreadValue);
     await expect(reviewer.getByTestId("review-reveal-source")).toHaveCount(0);
-    // The server-owned history read never echoes raw evidence values.
-    expect(JSON.stringify(history)).not.toContain(SOURCE_SENTINEL);
-    expect(JSON.stringify(history)).not.toContain(MISREAD_SENTINEL);
-    expect(JSON.stringify(route)).not.toContain(SOURCE_SENTINEL);
-    expect(JSON.stringify(route)).not.toContain(MISREAD_SENTINEL);
-    expect(JSON.stringify(correctionPosts[0].body)).toContain(SOURCE_SENTINEL);
-    expect(JSON.stringify(correctionBody)).toContain(SOURCE_SENTINEL);
+    // The server-owned history read never echoes raw evidence values; the
+    // command bodies carry them (byte-exact by construction), proven with
+    // booleans so a failure prints no raw value.
+    expect(JSON.stringify(history).includes(sourceValue)).toBe(false);
+    expect(JSON.stringify(history).includes(misreadValue)).toBe(false);
+    expect(JSON.stringify(route).includes(sourceValue)).toBe(false);
+    expect(JSON.stringify(route).includes(misreadValue)).toBe(false);
+    expect(JSON.stringify(correctionPosts[0].body).includes(sourceValue)).toBe(true);
+    expect(JSON.stringify(correctionBody).includes(sourceValue)).toBe(true);
     // The UI status text is sanitized: it names the command and revision but
     // never echoes corrected or revealed values.
     const statusText = await reviewer
       .getByTestId("review-command-status")
       .innerText();
-    expect(statusText).not.toContain(SOURCE_SENTINEL);
-    expect(statusText).not.toContain(MISREAD_SENTINEL);
+    expect(statusText.includes(sourceValue)).toBe(false);
+    expect(statusText.includes(misreadValue)).toBe(false);
 
     // Layout stays usable on both viewports.
     expect(await assertNoOverflow(reviewer)).toBe(true);
@@ -737,6 +774,7 @@ async function runLostResponseReplayTracer(browser) {
   const resources = {};
   let failure;
   try {
+    const { sourceValue, misreadValue } = loadScenarioRestrictedValues();
     resources.server = await startServer();
     const server = resources.server;
     resources.reviewerContext = await browser.newContext({
@@ -754,21 +792,28 @@ async function runLostResponseReplayTracer(browser) {
         posts.push({ url: url.pathname, body: request.postDataJSON() });
       }
     });
-    const { applicationId, diagnostics } = await openClaimedReviewPanel(
+    const { workId, applicationId, diagnostics } = await openClaimedReviewPanel(
       reviewer,
       server,
     );
     // The raw evidence crosses the boundary byte-for-byte: the whitespace is
     // part of the entered value.
-    const paddedRaw = `  ${SOURCE_SENTINEL}  `;
+    const paddedRaw = `  ${sourceValue}  `;
     let correctionAttempts = 0;
-    await reviewer.route("**/correct-field-observation", (route) => {
+    let replayResult = null;
+    await reviewer.route("**/correct-field-observation", async (route) => {
       correctionAttempts += 1;
       if (correctionAttempts === 1) {
-        // The response is lost on the wire: transport outcome unknown.
-        return route.abort();
+        // The correction executes through FastAPI and commits; only the
+        // browser response is lost on the wire, so the transport outcome is
+        // unknown while the server has already accepted it.
+        await route.fetch();
+        await route.abort();
+        return;
       }
-      return route.continue();
+      const response = await route.fetch();
+      replayResult = await response.json();
+      await route.continue();
     });
     await reviewer.getByTestId("review-correct-button").nth(3).click();
     await expect(reviewer.getByTestId("review-correction-form")).toBeVisible();
@@ -778,6 +823,14 @@ async function runLostResponseReplayTracer(browser) {
       "结果未知：网络未确认，重试将使用同一幂等键",
     );
     await expect(reviewer.getByTestId("retry-button")).toBeVisible();
+    // The server already committed the first correction: authoritative
+    // history must prove exactly one correction exists before the retry.
+    const committedHistoryResponse = await reviewer.request.get(
+      `${server.baseURL}/controlled/s01/api/queries/applications/${encodeURIComponent(applicationId)}/history`,
+    );
+    expect(committedHistoryResponse.ok()).toBeTruthy();
+    const committedHistory = await committedHistoryResponse.json();
+    expect(committedHistory.corrections.length).toBe(1);
     await reviewer.getByTestId("retry-button").click();
     await expect(
       reviewer
@@ -788,16 +841,26 @@ async function runLostResponseReplayTracer(browser) {
     const correctionPosts = posts.filter((entry) =>
       entry.url.endsWith("/correct-field-observation"),
     );
-    expect(correctionPosts).toHaveLength(2);
+    expect(correctionPosts.length).toBe(2);
     // The replay is the exact original command: same idempotency key and a
-    // byte-identical body, never a reconstruction from current UI state.
+    // byte-identical body (proven through digests so a failure prints no
+    // raw value), never a reconstruction from current UI state.
     expect(correctionPosts[0].body.idempotency_key).toBe(
       correctionPosts[1].body.idempotency_key,
     );
-    expect(JSON.stringify(correctionPosts[0].body)).toBe(
+    expectByteEqual(
+      JSON.stringify(correctionPosts[0].body),
       JSON.stringify(correctionPosts[1].body),
     );
-    expect(correctionPosts[1].body.correction.raw).toBe(paddedRaw);
+    expectByteEqual(correctionPosts[1].body.correction.raw, paddedRaw);
+    // The second FastAPI response is an authoritative replay of the first
+    // accepted command: exactly one correction and one successor effect.
+    expect(replayResult).not.toBeNull();
+    expect(replayResult.status).toBe("accepted");
+    expect(replayResult.replayed).toBe(true);
+    expect(replayResult.correction_id).toBe(
+      committedHistory.corrections[0].correction_id,
+    );
     await awaitConvergence(reviewer, server, applicationId);
     const historyResponse = await reviewer.request.get(
       `${server.baseURL}/controlled/s01/api/queries/applications/${encodeURIComponent(applicationId)}/history`,
@@ -805,9 +868,10 @@ async function runLostResponseReplayTracer(browser) {
     const history = await historyResponse.json();
     expect(history.runs).toHaveLength(2);
     expect(history.runs.map((run) => run.current)).toEqual([false, true]);
-    expect(history.corrections).toHaveLength(1);
-    await assertSentinelAbsentEverywhere(reviewer, SOURCE_SENTINEL);
-    await assertSentinelAbsentEverywhere(reviewer, MISREAD_SENTINEL);
+    expect(history.corrections.length).toBe(1);
+    expect(history.corrections[0].correction_id).toBe(replayResult.correction_id);
+    await assertSentinelAbsentEverywhere(reviewer, sourceValue);
+    await assertSentinelAbsentEverywhere(reviewer, misreadValue);
     await assertCleanDiagnostics(
       diagnostics,
       "/correct-field-observation",
@@ -839,6 +903,7 @@ async function runStaleCorrectionReloadTracer(browser) {
   const resources = {};
   let failure;
   try {
+    const { sourceValue, misreadValue } = loadScenarioRestrictedValues();
     resources.server = await startServer();
     const server = resources.server;
     resources.reviewerContext = await browser.newContext({
@@ -856,69 +921,97 @@ async function runStaleCorrectionReloadTracer(browser) {
         posts.push({ url: url.pathname, body: request.postDataJSON() });
       }
     });
-    const { applicationId, diagnostics } = await openClaimedReviewPanel(
+    const { workId, applicationId, diagnostics } = await openClaimedReviewPanel(
       reviewer,
       server,
     );
-    let correctionAttempts = 0;
-    await reviewer.route("**/correct-field-observation", (route) => {
-      correctionAttempts += 1;
-      if (correctionAttempts === 1) {
-        return route.fulfill({
-          status: 409,
-          contentType: "application/json",
-          body: JSON.stringify({
-            detail: {
-              error: "S03_STALE",
-              reason_code: "STALE_WORK_ITEM_CLAIM",
-            },
-          }),
-        });
-      }
-      return route.continue();
-    });
+    // A second authenticated server interaction (the same registered
+    // subject through its own session) releases the page's live claim,
+    // advancing the authoritative fence/context the page still holds; no
+    // browser-side 409 is fabricated.
+    const workViewResponse = await reviewer.request.get(
+      `${server.baseURL}/controlled/s01/api/queries/review-work-items/${encodeURIComponent(workId)}`,
+    );
+    expect(workViewResponse.ok()).toBeTruthy();
+    const workView = await workViewResponse.json();
+    const releaseResponse = await reviewer.request.post(
+      `${server.baseURL}/controlled/s01/api/commands/review-work-items/${encodeURIComponent(workId)}/release`,
+      {
+        data: {
+          expected_fence: workView.claim_fence,
+          expected_context: workView.command_context,
+          idempotency_key: "t03-r2-stale-release",
+        },
+      },
+    );
+    expect(releaseResponse.ok()).toBeTruthy();
+    const releaseBody = await releaseResponse.json();
+    expect(releaseBody.status).toBe("released");
+    // The page submits its stale correction unmocked: FastAPI itself returns
+    // the registered sanitized stale rejection.
     await reviewer.getByTestId("review-correct-button").nth(3).click();
     await expect(reviewer.getByTestId("review-correction-form")).toBeVisible();
-    await reviewer.getByTestId("review-correction-raw").fill(SOURCE_SENTINEL);
+    await reviewer.getByTestId("review-correction-raw").fill(sourceValue);
     await reviewer.getByTestId("review-correction-submit").click();
     await expect(reviewer.getByTestId("review-command-status")).toContainText(
       "更正未接受（STALE_WORK_ITEM_CLAIM）：请重新加载权威上下文后再试",
     );
+    const stalePosts = posts.filter((entry) =>
+      entry.url.endsWith("/correct-field-observation"),
+    );
+    expect(stalePosts.length).toBe(1);
+    // The stale command created no correction: authoritative history has
+    // none before the recovery correction.
+    const emptyHistoryResponse = await reviewer.request.get(
+      `${server.baseURL}/controlled/s01/api/queries/applications/${encodeURIComponent(applicationId)}/history`,
+    );
+    const emptyHistory = await emptyHistoryResponse.json();
+    expect(emptyHistory.corrections).toHaveLength(0);
     // The definitive rejection scrubbed the reveal, the form, and the
     // restricted mutations; no restricted value may survive anywhere.
     await expect(reviewer.getByTestId("review-correction-form")).toHaveCount(0);
-    await assertSentinelAbsentEverywhere(reviewer, SOURCE_SENTINEL);
+    await assertSentinelAbsentEverywhere(reviewer, sourceValue);
     for (const button of await reviewer
       .getByTestId("review-reveal-button")
       .all()) {
       await expect(button).toBeDisabled();
     }
-    // An authoritative reload recovers the fenced actions; the stale
-    // correction never committed, so no invalidation shell may appear.
+    // An authoritative reload exposes the actual new claim context (the
+    // released claim) and recovers the fenced actions.
     await reviewer.getByRole("button", { name: "重新加载" }).click();
     await expect(reviewer.getByTestId("review-command-status")).toContainText(
       "等待操作",
     );
-    await expect(reviewer.getByTestId("review-reveal-button").first()).toBeEnabled();
+    await expect(reviewer.getByRole("button", { name: "认领" })).toBeEnabled();
+    await reviewer.getByRole("button", { name: "认领" }).click();
+    await expect(reviewer.getByTestId("review-command-status")).toContainText(
+      "认领已接受",
+    );
     await reviewer.getByTestId("review-correct-button").nth(3).click();
     await expect(reviewer.getByTestId("review-correction-form")).toBeVisible();
-    await reviewer.getByTestId("review-correction-raw").fill(SOURCE_SENTINEL);
+    await reviewer.getByTestId("review-correction-raw").fill(sourceValue);
     await reviewer.getByTestId("review-correction-submit").click();
     await expect(
       reviewer
         .getByTestId("review-correction-pending")
         .or(reviewer.getByTestId("review-correction-converged")),
     ).toBeVisible();
-    await routeContinueOnly(reviewer);
     await awaitConvergence(reviewer, server, applicationId);
     const correctionPosts = posts.filter((entry) =>
       entry.url.endsWith("/correct-field-observation"),
     );
-    expect(correctionPosts).toHaveLength(2);
+    expect(correctionPosts.length).toBe(2);
     // The successful command carries the exact entered raw byte-for-byte.
-    expect(correctionPosts[1].body.correction.raw).toBe(SOURCE_SENTINEL);
-    await assertSentinelAbsentEverywhere(reviewer, SOURCE_SENTINEL);
-    await assertSentinelAbsentEverywhere(reviewer, MISREAD_SENTINEL);
+    expectByteEqual(correctionPosts[1].body.correction.raw, sourceValue);
+    // Exactly one correction exists after recovery: the stale command never
+    // committed and the replay never duplicated it.
+    const historyResponse = await reviewer.request.get(
+      `${server.baseURL}/controlled/s01/api/queries/applications/${encodeURIComponent(applicationId)}/history`,
+    );
+    const history = await historyResponse.json();
+    expect(history.corrections.length).toBe(1);
+    await assertSentinelAbsentEverywhere(reviewer, sourceValue);
+    await assertSentinelAbsentEverywhere(reviewer, misreadValue);
     await assertCleanDiagnostics(
       diagnostics,
       "/correct-field-observation",
@@ -946,6 +1039,7 @@ async function runKeyboardTracer(browser, viewport) {
   const resources = {};
   let failure;
   try {
+    const { sourceValue, misreadValue } = loadScenarioRestrictedValues();
     resources.server = await startServer();
     const server = resources.server;
     resources.reviewerContext = await browser.newContext({
@@ -979,8 +1073,9 @@ async function runKeyboardTracer(browser, viewport) {
     );
     await tabUntil(reviewer, (page) => isInvoiceRevealFocused(page));
     await reviewer.keyboard.press("Enter");
-    await expect(reviewer.getByTestId("review-reveal-source")).toHaveText(
-      SOURCE_SENTINEL,
+    expectByteEqual(
+      await reviewer.getByTestId("review-reveal-source").textContent(),
+      sourceValue,
     );
     // The reveal button remounts when its pending state clears, so focus
     // returns to the document root; keyboard navigation continues with Tab
@@ -996,7 +1091,7 @@ async function runKeyboardTracer(browser, viewport) {
         () => document.activeElement?.dataset?.testid ?? null,
       ),
     ).toBe("review-correction-raw");
-    await reviewer.keyboard.type(SOURCE_SENTINEL);
+    await reviewer.keyboard.type(sourceValue);
     await reviewer.keyboard.press("Tab");
     expect(
       await reviewer.evaluate(
@@ -1019,10 +1114,10 @@ async function runKeyboardTracer(browser, viewport) {
     const correctionPosts = posts.filter((entry) =>
       entry.url.endsWith("/correct-field-observation"),
     );
-    expect(correctionPosts).toHaveLength(1);
-    expect(correctionPosts[0].body.correction.raw).toBe(SOURCE_SENTINEL);
-    await assertSentinelAbsentEverywhere(reviewer, SOURCE_SENTINEL);
-    await assertSentinelAbsentEverywhere(reviewer, MISREAD_SENTINEL);
+    expect(correctionPosts.length).toBe(1);
+    expectByteEqual(correctionPosts[0].body.correction.raw, sourceValue);
+    await assertSentinelAbsentEverywhere(reviewer, sourceValue);
+    await assertSentinelAbsentEverywhere(reviewer, misreadValue);
     expect(await assertNoOverflow(reviewer)).toBe(true);
     expect(diagnostics.browserErrors).toEqual([]);
     expect(diagnostics.consoleErrors).toEqual([]);

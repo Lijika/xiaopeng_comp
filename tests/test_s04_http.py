@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 import time
 
@@ -134,7 +135,12 @@ def test_s01_reveal_and_correction_openapi_contracts_are_closed(
 
 def test_correction_rerun_history_and_current_route_over_http(tmp_path: Path) -> None:
     state_path = tmp_path / "target.sqlite3"
-    with s01_test_loopback({"TASK4_S01_STATE_PATH": str(state_path)}) as server:
+    with s01_test_loopback(
+        {
+            "TASK4_S01_STATE_PATH": str(state_path),
+            "TASK4_S01_TEST_STATE_PATH": str(state_path),
+        }
+    ) as server:
         admission = submit(server, "s04-http-intake").json()
         application_id = admission["application_id"]
         item = wait_for_projected_queue_item(server, application_id)
@@ -272,6 +278,27 @@ def test_correction_rerun_history_and_current_route_over_http(tmp_path: Path) ->
     assert unsupported.status == 422
     assert unsupported.json()["detail"]["error"] == "S03_INVALID_COMMAND"
     assert after_rejection == before_rejection
+    # The authoritative stored successor preserves the correction raw and
+    # its lexeme byte-for-byte (leading/trailing whitespace included): only
+    # the adapter/client boundary may alter the value, never the authority.
+    connection = sqlite3.connect(state_path)
+    stored = connection.execute(
+        "SELECT payload FROM evidence_events"
+    ).fetchall()
+    connection.close()
+    successors = []
+    for (payload,) in stored:
+        event = json.loads(payload)
+        if event.get("kind") != "field_correction":
+            continue
+        successor_id = event["payload"]["correction"]["observation_id"]
+        for document in event["payload"]["evidence"]:
+            for observation in document.get("observations", []):
+                if observation.get("observation_id") == successor_id:
+                    successors.append(observation)
+    assert len(successors) == 1
+    assert successors[0]["raw"] == "  S2ENG54A  "
+    assert successors[0]["raw_lexeme"] == "  S2ENG54A  "
     assert corrected.status == 200
     assert corrected.json()["status"] == "accepted"
     assert pending.status == 200

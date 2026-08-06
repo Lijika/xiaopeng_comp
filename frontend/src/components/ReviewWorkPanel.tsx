@@ -67,13 +67,15 @@ const CORRECTION_REASONS: readonly CorrectionReason[] = [
 ];
 
 /** One indivisible reveal/correction authorization: application, work,
- * observation, evidence/lifecycle revisions, claim fence, and claim expiry.
- * Restricted values may exist only while this exact token is live and
- * unexpired; its key is never persisted and is not a secret. */
+ * observation, the complete generated expected context, evidence/lifecycle
+ * revisions, claim fence, and claim expiry.  Restricted values may exist
+ * only while this exact token is live and unexpired; its key is never
+ * persisted and is not a secret. */
 type IssuedContextToken = {
   applicationId: string;
   workItemId: string;
   observationId: string;
+  expectedContext: Record<string, unknown>;
   evidenceRevision: number;
   lifecycleRevision: number;
   claimFence: number;
@@ -85,11 +87,21 @@ function contextTokenKey(token: IssuedContextToken): string {
     token.applicationId,
     token.workItemId,
     token.observationId,
+    JSON.stringify(token.expectedContext),
     token.evidenceRevision,
     token.lifecycleRevision,
     token.claimFence,
+    token.claimExpiresAt,
   ].join("|");
 }
+
+/** The exact issuance of a restricted command: the token it was authorized
+ * under and the observation it targets.  Response storage and replay both
+ * require the live ref to be this exact object. */
+type IssuedCommand = {
+  tokenKey: string;
+  observationId: string;
+};
 
 /** The restricted reveal payload, keyed to the exact issued token it was
  * authorized under.  It may render only while that token is still live; it
@@ -617,6 +629,17 @@ function CorrectionProgressBanner({
       </p>
     );
   }
+  if (convergence === "terminal") {
+    return (
+      <p
+        role="status"
+        aria-live="polite"
+        data-testid="review-correction-terminal"
+      >
+        更正收敛终止（证据修订 {accepted.evidenceRevision}）：权威读取失败，请重新加载查看最新状态
+      </p>
+    );
+  }
   return (
     <p
       role="status"
@@ -683,11 +706,9 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     useState<CorrectionReason>("SOURCE_VALUE_MISREAD");
   // The exact restricted command (and the token it was issued under) retained
   // only while its transport outcome is genuinely unknown, for exact replay.
-  const issuedRef = useRef<{
-    tokenKey: string;
-    observationId: string;
-    command: RevealCommand | CorrectionCommand;
-  } | null>(null);
+  const issuedRef = useRef<
+    (IssuedCommand & { command: RevealCommand | CorrectionCommand }) | null
+  >(null);
 
   useEffect(() => {
     headingRef.current?.focus();
@@ -733,6 +754,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
       applicationId: work.data.application_id,
       workItemId: workId,
       observationId,
+      expectedContext: work.data.command_context,
       evidenceRevision: work.data.evidence_revision,
       lifecycleRevision: work.data.lifecycle_revision,
       claimFence: work.data.claim_fence,
@@ -745,20 +767,24 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
   };
 
   // Render-time guard: restricted values may render only while the exact
-  // token that authorized them is still live (same context, unexpired claim).
+  // token that authorized them is still live (same application/work/
+  // observation/context/revision/fence/expiry).  A mismatch ends any unknown
+  // replay (the pending restricted command is dropped with its raw) and
+  // clears every restricted holder.
   useEffect(() => {
-    setRevealed((current) =>
-      current === null ||
-      current.tokenKey === liveTokenKey(current.observationId)
-        ? current
-        : null,
-    );
-    setCorrectionTarget((current) =>
-      current === null ||
-      current.tokenKey === liveTokenKey(current.observationId)
-        ? current
-        : null,
-    );
+    const revealLive =
+      revealed === null ||
+      revealed.tokenKey === liveTokenKey(revealed.observationId);
+    const draftLive =
+      correctionTarget === null ||
+      correctionTarget.tokenKey === liveTokenKey(correctionTarget.observationId);
+    const issuedLive =
+      issuedRef.current === null ||
+      issuedRef.current.tokenKey ===
+        liveTokenKey(issuedRef.current.observationId);
+    if (!revealLive || !draftLive || !issuedLive) {
+      invalidateRestricted();
+    }
   }, [work.data, workId]);
 
   // One expiry clock: the restricted authorization dies at claim expiry
@@ -913,18 +939,18 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     });
   };
 
-  /** Store a reveal response only when the exact token that issued it is
-   * still live and unexpired; discard it before storage otherwise (context
-   * change, expiry, access loss, or a newer command). */
-  const storeRevealIfIssued = (result: RevealResult) => {
-    const issued = issuedRef.current;
+  /** Store a reveal response only when the exact issuance that issued it is
+   * still the live issuance and its token is still current and unexpired;
+   * discard it before storage otherwise (context change, expiry, access
+   * loss, or a newer command). */
+  const storeRevealIfIssued = (issuance: IssuedCommand, result: RevealResult) => {
     const expectedKey = liveTokenKey(result.observation_id);
     if (
-      issued === null ||
+      issuedRef.current !== issuance ||
       expectedKey === null ||
-      issued.tokenKey !== expectedKey
+      issuance.tokenKey !== expectedKey
     ) {
-      issuedRef.current = null;
+      if (issuedRef.current === issuance) issuedRef.current = null;
       reveal.reset();
       setPendingCommand(null);
       return;
@@ -932,7 +958,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     issuedRef.current = null;
     accepted("reveal")();
     setRevealed({
-      tokenKey: issued.tokenKey,
+      tokenKey: issuance.tokenKey,
       observationId: result.observation_id,
       sourceText: result.source_text,
     });
@@ -951,16 +977,20 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
       expected_context: work.data.command_context,
       idempotency_key: revealKey,
     };
-    issuedRef.current = {
+    // A new restricted command scrubs every previous restricted holder.
+    invalidateRestricted();
+    const issuance = {
       tokenKey: contextTokenKey(token),
       observationId: link.observation_id,
       command,
     };
+    issuedRef.current = issuance;
     setPendingCommand({ action: "reveal", command });
     setLastAccepted(null);
     setRejectedAction(null);
     reveal.mutate(command, {
-      onSuccess: (result: RevealResult) => storeRevealIfIssued(result),
+      onSuccess: (result: RevealResult) =>
+        storeRevealIfIssued(issuance, result),
       onError: rejected("reveal"),
     });
   };
@@ -980,6 +1010,8 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     }
     const token = liveToken(link.observation_id);
     if (token === null) return;
+    // A new restricted draft scrubs every previous restricted holder.
+    invalidateRestricted();
     setCorrectionTarget({
       tokenKey: contextTokenKey(token),
       findingId,
@@ -1001,21 +1033,23 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     setCorrectionRaw("");
   };
 
-  /** Store a correction acceptance only when the exact issued token is still
-   * live and unexpired; discard it before storage otherwise.  The response's
+  /** Store a correction acceptance only when the exact issuance that issued
+   * it is still the live issuance and its token is still current and
+   * unexpired; discard it before storage otherwise.  The response's
    * ``observation_id`` is the successor observation the rerun created, so
    * the authorization check is keyed to the superseded observation the
    * command was issued against. */
-  const storeCorrectionIfIssued = (result: CorrectionResult) => {
-    const issued = issuedRef.current;
-    const expectedKey =
-      issued === null ? null : liveTokenKey(issued.observationId);
+  const storeCorrectionIfIssued = (
+    issuance: IssuedCommand,
+    result: CorrectionResult,
+  ) => {
+    const expectedKey = liveTokenKey(issuance.observationId);
     if (
-      issued === null ||
+      issuedRef.current !== issuance ||
       expectedKey === null ||
-      issued.tokenKey !== expectedKey
+      issuance.tokenKey !== expectedKey
     ) {
-      issuedRef.current = null;
+      if (issuedRef.current === issuance) issuedRef.current = null;
       correct.reset();
       setPendingCommand(null);
       return;
@@ -1062,11 +1096,12 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
         reason_code: correctionReason,
       },
     };
-    issuedRef.current = {
+    const issuance = {
       tokenKey: correctionTarget.tokenKey,
       observationId: correctionTarget.observationId,
       command,
     };
+    issuedRef.current = issuance;
     // Submission boundary: close the restricted reveal and the draft form up
     // front so neither may linger in the DOM while the command is in flight.
     setRevealed(null);
@@ -1077,7 +1112,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     setRejectedAction(null);
     correct.mutate(command, {
       onSuccess: (result: CorrectionResult) =>
-        storeCorrectionIfIssued(result),
+        storeCorrectionIfIssued(issuance, result),
       onError: rejected("correct"),
     });
   };
@@ -1125,15 +1160,21 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
       });
     } else if (pendingCommand.action === "reveal") {
       // Unknown outcome: replay the exact issued command and key captured at
-      // issuance; a response may be stored only under that same token.
+      // issuance, but only while that exact issuance is still live; a
+      // context mismatch already ended the replay.
+      const issuance = issuedRef.current;
+      if (issuance === null) return;
       reveal.mutate(pendingCommand.command, {
-        onSuccess: (result: RevealResult) => storeRevealIfIssued(result),
+        onSuccess: (result: RevealResult) =>
+          storeRevealIfIssued(issuance, result),
         onError: rejected("reveal"),
       });
     } else if (pendingCommand.action === "correct") {
+      const issuance = issuedRef.current;
+      if (issuance === null) return;
       correct.mutate(pendingCommand.command, {
         onSuccess: (result: CorrectionResult) =>
-          storeCorrectionIfIssued(result),
+          storeCorrectionIfIssued(issuance, result),
         onError: rejected("correct"),
       });
     } else {
@@ -1191,7 +1232,9 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
         ? "更正已收敛"
         : convergence === "timed_out"
           ? "收敛超时：请重新加载查看权威状态"
-          : "等待服务端后续运行";
+          : convergence === "terminal"
+            ? "收敛终止：权威读取失败"
+            : "等待服务端后续运行";
   }
 
   const correctionAccepted = acceptedCorrection !== null;

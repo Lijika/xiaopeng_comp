@@ -526,6 +526,39 @@ describe("correction convergence predicate (T03)", () => {
     expect(correctionConverged(routePayload(), historyPayload(), 2)).toBe(true);
     expect(correctionConverged(routePayload(), historyPayload(), 3)).toBe(false);
   });
+
+  it("requires the route and history to name the same server-current run", () => {
+    const disagreeing = historyPayload({ current_run_id: "run_other" });
+    expect(correctionConverged(routePayload(), disagreeing, 2)).toBe(false);
+  });
+
+  it("requires the current run's evidence revision to reach the accepted revision", () => {
+    // The route already reports the successor revision while history still
+    // marks the old run current at the old revision: the skewed projection
+    // must stay waiting, never converge.
+    const runs = historyPayload().runs;
+    const skewed = historyPayload({
+      current_run_id: "run_old",
+      runs: [
+        { ...runs[0], run_id: "run_old", current: true, evidence_revision: 1 },
+        { ...runs[1], run_id: "run_succ", current: false },
+      ],
+    });
+    expect(
+      correctionConverged(
+        routePayload({ current_run_id: "run_old", evidence_revision: 2 }),
+        skewed,
+        2,
+      ),
+    ).toBe(false);
+    const exact = historyPayload({
+      runs: [
+        { ...runs[0], current: false },
+        { ...runs[1], current: true, evidence_revision: 2 },
+      ],
+    });
+    expect(correctionConverged(routePayload(), exact, 2)).toBe(true);
+  });
 });
 
 describe("correction convergence polling (T03)", () => {
@@ -613,9 +646,10 @@ describe("correction convergence polling (T03)", () => {
         }),
         { wrapper: wrap(client) },
       );
-      // Poll 1 ends on the definitive route error: no timer may be scheduled.
+      // Poll 1 ends on the definitive route error: the outcome is the
+      // sanitized terminal state, never a claimed elapsed timeout.
       await settleWithTimers(
-        () => historyRequests >= 2 && result.current.converge === "timed_out",
+        () => historyRequests >= 2 && result.current.converge === "terminal",
       );
       const routeAtRejection = routeRequests;
       await vi.advanceTimersByTimeAsync(20_000);
