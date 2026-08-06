@@ -256,6 +256,7 @@ async function waitForQueueItem(page) {
       return page.getByTestId("queue-item").count();
     })
     .toBeGreaterThan(0);
+  await expect(page.getByRole("button", { name: "Refresh queue" })).toBeEnabled();
 }
 
 async function expectNoLayoutFaults(page) {
