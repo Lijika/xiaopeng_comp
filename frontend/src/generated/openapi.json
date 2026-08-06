@@ -696,7 +696,7 @@
           },
           "version": {
             "title": "Version",
-            "type": "string"
+            "type": "integer"
           }
         },
         "required": [

@@ -1359,6 +1359,11 @@ def test_s01_manual_review_openapi_contract_is_closed() -> None:
         ):
             assert_closed(name)
 
+        assert (
+            schemas["S01HistoryAttachmentVersion"]["properties"]["version"]["type"]
+            == "integer"
+        )
+
         # The migrated command request bodies are emitted inline by
         # ``openapi_extra`` (self-contained, with ``$defs`` inlined); walk the
         # four command paths and prove their nested schemas are closed (no

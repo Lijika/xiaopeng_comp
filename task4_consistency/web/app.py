@@ -1036,7 +1036,7 @@ class S01HistoryBusinessException(BaseModel):
 
 class S01HistoryAttachmentVersion(BaseModel):
     attachment_id: str
-    version: str
+    version: int
     document_id: str
     document_role: str
     supersedes_attachment_id: str | None = None

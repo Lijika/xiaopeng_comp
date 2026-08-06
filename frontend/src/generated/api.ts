@@ -1424,7 +1424,7 @@ export interface components {
             /** Supersedes Attachment Id */
             supersedes_attachment_id?: string | null;
             /** Version */
-            version: string;
+            version: number;
         };
         /** S01HistoryBusinessException */
         S01HistoryBusinessException: {
