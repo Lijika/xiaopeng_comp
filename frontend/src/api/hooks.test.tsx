@@ -142,6 +142,15 @@ describe("generated request body binding (S2)", () => {
       "application_id" | "expected_fence" | "expected_context" | "idempotency_key" | "correction"
     >();
   });
+
+  it("closes the correction reason and schema version as generated literals", () => {
+    type Reason = CorrectionCommand["correction"]["reason_code"];
+    type Version = CorrectionCommand["correction"]["schema_version"];
+    expectTypeOf<Reason>().toEqualTypeOf<
+      "SOURCE_VALUE_MISREAD" | "SOURCE_VALUE_MISSING"
+    >();
+    expectTypeOf<Version>().toEqualTypeOf<"field-observation-correction/1">();
+  });
 });
 
 async function settleWithTimers(check: () => boolean): Promise<void> {
@@ -555,7 +564,7 @@ describe("correction convergence polling (T03)", () => {
         },
       });
       const client = createQueryClient();
-      renderHook(
+      const { result } = renderHook(
         () => ({
           route: useCurrentRoute(APP_ID),
           history: useApplicationHistory(APP_ID),
@@ -563,10 +572,14 @@ describe("correction convergence polling (T03)", () => {
         }),
         { wrapper: wrap(client) },
       );
+      // The effect reports waiting immediately (before the first refetch).
+      await settleWithTimers(() => result.current.converge === "waiting");
       // Poll 1 (history request 2): not converged, so the 1.5s timer runs.
       await settleWithTimers(() => historyRequests >= 2);
       // Poll 2 (history request 3) observes convergence and must stop polling.
-      await settleWithTimers(() => historyRequests >= 3);
+      await settleWithTimers(
+        () => historyRequests >= 3 && result.current.converge === "converged",
+      );
       const routeAtConvergence = routeRequests;
       await vi.advanceTimersByTimeAsync(20_000);
       expect(historyRequests).toBe(3);
@@ -592,7 +605,7 @@ describe("correction convergence polling (T03)", () => {
         },
       });
       const client = createQueryClient();
-      renderHook(
+      const { result } = renderHook(
         () => ({
           route: useCurrentRoute(APP_ID),
           history: useApplicationHistory(APP_ID),
@@ -601,7 +614,9 @@ describe("correction convergence polling (T03)", () => {
         { wrapper: wrap(client) },
       );
       // Poll 1 ends on the definitive route error: no timer may be scheduled.
-      await settleWithTimers(() => historyRequests >= 2);
+      await settleWithTimers(
+        () => historyRequests >= 2 && result.current.converge === "timed_out",
+      );
       const routeAtRejection = routeRequests;
       await vi.advanceTimersByTimeAsync(20_000);
       expect(historyRequests).toBe(2);
@@ -644,6 +659,49 @@ describe("correction convergence polling (T03)", () => {
       unmount();
       await vi.advanceTimersByTimeAsync(20_000);
       expect(historyRequests).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("surfaces an explicit timed_out when the bounded poll ends without convergence", async () => {
+    vi.useFakeTimers();
+    try {
+      let routeRequests = 0;
+      let historyRequests = 0;
+      const { jsonResponse } = fetchRouter({
+        [`GET ${ROUTE_PATH}`]: () => {
+          routeRequests += 1;
+          return jsonResponse(routePayload({ current_run_id: "run_old" }));
+        },
+        [`GET ${HISTORY_PATH}`]: () => {
+          historyRequests += 1;
+          return jsonResponse(
+            historyPayload({
+              runs: historyPayload().runs.map((run) => ({ ...run, current: false })),
+            }),
+          );
+        },
+      });
+      const client = createQueryClient();
+      const { result } = renderHook(
+        () => ({
+          route: useCurrentRoute(APP_ID),
+          history: useApplicationHistory(APP_ID),
+          converge: useCorrectionConvergence(APP_ID, 2),
+        }),
+        { wrapper: wrap(client) },
+      );
+      // The successor never becomes current: every 1.5s poll refetches and
+      // rechecks until the 240-attempt safety ceiling turns the outcome into
+      // an explicit timed_out (never a converged claim).
+      await vi.advanceTimersByTimeAsync(400_000);
+      await settleWithTimers(() => result.current.converge === "timed_out");
+      const routesAtCeiling = routeRequests;
+      const historiesAtCeiling = historyRequests;
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(routeRequests).toBe(routesAtCeiling);
+      expect(historyRequests).toBe(historiesAtCeiling);
     } finally {
       vi.useRealTimers();
     }
@@ -789,6 +847,56 @@ describe("reveal and correction mutations (T03)", () => {
     expect(result.current.correct.data?.evidence_revision).toBe(2);
     // Acceptance invalidates the server-owned S01 queries: the queue refetches.
     await waitFor(() => expect(queueRequests).toBeGreaterThan(1));
+  });
+
+  it("does not retain the correction raw in the MutationCache after unmount", async () => {
+    const { jsonResponse } = fetchRouter({
+      [`POST ${T03_CORRECT_PATH}`]: () =>
+        jsonResponse({
+          status: "accepted",
+          replayed: false,
+          application_id: APP_ID,
+          work_item_id: WORK_ID,
+          correction_id: "correction_t03hook",
+          observation_id: "observation_t03hook",
+          invalidated_run_id: "run_t03hook",
+          job_id: "job_t03hook",
+          phase: "Auto Complete",
+          route: "auto_complete",
+          lifecycle_revision: 7,
+          evidence_revision: 2,
+          invalidated_exception_ids: [],
+        }),
+    });
+    const client = createQueryClient();
+    const holder = renderHook(() => useCorrectFieldObservation(WORK_ID), {
+      wrapper: wrap(client),
+    });
+    // The exact raw-bearing command travels through the mutation cache only
+    // for the shortest allowed lifetime (gcTime 0): while mounted it must be
+    // visible, and after unmount it must be garbage collected.
+    holder.result.current.mutate(correctionCommand);
+    await waitFor(() => expect(holder.result.current.isSuccess).toBe(true));
+    const rawRetained = client
+      .getMutationCache()
+      .getAll()
+      .some((mutation) =>
+        JSON.stringify(mutation.state.variables ?? {}).includes(
+          "LSVAA4182N500005Z",
+        ),
+      );
+    expect(rawRetained).toBe(true);
+    holder.unmount();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const afterUnmount = client
+      .getMutationCache()
+      .getAll()
+      .some((mutation) =>
+        JSON.stringify(mutation.state.variables ?? {}).includes(
+          "LSVAA4182N500005Z",
+        ),
+      );
+    expect(afterUnmount).toBe(false);
   });
 
   it("discards a late reveal response after unmount without a retry", async () => {

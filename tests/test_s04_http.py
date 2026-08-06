@@ -89,6 +89,16 @@ def test_s01_reveal_and_correction_openapi_contracts_are_closed(
         "source_location",
         "reason_code",
     }
+    # The transport vocabulary is closed: the domain's registered schema
+    # version and the two registered correction reasons are Pydantic
+    # literals, so an unsupported value fails validation on the wire.
+    assert nested["properties"]["schema_version"]["const"] == (
+        "field-observation-correction/1"
+    )
+    assert nested["properties"]["reason_code"]["enum"] == [
+        "SOURCE_VALUE_MISREAD",
+        "SOURCE_VALUE_MISSING",
+    ]
     source_location = nested["properties"]["source_location"]
     assert source_location["additionalProperties"] is False
     assert set(source_location["properties"]) == {
@@ -165,7 +175,10 @@ def test_correction_rerun_history_and_current_route_over_http(tmp_path: Path) ->
                 "document_id": source["document_id"],
                 "document_role": source["document_role"],
                 "field": source["field"],
-                "raw": "S2ENG54A",
+                # The raw evidence crosses the boundary byte-for-byte: the
+                # leading/trailing whitespace is part of the entered value and
+                # must be accepted and persisted verbatim by the authority.
+                "raw": "  S2ENG54A  ",
                 "source_location": {
                     key: source[key]
                     for key in ("source_sha256", "source_page", "source_region")
@@ -202,6 +215,16 @@ def test_correction_rerun_history_and_current_route_over_http(tmp_path: Path) ->
             "POST",
             f"/controlled/s01/api/commands/review-work-items/{work_item_id}/correct-field-observation",
             body=malformed,
+            headers=headers("reviewer"),
+        )
+        # The transport vocabulary is closed: an unregistered reason code is
+        # rejected by the Pydantic literal before it reaches the domain.
+        unsupported_reason = json.loads(json.dumps(command))
+        unsupported_reason["correction"]["reason_code"] = "SOURCE_VALUE_EDITED"
+        unsupported = server.request(
+            "POST",
+            f"/controlled/s01/api/commands/review-work-items/{work_item_id}/correct-field-observation",
+            body=unsupported_reason,
             headers=headers("reviewer"),
         )
         after_rejection = server.request(
@@ -246,6 +269,8 @@ def test_correction_rerun_history_and_current_route_over_http(tmp_path: Path) ->
     assert invalid.status == 422
     assert invalid.json()["detail"]["error"] == "S03_INVALID_COMMAND"
     assert "RAW-CORRECTION-SENTINEL" not in invalid.text
+    assert unsupported.status == 422
+    assert unsupported.json()["detail"]["error"] == "S03_INVALID_COMMAND"
     assert after_rejection == before_rejection
     assert corrected.status == 200
     assert corrected.json()["status"] == "accepted"

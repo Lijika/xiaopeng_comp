@@ -3310,10 +3310,16 @@ export interface operations {
                         observation_id: string;
                         /** Raw */
                         raw: string;
-                        /** Reason Code */
-                        reason_code: string;
-                        /** Schema Version */
-                        schema_version: string;
+                        /**
+                         * Reason Code
+                         * @enum {string}
+                         */
+                        reason_code: "SOURCE_VALUE_MISREAD" | "SOURCE_VALUE_MISSING";
+                        /**
+                         * Schema Version
+                         * @constant
+                         */
+                        schema_version: "field-observation-correction/1";
                         /**
                          * S01FieldCorrectionSourceLocation
                          * @description The closed source location a field correction must prove.  The domain

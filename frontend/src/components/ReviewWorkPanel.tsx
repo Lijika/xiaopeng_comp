@@ -24,6 +24,7 @@ import {
   useWorkspace,
   type ClaimCommand,
   type CorrectionCommand,
+  type CorrectionConvergence,
   type CorrectionResult,
   type FencedCommand,
   type RevealCommand,
@@ -49,7 +50,9 @@ type Action =
 
 type Outcome = "confirmed" | "not_confirmed" | "inconclusive";
 
-type CorrectionReason = "SOURCE_VALUE_MISREAD" | "SOURCE_VALUE_MISSING";
+/** The closed reason vocabulary of the S01 domain authority, bound to the
+ * generated OpenAPI literal so an unsupported reason fails typecheck. */
+type CorrectionReason = CorrectionCommand["correction"]["reason_code"];
 
 const OUTCOMES: readonly Outcome[] = [
   "confirmed",
@@ -63,18 +66,44 @@ const CORRECTION_REASONS: readonly CorrectionReason[] = [
   "SOURCE_VALUE_MISSING",
 ];
 
-/** The restricted reveal payload, keyed to the exact composite context it
- * was issued against.  It may render only while that context is still live;
- * it is never stored in a query cache, URL, or storage. */
+/** One indivisible reveal/correction authorization: application, work,
+ * observation, evidence/lifecycle revisions, claim fence, and claim expiry.
+ * Restricted values may exist only while this exact token is live and
+ * unexpired; its key is never persisted and is not a secret. */
+type IssuedContextToken = {
+  applicationId: string;
+  workItemId: string;
+  observationId: string;
+  evidenceRevision: number;
+  lifecycleRevision: number;
+  claimFence: number;
+  claimExpiresAt: number;
+};
+
+function contextTokenKey(token: IssuedContextToken): string {
+  return [
+    token.applicationId,
+    token.workItemId,
+    token.observationId,
+    token.evidenceRevision,
+    token.lifecycleRevision,
+    token.claimFence,
+  ].join("|");
+}
+
+/** The restricted reveal payload, keyed to the exact issued token it was
+ * authorized under.  It may render only while that token is still live; it
+ * is never stored in a query cache, URL, or storage. */
 type RevealState = {
-  epoch: number;
-  contextKey: string;
+  tokenKey: string;
   observationId: string;
   sourceText: string;
 };
 
-/** The source-backed correction target pinned to one workspace observation. */
+/** The source-backed correction target pinned to one workspace observation
+ * and to the exact token that authorized the draft. */
 type CorrectionTarget = {
+  tokenKey: string;
   findingId: string;
   observationId: string;
   documentId: string;
@@ -85,15 +114,13 @@ type CorrectionTarget = {
   sourceRegion: string;
 };
 
-type PendingCommand = {
-  action: Action;
-  command:
-    | ClaimCommand
-    | FencedCommand
-    | SubmitCommand
-    | RevealCommand
-    | CorrectionCommand;
-};
+type PendingCommand =
+  | { action: "claim"; command: ClaimCommand }
+  | { action: "renew"; command: FencedCommand }
+  | { action: "release"; command: FencedCommand }
+  | { action: "submit"; command: SubmitCommand }
+  | { action: "reveal"; command: RevealCommand }
+  | { action: "correct"; command: CorrectionCommand };
 
 const ACTION_LABELS: Record<Action, string> = {
   claim: "认领",
@@ -190,8 +217,7 @@ function WorkspaceSection({
   work,
   workspace,
   claimed,
-  liveContextKey,
-  revealEpoch,
+  liveTokenKey,
   revealed,
   correctionTarget,
   correctionRaw,
@@ -210,8 +236,7 @@ function WorkspaceSection({
   work: ReviewWorkResponse;
   workspace: UseQueryResult<WorkspaceResponse>;
   claimed: boolean;
-  liveContextKey: string | null;
-  revealEpoch: number;
+  liveTokenKey: (observationId: string) => string | null;
   revealed: RevealState | null;
   correctionTarget: CorrectionTarget | null;
   correctionRaw: string;
@@ -324,10 +349,8 @@ function WorkspaceSection({
             {finding.evidence_links.map((link) => {
               const revealedHere =
                 revealed !== null &&
-                liveContextKey !== null &&
-                revealed.epoch === revealEpoch &&
-                revealed.contextKey === liveContextKey &&
-                revealed.observationId === link.observation_id;
+                revealed.observationId === link.observation_id &&
+                revealed.tokenKey === liveTokenKey(link.observation_id);
               const correctable =
                 typeof link.source_sha256 === "string" &&
                 typeof link.source_page === "number" &&
@@ -452,7 +475,7 @@ function WorkspaceSection({
                               size="sm"
                               data-testid="review-correction-submit"
                               disabled={
-                                correctPending || correctionRaw.trim() === ""
+                                correctPending || correctionRaw.length === 0
                               }
                               onClick={onSubmitCorrection}
                             >
@@ -558,6 +581,53 @@ function HistorySection({
   );
 }
 
+/** The visible outcome of an accepted evidence correction, resolved strictly
+ * from server-owned current-route/history facts. */
+function CorrectionProgressBanner({
+  accepted,
+  convergence,
+  currentRunId,
+  route,
+}: {
+  accepted: { evidenceRevision: number; applicationId: string };
+  convergence: CorrectionConvergence;
+  currentRunId: string | null;
+  route: string | null;
+}) {
+  if (convergence === "converged") {
+    return (
+      <p
+        role="status"
+        aria-live="polite"
+        data-testid="review-correction-converged"
+      >
+        更正已收敛（证据修订 {accepted.evidenceRevision}）：当前运行{" "}
+        {currentRunId ?? "None"} · {route ?? "None"}
+      </p>
+    );
+  }
+  if (convergence === "timed_out") {
+    return (
+      <p
+        role="status"
+        aria-live="polite"
+        data-testid="review-correction-timeout"
+      >
+        更正收敛超时（证据修订 {accepted.evidenceRevision}）：自动刷新已停止，请重新加载查看权威状态
+      </p>
+    );
+  }
+  return (
+    <p
+      role="status"
+      aria-live="polite"
+      data-testid="review-correction-pending"
+    >
+      更正已接受（证据修订 {accepted.evidenceRevision}）：等待服务端后续运行收敛…
+    </p>
+  );
+}
+
 export default function ReviewWorkPanel({ workId }: { workId: string }) {
   const headingRef = useRef<HTMLHeadingElement>(null);
   const queryClient = useQueryClient();
@@ -580,7 +650,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
   // The route query is hoisted so action gating can require a current
   // authoritative route read; GateSection observes the same shared query.
   const gate = useCurrentRoute(applicationId);
-  useCorrectionConvergence(
+  const convergence = useCorrectionConvergence(
     applicationId,
     acceptedCorrection?.evidenceRevision ?? null,
   );
@@ -611,18 +681,102 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
   const [correctionRaw, setCorrectionRaw] = useState("");
   const [correctionReason, setCorrectionReason] =
     useState<CorrectionReason>("SOURCE_VALUE_MISREAD");
-  // Every scrub boundary bumps the reveal epoch; a late reveal response is
-  // discarded unless it was issued in the current epoch (and context).
-  const [revealEpoch, setRevealEpoch] = useState(0);
+  // The exact restricted command (and the token it was issued under) retained
+  // only while its transport outcome is genuinely unknown, for exact replay.
+  const issuedRef = useRef<{
+    tokenKey: string;
+    observationId: string;
+    command: RevealCommand | CorrectionCommand;
+  } | null>(null);
 
   useEffect(() => {
     headingRef.current?.focus();
   }, [workId]);
 
-  // Unmount boundary: drop the restricted reveal payload with the panel.
+  /** Scrub every restricted surface: the issued token, the pending command,
+   * the saved reveal, the correction draft, and the restricted mutations.
+   * Safe on any access, selection, context, expiry, or definitive-error
+   * boundary. */
+  const invalidateRestricted = () => {
+    issuedRef.current = null;
+    setPendingCommand(null);
+    setRevealed(null);
+    setCorrectionTarget(null);
+    setCorrectionRaw("");
+    reveal.reset();
+    correct.reset();
+  };
+
+  // Unmount boundary: drop every restricted payload with the panel and clear
+  // the restricted mutations from the MutationCache.  The mutation objects
+  // are captured through refs because their identity changes on state
+  // updates; the effect itself must stay mounted-once.
+  const revealRef = useRef(reveal);
+  const correctRef = useRef(correct);
+  revealRef.current = reveal;
+  correctRef.current = correct;
   useEffect(() => {
-    return () => setRevealed(null);
+    return () => {
+      issuedRef.current = null;
+      revealRef.current.reset();
+      correctRef.current.reset();
+    };
   }, []);
+
+  /** The live authorization token for one observation: exists only while the
+   * work item is claimed, the exact context is current, and the claim is
+   * unexpired. */
+  const liveToken = (observationId: string): IssuedContextToken | null => {
+    if (work.data === undefined || work.data.status !== "claimed") return null;
+    if (Date.now() / 1000 >= work.data.claim_expires_at) return null;
+    return {
+      applicationId: work.data.application_id,
+      workItemId: workId,
+      observationId,
+      evidenceRevision: work.data.evidence_revision,
+      lifecycleRevision: work.data.lifecycle_revision,
+      claimFence: work.data.claim_fence,
+      claimExpiresAt: work.data.claim_expires_at,
+    };
+  };
+  const liveTokenKey = (observationId: string): string | null => {
+    const token = liveToken(observationId);
+    return token === null ? null : contextTokenKey(token);
+  };
+
+  // Render-time guard: restricted values may render only while the exact
+  // token that authorized them is still live (same context, unexpired claim).
+  useEffect(() => {
+    setRevealed((current) =>
+      current === null ||
+      current.tokenKey === liveTokenKey(current.observationId)
+        ? current
+        : null,
+    );
+    setCorrectionTarget((current) =>
+      current === null ||
+      current.tokenKey === liveTokenKey(current.observationId)
+        ? current
+        : null,
+    );
+  }, [work.data, workId]);
+
+  // One expiry clock: the restricted authorization dies at claim expiry
+  // without navigation, and any response arriving after that is discarded
+  // before storage by the issued-token check.
+  useEffect(() => {
+    if (work.data === undefined || work.data.status !== "claimed") return;
+    const delayMs = work.data.claim_expires_at * 1000 - Date.now();
+    if (delayMs <= 0) {
+      invalidateRestricted();
+      return;
+    }
+    const timer = setTimeout(() => invalidateRestricted(), delayMs);
+    return () => clearTimeout(timer);
+    // The timer is bound to the authoritative work item data; the scrub
+    // closure is recreated each render and stays pure.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [work.data]);
 
   const anyPending =
     claim.isPending ||
@@ -674,7 +828,8 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
 
   /** A definitive rejection proves the semantic key was never accepted, so
    * the key rotates once at that proof and the rejected action stays latched
-   * until the owning work-item refetch succeeds (FIX-1). */
+   * until the owning work-item refetch succeeds (FIX-1).  It is also a
+   * definitive-error boundary: every restricted surface is scrubbed. */
   const rejected = (action: Action) => (error: Error) => {
     if (!isDefinitiveRejection(error)) return;
     keyRotations[action]();
@@ -682,6 +837,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     setRejectedAction(action);
     setRequiresReload(true);
     setConflictReason(error.reasonCode ?? "conflict");
+    invalidateRestricted();
   };
 
   const owningReadsCurrent =
@@ -757,40 +913,37 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     });
   };
 
-  /** The composite context a reveal was issued against.  A saved reveal may
-   * render only while this exact live context is still current. */
-  const liveRevealContextKey =
-    work.data !== undefined && work.data.status === "claimed"
-      ? [
-          work.data.application_id,
-          workId,
-          work.data.evidence_revision,
-          work.data.lifecycle_revision,
-          work.data.claim_fence,
-        ].join("|")
-      : null;
-
-  // Render-time guard: drop any saved reveal whose issued context no longer
-  // matches the live application/work/observation/evidence/fence context.
-  useEffect(() => {
-    setRevealed((current) =>
-      current === null || current.contextKey === liveRevealContextKey
-        ? current
-        : null,
-    );
-  }, [liveRevealContextKey, revealEpoch]);
-
-  /** Scrub boundary for the restricted reveal: clear rendered state, bump
-   * the epoch so in-flight/late responses can never render. */
-  const scrubReveal = () => {
-    setRevealed(null);
-    setRevealEpoch((epoch) => epoch + 1);
+  /** Store a reveal response only when the exact token that issued it is
+   * still live and unexpired; discard it before storage otherwise (context
+   * change, expiry, access loss, or a newer command). */
+  const storeRevealIfIssued = (result: RevealResult) => {
+    const issued = issuedRef.current;
+    const expectedKey = liveTokenKey(result.observation_id);
+    if (
+      issued === null ||
+      expectedKey === null ||
+      issued.tokenKey !== expectedKey
+    ) {
+      issuedRef.current = null;
+      reveal.reset();
+      setPendingCommand(null);
+      return;
+    }
+    issuedRef.current = null;
+    accepted("reveal")();
+    setRevealed({
+      tokenKey: issued.tokenKey,
+      observationId: result.observation_id,
+      sourceText: result.source_text,
+    });
+    reveal.reset();
   };
 
   const handleReveal = (link: S01EvidenceLink) => {
     if (work.data === undefined || anyPending || pendingCommand !== null) return;
     if (requiresReload || work.isError || !owningReadsCurrent) return;
-    if (liveRevealContextKey === null) return;
+    const token = liveToken(link.observation_id);
+    if (token === null) return;
     const command: RevealCommand = {
       application_id: work.data.application_id,
       observation_id: link.observation_id,
@@ -798,22 +951,16 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
       expected_context: work.data.command_context,
       idempotency_key: revealKey,
     };
+    issuedRef.current = {
+      tokenKey: contextTokenKey(token),
+      observationId: link.observation_id,
+      command,
+    };
     setPendingCommand({ action: "reveal", command });
     setLastAccepted(null);
     setRejectedAction(null);
     reveal.mutate(command, {
-      onSuccess: (result: RevealResult) => {
-        // Handle and immediately reset the restricted mutation so the source
-        // text is retained only in the exact panel state that may show it.
-        accepted("reveal")();
-        setRevealed({
-          epoch: revealEpoch,
-          contextKey: liveRevealContextKey,
-          observationId: result.observation_id,
-          sourceText: result.source_text,
-        });
-        reveal.reset();
-      },
+      onSuccess: (result: RevealResult) => storeRevealIfIssued(result),
       onError: rejected("reveal"),
     });
   };
@@ -831,7 +978,10 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     ) {
       return;
     }
+    const token = liveToken(link.observation_id);
+    if (token === null) return;
     setCorrectionTarget({
+      tokenKey: contextTokenKey(token),
       findingId,
       observationId: link.observation_id,
       documentId: link.document_id,
@@ -851,16 +1001,46 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     setCorrectionRaw("");
   };
 
+  /** Store a correction acceptance only when the exact issued token is still
+   * live and unexpired; discard it before storage otherwise.  The response's
+   * ``observation_id`` is the successor observation the rerun created, so
+   * the authorization check is keyed to the superseded observation the
+   * command was issued against. */
+  const storeCorrectionIfIssued = (result: CorrectionResult) => {
+    const issued = issuedRef.current;
+    const expectedKey =
+      issued === null ? null : liveTokenKey(issued.observationId);
+    if (
+      issued === null ||
+      expectedKey === null ||
+      issued.tokenKey !== expectedKey
+    ) {
+      issuedRef.current = null;
+      correct.reset();
+      setPendingCommand(null);
+      return;
+    }
+    issuedRef.current = null;
+    accepted("correct")();
+    setAcceptedCorrection({
+      evidenceRevision: result.evidence_revision,
+      applicationId: result.application_id,
+    });
+    correct.reset();
+  };
+
   const handleCorrectionSubmit = () => {
     if (work.data === undefined || anyPending || pendingCommand !== null) return;
     if (requiresReload || work.isError || !owningReadsCurrent) return;
-    if (correctionTarget === null || correctionRaw.trim() === "") return;
-    // Submission boundary: scrub the restricted reveal and close the typed
-    // correction form up front so neither may linger in the DOM while the
-    // command is in flight.
-    scrubReveal();
-    setCorrectionTarget(null);
-    setCorrectionRaw("");
+    if (correctionTarget === null || correctionRaw.length === 0) return;
+    const expectedKey = liveTokenKey(correctionTarget.observationId);
+    if (expectedKey === null || expectedKey !== correctionTarget.tokenKey) {
+      // The draft outlived its authorization: scrub without submitting.
+      invalidateRestricted();
+      return;
+    }
+    // The raw evidence crosses the boundary byte-for-byte as entered; only
+    // length zero counts as missing.
     const command: CorrectionCommand = {
       application_id: work.data.application_id,
       expected_fence: work.data.claim_fence,
@@ -873,7 +1053,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
         document_id: correctionTarget.documentId,
         document_role: correctionTarget.documentRole,
         field: correctionTarget.field,
-        raw: correctionRaw.trim(),
+        raw: correctionRaw,
         source_location: {
           source_sha256: correctionTarget.sourceSha256,
           source_page: correctionTarget.sourcePage,
@@ -882,23 +1062,23 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
         reason_code: correctionReason,
       },
     };
+    issuedRef.current = {
+      tokenKey: correctionTarget.tokenKey,
+      observationId: correctionTarget.observationId,
+      command,
+    };
+    // Submission boundary: close the restricted reveal and the draft form up
+    // front so neither may linger in the DOM while the command is in flight.
+    setRevealed(null);
+    setCorrectionTarget(null);
+    setCorrectionRaw("");
     setPendingCommand({ action: "correct", command });
     setLastAccepted(null);
     setRejectedAction(null);
     correct.mutate(command, {
-      onSuccess: (result: CorrectionResult) => {
-        // Acceptance is command acceptance only: currentness and the
-        // successor run remain server-owned reads.
-        accepted("correct")();
-        setAcceptedCorrection({
-          evidenceRevision: result.evidence_revision,
-          applicationId: result.application_id,
-        });
-        correct.reset();
-      },
-      onError: (error: Error) => {
-        rejected("correct")(error);
-      },
+      onSuccess: (result: CorrectionResult) =>
+        storeCorrectionIfIssued(result),
+      onError: rejected("correct"),
     });
   };
 
@@ -933,47 +1113,31 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
       void reconcileClaim();
       return;
     }
-    const command = pendingCommand.command;
     if (pendingCommand.action === "renew") {
-      renew.mutate(command as FencedCommand, {
+      renew.mutate(pendingCommand.command, {
         onSuccess: accepted("renew"),
         onError: rejected("renew"),
       });
     } else if (pendingCommand.action === "release") {
-      release.mutate(command as FencedCommand, {
+      release.mutate(pendingCommand.command, {
         onSuccess: accepted("release"),
         onError: rejected("release"),
       });
     } else if (pendingCommand.action === "reveal") {
-      // Unknown outcome: replay the exact same key and fingerprint; the
-      // restricted reveal stays masked until an authorized response arrives.
-      reveal.mutate(command as RevealCommand, {
-        onSuccess: (result: RevealResult) => {
-          accepted("reveal")();
-          setRevealed({
-            epoch: revealEpoch,
-            contextKey: liveRevealContextKey ?? "",
-            observationId: result.observation_id,
-            sourceText: result.source_text,
-          });
-          reveal.reset();
-        },
+      // Unknown outcome: replay the exact issued command and key captured at
+      // issuance; a response may be stored only under that same token.
+      reveal.mutate(pendingCommand.command, {
+        onSuccess: (result: RevealResult) => storeRevealIfIssued(result),
         onError: rejected("reveal"),
       });
     } else if (pendingCommand.action === "correct") {
-      correct.mutate(command as CorrectionCommand, {
-        onSuccess: (result: CorrectionResult) => {
-          accepted("correct")();
-          setAcceptedCorrection({
-            evidenceRevision: result.evidence_revision,
-            applicationId: result.application_id,
-          });
-          correct.reset();
-        },
+      correct.mutate(pendingCommand.command, {
+        onSuccess: (result: CorrectionResult) =>
+          storeCorrectionIfIssued(result),
         onError: rejected("correct"),
       });
     } else {
-      submit.mutate(command as SubmitCommand, {
+      submit.mutate(pendingCommand.command, {
         onSuccess: accepted("submit"),
         onError: rejected("submit"),
       });
@@ -985,11 +1149,11 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     // fresh semantic key, and an accepted outcome must never be cleared by a
     // reload.
     if (anyPending) return;
-    // Authoritative reload boundary: scrub the restricted reveal up front so
-    // it cannot outlive the interaction that authorized it even while the
-    // refetch is in flight.  The epoch bump also discards any in-flight late
-    // response; the next explicit reveal re-issues from the live context.
-    scrubReveal();
+    // Authoritative reload boundary: scrub every restricted surface up front
+    // (issued token, saved reveal, correction draft, restricted mutations) so
+    // nothing can outlive the interaction even while the refetch is in
+    // flight; the next explicit reveal re-issues from the live context.
+    invalidateRestricted();
     // Authoritative reload.  A failed refetch must never clear the conflict
     // fence nor rotate the semantic idempotency keys, so the refetch throws
     // and the fence is kept on failure.  The rejection latch clears only
@@ -1003,8 +1167,6 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
       return;
     }
     await queryClient.invalidateQueries({ queryKey: ["s01"] });
-    setCorrectionTarget(null);
-    setCorrectionRaw("");
     setRejectedAction(null);
     setRequiresReload(false);
     setConflictReason(null);
@@ -1024,7 +1186,12 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
   } else if (lastAccepted !== null) {
     statusText = `${ACTION_LABELS[lastAccepted]}已接受`;
   } else if (acceptedCorrection !== null) {
-    statusText = "等待服务端后续运行";
+    statusText =
+      convergence === "converged"
+        ? "更正已收敛"
+        : convergence === "timed_out"
+          ? "收敛超时：请重新加载查看权威状态"
+          : "等待服务端后续运行";
   }
 
   const correctionAccepted = acceptedCorrection !== null;
@@ -1066,13 +1233,12 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
           <h2 id="review-title" tabIndex={-1} ref={headingRef}>
             人工核验
           </h2>
-          <p
-            role="status"
-            aria-live="polite"
-            data-testid="review-correction-pending"
-          >
-            更正已接受（证据修订 {acceptedCorrection.evidenceRevision}）：等待服务端后续运行收敛…
-          </p>
+          <CorrectionProgressBanner
+            accepted={acceptedCorrection}
+            convergence={convergence}
+            currentRunId={gate.data?.current_run_id ?? null}
+            route={gate.data?.route ?? null}
+          />
           <GateSection applicationId={acceptedCorrection.applicationId} />
           <HistorySection history={history} />
         </section>
@@ -1106,6 +1272,10 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
 
   const data = work.data;
   const claimed = data.status === "claimed";
+  // The claim expiry is part of the issued authorization: an expired claim
+  // disables every restricted control until an authoritative renewal.
+  const claimExpired =
+    claimed && Date.now() / 1000 >= data.claim_expires_at;
   const commandBlocked =
     pendingCommand !== null || transportUnknown || requiresReload;
   const canClaim =
@@ -1136,21 +1306,19 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
         人工核验
       </h2>
       {correctionAccepted && (
-        <p
-          role="status"
-          aria-live="polite"
-          data-testid="review-correction-pending"
-        >
-          更正已接受（证据修订 {acceptedCorrection.evidenceRevision}）：等待服务端后续运行收敛…
-        </p>
+        <CorrectionProgressBanner
+          accepted={acceptedCorrection}
+          convergence={convergence}
+          currentRunId={gate.data?.current_run_id ?? null}
+          route={gate.data?.route ?? null}
+        />
       )}
       <WorkFacts work={data} />
       <WorkspaceSection
         work={data}
         workspace={workspace}
         claimed={claimed && !correctionAccepted}
-        liveContextKey={liveRevealContextKey}
-        revealEpoch={revealEpoch}
+        liveTokenKey={liveTokenKey}
         revealed={revealed}
         correctionTarget={correctionTarget}
         correctionRaw={correctionRaw}
@@ -1159,7 +1327,11 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
         revealPending={active === "reveal"}
         correctPending={active === "correct"}
         controlsDisabled={
-          !claimed || correctionAccepted || commandBlocked || !owningReadsCurrent
+          !claimed ||
+          claimExpired ||
+          correctionAccepted ||
+          commandBlocked ||
+          !owningReadsCurrent
         }
         onReveal={handleReveal}
         onStartCorrection={handleStartCorrection}

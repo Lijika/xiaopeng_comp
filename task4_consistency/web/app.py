@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass
 from email.message import Message
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 from urllib.parse import urlparse
 
 import yaml
@@ -1161,7 +1161,7 @@ class S01FieldObservationCorrection(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: str
+    schema_version: Literal["field-observation-correction/1"]
     finding_id: str
     observation_id: str
     document_id: str
@@ -1169,7 +1169,7 @@ class S01FieldObservationCorrection(BaseModel):
     field: str
     raw: str
     source_location: S01FieldCorrectionSourceLocation
-    reason_code: str
+    reason_code: Literal["SOURCE_VALUE_MISREAD", "SOURCE_VALUE_MISSING"]
 
 
 class S01ReviewRevealBody(S01ReviewFencedBody):

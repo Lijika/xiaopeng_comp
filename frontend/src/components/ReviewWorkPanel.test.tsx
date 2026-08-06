@@ -217,16 +217,24 @@ function jsonResponse(payload: unknown, status = 200): Response {
   });
 }
 
+/** A live claim far in the future: the issued token must be unexpired for
+ * the restricted reveal/correction flow. */
+const LIVE_CLAIM_EXPIRES_AT = 4_102_444_800;
+
 function claimedWorkPayload() {
   return workPayload({
     status: "claimed",
     claim_subject: "t02-reviewer",
     claim_fence: 1,
+    claim_expires_at: LIVE_CLAIM_EXPIRES_AT,
   });
 }
 
 function claimedWorkspacePayload() {
-  return workspacePayload({ claim_fence: 1 });
+  return workspacePayload({
+    claim_fence: 1,
+    claim_expires_at: LIVE_CLAIM_EXPIRES_AT,
+  });
 }
 
 function baseRoutes() {
@@ -941,6 +949,7 @@ function t03WorkspacePayload() {
   const link = base.selected_finding.evidence_links[0];
   return workspacePayload({
     claim_fence: 1,
+    claim_expires_at: LIVE_CLAIM_EXPIRES_AT,
     selected_finding: {
       ...base.selected_finding,
       evidence_links: [
@@ -1029,7 +1038,9 @@ function correctionResultPayload(overrides: Record<string, unknown> = {}) {
     application_id: APP_ID,
     work_item_id: WORK_ID,
     correction_id: "correction_t03panel",
-    observation_id: "observation_t02panel",
+    // The server echoes the successor observation the rerun created, never
+    // the superseded observation the command was issued against.
+    observation_id: "observation_t02panel_succ",
     invalidated_run_id: "run_t02panel",
     job_id: "job_t03panel",
     phase: "Auto Complete",
@@ -1196,6 +1207,120 @@ describe("ReviewWorkPanel controlled reveal (T03)", () => {
       router.calls.filter((call) => call.method === "POST"),
     ).toHaveLength(2);
   });
+
+  it("expiry scrubs the saved reveal and every restricted control without navigation", async () => {
+    const nearExpiry = Math.floor(Date.now() / 1000) + 3;
+    const router = fetchRouter({
+      ...baseRoutes(),
+      [`GET ${WORK_PATH}`]: () =>
+        jsonResponse(
+          workPayload({
+            status: "claimed",
+            claim_subject: "t02-reviewer",
+            claim_fence: 1,
+            claim_expires_at: nearExpiry,
+          }),
+        ),
+      [`GET ${WORKSPACE_PATH}`]: () => jsonResponse(t03WorkspacePayload()),
+      [`POST ${REVEAL_PATH}`]: () => jsonResponse(revealResultPayload()),
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
+    await screen.findByTestId("review-reveal-source");
+    // The one expiry clock fires without navigation and drops the restricted
+    // reveal, the correction draft, and the token.
+    await waitFor(
+      () =>
+        expect(screen.queryByTestId("review-reveal-source")).not.toBeInTheDocument(),
+      { timeout: 8_000 },
+    );
+    expect(screen.getByTestId("review-panel").textContent ?? "").not.toContain(
+      SOURCE_SENTINEL,
+    );
+    expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(1);
+  });
+
+  it("discards a late reveal response that resolves after the claim expires", async () => {
+    const nearExpiry = Math.floor(Date.now() / 1000) + 3;
+    let resolveReveal: ((response: Response) => void) | undefined;
+    const router = fetchRouter({
+      ...baseRoutes(),
+      [`GET ${WORK_PATH}`]: () =>
+        jsonResponse(
+          workPayload({
+            status: "claimed",
+            claim_subject: "t02-reviewer",
+            claim_fence: 1,
+            claim_expires_at: nearExpiry,
+          }),
+        ),
+      [`GET ${WORKSPACE_PATH}`]: () => jsonResponse(t03WorkspacePayload()),
+      [`POST ${REVEAL_PATH}`]: () =>
+        new Promise<Response>((resolve) => {
+          resolveReveal = resolve;
+        }),
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
+    // The reveal was issued under a live (unexpired) token.
+    await waitFor(() =>
+      expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(
+        1,
+      ),
+    );
+    // Let the expiry clock run out with the reveal still in flight; the
+    // authorization dies, the pending command is dropped, and the late
+    // success must be discarded before storage.
+    await new Promise((resolve) => setTimeout(resolve, 3_500));
+    await act(async () => {
+      resolveReveal?.(
+        new Response(JSON.stringify(revealResultPayload()), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    });
+    // The late success was discarded before storage: the restricted text
+    // never renders and the panel holds no pending reveal.
+    expect(screen.queryByTestId("review-reveal-source")).not.toBeInTheDocument();
+    expect(screen.getByTestId("review-panel").textContent ?? "").not.toContain(
+      SOURCE_SENTINEL,
+    );
+    expect(
+      screen.queryByTestId("review-reveal-pending"),
+    ).not.toBeInTheDocument();
+    expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(1);
+  });
+
+  it("an expired claim disables every restricted control and cannot issue a reveal", async () => {
+    const router = fetchRouter({
+      ...baseRoutes(),
+      [`GET ${WORK_PATH}`]: () =>
+        jsonResponse(
+          workPayload({
+            status: "claimed",
+            claim_subject: "t02-reviewer",
+            claim_fence: 1,
+            claim_expires_at: 0,
+          }),
+        ),
+      [`GET ${WORKSPACE_PATH}`]: () => jsonResponse(t03WorkspacePayload()),
+      [`POST ${REVEAL_PATH}`]: () => jsonResponse(revealResultPayload()),
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    for (const button of screen.getAllByRole("button", { name: "查看来源" })) {
+      expect(button).toBeDisabled();
+    }
+    for (const button of screen.getAllByRole("button", { name: "更正该字段" })) {
+      expect(button).toBeDisabled();
+    }
+    await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
+    expect(screen.queryByTestId("review-reveal-source")).not.toBeInTheDocument();
+    expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(0);
+  });
 });
 
 describe("ReviewWorkPanel evidence correction rerun (T03)", () => {
@@ -1238,15 +1363,15 @@ describe("ReviewWorkPanel evidence correction rerun (T03)", () => {
     );
     const submit = screen.getByRole("button", { name: "提交修正" });
     expect(submit).toBeDisabled();
-    await userEvent.type(
-      screen.getByTestId("review-correction-raw"),
-      "LSVAA4182N500005Z",
-    );
+    // The raw evidence crosses the boundary byte-for-byte: leading/trailing
+    // whitespace is part of the entered value, not trimmed by the client.
+    const paddedRaw = "  LSVAA4182N500005Z  ";
+    await userEvent.type(screen.getByTestId("review-correction-raw"), paddedRaw);
     expect(submit).toBeEnabled();
     await userEvent.click(submit);
     await waitFor(() =>
-      expect(screen.getByTestId("review-correction-pending")).toHaveTextContent(
-        "证据修订 2",
+      expect(screen.getByTestId("review-correction-converged")).toHaveTextContent(
+        "run_t03succ",
       ),
     );
     const correctCall = router.calls.filter(
@@ -1264,7 +1389,7 @@ describe("ReviewWorkPanel evidence correction rerun (T03)", () => {
         document_id: "reg",
         document_role: "机动车登记证书",
         field: "engine_no",
-        raw: "LSVAA4182N500005Z",
+        raw: paddedRaw,
         source_location: {
           source_sha256: "d".repeat(64),
           source_page: 1,
@@ -1300,8 +1425,17 @@ describe("ReviewWorkPanel evidence correction rerun (T03)", () => {
       SOURCE_SENTINEL,
     );
     // The invalidated old workspace/work reads existence-hide (404) but the
-    // review shell, the authoritative gate, and history stay usable.
-    expect(screen.getByTestId("review-correction-pending")).toBeInTheDocument();
+    // review shell, the authoritative gate, and history stay usable; the
+    // successor convergence is resolved from server-owned route/history.
+    expect(
+      screen.queryByTestId("review-correction-pending"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByTestId("review-correction-converged")).toHaveTextContent(
+      "证据修订 2",
+    );
+    expect(screen.getByTestId("review-correction-converged")).toHaveTextContent(
+      "run_t03succ",
+    );
     expect(screen.getByTestId("gate-phase")).toHaveTextContent("Auto Complete");
     expect(screen.getByTestId("review-history-corrections")).toHaveTextContent(
       "correction_t03panel",
@@ -1346,7 +1480,7 @@ describe("ReviewWorkPanel evidence correction rerun (T03)", () => {
           422,
         ),
     });
-    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    const { client } = renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
     await waitForReviewReady();
     await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
     await screen.findByTestId("review-reveal-source");
@@ -1373,6 +1507,13 @@ describe("ReviewWorkPanel evidence correction rerun (T03)", () => {
     expect(
       screen.queryByTestId("review-correction-pending"),
     ).not.toBeInTheDocument();
+    // The restricted raw must not survive in the MutationCache after the
+    // definitive rejection scrubbed the panel.
+    const cached = client
+      .getMutationCache()
+      .getAll()
+      .map((mutation) => JSON.stringify(mutation.state.variables ?? {}));
+    expect(cached.join("\n")).not.toContain("LSVAA4182N500005Z");
     expect(screen.getByTestId("review-reload-note")).toBeInTheDocument();
     for (const button of screen.getAllByRole("button", { name: "查看来源" })) {
       expect(button).toBeDisabled();

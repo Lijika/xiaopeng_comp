@@ -6,7 +6,7 @@ import {
   type UseQueryResult,
 } from "@tanstack/react-query";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 
 import type { paths, components } from "../generated/api";
 import {
@@ -221,13 +221,23 @@ export function useRevealFieldObservation(
 }
 
 /** The evidence correction command.  Acceptance invalidates the server-owned
- * S01 queries; the successor run converges through current-route/history. */
+ * S01 queries; the successor run converges through current-route/history.
+ * The mutation keeps ``gcTime: 0`` so a correction's restricted ``raw``
+ * cannot survive in the MutationCache after the panel resets it. */
 export function useCorrectFieldObservation(
   workId: string,
 ): UseMutationResult<CorrectionResult, Error, CorrectionCommand> {
-  return useReviewCommandMutation<CorrectionResult, CorrectionCommand>(
-    `/controlled/s01/api/commands/review-work-items/${encodeURIComponent(workId)}/correct-field-observation`,
-  );
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (command: CorrectionCommand) =>
+      request<CorrectionResult>(
+        `/controlled/s01/api/commands/review-work-items/${encodeURIComponent(workId)}/correct-field-observation`,
+        { method: "POST", body: JSON.stringify(command) },
+      ),
+    retry: false,
+    gcTime: 0,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["s01"] }),
+  });
 }
 
 /**
@@ -253,20 +263,37 @@ export function correctionConverged(
   );
 }
 
+/** The smallest explicit convergence outcome of an accepted evidence
+ * correction: nothing accepted, still reconciling against the authoritative
+ * reads, converged to the server-current successor/route, or the bounded
+ * poll ended without convergence (including a definitive terminal error).
+ * Currentness is never derived locally; every state follows server data. */
+export type CorrectionConvergence =
+  | "idle"
+  | "waiting"
+  | "converged"
+  | "timed_out";
+
 /**
  * Convergence polling for an accepted evidence correction: while the
  * accepted revision has no server-current successor run, refetch only the
  * authoritative current-route and history queries and stop on the exact
  * convergence predicate, on unmount/context change, or on a definitive
- * terminal error.  Completion is never inferred from elapsed attempts.
+ * terminal error.  Completion is never inferred from elapsed attempts; the
+ * bounded ceiling only turns the outcome into an explicit ``timed_out``.
  */
 export function useCorrectionConvergence(
   applicationId: string | null,
   acceptedEvidenceRevision: number | null,
-): void {
+): CorrectionConvergence {
   const queryClient = useQueryClient();
+  const [outcome, setOutcome] = useState<CorrectionConvergence>("idle");
   useEffect(() => {
-    if (applicationId === null || acceptedEvidenceRevision === null) return;
+    if (applicationId === null || acceptedEvidenceRevision === null) {
+      setOutcome("idle");
+      return;
+    }
+    setOutcome("waiting");
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let attempts = 0;
@@ -283,7 +310,10 @@ export function useCorrectionConvergence(
       const history = queryClient.getQueryData<ApplicationHistoryResponse>(
         HISTORY_KEY(applicationId),
       );
-      if (correctionConverged(route, history, acceptedEvidenceRevision)) return;
+      if (correctionConverged(route, history, acceptedEvidenceRevision)) {
+        setOutcome("converged");
+        return;
+      }
       const routeState = queryClient.getQueryState(ROUTE_KEY(applicationId));
       const historyState = queryClient.getQueryState(HISTORY_KEY(applicationId));
       if (
@@ -294,10 +324,14 @@ export function useCorrectionConvergence(
           historyState?.error !== null &&
           isDefinitiveRejection(historyState.error))
       ) {
+        setOutcome("timed_out");
         return;
       }
-      // Safety ceiling only: stopping here never claims convergence.
-      if (attempts >= 240) return;
+      // Safety ceiling only: the bounded end is surfaced, never converged.
+      if (attempts >= 240) {
+        setOutcome("timed_out");
+        return;
+      }
       timer = setTimeout(poll, 1_500);
     };
     void poll();
@@ -306,6 +340,7 @@ export function useCorrectionConvergence(
       if (timer !== undefined) clearTimeout(timer);
     };
   }, [applicationId, acceptedEvidenceRevision, queryClient]);
+  return outcome;
 }
 
 export function useVerifyRecovery(

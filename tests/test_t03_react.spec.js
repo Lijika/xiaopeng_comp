@@ -483,14 +483,13 @@ async function runRevealCorrectionTracer(browser, viewport, label) {
 
     // 4. Command acceptance and the pending/reconciling surface; the
     // invalidated old workspace may become unavailable without losing the
-    // shell, current-route, or history.
-    await expect(reviewer.getByTestId("review-command-status")).toContainText(
-      "更正已接受",
-    );
-    await expect(reviewer.getByTestId("review-correction-pending")).toBeVisible();
-    await expect(reviewer.getByTestId("review-correction-pending")).toContainText(
-      "证据修订",
-    );
+    // shell, current-route, or history.  The UI is waiting immediately after
+    // acceptance and converges to the server-owned successor shortly after.
+    await expect(
+      reviewer
+        .getByTestId("review-correction-pending")
+        .or(reviewer.getByTestId("review-correction-converged")),
+    ).toBeVisible();
     await expect(reviewer.getByTestId("gate-panel")).toBeVisible();
     await expect(reviewer.getByTestId("history-panel")).toBeVisible();
 
@@ -551,10 +550,20 @@ async function runRevealCorrectionTracer(browser, viewport, label) {
       route.currentness_reason,
     );
     await expect(reviewer.getByTestId("gate-phase")).toHaveText(route.phase);
-    await expect(reviewer.getByTestId("review-correction-pending")).toContainText(
+    expect(route.evidence_revision).toBe(correction.evidence_revision);
+    // The UI must leave the waiting state and explicitly converge to the
+    // server-owned successor run and current route.
+    await expect(reviewer.getByTestId("review-correction-converged")).toBeVisible();
+    await expect(reviewer.getByTestId("review-correction-converged")).toContainText(
       String(route.evidence_revision),
     );
-    expect(route.evidence_revision).toBe(correction.evidence_revision);
+    await expect(reviewer.getByTestId("review-correction-converged")).toContainText(
+      successor.run_id,
+    );
+    await expect(reviewer.getByTestId("review-correction-converged")).toContainText(
+      route.route,
+    );
+    await expect(reviewer.getByTestId("review-correction-timeout")).toHaveCount(0);
 
     // 6. No restricted sentinel survives in any surface after convergence.
     await assertSentinelAbsentEverywhere(reviewer, SOURCE_SENTINEL);
@@ -605,11 +614,477 @@ const VIEWPORTS = [
   { width: 390, height: 844, label: "mobile 390x844" },
 ];
 
-for (const viewport of VIEWPORTS) {
-  test(`T03 production tracer (${viewport.label}): controlled reveal and correction rerun`, async ({
+/** Opens the production shell, installs the manual work item, claims it, and
+ * registers the expected existence-hiding 404 diagnostics for the post-
+ * correction invalidation. */
+async function openClaimedReviewPanel(reviewer, server) {
+  const shellResponse = await reviewer.goto(`${server.baseURL}${REACT_URL}`, {
+    waitUntil: "networkidle",
+  });
+  expect(shellResponse.status()).toBe(200);
+  await expect(reviewer.getByTestId("queue-panel")).toBeVisible();
+  const item = await installManualWork(server.baseURL, reviewer);
+  const workId = item.work_item_id;
+  const applicationId = item.application_id;
+  await reviewer.reload({ waitUntil: "networkidle" });
+  await reviewer.getByRole("link", { name: new RegExp(workId) }).click();
+  await expect(reviewer.getByTestId("review-panel")).toBeVisible();
+  const diagnostics = trackPageDiagnostics(reviewer, [
+    {
+      name: "workspaceGone404",
+      url: `${server.baseURL}/controlled/s01/api/queries/applications/${encodeURIComponent(applicationId)}/workspace`,
+      statusText: "404",
+    },
+    {
+      name: "workGone404",
+      url: `${server.baseURL}/controlled/s01/api/queries/review-work-items/${encodeURIComponent(workId)}`,
+      statusText: "404",
+    },
+  ]);
+  await reviewer.getByRole("button", { name: "认领" }).click();
+  await expect(reviewer.getByTestId("review-command-status")).toContainText(
+    "认领已接受",
+  );
+  await expect(reviewer.getByTestId("review-status")).toHaveText("claimed");
+  return { workId, applicationId, diagnostics };
+}
+
+/** Waits for the server-owned successor convergence and asserts the UI has
+ * explicitly converged to it (never a pending or timed-out display). */
+async function awaitConvergence(reviewer, server, applicationId, expectCurrentRun) {
+  await expect
+    .poll(
+      async () =>
+        (await reviewer.getByTestId("review-history-runs").innerText()).split(
+          "\n",
+        ).length,
+      { timeout: 30_000 },
+    )
+    .toBeGreaterThanOrEqual(2);
+  await expect(reviewer.getByTestId("review-correction-converged")).toBeVisible();
+  const routeResponse = await reviewer.request.get(
+    `${server.baseURL}/controlled/s01/api/queries/applications/${encodeURIComponent(applicationId)}/current-route`,
+  );
+  expect(routeResponse.ok()).toBeTruthy();
+  const route = await routeResponse.json();
+  if (expectCurrentRun !== undefined) {
+    expect(route.current_run_id).toBe(expectCurrentRun);
+  }
+  await expect(reviewer.getByTestId("review-correction-converged")).toContainText(
+    route.current_run_id,
+  );
+  await expect(reviewer.getByTestId("review-correction-converged")).toContainText(
+    route.route,
+  );
+  return route;
+}
+
+/** Asserts clean diagnostics except for the deliberately fault-injected
+ * correction POST (abort/conflict produce browser console/network noise that
+ * is the point of the scenario, not an unexpected failure). */
+async function assertCleanDiagnostics(diagnostics, faultedUrlPart) {
+  const unexpectedConsole = diagnostics.consoleErrors.filter(
+    (message) => !message.includes(faultedUrlPart),
+  );
+  const unexpectedNetwork = diagnostics.networkErrors.filter(
+    (entry) => !entry.url.includes(faultedUrlPart),
+  );
+  expect(diagnostics.browserErrors).toEqual([]);
+  expect(unexpectedConsole).toEqual([]);
+  expect(unexpectedNetwork).toEqual([]);
+}
+
+/** Tabs until the active element satisfies the predicate; returns the active
+ * element's data-testid.  Keyboard-only navigation proof helper. */
+async function tabUntil(reviewer, predicate, maxTabs = 60) {
+  for (let index = 0; index < maxTabs; index += 1) {
+    await reviewer.keyboard.press("Tab");
+    const testid = await reviewer.evaluate(
+      () => document.activeElement?.dataset?.testid ?? null,
+    );
+    if (await predicate(reviewer)) return testid;
+  }
+  throw new Error("Tab navigation never reached the target control");
+}
+
+const isInvoiceRevealFocused = (reviewer) =>
+  reviewer.evaluate(() => {
+    const element = document.activeElement;
+    if (
+      !(element instanceof HTMLElement) ||
+      element.dataset.testid !== "review-reveal-button"
+    ) {
+      return false;
+    }
+    const listItem = element.closest("li");
+    return listItem !== null && listItem.textContent.includes("inv");
+  });
+
+const isInvoiceCorrectFocused = (reviewer) =>
+  reviewer.evaluate(() => {
+    const element = document.activeElement;
+    if (
+      !(element instanceof HTMLElement) ||
+      element.dataset.testid !== "review-correct-button"
+    ) {
+      return false;
+    }
+    const listItem = element.closest("li");
+    return listItem !== null && listItem.textContent.includes("inv");
+  });
+
+async function runLostResponseReplayTracer(browser) {
+  const resources = {};
+  let failure;
+  try {
+    resources.server = await startServer();
+    const server = resources.server;
+    resources.reviewerContext = await browser.newContext({
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: { Authorization: `Bearer ${DEMO_CREDENTIAL}` },
+    });
+    const reviewer = await resources.reviewerContext.newPage();
+    const posts = [];
+    reviewer.on("request", (request) => {
+      const url = new URL(request.url());
+      if (
+        request.method() === "POST" &&
+        url.pathname.includes("/commands/review-work-items/")
+      ) {
+        posts.push({ url: url.pathname, body: request.postDataJSON() });
+      }
+    });
+    const { applicationId, diagnostics } = await openClaimedReviewPanel(
+      reviewer,
+      server,
+    );
+    // The raw evidence crosses the boundary byte-for-byte: the whitespace is
+    // part of the entered value.
+    const paddedRaw = `  ${SOURCE_SENTINEL}  `;
+    let correctionAttempts = 0;
+    await reviewer.route("**/correct-field-observation", (route) => {
+      correctionAttempts += 1;
+      if (correctionAttempts === 1) {
+        // The response is lost on the wire: transport outcome unknown.
+        return route.abort();
+      }
+      return route.continue();
+    });
+    await reviewer.getByTestId("review-correct-button").nth(3).click();
+    await expect(reviewer.getByTestId("review-correction-form")).toBeVisible();
+    await reviewer.getByTestId("review-correction-raw").fill(paddedRaw);
+    await reviewer.getByTestId("review-correction-submit").click();
+    await expect(reviewer.getByTestId("review-command-status")).toContainText(
+      "结果未知：网络未确认，重试将使用同一幂等键",
+    );
+    await expect(reviewer.getByTestId("retry-button")).toBeVisible();
+    await reviewer.getByTestId("retry-button").click();
+    await expect(
+      reviewer
+        .getByTestId("review-correction-pending")
+        .or(reviewer.getByTestId("review-correction-converged")),
+    ).toBeVisible();
+    await routeContinueOnly(reviewer);
+    const correctionPosts = posts.filter((entry) =>
+      entry.url.endsWith("/correct-field-observation"),
+    );
+    expect(correctionPosts).toHaveLength(2);
+    // The replay is the exact original command: same idempotency key and a
+    // byte-identical body, never a reconstruction from current UI state.
+    expect(correctionPosts[0].body.idempotency_key).toBe(
+      correctionPosts[1].body.idempotency_key,
+    );
+    expect(JSON.stringify(correctionPosts[0].body)).toBe(
+      JSON.stringify(correctionPosts[1].body),
+    );
+    expect(correctionPosts[1].body.correction.raw).toBe(paddedRaw);
+    await awaitConvergence(reviewer, server, applicationId);
+    const historyResponse = await reviewer.request.get(
+      `${server.baseURL}/controlled/s01/api/queries/applications/${encodeURIComponent(applicationId)}/history`,
+    );
+    const history = await historyResponse.json();
+    expect(history.runs).toHaveLength(2);
+    expect(history.runs.map((run) => run.current)).toEqual([false, true]);
+    expect(history.corrections).toHaveLength(1);
+    await assertSentinelAbsentEverywhere(reviewer, SOURCE_SENTINEL);
+    await assertSentinelAbsentEverywhere(reviewer, MISREAD_SENTINEL);
+    await assertCleanDiagnostics(
+      diagnostics,
+      "/correct-field-observation",
+    );
+  } catch (error) {
+    failure = error;
+    throw error;
+  } finally {
+    try {
+      await settleCleanup([
+        resources.reviewerContext
+          ? () => resources.reviewerContext.close()
+          : () => Promise.resolve(),
+        resources.server
+          ? () => stopServer(resources.server)
+          : () => Promise.resolve(),
+      ]);
+    } catch (cleanupError) {
+      if (failure === undefined) throw cleanupError;
+    }
+  }
+}
+
+async function routeContinueOnly(reviewer) {
+  await reviewer.unroute("**/correct-field-observation");
+}
+
+async function runStaleCorrectionReloadTracer(browser) {
+  const resources = {};
+  let failure;
+  try {
+    resources.server = await startServer();
+    const server = resources.server;
+    resources.reviewerContext = await browser.newContext({
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: { Authorization: `Bearer ${DEMO_CREDENTIAL}` },
+    });
+    const reviewer = await resources.reviewerContext.newPage();
+    const posts = [];
+    reviewer.on("request", (request) => {
+      const url = new URL(request.url());
+      if (
+        request.method() === "POST" &&
+        url.pathname.includes("/commands/review-work-items/")
+      ) {
+        posts.push({ url: url.pathname, body: request.postDataJSON() });
+      }
+    });
+    const { applicationId, diagnostics } = await openClaimedReviewPanel(
+      reviewer,
+      server,
+    );
+    let correctionAttempts = 0;
+    await reviewer.route("**/correct-field-observation", (route) => {
+      correctionAttempts += 1;
+      if (correctionAttempts === 1) {
+        return route.fulfill({
+          status: 409,
+          contentType: "application/json",
+          body: JSON.stringify({
+            detail: {
+              error: "S03_STALE",
+              reason_code: "STALE_WORK_ITEM_CLAIM",
+            },
+          }),
+        });
+      }
+      return route.continue();
+    });
+    await reviewer.getByTestId("review-correct-button").nth(3).click();
+    await expect(reviewer.getByTestId("review-correction-form")).toBeVisible();
+    await reviewer.getByTestId("review-correction-raw").fill(SOURCE_SENTINEL);
+    await reviewer.getByTestId("review-correction-submit").click();
+    await expect(reviewer.getByTestId("review-command-status")).toContainText(
+      "更正未接受（STALE_WORK_ITEM_CLAIM）：请重新加载权威上下文后再试",
+    );
+    // The definitive rejection scrubbed the reveal, the form, and the
+    // restricted mutations; no restricted value may survive anywhere.
+    await expect(reviewer.getByTestId("review-correction-form")).toHaveCount(0);
+    await assertSentinelAbsentEverywhere(reviewer, SOURCE_SENTINEL);
+    for (const button of await reviewer
+      .getByTestId("review-reveal-button")
+      .all()) {
+      await expect(button).toBeDisabled();
+    }
+    // An authoritative reload recovers the fenced actions; the stale
+    // correction never committed, so no invalidation shell may appear.
+    await reviewer.getByRole("button", { name: "重新加载" }).click();
+    await expect(reviewer.getByTestId("review-command-status")).toContainText(
+      "等待操作",
+    );
+    await expect(reviewer.getByTestId("review-reveal-button").first()).toBeEnabled();
+    await reviewer.getByTestId("review-correct-button").nth(3).click();
+    await expect(reviewer.getByTestId("review-correction-form")).toBeVisible();
+    await reviewer.getByTestId("review-correction-raw").fill(SOURCE_SENTINEL);
+    await reviewer.getByTestId("review-correction-submit").click();
+    await expect(
+      reviewer
+        .getByTestId("review-correction-pending")
+        .or(reviewer.getByTestId("review-correction-converged")),
+    ).toBeVisible();
+    await routeContinueOnly(reviewer);
+    await awaitConvergence(reviewer, server, applicationId);
+    const correctionPosts = posts.filter((entry) =>
+      entry.url.endsWith("/correct-field-observation"),
+    );
+    expect(correctionPosts).toHaveLength(2);
+    // The successful command carries the exact entered raw byte-for-byte.
+    expect(correctionPosts[1].body.correction.raw).toBe(SOURCE_SENTINEL);
+    await assertSentinelAbsentEverywhere(reviewer, SOURCE_SENTINEL);
+    await assertSentinelAbsentEverywhere(reviewer, MISREAD_SENTINEL);
+    await assertCleanDiagnostics(
+      diagnostics,
+      "/correct-field-observation",
+    );
+  } catch (error) {
+    failure = error;
+    throw error;
+  } finally {
+    try {
+      await settleCleanup([
+        resources.reviewerContext
+          ? () => resources.reviewerContext.close()
+          : () => Promise.resolve(),
+        resources.server
+          ? () => stopServer(resources.server)
+          : () => Promise.resolve(),
+      ]);
+    } catch (cleanupError) {
+      if (failure === undefined) throw cleanupError;
+    }
+  }
+}
+
+async function runKeyboardTracer(browser, viewport) {
+  const resources = {};
+  let failure;
+  try {
+    resources.server = await startServer();
+    const server = resources.server;
+    resources.reviewerContext = await browser.newContext({
+      viewport,
+      extraHTTPHeaders: { Authorization: `Bearer ${DEMO_CREDENTIAL}` },
+    });
+    const reviewer = await resources.reviewerContext.newPage();
+    const posts = [];
+    reviewer.on("request", (request) => {
+      const url = new URL(request.url());
+      if (
+        request.method() === "POST" &&
+        url.pathname.includes("/commands/review-work-items/")
+      ) {
+        posts.push({ url: url.pathname, body: request.postDataJSON() });
+      }
+    });
+    const { applicationId, diagnostics } = await openClaimedReviewPanel(
+      reviewer,
+      server,
+    );
+    // Claim was issued by mouse in the shared helper; the reveal, correction,
+    // and rerun below are keyboard-only (Tab/Enter) with visible focus on
+    // every restricted control.
+    await tabUntil(
+      reviewer,
+      (page) =>
+        page.evaluate(
+          () => document.activeElement?.dataset?.testid === "review-reveal-button",
+        ),
+    );
+    await tabUntil(reviewer, (page) => isInvoiceRevealFocused(page));
+    await reviewer.keyboard.press("Enter");
+    await expect(reviewer.getByTestId("review-reveal-source")).toHaveText(
+      SOURCE_SENTINEL,
+    );
+    // The reveal button remounts when its pending state clears, so focus
+    // returns to the document root; keyboard navigation continues with Tab
+    // until the invoice correction button is reached again.
+    await tabUntil(reviewer, (page) => isInvoiceCorrectFocused(page));
+    await reviewer.keyboard.press("Enter");
+    await expect(reviewer.getByTestId("review-correction-form")).toBeVisible();
+    // Tab into the raw input, type the value, then Tab through the reason
+    // select to the submit button and activate it with Enter.
+    await reviewer.keyboard.press("Tab");
+    expect(
+      await reviewer.evaluate(
+        () => document.activeElement?.dataset?.testid ?? null,
+      ),
+    ).toBe("review-correction-raw");
+    await reviewer.keyboard.type(SOURCE_SENTINEL);
+    await reviewer.keyboard.press("Tab");
+    expect(
+      await reviewer.evaluate(
+        () => document.activeElement?.dataset?.testid ?? null,
+      ),
+    ).toBe("review-correction-reason");
+    await reviewer.keyboard.press("Tab");
+    expect(
+      await reviewer.evaluate(
+        () => document.activeElement?.dataset?.testid ?? null,
+      ),
+    ).toBe("review-correction-submit");
+    await reviewer.keyboard.press("Enter");
+    await expect(
+      reviewer
+        .getByTestId("review-correction-pending")
+        .or(reviewer.getByTestId("review-correction-converged")),
+    ).toBeVisible();
+    await awaitConvergence(reviewer, server, applicationId);
+    const correctionPosts = posts.filter((entry) =>
+      entry.url.endsWith("/correct-field-observation"),
+    );
+    expect(correctionPosts).toHaveLength(1);
+    expect(correctionPosts[0].body.correction.raw).toBe(SOURCE_SENTINEL);
+    await assertSentinelAbsentEverywhere(reviewer, SOURCE_SENTINEL);
+    await assertSentinelAbsentEverywhere(reviewer, MISREAD_SENTINEL);
+    expect(await assertNoOverflow(reviewer)).toBe(true);
+    expect(diagnostics.browserErrors).toEqual([]);
+    expect(diagnostics.consoleErrors).toEqual([]);
+    expect(diagnostics.networkErrors).toEqual([]);
+  } catch (error) {
+    failure = error;
+    throw error;
+  } finally {
+    try {
+      await settleCleanup([
+        resources.reviewerContext
+          ? () => resources.reviewerContext.close()
+          : () => Promise.resolve(),
+        resources.server
+          ? () => stopServer(resources.server)
+          : () => Promise.resolve(),
+      ]);
+    } catch (cleanupError) {
+      if (failure === undefined) throw cleanupError;
+    }
+  }
+}
+
+if (process.env.T03_DEBUG_EXPORTS === "1") {
+  module.exports.__startServerForDebug = startServer;
+  module.exports.__installManualWork = installManualWork;
+} else {
+  // The restricted T03 flow renders revealed source text and submits
+  // correction raw values; failure screenshots/traces would be a durable
+  // copy of restricted evidence, so this owning spec never captures them.
+  // The rest of the suite keeps its failure diagnostics.
+  test.use({ screenshot: "off", trace: "off" });
+
+  for (const viewport of VIEWPORTS) {
+    test(`T03 production tracer (${viewport.label}): controlled reveal and correction rerun`, async ({
+      browser,
+    }) => {
+      test.setTimeout(180_000);
+      await runRevealCorrectionTracer(browser, viewport, viewport.label);
+    });
+  }
+
+  test("T03 lost-response replay keeps the exact idempotency key and byte-identical body", async ({
     browser,
   }) => {
     test.setTimeout(180_000);
-    await runRevealCorrectionTracer(browser, viewport, viewport.label);
+    await runLostResponseReplayTracer(browser);
   });
+
+  test("T03 stale correction recovers through an authoritative reload", async ({
+    browser,
+  }) => {
+    test.setTimeout(180_000);
+    await runStaleCorrectionReloadTracer(browser);
+  });
+
+  for (const viewport of VIEWPORTS) {
+    test(`T03 keyboard-only reveal/correct/rerun (${viewport.label})`, async ({
+      browser,
+    }) => {
+      test.setTimeout(180_000);
+      await runKeyboardTracer(browser, viewport);
+    });
+  }
 }
