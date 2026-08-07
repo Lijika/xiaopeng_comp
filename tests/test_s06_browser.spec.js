@@ -559,6 +559,22 @@ const CONSOLE_NET_FAILURE = "console:net-failure";
 const CONSOLE_UNEXPECTED = "console:unexpected";
 const PAGE_ERROR = "page-error";
 const NETWORK_FAILURE = "network-failure";
+const DIAGNOSTIC_WORKSPACE_PATH =
+  "/controlled/s01/api/queries/applications/{application_id}/workspace";
+const DIAGNOSTIC_S02_REQUEST_PATH =
+  "/controlled/s02/api/queries/supplement-requests/{request_id}";
+const DIAGNOSTIC_RESOURCE_IDS = new Map([
+  ["applications", "{application_id}"],
+  ["review-work-items", "{work_item_id}"],
+  ["supplement-requests", "{request_id}"],
+]);
+
+function sanitizedDiagnosticPath(url) {
+  const segments = new URL(url).pathname.split("/");
+  return segments
+    .map((segment, index) => DIAGNOSTIC_RESOURCE_IDS.get(segments[index - 1]) ?? segment)
+    .join("/");
+}
 
 function trackT04Diagnostics(pages) {
   const records = {
@@ -572,7 +588,7 @@ function trackT04Diagnostics(pages) {
       if (response.status() >= 400) {
         records.responses.push({
           method: response.request().method(),
-          path: new URL(response.url()).pathname,
+          path: sanitizedDiagnosticPath(response.url()),
           status: response.status(),
         });
       }
@@ -592,7 +608,7 @@ function trackT04Diagnostics(pages) {
     page.on("requestfailed", (request) => {
       records.failedRequests.push({
         method: request.method(),
-        path: new URL(request.url()).pathname,
+        path: sanitizedDiagnosticPath(request.url()),
         category: NETWORK_FAILURE,
       });
     });
@@ -637,6 +653,31 @@ async function surfaceContains(page, testId, needle) {
 async function expectSurfaceAbsent(page, testId, needle, label) {
   expect(await surfaceContains(page, testId, needle), label).toBe(false);
 }
+
+test("T04 diagnostic path oracle removes dynamic resource identifiers", () => {
+  const cases = [
+    {
+      id: "app_t04_secret_identifier",
+      url: "https://example.test/controlled/s01/api/queries/applications/app_t04_secret_identifier/workspace",
+      label: "diagnostic path: no application id",
+    },
+    {
+      id: "work_t04_secret_identifier",
+      url: "https://example.test/controlled/s01/api/queries/review-work-items/work_t04_secret_identifier",
+      label: "diagnostic path: no work id",
+    },
+    {
+      id: "supplement_request_t04_secret_identifier",
+      url: "https://example.test/controlled/s02/api/queries/supplement-requests/supplement_request_t04_secret_identifier",
+      label: "diagnostic path: no request id",
+    },
+  ];
+  for (const item of cases) {
+    expect(sanitizedDiagnosticPath(item.url).includes(item.id), item.label).toBe(
+      false,
+    );
+  }
+});
 
 /** Starts one T04 server plus the separate Reviewer/Integrator contexts and
  * returns the running flow handles. */
@@ -842,11 +883,11 @@ async function reviewerConverges(flow) {
 /** The exact expected Reviewer 404 set: the invalidated work item's
  * workspace existence-hides once at acceptance and once at the reviewer's
  * authoritative reload. */
-function expectedReviewerWorkspace404s(flow) {
+function expectedReviewerWorkspace404s() {
   return [
     {
       method: "GET",
-      path: `/controlled/s01/api/queries/applications/${flow.applicationId}/workspace`,
+      path: DIAGNOSTIC_WORKSPACE_PATH,
       status: 404,
     },
   ];
@@ -944,7 +985,7 @@ for (const viewport of [
         viewport,
       );
       expectExactDiagnostics(diagnostics, {
-        api404s: expectedReviewerWorkspace404s(flow),
+        api404s: expectedReviewerWorkspace404s(),
       });
       expect(await reviewer.evaluate(() => sessionStorage.length)).toBe(0);
       expect(await reviewer.evaluate(() => localStorage.length)).toBe(0);
@@ -1001,78 +1042,225 @@ for (const viewport of [
  * ancestor.  Assertion messages carry stable test IDs/categories only —
  * never rendered text. */
 async function expectViewportIntegrity(page, testIds, viewport) {
-  const layout = await page.evaluate(() => ({
-    innerWidth: window.innerWidth,
-    innerHeight: window.innerHeight,
-    scrollWidth: document.documentElement.scrollWidth,
-    clientWidth: document.documentElement.clientWidth,
-    scrollHeight: document.documentElement.scrollHeight,
-    clientHeight: document.documentElement.clientHeight,
-  }));
-  expect(layout.innerWidth).toBe(viewport.width);
-  expect(layout.innerHeight).toBe(viewport.height);
-  // No horizontal overflow: the document never scrolls sideways.
-  expect(layout.scrollWidth).toBeLessThanOrEqual(layout.clientWidth);
-  const boxes = await page.evaluate(
-    (ids) =>
-      ids.map((id) => {
-        const element = document.querySelector(`[data-testid="${id}"]`);
-        if (element === null) return null;
-        const rect = element.getBoundingClientRect();
-        const ancestor = ids.find(
-          (candidate) =>
-            candidate !== id &&
-            element.closest(`[data-testid="${candidate}"]`) !== null,
-        );
-        return {
-          id,
-          x: rect.x,
-          // Document coordinates: the clipping ancestor is the document,
-          // so an element scrolled out above the viewport keeps a valid
-          // document-space position.
-          y: rect.y + window.scrollY,
-          w: rect.width,
-          h: rect.height,
-          ancestor,
-        };
-      }),
-    testIds,
-  );
-  const present = boxes.filter((box) => box !== null);
-  expect(present.length).toBeGreaterThan(0);
-  for (const box of present) {
-    // Not clipped horizontally: the rectangle spans only the viewport width.
-    expect(box.x, `${box.id}: no horizontal clipping (x)`).toBeGreaterThanOrEqual(
-      -1,
-    );
-    expect(
-      box.x + box.w,
-      `${box.id}: no horizontal clipping (right edge)`,
-    ).toBeLessThanOrEqual(layout.innerWidth + 1);
-    // Within the clipping ancestor (the document): the rectangle never
-    // extends past the scroll extent, and it is never collapsed.
-    expect(box.y, `${box.id}: within document (y)`).toBeGreaterThanOrEqual(-1);
-    expect(
-      box.y + box.h,
-      `${box.id}: within document (bottom edge)`,
-    ).toBeLessThanOrEqual(layout.scrollHeight + 1);
-    expect(box.w, `${box.id}: non-zero width`).toBeGreaterThan(0);
-    expect(box.h, `${box.id}: non-zero height`).toBeGreaterThan(0);
-  }
-  // Unrelated peers (no ancestor/descendant nesting) never intersect.
-  for (let i = 0; i < present.length; i += 1) {
-    for (let j = i + 1; j < present.length; j += 1) {
-      const a = present[i];
-      const b = present[j];
-      if (a.ancestor === b.id || b.ancestor === a.id) {
-        continue;
+  const facts = await page.evaluate((ids) => {
+    const root = document.documentElement;
+    const documentRect = {
+      x: 0,
+      y: 0,
+      w: root.clientWidth,
+      h: root.scrollHeight,
+    };
+    const visible = (element) => {
+      const style = getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return (
+        style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        rect.width > 0 &&
+        rect.height > 0
+      );
+    };
+    const documentBox = (rect) => ({
+      x: rect.x,
+      y: rect.y + window.scrollY,
+      w: rect.width,
+      h: rect.height,
+    });
+    const clips = (value) => ["auto", "scroll", "hidden", "clip"].includes(value);
+    const clippingAncestor = (element) => {
+      let current = element;
+      while (current !== null && current !== root) {
+        const style = getComputedStyle(current);
+        if (clips(style.overflowX) || clips(style.overflowY)) {
+          return documentBox(current.getBoundingClientRect());
+        }
+        current = current.parentElement;
       }
-      const intersects =
-        a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
-      expect(intersects, `${a.id} must not overlap ${b.id}`).toBe(false);
+      return documentRect;
+    };
+    const counts = ids.map((id) => ({
+      id,
+      count: document.querySelectorAll(`[data-testid="${id}"]`).length,
+    }));
+    const targets = [];
+    const entries = [];
+    const seenControls = new Set();
+    const seenText = new Set();
+    const controlSelector =
+      'button, input, textarea, select, a[href], [role="button"], [tabindex]:not([tabindex="-1"])';
+
+    for (const id of ids) {
+      const element = document.querySelector(`[data-testid="${id}"]`);
+      if (element === null || !visible(element)) continue;
+      const style = getComputedStyle(element);
+      targets.push({
+        id,
+        ...documentBox(element.getBoundingClientRect()),
+        scrollWidth: element.scrollWidth,
+        clientWidth: element.clientWidth,
+        scrollHeight: element.scrollHeight,
+        clientHeight: element.clientHeight,
+        overflowX: style.overflowX,
+        overflowY: style.overflowY,
+      });
+
+      const controls = [
+        ...(element.matches(controlSelector) ? [element] : []),
+        ...element.querySelectorAll(controlSelector),
+      ];
+      for (const control of controls) {
+        if (seenControls.has(control) || !visible(control)) continue;
+        seenControls.add(control);
+        entries.push({
+          node: control,
+          label: `${id}:control:${entries.length}:${control.getAttribute("data-testid") ?? control.tagName.toLowerCase()}`,
+          rects: [documentBox(control.getBoundingClientRect())],
+          clip: clippingAncestor(control.parentElement),
+        });
+      }
+
+      const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        const parent = node.parentElement;
+        if (
+          seenText.has(node) ||
+          parent === null ||
+          node.textContent.trim() === "" ||
+          !visible(parent)
+        ) {
+          continue;
+        }
+        seenText.add(node);
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        const rects = [...range.getClientRects()]
+          .filter((rect) => rect.width > 0 && rect.height > 0)
+          .map(documentBox);
+        if (rects.length > 0) {
+          entries.push({
+            node: parent,
+            label: `${id}:text:${entries.length}`,
+            rects,
+            clip: clippingAncestor(parent),
+          });
+        }
+      }
     }
+
+    const overlaps = [];
+    for (let left = 0; left < entries.length; left += 1) {
+      for (let right = left + 1; right < entries.length; right += 1) {
+        const a = entries[left];
+        const b = entries[right];
+        if (
+          a.node === b.node ||
+          a.node.contains(b.node) ||
+          b.node.contains(a.node)
+        ) {
+          continue;
+        }
+        const intersects = a.rects.some((first) =>
+          b.rects.some(
+            (second) =>
+              first.x < second.x + second.w - 0.5 &&
+              second.x < first.x + first.w - 0.5 &&
+              first.y < second.y + second.h - 0.5 &&
+              second.y < first.y + first.h - 0.5,
+          ),
+        );
+        if (intersects) overlaps.push(`${a.label}|${b.label}`);
+      }
+    }
+
+    return {
+      layout: {
+        innerWidth: window.innerWidth,
+        innerHeight: window.innerHeight,
+        scrollWidth: root.scrollWidth,
+        clientWidth: root.clientWidth,
+      },
+      counts,
+      targets,
+      leaves: entries.flatMap((entry) =>
+        entry.rects.map((rect, index) => ({
+          label: `${entry.label}:${index}`,
+          ...rect,
+          clip: entry.clip,
+        })),
+      ),
+      overlaps,
+    };
+  }, testIds);
+
+  expect(facts.layout.innerWidth).toBe(viewport.width);
+  expect(facts.layout.innerHeight).toBe(viewport.height);
+  expect(facts.layout.scrollWidth).toBeLessThanOrEqual(facts.layout.clientWidth);
+  for (const target of facts.counts) {
+    expect(target.count, `${target.id}: exactly one visible target`).toBe(1);
   }
+  expect(facts.targets.length, "viewport oracle: every target visible").toBe(
+    testIds.length,
+  );
+  for (const target of facts.targets) {
+    if (target.overflowX !== "visible") {
+      expect(target.scrollWidth, `${target.id}: horizontal content fit`).toBeLessThanOrEqual(
+        target.clientWidth + 1,
+      );
+    }
+    if (["hidden", "clip"].includes(target.overflowY)) {
+      expect(target.scrollHeight, `${target.id}: vertical content fit`).toBeLessThanOrEqual(
+        target.clientHeight + 1,
+      );
+    }
+    expect(target.x, `${target.id}: document left edge`).toBeGreaterThanOrEqual(-1);
+    expect(target.x + target.w, `${target.id}: document right edge`).toBeLessThanOrEqual(
+      facts.layout.innerWidth + 1,
+    );
+  }
+  for (const leaf of facts.leaves) {
+    expect(leaf.x, `${leaf.label}: clipping left`).toBeGreaterThanOrEqual(
+      leaf.clip.x - 1,
+    );
+    expect(leaf.y, `${leaf.label}: clipping top`).toBeGreaterThanOrEqual(
+      leaf.clip.y - 1,
+    );
+    expect(leaf.x + leaf.w, `${leaf.label}: clipping right`).toBeLessThanOrEqual(
+      leaf.clip.x + leaf.clip.w + 1,
+    );
+    expect(leaf.y + leaf.h, `${leaf.label}: clipping bottom`).toBeLessThanOrEqual(
+      leaf.clip.y + leaf.clip.h + 1,
+    );
+  }
+  expect(facts.overlaps, "viewport oracle: unrelated leaves do not overlap").toEqual(
+    [],
+  );
 }
+
+test("T04 viewport oracle rejects clipped text and overlapping leaf controls", async ({
+  page,
+}) => {
+  const viewport = { width: 390, height: 844 };
+  await page.setViewportSize(viewport);
+  await page.setContent(`
+    <style>
+      #clipped { width: 80px; height: 20px; overflow: hidden; white-space: nowrap; }
+      #overlap { position: relative; width: 200px; height: 80px; }
+      #overlap button { position: absolute; inset: 10px auto auto 10px; }
+    </style>
+    <p id="clipped" data-testid="oracle-clipped">deliberately clipped operator status</p>
+    <div id="overlap" data-testid="oracle-overlap">
+      <button data-testid="oracle-first">First</button>
+      <button data-testid="oracle-second">Second</button>
+    </div>
+  `);
+  await expect(
+    expectViewportIntegrity(page, ["oracle-clipped"], viewport),
+  ).rejects.toThrow();
+  await expect(
+    expectViewportIntegrity(page, ["oracle-overlap"], viewport),
+  ).rejects.toThrow();
+});
 
 test("T04 React: lost-response exact replay returns the original receipt and a same-key conflict has no second effect", async ({
   browser,
@@ -1240,7 +1428,7 @@ test("T04 React: lost-response exact replay returns the original receipt and a s
     ).toHaveText("fulfilled", { timeout: 10000 });
     await reviewerConverges(flow);
     expectExactDiagnostics(diagnostics, {
-      api404s: expectedReviewerWorkspace404s(flow),
+      api404s: expectedReviewerWorkspace404s(),
       abortedPosts: [
         {
           method: "POST",
@@ -1378,7 +1566,7 @@ test("T04 React: awaiting_predecessor, rejected and quarantined receipts create 
     ).toHaveText("fulfilled", { timeout: 10000 });
     await reviewerConverges(flow);
     expectExactDiagnostics(diagnostics, {
-      api404s: expectedReviewerWorkspace404s(flow),
+      api404s: expectedReviewerWorkspace404s(),
     });
   } finally {
     await stopT04Flow(flow);
@@ -1479,17 +1667,17 @@ test("T04 React: wrong role/request scope and lost sessions are existence-hiding
       api404s: [
         {
           method: "GET",
-          path: `/controlled/s01/api/queries/applications/${flow.applicationId}/workspace`,
+          path: DIAGNOSTIC_WORKSPACE_PATH,
           status: 404,
         },
         {
           method: "GET",
-          path: `/controlled/s02/api/queries/supplement-requests/${encodeURIComponent(requestId)}`,
+          path: DIAGNOSTIC_S02_REQUEST_PATH,
           status: 404,
         },
         {
           method: "GET",
-          path: `/controlled/s02/api/queries/supplement-requests/${encodeURIComponent("supplement_request_missing00000000000000000000000")}`,
+          path: DIAGNOSTIC_S02_REQUEST_PATH,
           status: 404,
         },
       ],
@@ -1589,17 +1777,17 @@ test("T04 React: a genuinely expired retained s02 session is existence-hiding an
       api404s: [
         {
           method: "GET",
-          path: `/controlled/s01/api/queries/applications/${flow.applicationId}/workspace`,
+          path: DIAGNOSTIC_WORKSPACE_PATH,
           status: 404,
         },
         {
           method: "GET",
-          path: `/controlled/s02/api/queries/supplement-requests/${encodeURIComponent(requestId)}`,
+          path: DIAGNOSTIC_S02_REQUEST_PATH,
           status: 404,
         },
         {
           method: "GET",
-          path: `/controlled/s02/api/queries/supplement-requests/${encodeURIComponent(requestId)}`,
+          path: DIAGNOSTIC_S02_REQUEST_PATH,
           status: 404,
         },
       ],
@@ -1736,7 +1924,7 @@ test("T04 React: the full operator flow works by keyboard with visible focus and
       await reviewer.getByTestId("review-supplement-converged").textContent(),
     ).toContain("证据修订 2");
     expectExactDiagnostics(diagnostics, {
-      api404s: expectedReviewerWorkspace404s(flow),
+      api404s: expectedReviewerWorkspace404s(),
     });
   } finally {
     await stopT04Flow(flow);
