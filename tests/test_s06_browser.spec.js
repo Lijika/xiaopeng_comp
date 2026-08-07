@@ -6,6 +6,7 @@ const fs = require("fs");
 const net = require("net");
 const os = require("os");
 const path = require("path");
+const { isDeepStrictEqual } = require("util");
 
 const ROOT = path.resolve(__dirname, "..");
 const PYTHON = process.env.PYTHON || path.join(ROOT, ".venv", "bin", "python");
@@ -762,7 +763,10 @@ async function reviewerCreatesSupplementRequest(reviewer, server) {
   const requestId = (
     await reviewer.getByTestId("review-supplement-request-id").textContent()
   ).trim();
-  expect(requestId).toMatch(/^supplement_request_/);
+  expect(
+    requestId.startsWith("supplement_request_"),
+    "supplement request: server identifier shape",
+  ).toBe(true);
   return requestId;
 }
 
@@ -881,7 +885,10 @@ async function reviewerConverges(flow) {
   ).toBe(1);
 
   // v1 non-current, v2 current (server authority).
-  expect(history.body.current_run_id).toBe(currentRunId);
+  expect(
+    history.body.current_run_id === currentRunId,
+    "history: current run agrees with current route",
+  ).toBe(true);
   expect(history.body.runs.map((run) => run.current)).toEqual([false, true]);
   expect(history.body.attachment_versions.map((item) => item.version)).toEqual([
     1,
@@ -974,7 +981,10 @@ for (const viewport of [
       const afterProgress = await integratorProjection(integrator, requestId);
       expect(afterProgress.next_request_progress_revision).toBe(2);
       expect(afterProgress.expected_predecessor_revision).toBe(1);
-      expect(afterProgress.batch.batch_id).toBe("t04-browser-batch");
+      expect(
+        afterProgress.batch.batch_id === "t04-browser-batch",
+        "integrator projection: submitted batch is current",
+      ).toBe(true);
       const closedSubmission = t04SubmissionFromProjection(afterProgress, server, {
         closed: true,
         batchId: "t04-browser-batch",
@@ -1021,7 +1031,10 @@ for (const viewport of [
       // URLs/query/hash carry no command, key, envelope, hash, or
       // unauthorized identifier.
       const integratorUrl = integrator.url();
-      expect(integratorUrl).toMatch(/^[^?#]*\?request=[A-Za-z0-9_:-]+$/);
+      expect(
+        /^[^?#]*\?request=[A-Za-z0-9_:-]+$/.test(integratorUrl),
+        "integrator url: request-only shape",
+      ).toBe(true);
       expect(integratorUrl.match(/[0-9a-f]{64}/) === null).toBe(true);
       expect(
         integratorUrl.includes("envelope"),
@@ -1363,7 +1376,7 @@ t04Test("T04 React: lost-response exact replay returns the original receipt and 
       "结果未知",
       { timeout: 10000 },
     );
-    expect(integrator.getByRole("button", { name: "重试" })).toBeVisible();
+    await expect(integrator.getByRole("button", { name: "重试" })).toBeVisible();
     expect(
       (await integrator.getByTestId("integrator-envelope-input").isDisabled()),
     ).toBe(true);
@@ -1410,10 +1423,17 @@ t04Test("T04 React: lost-response exact replay returns the original receipt and 
     expect(historyAfterReplay.body.evidence_revision).toBe(
       baselineHistory.body.evidence_revision,
     );
-    expect(historyAfterReplay.body.runs).toEqual(baselineHistory.body.runs);
-    expect(historyAfterReplay.body.attachment_versions).toEqual(
-      baselineHistory.body.attachment_versions,
-    );
+    expect(
+      isDeepStrictEqual(historyAfterReplay.body.runs, baselineHistory.body.runs),
+      "replay: run history unchanged",
+    ).toBe(true);
+    expect(
+      isDeepStrictEqual(
+        historyAfterReplay.body.attachment_versions,
+        baselineHistory.body.attachment_versions,
+      ),
+      "replay: attachment history unchanged",
+    ).toBe(true);
 
     // Same key, different fingerprint: definitive conflict, no second effect.
     const conflictingSubmission = structuredClone(openSubmission);
@@ -1498,9 +1518,10 @@ t04Test("T04 React: awaiting_predecessor, rejected and quarantined receipts crea
     const gapSubmission = structuredClone(baseSubmission);
     gapSubmission.source_revision = openProjection.next_source_revision + 1;
     const gapAnnouncement = await integratorSubmitsEnvelope(integrator, gapSubmission);
-    expect(gapAnnouncement).toBe(
-      `附件版本等待前驱（intake.sequence_gap）`,
-    );
+    expect(
+      gapAnnouncement === "附件版本等待前驱（intake.sequence_gap）",
+      "predecessor gap: fixed awaiting-predecessor announcement",
+    ).toBe(true);
     await expect(
       integrator.getByTestId("integrator-receipt-disposition"),
     ).toHaveText("awaiting_predecessor");
@@ -1512,9 +1533,10 @@ t04Test("T04 React: awaiting_predecessor, rejected and quarantined receipts crea
       integrator,
       contextSubmission,
     );
-    expect(contextAnnouncement).toBe(
-      "附件版本被拒绝（intake.request_context_mismatch）",
-    );
+    expect(
+      contextAnnouncement === "附件版本被拒绝（intake.request_context_mismatch）",
+      "request context: fixed rejected announcement",
+    ).toBe(true);
     await expect(
       integrator.getByTestId("integrator-receipt-disposition"),
     ).toHaveText("rejected");
@@ -1532,9 +1554,10 @@ t04Test("T04 React: awaiting_predecessor, rejected and quarantined receipts crea
       integrator,
       versionSubmission,
     );
-    expect(versionAnnouncement).toBe(
-      "附件版本被拒绝（intake.request_context_mismatch）",
-    );
+    expect(
+      versionAnnouncement === "附件版本被拒绝（intake.request_context_mismatch）",
+      "request version: fixed rejected announcement",
+    ).toBe(true);
     await expect(
       integrator.getByTestId("integrator-receipt-disposition"),
     ).toHaveText("rejected");
@@ -1543,7 +1566,10 @@ t04Test("T04 React: awaiting_predecessor, rejected and quarantined receipts crea
     const hashSubmission = structuredClone(baseSubmission);
     hashSubmission.attachments[0].object.sha256 = "0".repeat(64);
     const hashAnnouncement = await integratorSubmitsEnvelope(integrator, hashSubmission);
-    expect(hashAnnouncement).toMatch(/^附件版本被隔离（/);
+    expect(
+      hashAnnouncement.startsWith("附件版本被隔离（"),
+      "attachment integrity: fixed quarantined announcement",
+    ).toBe(true);
     await expect(
       integrator.getByTestId("integrator-receipt-disposition"),
     ).toHaveText("quarantined");
@@ -1576,7 +1602,10 @@ t04Test("T04 React: awaiting_predecessor, rejected and quarantined receipts crea
       integrator,
       baseSubmission,
     );
-    expect(progressAnnouncement).toBe("附件版本已接受");
+    expect(
+      progressAnnouncement === "附件版本已接受",
+      "valid progress: fixed accepted announcement",
+    ).toBe(true);
     const afterProgress = await integratorProjection(integrator, requestId);
     const closedSubmission = t04SubmissionFromProjection(afterProgress, server, {
       closed: true,
@@ -1625,7 +1654,10 @@ t04Test("T04 React: wrong role/request scope and lost sessions are existence-hid
       `/controlled/s02/api/queries/supplement-requests/${encodeURIComponent(requestId)}`,
     );
     expect(crossRole.status).toBe(404);
-    expect(crossRole.body).toEqual({ detail: { error: "S02_NOT_FOUND" } });
+    expect(
+      isDeepStrictEqual(crossRole.body, { detail: { error: "S02_NOT_FOUND" } }),
+      "cross-role read: sanitized not-found body",
+    ).toBe(true);
 
     // Unknown request scope in the Integrator shell: sanitized panel error.
     await integrator.goto(
@@ -1680,9 +1712,10 @@ t04Test("T04 React: wrong role/request scope and lost sessions are existence-hid
       integrator,
       wrongWorkload,
     );
-    expect(wrongWorkloadAnnouncement).toBe(
-      "附件版本被拒绝（intake.source_disabled）",
-    );
+    expect(
+      wrongWorkloadAnnouncement === "附件版本被拒绝（intake.source_disabled）",
+      "wrong workload: fixed rejected announcement",
+    ).toBe(true);
     const afterWrongWorkload = await integratorProjection(integrator, requestId);
     expect(afterWrongWorkload.next_request_progress_revision).toBe(1);
 
@@ -1743,7 +1776,10 @@ t04Test("T04 React: a genuinely expired retained s02 session is existence-hiding
     );
     expect(cookieNames).toContain("s02_session");
     const validProjection = await integratorProjection(integrator, requestId);
-    expect(validProjection.request_id).toBe(requestId);
+    expect(
+      validProjection.request_id === requestId,
+      "retained session: projection remains request-bound",
+    ).toBe(true);
 
     // Advance the server clock beyond the short TTL; the cookie is retained
     // but the identity is genuinely expired.
@@ -1794,7 +1830,10 @@ t04Test("T04 React: a genuinely expired retained s02 session is existence-hiding
       `/controlled/s02/api/queries/supplement-requests/${encodeURIComponent(requestId)}`,
     );
     expect(expiredRead.status).toBe(404);
-    expect(expiredRead.body).toEqual({ detail: { error: "S02_NOT_FOUND" } });
+    expect(
+      isDeepStrictEqual(expiredRead.body, { detail: { error: "S02_NOT_FOUND" } }),
+      "expired session: sanitized not-found body",
+    ).toBe(true);
 
     expectExactDiagnostics(diagnostics, {
       api404s: [
@@ -1919,8 +1958,12 @@ t04Test("T04 React: the full operator flow works by keyboard with visible focus 
       { timeout: 10000 },
     );
     expect(
-      await integrator.getByTestId("integrator-command-status").textContent(),
-    ).toContain("附件版本已接受");
+      (
+        (await integrator.getByTestId("integrator-command-status").textContent()) ??
+        ""
+      ).includes("附件版本已接受"),
+      "keyboard flow: progress accepted",
+    ).toBe(true);
 
     const afterProgress = await integratorProjection(integrator, requestId);
     const closedSubmission = t04SubmissionFromProjection(afterProgress, server, {
@@ -1944,8 +1987,12 @@ t04Test("T04 React: the full operator flow works by keyboard with visible focus 
       timeout: 20000,
     });
     expect(
-      await reviewer.getByTestId("review-supplement-converged").textContent(),
-    ).toContain("证据修订 2");
+      (
+        (await reviewer.getByTestId("review-supplement-converged").textContent()) ??
+        ""
+      ).includes("证据修订 2"),
+      "keyboard flow: reviewer converged",
+    ).toBe(true);
     expectExactDiagnostics(diagnostics, {
       api404s: expectedReviewerWorkspace404s(),
     });
