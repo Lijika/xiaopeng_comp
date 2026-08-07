@@ -1103,7 +1103,6 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
   const [revealKey, setRevealKey] = useState(newIdempotencyKey);
   const [correctionKey, setCorrectionKey] = useState(newIdempotencyKey);
   const [supplementKey, setSupplementKey] = useState(newIdempotencyKey);
-  const [exceptionKey, setExceptionKey] = useState(newIdempotencyKey);
   const [pendingCommand, setPendingCommand] = useState<PendingCommand | null>(
     null,
   );
@@ -1269,7 +1268,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     reveal: () => setRevealKey(newIdempotencyKey()),
     correct: () => setCorrectionKey(newIdempotencyKey()),
     supplement: () => setSupplementKey(newIdempotencyKey()),
-    exception: () => setExceptionKey(newIdempotencyKey()),
+    exception: () => {},
   };
 
   const accepted = (action: Action) => () => {
@@ -1459,7 +1458,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
       reason_code: exceptionEligibility.request_reason,
       expected_fence: work.data.claim_fence,
       expected_context: work.data.command_context,
-      idempotency_key: exceptionKey,
+      idempotency_key: newIdempotencyKey(),
       predecessor_request_id: exceptionEligibility.predecessor_request_id,
     };
     setPendingCommand({ action: "exception", command });
