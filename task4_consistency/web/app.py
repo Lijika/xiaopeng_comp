@@ -466,6 +466,12 @@ def _engine() -> RuleEngine:
     return RuleEngine(load_rules(_active_rules_path()))
 
 
+def _run_check(application: Application, rules_path: Path):
+    """The one shared Application -> RuleEngine -> Report path; the T06 demo
+    facade reuses the exact legacy /api/check execution."""
+    return RuleEngine(load_rules(rules_path)).run(application)
+
+
 def _parse_rules_payload(body: "RulesBody") -> tuple[dict[str, Any], str]:
     """Return (data, yaml_text). Raises HTTPException 400 with clear tip."""
     if body.yaml_text is not None:
@@ -4365,8 +4371,7 @@ def api_check(body: CheckBody) -> dict[str, Any]:
             },
         )
     try:
-        eng = RuleEngine(load_rules(rules_path))
-        report = eng.run(app_obj)
+        report = _run_check(app_obj, rules_path)
     except Exception as e:
         raise HTTPException(
             500,
@@ -4814,6 +4819,277 @@ def create_s02_test_app() -> FastAPI:
         S01_TEST_DRIVER = None
         S02_CONFIGURED = False
     return app
+
+
+# --- T06 / Issue #40: closed synthetic demo facade ---------------------------
+
+# The sole code-owned allow-list: fixture_id -> fixed basename.  A request
+# value is never joined to a filesystem path.
+DEMO_FIXTURES: dict[str, str] = {
+    "app_demo_step2_ok": "app_demo_step2_ok.json",
+    "app_demo_step2_bad_vin": "app_demo_step2_bad_vin.json",
+    "app_demo_step2_fmt": "app_demo_step2_fmt.json",
+}
+
+_DEMO_EVIDENCE_LIMITATION = (
+    "赛题影像页序/检测框元数据（无 OCR 文本）；字段值为合成仿真，不代表真实证据。"
+)
+_STEP2_SAMPLE_ID_RE = re.compile(r"[A-Za-z0-9_.-]+")
+# Neutral code-owned selector copy: never sourced from fixture label,
+# expected_verdicts, or outcome-bearing demo_title/demo_desc metadata.
+_DEMO_NEUTRAL_TITLES = ("演示样例 1", "演示样例 2", "演示样例 3")
+_DEMO_NEUTRAL_DESCRIPTION = "预置合成多单据校验样例"
+# The three fixed T06 error contracts: status + exact generic message.  The
+# 404 never reflects caller input; 503 never exposes a basename/locator; the
+# 500 never includes exception text or internal paths.
+_DEMO_ERRORS: dict[str, tuple[int, str]] = {
+    "DEMO_FIXTURE_NOT_FOUND": (404, "未找到演示样例"),
+    "DEMO_FIXTURE_UNAVAILABLE": (503, "演示样例暂不可用"),
+    "DEMO_CHECK_FAILED": (500, "校验执行失败，请稍后重试"),
+}
+
+
+def _demo_error(code: str) -> HTTPException:
+    status, message = _DEMO_ERRORS[code]
+    return HTTPException(status, detail={"error": code, "message": message})
+
+
+class DemoFixtureOption(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    fixture_id: str
+    title: str
+    description: str
+    field_source: Literal["synthetic"]
+    step2_sample_id: str
+
+
+class DemoFixturesResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    fixtures: list[DemoFixtureOption]
+
+
+class DemoCheckRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    fixture_id: str
+
+
+class DemoSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    consistent: int = 0
+    inconsistent: int = 0
+    uncertain: int = 0
+    skipped: int = 0
+    coverage: float = 0.0
+    total: int = 0
+    total_including_skipped: int = 0
+
+
+class DemoConfigInfo(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rule_config_version: str | int | None = None
+    rule_package: str | None = None
+    rule_changelog: list[str] = Field(default_factory=list)
+
+
+class DemoSnapshotItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    doc_id: str
+    doc_type: str
+    field: str
+    raw: str | None
+    normalized: str | None
+    confidence: float
+    ocr_fix: bool | None = None
+    pre_ocr: str | None = None
+    notes: list[str] = Field(default_factory=list)
+
+
+class DemoDiffHighlight(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    pos: int | None = None
+    left: str | None = None
+    right: str | None = None
+    detail: str | None = None
+
+
+class DemoCheckItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rule_id: str
+    name: str
+    verdict: Literal["consistent", "inconsistent", "uncertain", "skipped"]
+    severity: Literal["critical", "major", "minor", "info"]
+    message: str
+    snapshots: list[DemoSnapshotItem] = Field(default_factory=list)
+    diff_highlight: DemoDiffHighlight | None = None
+    score: float | None = None
+    rule_type: str | None = None
+    flags: list[str] = Field(default_factory=list)
+    reason_codes: list[str] = Field(default_factory=list)
+
+
+class DemoEvidenceLink(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["step2_sample"]
+    label: str
+    sample_id: str
+    href: str
+    limitation: str
+
+
+class DemoCheckResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    track: Literal["C-DEMO"]
+    data_scope: Literal["synthetic"]
+    fixture_id: str
+    application_id: str
+    summary: DemoSummary
+    checks: list[DemoCheckItem]
+    config: DemoConfigInfo
+    evidence_links: list[DemoEvidenceLink]
+
+
+class DemoErrorDetail(BaseModel):
+    """The closed T06 error detail: the registered code plus the exact fixed
+    generic message, with no caller or internal detail."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    error: str
+    message: str
+
+
+class DemoErrorResponse(BaseModel):
+    """The closed T06 error envelope registered on every demo error
+    response, matching the wire shape consumed by the fetch adapter."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    detail: DemoErrorDetail
+
+
+def _load_demo_fixture(fixture_id: str) -> dict[str, Any]:
+    """Allow-list lookup plus fail-closed validation: the returned mapping is
+    always a synthetic fixture whose verified Step2 sample file exists.  All
+    failures use the fixed generic contracts; none reflect caller input."""
+    basename = DEMO_FIXTURES.get(fixture_id)
+    if basename is None:
+        raise _demo_error("DEMO_FIXTURE_NOT_FOUND")
+    fp = FIXTURES / basename
+    try:
+        data = json.loads(fp.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise _demo_error("DEMO_FIXTURE_UNAVAILABLE") from e
+    if not isinstance(data, dict):
+        raise _demo_error("DEMO_FIXTURE_UNAVAILABLE")
+    meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
+    if meta.get("field_source") != "synthetic":
+        raise _demo_error("DEMO_FIXTURE_UNAVAILABLE")
+    sid = meta.get("step2_sample_id")
+    if not isinstance(sid, str) or not _STEP2_SAMPLE_ID_RE.fullmatch(sid):
+        raise _demo_error("DEMO_FIXTURE_UNAVAILABLE")
+    if not (ROOT / "data" / "step2" / f"{sid}_page_order.json").is_file():
+        raise _demo_error("DEMO_FIXTURE_UNAVAILABLE")
+    return data
+
+
+@app.get(
+    "/api/demo/fixtures",
+    response_model=DemoFixturesResponse,
+    responses={503: {"model": DemoErrorResponse}},
+)
+def demo_fixtures() -> DemoFixturesResponse:
+    """The closed option list: only validated synthetic Step2-bound fixtures,
+    with neutral code-owned copy that never reveals the expected outcome."""
+    options: list[DemoFixtureOption] = []
+    for index, fixture_id in enumerate(DEMO_FIXTURES):
+        data = _load_demo_fixture(fixture_id)
+        meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
+        options.append(
+            DemoFixtureOption(
+                fixture_id=fixture_id,
+                title=_DEMO_NEUTRAL_TITLES[index],
+                description=_DEMO_NEUTRAL_DESCRIPTION,
+                field_source="synthetic",
+                step2_sample_id=str(meta["step2_sample_id"]),
+            )
+        )
+    return DemoFixturesResponse(fixtures=options)
+
+
+@app.post(
+    "/api/demo/check",
+    response_model=DemoCheckResponse,
+    responses={
+        404: {"model": DemoErrorResponse},
+        500: {"model": DemoErrorResponse},
+        503: {"model": DemoErrorResponse},
+    },
+)
+def demo_check(body: DemoCheckRequest) -> DemoCheckResponse:
+    """Run exactly one server-resident synthetic fixture through the active
+    rules and project a typed C-DEMO report with Step2 evidence metadata."""
+    data = _load_demo_fixture(body.fixture_id)
+    try:
+        app_obj = Application.from_dict(data)
+        report = _run_check(app_obj, _active_rules_path())
+    except Exception as e:
+        # Bounded 500: the fixed generic message only; exception text and
+        # internal paths stay in the server logs via chaining.
+        raise _demo_error("DEMO_CHECK_FAILED") from e
+    meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
+    sid = str(meta["step2_sample_id"])
+    report_dict = report.to_dict()
+    return DemoCheckResponse(
+        track="C-DEMO",
+        data_scope="synthetic",
+        fixture_id=body.fixture_id,
+        application_id=report.application_id,
+        summary=DemoSummary(**report_dict["summary"]),
+        checks=[DemoCheckItem(**c) for c in report_dict["checks"]],
+        config=DemoConfigInfo(
+            rule_config_version=report_dict["rule_config_version"],
+            rule_package=report_dict.get("rule_package"),
+            rule_changelog=report_dict.get("rule_changelog") or [],
+        ),
+        evidence_links=[
+            DemoEvidenceLink(
+                kind="step2_sample",
+                label=f"Step2 页序样本 {sid}",
+                sample_id=sid,
+                href=f"/api/step2/{sid}",
+                limitation=_DEMO_EVIDENCE_LIMITATION,
+            )
+        ],
+    )
+
+
+@app.get("/demo/react", response_class=HTMLResponse)
+def demo_react_shell() -> HTMLResponse:
+    """The exact additive demo shell route: the same built React artifact as
+    the controlled shells, no-store, and fail-closed when the build is
+    missing.  No catch-all route may intercept /api or controlled 404s."""
+    index_html = _react_shell_index_html()
+    if index_html is None:
+        raise HTTPException(
+            503,
+            detail={
+                "error": "DEMO_REACT_UNAVAILABLE",
+                "message": "React demo shell is not built",
+            },
+        )
+    response = HTMLResponse(index_html)
+    _s01_disable_cache(response)
+    return response
 
 
 def create_app() -> FastAPI:

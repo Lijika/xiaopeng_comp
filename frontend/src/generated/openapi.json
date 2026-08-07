@@ -62,6 +62,509 @@
         "title": "CheckBody",
         "type": "object"
       },
+      "DemoCheckItem": {
+        "additionalProperties": false,
+        "properties": {
+          "diff_highlight": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DemoDiffHighlight"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "flags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Flags",
+            "type": "array"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "reason_codes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reason Codes",
+            "type": "array"
+          },
+          "rule_id": {
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "rule_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rule Type"
+          },
+          "score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score"
+          },
+          "severity": {
+            "enum": [
+              "critical",
+              "major",
+              "minor",
+              "info"
+            ],
+            "title": "Severity",
+            "type": "string"
+          },
+          "snapshots": {
+            "items": {
+              "$ref": "#/components/schemas/DemoSnapshotItem"
+            },
+            "title": "Snapshots",
+            "type": "array"
+          },
+          "verdict": {
+            "enum": [
+              "consistent",
+              "inconsistent",
+              "uncertain",
+              "skipped"
+            ],
+            "title": "Verdict",
+            "type": "string"
+          }
+        },
+        "required": [
+          "rule_id",
+          "name",
+          "verdict",
+          "severity",
+          "message"
+        ],
+        "title": "DemoCheckItem",
+        "type": "object"
+      },
+      "DemoCheckRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "fixture_id": {
+            "title": "Fixture Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "fixture_id"
+        ],
+        "title": "DemoCheckRequest",
+        "type": "object"
+      },
+      "DemoCheckResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "application_id": {
+            "title": "Application Id",
+            "type": "string"
+          },
+          "checks": {
+            "items": {
+              "$ref": "#/components/schemas/DemoCheckItem"
+            },
+            "title": "Checks",
+            "type": "array"
+          },
+          "config": {
+            "$ref": "#/components/schemas/DemoConfigInfo"
+          },
+          "data_scope": {
+            "const": "synthetic",
+            "title": "Data Scope",
+            "type": "string"
+          },
+          "evidence_links": {
+            "items": {
+              "$ref": "#/components/schemas/DemoEvidenceLink"
+            },
+            "title": "Evidence Links",
+            "type": "array"
+          },
+          "fixture_id": {
+            "title": "Fixture Id",
+            "type": "string"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/DemoSummary"
+          },
+          "track": {
+            "const": "C-DEMO",
+            "title": "Track",
+            "type": "string"
+          }
+        },
+        "required": [
+          "track",
+          "data_scope",
+          "fixture_id",
+          "application_id",
+          "summary",
+          "checks",
+          "config",
+          "evidence_links"
+        ],
+        "title": "DemoCheckResponse",
+        "type": "object"
+      },
+      "DemoConfigInfo": {
+        "additionalProperties": false,
+        "properties": {
+          "rule_changelog": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Rule Changelog",
+            "type": "array"
+          },
+          "rule_config_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rule Config Version"
+          },
+          "rule_package": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rule Package"
+          }
+        },
+        "title": "DemoConfigInfo",
+        "type": "object"
+      },
+      "DemoDiffHighlight": {
+        "additionalProperties": false,
+        "properties": {
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "left": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Left"
+          },
+          "pos": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pos"
+          },
+          "right": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Right"
+          }
+        },
+        "title": "DemoDiffHighlight",
+        "type": "object"
+      },
+      "DemoErrorDetail": {
+        "additionalProperties": false,
+        "description": "The closed T06 error detail: the registered code plus the exact fixed\ngeneric message, with no caller or internal detail.",
+        "properties": {
+          "error": {
+            "title": "Error",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "error",
+          "message"
+        ],
+        "title": "DemoErrorDetail",
+        "type": "object"
+      },
+      "DemoErrorResponse": {
+        "additionalProperties": false,
+        "description": "The closed T06 error envelope registered on every demo error\nresponse, matching the wire shape consumed by the fetch adapter.",
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/DemoErrorDetail"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "DemoErrorResponse",
+        "type": "object"
+      },
+      "DemoEvidenceLink": {
+        "additionalProperties": false,
+        "properties": {
+          "href": {
+            "title": "Href",
+            "type": "string"
+          },
+          "kind": {
+            "const": "step2_sample",
+            "title": "Kind",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "limitation": {
+            "title": "Limitation",
+            "type": "string"
+          },
+          "sample_id": {
+            "title": "Sample Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "label",
+          "sample_id",
+          "href",
+          "limitation"
+        ],
+        "title": "DemoEvidenceLink",
+        "type": "object"
+      },
+      "DemoFixtureOption": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "field_source": {
+            "const": "synthetic",
+            "title": "Field Source",
+            "type": "string"
+          },
+          "fixture_id": {
+            "title": "Fixture Id",
+            "type": "string"
+          },
+          "step2_sample_id": {
+            "title": "Step2 Sample Id",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "fixture_id",
+          "title",
+          "description",
+          "field_source",
+          "step2_sample_id"
+        ],
+        "title": "DemoFixtureOption",
+        "type": "object"
+      },
+      "DemoFixturesResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "fixtures": {
+            "items": {
+              "$ref": "#/components/schemas/DemoFixtureOption"
+            },
+            "title": "Fixtures",
+            "type": "array"
+          }
+        },
+        "required": [
+          "fixtures"
+        ],
+        "title": "DemoFixturesResponse",
+        "type": "object"
+      },
+      "DemoSnapshotItem": {
+        "additionalProperties": false,
+        "properties": {
+          "confidence": {
+            "title": "Confidence",
+            "type": "number"
+          },
+          "doc_id": {
+            "title": "Doc Id",
+            "type": "string"
+          },
+          "doc_type": {
+            "title": "Doc Type",
+            "type": "string"
+          },
+          "field": {
+            "title": "Field",
+            "type": "string"
+          },
+          "normalized": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Normalized"
+          },
+          "notes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Notes",
+            "type": "array"
+          },
+          "ocr_fix": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ocr Fix"
+          },
+          "pre_ocr": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pre Ocr"
+          },
+          "raw": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw"
+          }
+        },
+        "required": [
+          "doc_id",
+          "doc_type",
+          "field",
+          "raw",
+          "normalized",
+          "confidence"
+        ],
+        "title": "DemoSnapshotItem",
+        "type": "object"
+      },
+      "DemoSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "consistent": {
+            "default": 0,
+            "title": "Consistent",
+            "type": "integer"
+          },
+          "coverage": {
+            "default": 0.0,
+            "title": "Coverage",
+            "type": "number"
+          },
+          "inconsistent": {
+            "default": 0,
+            "title": "Inconsistent",
+            "type": "integer"
+          },
+          "skipped": {
+            "default": 0,
+            "title": "Skipped",
+            "type": "integer"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          },
+          "total_including_skipped": {
+            "default": 0,
+            "title": "Total Including Skipped",
+            "type": "integer"
+          },
+          "uncertain": {
+            "default": 0,
+            "title": "Uncertain",
+            "type": "integer"
+          }
+        },
+        "title": "DemoSummary",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -5021,6 +5524,104 @@
         "summary": "Api Check Batch"
       }
     },
+    "/api/demo/check": {
+      "post": {
+        "description": "Run exactly one server-resident synthetic fixture through the active\nrules and project a typed C-DEMO report with Step2 evidence metadata.",
+        "operationId": "demo_check_api_demo_check_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DemoCheckRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemoCheckResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemoErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemoErrorResponse"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemoErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Demo Check"
+      }
+    },
+    "/api/demo/fixtures": {
+      "get": {
+        "description": "The closed option list: only validated synthetic Step2-bound fixtures,\nwith neutral code-owned copy that never reveals the expected outcome.",
+        "operationId": "demo_fixtures_api_demo_fixtures_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemoFixturesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemoErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Demo Fixtures"
+      }
+    },
     "/api/evaluate/summary": {
       "get": {
         "description": "Run evaluate by suite (default main). Round19/20 honesty: only main is delivery.",
@@ -9294,6 +9895,25 @@
           }
         },
         "summary": "Controlled S05 React Page"
+      }
+    },
+    "/demo/react": {
+      "get": {
+        "description": "The exact additive demo shell route: the same built React artifact as\nthe controlled shells, no-store, and fail-closed when the build is\nmissing.  No catch-all route may intercept /api or controlled 404s.",
+        "operationId": "demo_react_shell_demo_react_get",
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Demo React Shell"
       }
     }
   }

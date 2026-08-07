@@ -145,3 +145,115 @@ body {
   color: var(--foreground);
   max-inline-size: 16rem;
 }
+
+/* T06 demo shell: scoped responsive controls/report, no new design system */
+
+.demo-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.demo-controls select {
+  border: 1px solid var(--border);
+  border-radius: 0.25rem;
+  padding: 0.25rem 0.375rem;
+  background-color: var(--background);
+  color: var(--foreground);
+  max-inline-size: min(100%, 26rem);
+}
+
+.demo-status {
+  margin-block: 0.75rem 0;
+  font-size: 0.875rem;
+  color: var(--muted-foreground);
+}
+
+.demo-error {
+  margin-block: 0.75rem 0;
+  color: #b3261e;
+}
+
+.demo-checks {
+  list-style: none;
+  padding-inline-start: 0;
+  margin-block: 0.75rem 0;
+}
+
+.demo-checks li {
+  border: 1px solid var(--border);
+  border-radius: 0.375rem;
+  padding: 0.5rem 0.625rem;
+  margin-block-start: 0.5rem;
+  overflow-wrap: anywhere;
+}
+
+.demo-check-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.demo-rule-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.875rem;
+}
+
+.verdict {
+  font-size: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 9999px;
+  padding: 0.125rem 0.5rem;
+}
+
+.severity {
+  font-size: 0.75rem;
+  color: var(--muted-foreground);
+}
+
+.demo-check-message {
+  margin-block: 0.375rem 0;
+}
+
+.demo-snapshots {
+  border-collapse: collapse;
+  inline-size: 100%;
+  margin-block-start: 0.5rem;
+  font-size: 0.8125rem;
+}
+
+.demo-snapshots th,
+.demo-snapshots td {
+  border: 1px solid var(--border);
+  padding: 0.25rem 0.375rem;
+  text-align: start;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.demo-diff {
+  margin-block: 0.375rem 0;
+  font-size: 0.8125rem;
+  color: var(--muted-foreground);
+}
+
+.demo-evidence {
+  margin-block-start: 1rem;
+}
+
+.demo-evidence h3 {
+  font-size: 0.875rem;
+  margin-block: 0 0.375rem;
+}
+
+.demo-evidence-link {
+  margin-block: 0.25rem 0;
+  overflow-wrap: anywhere;
+}
+
+.demo-limitation {
+  color: var(--muted-foreground);
+  font-size: 0.8125rem;
+}

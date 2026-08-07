@@ -30,6 +30,15 @@ export type ExceptionDecisionResult =
   components["schemas"]["T05ExceptionDecisionResult"];
 export type BusinessExceptionOperationsStatus =
   components["schemas"]["T05BusinessExceptionOperationsStatus"];
+export type DemoFixturesResponse = components["schemas"]["DemoFixturesResponse"];
+export type DemoFixtureOption = components["schemas"]["DemoFixtureOption"];
+export type DemoCheckResponse = components["schemas"]["DemoCheckResponse"];
+export type DemoCheckItem = components["schemas"]["DemoCheckItem"];
+export type DemoSnapshotItem = components["schemas"]["DemoSnapshotItem"];
+export type DemoDiffHighlight = components["schemas"]["DemoDiffHighlight"];
+export type DemoSummary = components["schemas"]["DemoSummary"];
+export type DemoConfigInfo = components["schemas"]["DemoConfigInfo"];
+export type DemoEvidenceLink = components["schemas"]["DemoEvidenceLink"];
 
 /** A structured server rejection; never invents identifiers or evidence. */
 export class HttpError extends Error {

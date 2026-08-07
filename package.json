@@ -13,6 +13,7 @@
     "test:unit": "vitest run --config frontend/vitest.config.ts",
     "build": "npm run typecheck && npm run check:generated && vite build --config frontend/vite.config.ts",
     "test:e2e:t01": "playwright test tests/test_t01_react.spec.js",
+    "test:e2e:t06": "playwright test tests/test_t06_react.spec.js",
     "test:e2e": "playwright test"
   },
   "dependencies": {

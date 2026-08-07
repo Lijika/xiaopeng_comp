@@ -46,6 +46,10 @@ export type BusinessExceptionView =
 export type ExceptionClaimResult = components["schemas"]["T05ExceptionClaimResult"];
 export type ExceptionDecisionResult =
   components["schemas"]["T05ExceptionDecisionResult"];
+export type DemoFixturesResponse = components["schemas"]["DemoFixturesResponse"];
+export type DemoCheckResponse = components["schemas"]["DemoCheckResponse"];
+
+export const DEMO_FIXTURES_KEY = ["demo", "fixtures"] as const;
 
 export const QUEUE_KEY = ["s01", "queue"] as const;
 export const WORK_KEY = (workId: string) =>
@@ -531,4 +535,30 @@ export function useDecideBusinessException(
     `/controlled/s01/api/commands/business-exceptions/${encodeURIComponent(requestId)}/decide`,
     ["s05"],
   );
+}
+
+/** The closed demo option list; never retried beyond the shared policy. */
+export function useDemoFixtures(): UseQueryResult<DemoFixturesResponse> {
+  return useQuery({
+    queryKey: DEMO_FIXTURES_KEY,
+    queryFn: () => request<DemoFixturesResponse>("/api/demo/fixtures"),
+    retry: retryPolicy,
+  });
+}
+
+/** The single explicit-click demo check mutation.  retry:false — a demo
+ * check never replays from a mount or StrictMode effect. */
+export function useDemoCheck(): UseMutationResult<
+  DemoCheckResponse,
+  Error,
+  string
+> {
+  return useMutation({
+    mutationFn: (fixtureId: string) =>
+      request<DemoCheckResponse>("/api/demo/check", {
+        method: "POST",
+        body: JSON.stringify({ fixture_id: fixtureId }),
+      }),
+    retry: false,
+  });
 }

@@ -976,4 +976,39 @@ describe("queue shell (App)", () => {
     expect(screen.queryByTestId("integrator-panel")).not.toBeInTheDocument();
     expect(screen.getByTestId("boundary-track")).toHaveTextContent("C-DEMO");
   });
+
+  it("mounts the demo shell exactly on /demo/react and never issues controlled reads", async () => {
+    const router = fetchRouter({
+      "GET /api/demo/fixtures": () =>
+        new Response(
+          JSON.stringify({
+            fixtures: [
+              {
+                fixture_id: "app_demo_step2_ok",
+                title: "赛题样例绑定·字段一致",
+                description: "多单据关键字段对齐",
+                field_source: "synthetic",
+                step2_sample_id: "JFL25P02L080310-01",
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    window.history.pushState(null, "", "/demo/react");
+    renderWithQuery(<App />);
+    await waitFor(() =>
+      expect(screen.getByTestId("demo-panel")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("demo-boundary-track")).toHaveTextContent(
+      "C-DEMO",
+    );
+    expect(screen.getByTestId("demo-boundary-scope")).toHaveTextContent(
+      "synthetic",
+    );
+    expect(screen.queryByTestId("queue-panel")).not.toBeInTheDocument();
+    expect(
+      router.calls.filter((call) => call.url.includes("/controlled/")),
+    ).toHaveLength(0);
+  });
 });

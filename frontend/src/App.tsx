@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useQueue } from "./api/hooks";
 import AttachmentVersionPanel from "./components/AttachmentVersionPanel";
 import BusinessExceptionApproverPanel from "./components/BusinessExceptionApproverPanel";
+import DemoCheckPanel from "./components/DemoCheckPanel";
 import QueuePanel from "./components/QueuePanel";
 import RecoveryWorkPanel from "./components/RecoveryWorkPanel";
 import ReviewWorkPanel from "./components/ReviewWorkPanel";
@@ -11,15 +12,39 @@ function readParam(name: string): string | null {
   return new URLSearchParams(window.location.search).get(name);
 }
 
-/** The one built artifact serves both controlled shells; the pathname owns
- * which role UI mounts.  ``/controlled/s01/react`` is the Reviewer shell and
- * ``/controlled/s02/react`` is the Integrator shell; every other path keeps
- * the Reviewer workbench behind the legacy URLs. */
+/** The one built artifact serves every shell; the pathname owns which role UI
+ * mounts.  ``/demo/react`` is the exact T06 demo shell; ``/controlled/s02/react``
+ * is the Integrator shell and ``/controlled/s05/react`` the Exception Approver
+ * shell; every other path keeps the Reviewer workbench behind the legacy URLs. */
+function isDemoShell(): boolean {
+  return window.location.pathname === "/demo/react";
+}
 function isIntegratorShell(): boolean {
   return window.location.pathname.startsWith("/controlled/s02");
 }
 function isExceptionApproverShell(): boolean {
   return window.location.pathname.startsWith("/controlled/s05");
+}
+
+/** The T06 competition demo shell: only the closed synthetic facade mounts
+ * here; no S01/S02/S05 read can fire. */
+function DemoShell() {
+  return (
+    <div className="mx-auto max-w-4xl px-4 py-6">
+      <header className="app-header">
+        <h1>凭证一致性校验演示</h1>
+        <span className="boundary track" data-testid="demo-boundary-track">
+          C-DEMO
+        </span>
+        <span className="boundary" data-testid="demo-boundary-scope">
+          synthetic
+        </span>
+      </header>
+      <main>
+        <DemoCheckPanel />
+      </main>
+    </div>
+  );
 }
 function IntegratorShell() {
   return (
@@ -119,6 +144,9 @@ function ReviewerWorkbench() {
 }
 
 export default function App() {
+  if (isDemoShell()) {
+    return <DemoShell />;
+  }
   if (isIntegratorShell()) {
     return <IntegratorShell />;
   }

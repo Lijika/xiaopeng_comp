@@ -75,6 +75,48 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/demo/check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Demo Check
+         * @description Run exactly one server-resident synthetic fixture through the active
+         *     rules and project a typed C-DEMO report with Step2 evidence metadata.
+         */
+        post: operations["demo_check_api_demo_check_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/demo/fixtures": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Demo Fixtures
+         * @description The closed option list: only validated synthetic Step2-bound fixtures,
+         *     with neutral code-owned copy that never reveals the expected outcome.
+         */
+        get: operations["demo_fixtures_api_demo_fixtures_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/evaluate/summary": {
         parameters: {
             query?: never;
@@ -1270,6 +1312,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/demo/react": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Demo React Shell
+         * @description The exact additive demo shell route: the same built React artifact as
+         *     the controlled shells, no-store, and fail-closed when the build is
+         *     missing.  No catch-all route may intercept /api or controlled 404s.
+         */
+        get: operations["demo_react_shell_demo_react_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1297,6 +1361,199 @@ export interface components {
             };
             /** Rules Path */
             rules_path?: string | null;
+        };
+        /** DemoCheckItem */
+        DemoCheckItem: {
+            diff_highlight?: components["schemas"]["DemoDiffHighlight"] | null;
+            /** Flags */
+            flags?: string[];
+            /** Message */
+            message: string;
+            /** Name */
+            name: string;
+            /** Reason Codes */
+            reason_codes?: string[];
+            /** Rule Id */
+            rule_id: string;
+            /** Rule Type */
+            rule_type?: string | null;
+            /** Score */
+            score?: number | null;
+            /**
+             * Severity
+             * @enum {string}
+             */
+            severity: "critical" | "major" | "minor" | "info";
+            /** Snapshots */
+            snapshots?: components["schemas"]["DemoSnapshotItem"][];
+            /**
+             * Verdict
+             * @enum {string}
+             */
+            verdict: "consistent" | "inconsistent" | "uncertain" | "skipped";
+        };
+        /** DemoCheckRequest */
+        DemoCheckRequest: {
+            /** Fixture Id */
+            fixture_id: string;
+        };
+        /** DemoCheckResponse */
+        DemoCheckResponse: {
+            /** Application Id */
+            application_id: string;
+            /** Checks */
+            checks: components["schemas"]["DemoCheckItem"][];
+            config: components["schemas"]["DemoConfigInfo"];
+            /**
+             * Data Scope
+             * @constant
+             */
+            data_scope: "synthetic";
+            /** Evidence Links */
+            evidence_links: components["schemas"]["DemoEvidenceLink"][];
+            /** Fixture Id */
+            fixture_id: string;
+            summary: components["schemas"]["DemoSummary"];
+            /**
+             * Track
+             * @constant
+             */
+            track: "C-DEMO";
+        };
+        /** DemoConfigInfo */
+        DemoConfigInfo: {
+            /** Rule Changelog */
+            rule_changelog?: string[];
+            /** Rule Config Version */
+            rule_config_version?: string | number | null;
+            /** Rule Package */
+            rule_package?: string | null;
+        };
+        /** DemoDiffHighlight */
+        DemoDiffHighlight: {
+            /** Detail */
+            detail?: string | null;
+            /** Left */
+            left?: string | null;
+            /** Pos */
+            pos?: number | null;
+            /** Right */
+            right?: string | null;
+        };
+        /**
+         * DemoErrorDetail
+         * @description The closed T06 error detail: the registered code plus the exact fixed
+         *     generic message, with no caller or internal detail.
+         */
+        DemoErrorDetail: {
+            /** Error */
+            error: string;
+            /** Message */
+            message: string;
+        };
+        /**
+         * DemoErrorResponse
+         * @description The closed T06 error envelope registered on every demo error
+         *     response, matching the wire shape consumed by the fetch adapter.
+         */
+        DemoErrorResponse: {
+            detail: components["schemas"]["DemoErrorDetail"];
+        };
+        /** DemoEvidenceLink */
+        DemoEvidenceLink: {
+            /** Href */
+            href: string;
+            /**
+             * Kind
+             * @constant
+             */
+            kind: "step2_sample";
+            /** Label */
+            label: string;
+            /** Limitation */
+            limitation: string;
+            /** Sample Id */
+            sample_id: string;
+        };
+        /** DemoFixtureOption */
+        DemoFixtureOption: {
+            /** Description */
+            description: string;
+            /**
+             * Field Source
+             * @constant
+             */
+            field_source: "synthetic";
+            /** Fixture Id */
+            fixture_id: string;
+            /** Step2 Sample Id */
+            step2_sample_id: string;
+            /** Title */
+            title: string;
+        };
+        /** DemoFixturesResponse */
+        DemoFixturesResponse: {
+            /** Fixtures */
+            fixtures: components["schemas"]["DemoFixtureOption"][];
+        };
+        /** DemoSnapshotItem */
+        DemoSnapshotItem: {
+            /** Confidence */
+            confidence: number;
+            /** Doc Id */
+            doc_id: string;
+            /** Doc Type */
+            doc_type: string;
+            /** Field */
+            field: string;
+            /** Normalized */
+            normalized: string | null;
+            /** Notes */
+            notes?: string[];
+            /** Ocr Fix */
+            ocr_fix?: boolean | null;
+            /** Pre Ocr */
+            pre_ocr?: string | null;
+            /** Raw */
+            raw: string | null;
+        };
+        /** DemoSummary */
+        DemoSummary: {
+            /**
+             * Consistent
+             * @default 0
+             */
+            consistent: number;
+            /**
+             * Coverage
+             * @default 0
+             */
+            coverage: number;
+            /**
+             * Inconsistent
+             * @default 0
+             */
+            inconsistent: number;
+            /**
+             * Skipped
+             * @default 0
+             */
+            skipped: number;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+            /**
+             * Total Including Skipped
+             * @default 0
+             */
+            total_including_skipped: number;
+            /**
+             * Uncertain
+             * @default 0
+             */
+            uncertain: number;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -3034,6 +3291,95 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    demo_check_api_demo_check_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DemoCheckRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DemoCheckResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DemoErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DemoErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DemoErrorResponse"];
+                };
+            };
+        };
+    };
+    demo_fixtures_api_demo_fixtures_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DemoFixturesResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DemoErrorResponse"];
                 };
             };
         };
@@ -6206,6 +6552,26 @@ export interface operations {
         };
     };
     controlled_s05_react_page_controlled_s05_react_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
+            };
+        };
+    };
+    demo_react_shell_demo_react_get: {
         parameters: {
             query?: never;
             header?: never;
