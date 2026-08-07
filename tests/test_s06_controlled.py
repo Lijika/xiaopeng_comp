@@ -3036,3 +3036,108 @@ def test_integrator_projection_binds_each_next_command_and_hides_scope(
         False,
         True,
     ]
+
+
+@pytest.mark.parametrize(
+    "expires_at",
+    [
+        "not-a-number",
+        float("nan"),
+        float("inf"),
+        True,
+        1.0,
+    ],
+)
+def test_integrator_projection_fails_closed_on_malformed_or_expired_expiry(
+    tmp_path: Path,
+    expires_at: object,
+) -> None:
+    service, application_id, _, request, source = _ready_supplement_request(tmp_path)
+    principal = S01CommandPrincipal(
+        subject="s06-integrator",
+        role="integrator",
+        scope="R-OBSERVED/c-demo",
+        source_id="s06-material-source",
+        expires_at=expires_at,  # type: ignore[arg-type]
+    )
+    with pytest.raises(QueryNotFound):
+        service.integrator_supplement_request_view(
+            principal=principal,
+            request_id=request["request_id"],
+            now=102,
+        )
+    with pytest.raises(QueryNotFound):
+        service.integrator_supplement_request_view(
+            principal=principal,
+            request_id="supplement_request_missing00000000000000000000000",
+            now=102,
+        )
+    live = S01CommandPrincipal(
+        subject="s06-integrator",
+        role="integrator",
+        scope="R-OBSERVED/c-demo",
+        source_id="s06-material-source",
+        expires_at=10_000.0,
+    )
+    projection = service.integrator_supplement_request_view(
+        principal=live,
+        request_id=request["request_id"],
+        now=102,
+    )
+    assert projection["status"] == "open"
+
+
+def test_reviewer_and_integrator_derivations_follow_the_same_transition(
+    tmp_path: Path,
+) -> None:
+    service, application_id, _, request, source = _ready_supplement_request(tmp_path)
+    request_id = request["request_id"]
+
+    def reviewer_view(now: int) -> dict[str, object]:
+        return service.supplement_request_view(
+            principal=REVIEWER,
+            request_id=request_id,
+            now=now,
+        )
+
+    def integrator_view(now: int) -> dict[str, object]:
+        return service.integrator_supplement_request_view(
+            principal=SUPPLEMENT_INTEGRATOR,
+            request_id=request_id,
+            now=now,
+        )
+
+    open_reviewer = reviewer_view(102)
+    open_integrator = integrator_view(102)
+    assert open_reviewer["status"] == open_integrator["status"] == "open"
+    assert open_reviewer["current"] is True
+    assert open_integrator["current"] is True
+
+    service.submit_attachment_version(
+        submission=_attachment_submission(request, source, closed=False),
+        idempotency_key="s06-t04-parity-progress",
+        principal=SUPPLEMENT_INTEGRATOR,
+        now=200,
+    )
+    progress_reviewer = reviewer_view(201)
+    progress_integrator = integrator_view(201)
+    assert progress_reviewer["status"] == progress_integrator["status"] == "open"
+    assert progress_reviewer["current"] is True
+    assert progress_integrator["current"] is True
+
+    service.submit_attachment_version(
+        submission=_attachment_submission(request, source, closed=True),
+        idempotency_key="s06-t04-parity-closure",
+        principal=SUPPLEMENT_INTEGRATOR,
+        now=202,
+    )
+    terminal_reviewer = reviewer_view(203)
+    terminal_integrator = integrator_view(203)
+    assert terminal_reviewer["status"] == terminal_integrator["status"] == "fulfilled"
+    assert terminal_reviewer["current"] is False
+    assert terminal_integrator["current"] is False
+
+    # The Integrator projection never exposes Reviewer/application/run data
+    # at any transition point.
+    for projection in (open_integrator, progress_integrator, terminal_integrator):
+        assert INTEGRATOR_INTERNAL_KEYS.isdisjoint(projection)

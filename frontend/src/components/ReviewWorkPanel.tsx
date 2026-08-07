@@ -850,6 +850,51 @@ function SupplementRequestSection({
   );
 }
 
+/** The accepted-supplement presentation rendered once by both review-shell
+ * branches: the server-derived progress banner, the authoritative request
+ * view, and the supplement-specific authoritative reload control.  The
+ * authority-specific reload callbacks stay separate. */
+function SupplementAcceptedBlock({
+  requestView,
+  accepted,
+  convergence,
+  currentRunId,
+  route,
+  onReload,
+  reloadDisabled,
+}: {
+  requestView: UseQueryResult<SupplementRequestView>;
+  accepted: { requestId: string };
+  convergence: CorrectionConvergence;
+  currentRunId: string | null;
+  route: string | null;
+  onReload: () => void;
+  reloadDisabled: boolean;
+}) {
+  return (
+    <>
+      <SupplementProgressBanner
+        requestView={requestView}
+        accepted={accepted}
+        convergence={convergence}
+        currentRunId={currentRunId}
+        route={route}
+      />
+      <SupplementRequestSection requestView={requestView} />
+      <div className="recovery-actions" data-testid="review-supplement-actions">
+        <Button
+          variant="secondary"
+          onClick={onReload}
+          disabled={reloadDisabled}
+          data-testid="supplement-reload-button"
+        >
+          重新加载
+        </Button>
+      </div>
+    </>
+  );
+}
+
 export default function ReviewWorkPanel({ workId }: { workId: string }) {
   const headingRef = useRef<HTMLHeadingElement>(null);
   const queryClient = useQueryClient();
@@ -1575,16 +1620,15 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
             人工核验
           </h2>
           {supplementAccepted && (
-            <>
-              <SupplementProgressBanner
-                requestView={requestView}
-                accepted={acceptedSupplement}
-                convergence={supplementConvergence}
-                currentRunId={gate.data?.current_run_id ?? null}
-                route={gate.data?.route ?? null}
-              />
-              <SupplementRequestSection requestView={requestView} />
-            </>
+            <SupplementAcceptedBlock
+              requestView={requestView}
+              accepted={acceptedSupplement}
+              convergence={supplementConvergence}
+              currentRunId={gate.data?.current_run_id ?? null}
+              route={gate.data?.route ?? null}
+              onReload={handleSupplementReload}
+              reloadDisabled={anyPending}
+            />
           )}
           {correctionAccepted && (
             <CorrectionProgressBanner
@@ -1596,18 +1640,6 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
           )}
           <GateSection applicationId={applicationId ?? ""} />
           <HistorySection history={history} />
-          {supplementAccepted && (
-            <div className="recovery-actions" data-testid="review-supplement-actions">
-              <Button
-                variant="secondary"
-                onClick={handleSupplementReload}
-                disabled={anyPending}
-                data-testid="supplement-reload-button"
-              >
-                重新加载
-              </Button>
-            </div>
-          )}
         </section>
       );
     }
@@ -1690,29 +1722,15 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
         />
       )}
       {supplementAccepted && (
-        <>
-          <SupplementProgressBanner
-            requestView={requestView}
-            accepted={acceptedSupplement}
-            convergence={supplementConvergence}
-            currentRunId={gate.data?.current_run_id ?? null}
-            route={gate.data?.route ?? null}
-          />
-          <SupplementRequestSection requestView={requestView} />
-          <div
-            className="recovery-actions"
-            data-testid="review-supplement-actions"
-          >
-            <Button
-              variant="secondary"
-              onClick={handleSupplementReload}
-              disabled={anyPending}
-              data-testid="supplement-reload-button"
-            >
-              重新加载
-            </Button>
-          </div>
-        </>
+        <SupplementAcceptedBlock
+          requestView={requestView}
+          accepted={acceptedSupplement}
+          convergence={supplementConvergence}
+          currentRunId={gate.data?.current_run_id ?? null}
+          route={gate.data?.route ?? null}
+          onReload={handleSupplementReload}
+          reloadDisabled={anyPending}
+        />
       )}
       <WorkFacts work={data} />
       <WorkspaceSection

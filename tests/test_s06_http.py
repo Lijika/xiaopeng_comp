@@ -4,6 +4,7 @@ from http.cookies import SimpleCookie
 import hashlib
 import json
 from pathlib import Path
+import sqlite3
 import time
 from typing import Any
 
@@ -663,3 +664,62 @@ def test_t04_s06_operations_are_closed_in_the_openapi_document(
     assert receipt_schema["additionalProperties"] is False
     assert "disposition" in receipt_schema["properties"]
     assert "recovery_target" in receipt_schema["properties"]
+
+
+def _corrupt_s02_session(
+    state_path: Path,
+    token: str,
+    expires_at: object,
+) -> None:
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    payload = {
+        "status": "active",
+        "subject": S02_SUBJECT,
+        "roles": ["integrator", "reviewer"],
+        "scope": "R-OBSERVED/c-demo",
+        "issued_at": 100.0,
+        "expires_at": expires_at,
+    }
+    with sqlite3.connect(state_path, timeout=5) as connection:
+        connection.execute(
+            "UPDATE sessions SET payload = ? WHERE item_id = ?",
+            (json.dumps(payload), digest),
+        )
+
+
+def test_t04_integrator_projection_http_fails_closed_on_malformed_expiry(
+    tmp_path: Path,
+) -> None:
+    environment, _ = _http_source(tmp_path)
+    state_path = Path(environment["TASK4_S01_TEST_STATE_PATH"])
+    with UvicornLoopback(
+        environment,
+        app_target="task4_consistency.web.app:create_s02_test_app",
+        app_factory=True,
+    ) as server:
+        _, request = _s06_http_ready_supplement_request(server)
+        request_id = request["request_id"]
+        for expires_at in ("not-a-number", float("nan"), float("inf"), True, 1.0):
+            fresh_page = server.request(
+                "GET",
+                "/controlled/s02",
+                headers={"Authorization": f"Bearer {S02_CREDENTIAL}"},
+                use_session=False,
+            )
+            token = _s02_cookie(fresh_page).removeprefix("s02_session=")
+            _corrupt_s02_session(state_path, token, expires_at)
+            response = server.request(
+                "GET",
+                f"/controlled/s02/api/queries/supplement-requests/{request_id}",
+                headers={"Cookie": f"s02_session={token}"},
+                use_session=False,
+            )
+            assert response.status == 404, (
+                repr(expires_at),
+                response.status,
+                response.text,
+            )
+            assert response.json() == {"detail": {"error": "S02_NOT_FOUND"}}
+            assert "request_id" not in response.text
+            assert "application_id" not in response.text
+            assert request_id not in response.text

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import {
   HttpError,
-  isDefinitiveRejection,
+  isDefinitiveIntegratorRejection,
   type AttachmentSubmissionResponse,
 } from "../api/client";
 import {
@@ -25,6 +25,31 @@ function newIdempotencyKey(): string {
 type IssuedSubmission = {
   command: AttachmentSubmissionCommand;
 };
+
+/** The truthful receipt announcement: every disposition maps to a distinct
+ * announcement, and a replayed original receipt stays ``accepted`` with the
+ * replay made explicit.  The receipt is authoritative server data; the panel
+ * never announces acceptance for any other disposition. */
+function dispositionAnnouncement(
+  receipt: AttachmentSubmissionResponse,
+): string {
+  const reason =
+    receipt.reason_code === null ? "" : `（${receipt.reason_code}）`;
+  switch (receipt.disposition) {
+    case "accepted":
+      return receipt.replayed
+        ? "附件版本已接受（重放原回执）"
+        : "附件版本已接受";
+    case "rejected":
+      return `附件版本被拒绝${reason}`;
+    case "quarantined":
+      return `附件版本被隔离${reason}`;
+    case "awaiting_predecessor":
+      return `附件版本等待前驱${reason}`;
+    default:
+      return `附件版本处置：${receipt.disposition}`;
+  }
+}
 
 /**
  * The Integrator's focused attachment-version panel.  It binds the next
@@ -66,7 +91,7 @@ export default function AttachmentVersionPanel() {
     projection.data !== undefined &&
     (projection.data.status !== "open" || !projection.data.current);
   const transportUnknown =
-    submit.isError && !isDefinitiveRejection(submit.error);
+    submit.isError && !isDefinitiveIntegratorRejection(submit.error);
   const submitBlocked =
     projection.isPending ||
     projection.isError ||
@@ -94,10 +119,10 @@ export default function AttachmentVersionPanel() {
         setIssued(null);
       },
       onError: (error) => {
-        if (!isDefinitiveRejection(error)) return;
+        if (!isDefinitiveIntegratorRejection(error)) return;
         setIssued(null);
         setRequiresReload(true);
-        setRejectionReason(error.reasonCode ?? "rejected");
+        setRejectionReason(error.reasonCode ?? error.errorCode ?? "rejected");
       },
     });
   };
@@ -110,10 +135,10 @@ export default function AttachmentVersionPanel() {
         setIssued(null);
       },
       onError: (error) => {
-        if (!isDefinitiveRejection(error)) return;
+        if (!isDefinitiveIntegratorRejection(error)) return;
         setIssued(null);
         setRequiresReload(true);
-        setRejectionReason(error.reasonCode ?? "rejected");
+        setRejectionReason(error.reasonCode ?? error.errorCode ?? "rejected");
       },
     });
   };
@@ -337,6 +362,13 @@ export default function AttachmentVersionPanel() {
       {lastReceipt !== null && (
         <section className="panel" data-testid="integrator-receipt">
           <h3>提交回执（服务端权威）</h3>
+          <p
+            role="status"
+            aria-live="polite"
+            data-testid="integrator-disposition-announcement"
+          >
+            {dispositionAnnouncement(lastReceipt)}
+          </p>
           <dl className="facts">
             <div>
               <dt>处置</dt>
@@ -415,7 +447,7 @@ export default function AttachmentVersionPanel() {
             : requiresReload
               ? "提交未接受"
               : lastReceipt !== null
-                ? "附件版本已接受"
+                ? dispositionAnnouncement(lastReceipt)
                 : "等待操作"}
       </p>
     </section>

@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { HttpError, request } from "./client";
+import {
+  HttpError,
+  isDefinitiveIntegratorRejection,
+  request,
+} from "./client";
 
 describe("thin same-origin fetch client", () => {
   it("requests no-store with same-origin credentials and decodes JSON", async () => {
@@ -83,5 +87,55 @@ describe("thin same-origin fetch client", () => {
     expect((error as HttpError).status).toBe(404);
     expect((error as HttpError).errorCode).toBe("S07_NOT_FOUND");
     expect((error as HttpError).message).not.toContain("hidden");
+  });
+});
+
+describe("Integrator definitive rejection classifier (T04)", () => {
+  function httpError(status: number, errorCode: string | undefined): HttpError {
+    return new HttpError(status, errorCode === undefined ? {} : { error: errorCode });
+  }
+
+  it("treats the structured S02_FORBIDDEN 403 as definitive", () => {
+    expect(
+      isDefinitiveIntegratorRejection(httpError(403, "S02_FORBIDDEN")),
+    ).toBe(true);
+  });
+
+  it("treats the structured S02_UNAVAILABLE 503 as definitive", () => {
+    expect(
+      isDefinitiveIntegratorRejection(httpError(503, "S02_UNAVAILABLE")),
+    ).toBe(true);
+  });
+
+  it("keeps a generic 403 unknown (not definitive)", () => {
+    expect(isDefinitiveIntegratorRejection(httpError(403, undefined))).toBe(
+      false,
+    );
+    expect(isDefinitiveIntegratorRejection(httpError(403, "S02_OTHER"))).toBe(
+      false,
+    );
+  });
+
+  it("keeps a generic or unrelated 503 unknown (not definitive)", () => {
+    expect(isDefinitiveIntegratorRejection(httpError(503, undefined))).toBe(
+      false,
+    );
+    expect(isDefinitiveIntegratorRejection(httpError(503, "S03_UNAVAILABLE"))).toBe(
+      false,
+    );
+  });
+
+  it("keeps non-HTTP transport failures unknown", () => {
+    expect(
+      isDefinitiveIntegratorRejection(new TypeError("fetch failed")),
+    ).toBe(false);
+  });
+
+  it("keeps the registered 404/409/413/422 statuses definitive", () => {
+    for (const status of [404, 409, 413, 422]) {
+      expect(isDefinitiveIntegratorRejection(httpError(status, "S02_X"))).toBe(
+        true,
+      );
+    }
   });
 });

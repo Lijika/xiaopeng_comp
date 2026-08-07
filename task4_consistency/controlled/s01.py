@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import secrets
 import tempfile
 import threading
@@ -7216,49 +7217,16 @@ class ControlledScenarioService:
             app = self._reviewer_application_authority(
                 principal, request["application_id"]
             )
-            successors = [
-                record
-                for record in self._store.review_records
-                if record.get("request_id") == request_id
-                and record.get("record_type")
-                in {
-                    "supplement_request_fulfilled",
-                    "supplement_request_expired",
-                    "supplement_request_invalidated",
-                }
-            ]
-            if len(successors) > 1:
-                raise RuntimeError("supplement request terminal authority is not unique")
-            status = successors[0]["status"] if successors else "open"
-            progress = sorted(
-                (
-                    record
-                    for record in self._store.review_records
-                    if record.get("record_type") == "supplement_request_progress"
-                    and record.get("request_id") == request_id
-                ),
-                key=lambda record: int(record["request_progress_revision"]),
+            derivation = self._supplement_request_lifecycle_derivation(
+                request=request,
+                app=app,
+                query_time=query_time,
             )
-            expected_evidence_revision = (
-                progress[-1]["evidence_revision"]
-                if progress
-                else request["expected_evidence_revision"]
-            )
-            current = (
-                status == "open"
-                and query_time < float(request["due_at"])
-                and app.get("cycle") == request["cycle"]
-                and app.get("evidence_revision") == expected_evidence_revision
-                and (
-                    app.get("phase") == "Supplement"
-                    and app.get("route") == "supplement_pending"
-                    and not progress
-                    or app.get("phase") == "Awaiting Evidence"
-                    and app.get("route") == "awaiting_evidence"
-                    and bool(progress)
-                    and app.get("current_run_id") is None
-                )
-            )
+            successors = derivation["successors"]
+            status = derivation["status"]
+            progress = derivation["progress"]
+            expected_evidence_revision = derivation["expected_evidence_revision"]
+            current = derivation["current"]
             material_requirement = {
                 "material_requirement_id": request["material_requirement_id"],
                 "document_role": request["document_role"],
@@ -7352,12 +7320,7 @@ class ControlledScenarioService:
         internals.
         """
         query_time = float(self._clock() if now is None else now)
-        if not self._valid_registered_principal(principal) or (
-            principal.expires_at is not None
-            and not isinstance(principal.expires_at, bool)
-            and isinstance(principal.expires_at, (int, float))
-            and float(principal.expires_at) <= query_time
-        ):
+        if not self._registered_principal_live(principal, now=query_time):
             raise QueryNotFound(request_id)
         with self._lock:
             self._reload_store()
@@ -7380,49 +7343,15 @@ class ControlledScenarioService:
             app = self._store.applications.get(request["application_id"])
             self._require_application_state_authority(app)
             assert app is not None
-            successors = [
-                record
-                for record in self._store.review_records
-                if record.get("request_id") == request_id
-                and record.get("record_type")
-                in {
-                    "supplement_request_fulfilled",
-                    "supplement_request_expired",
-                    "supplement_request_invalidated",
-                }
-            ]
-            if len(successors) > 1:
-                raise RuntimeError("supplement request terminal authority is not unique")
-            status = successors[0]["status"] if successors else "open"
-            progress = sorted(
-                (
-                    record
-                    for record in self._store.review_records
-                    if record.get("record_type") == "supplement_request_progress"
-                    and record.get("request_id") == request_id
-                ),
-                key=lambda record: int(record["request_progress_revision"]),
+            derivation = self._supplement_request_lifecycle_derivation(
+                request=request,
+                app=app,
+                query_time=query_time,
             )
-            expected_evidence_revision = (
-                progress[-1]["evidence_revision"]
-                if progress
-                else request["expected_evidence_revision"]
-            )
-            current = (
-                status == "open"
-                and query_time < float(request["due_at"])
-                and app.get("cycle") == request["cycle"]
-                and app.get("evidence_revision") == expected_evidence_revision
-                and (
-                    app.get("phase") == "Supplement"
-                    and app.get("route") == "supplement_pending"
-                    and not progress
-                    or app.get("phase") == "Awaiting Evidence"
-                    and app.get("route") == "awaiting_evidence"
-                    and bool(progress)
-                    and app.get("current_run_id") is None
-                )
-            )
+            status = derivation["status"]
+            progress = derivation["progress"]
+            expected_evidence_revision = derivation["expected_evidence_revision"]
+            current = derivation["current"]
             material_requirement = {
                 "material_requirement_id": request["material_requirement_id"],
                 "document_role": request["document_role"],
@@ -7492,6 +7421,69 @@ class ControlledScenarioService:
                 "next_batch_item_sequence": next_progress_revision,
                 "batch": batch,
             }
+
+    def _supplement_request_lifecycle_derivation(
+        self,
+        *,
+        request: dict[str, Any],
+        app: dict[str, Any],
+        query_time: float,
+    ) -> dict[str, Any]:
+        """The single server derivation of a supplement request's terminal
+        authority, progress authority, expected evidence revision and
+        currentness.  Both the Reviewer and Integrator projections call it
+        from immutable Lifecycle facts; each keeps its own authorization and
+        minimized response shape."""
+        successors = [
+            record
+            for record in self._store.review_records
+            if record.get("request_id") == request["request_id"]
+            and record.get("record_type")
+            in {
+                "supplement_request_fulfilled",
+                "supplement_request_expired",
+                "supplement_request_invalidated",
+            }
+        ]
+        if len(successors) > 1:
+            raise RuntimeError("supplement request terminal authority is not unique")
+        status = successors[0]["status"] if successors else "open"
+        progress = sorted(
+            (
+                record
+                for record in self._store.review_records
+                if record.get("record_type") == "supplement_request_progress"
+                and record.get("request_id") == request["request_id"]
+            ),
+            key=lambda record: int(record["request_progress_revision"]),
+        )
+        expected_evidence_revision = (
+            progress[-1]["evidence_revision"]
+            if progress
+            else request["expected_evidence_revision"]
+        )
+        current = (
+            status == "open"
+            and query_time < float(request["due_at"])
+            and app.get("cycle") == request["cycle"]
+            and app.get("evidence_revision") == expected_evidence_revision
+            and (
+                app.get("phase") == "Supplement"
+                and app.get("route") == "supplement_pending"
+                and not progress
+                or app.get("phase") == "Awaiting Evidence"
+                and app.get("route") == "awaiting_evidence"
+                and bool(progress)
+                and app.get("current_run_id") is None
+            )
+        )
+        return {
+            "successors": successors,
+            "status": status,
+            "progress": progress,
+            "expected_evidence_revision": expected_evidence_revision,
+            "current": current,
+        }
 
     def correct_field_observation(
         self,
@@ -13069,6 +13061,30 @@ class ControlledScenarioService:
             and isinstance(principal.source_id, str)
             and bool(principal.source_id)
             and principal.source_id.strip() == principal.source_id
+        )
+
+    @classmethod
+    def _registered_principal_live(
+        cls,
+        principal: S01CommandPrincipal,
+        *,
+        now: float,
+    ) -> bool:
+        """The registered Integrator identity seam for the read-only request
+        projection: the principal must be a registered integrator whose
+        expiry (when present) is a finite numeric timestamp strictly after
+        ``now``.  Every other expiry form (boolean, string, NaN, infinity,
+        expired) fails closed with the same sanitized query-not-found."""
+        if not cls._valid_registered_principal(principal):
+            return False
+        expires_at = principal.expires_at
+        if expires_at is None:
+            return True
+        return (
+            not isinstance(expires_at, bool)
+            and isinstance(expires_at, (int, float))
+            and math.isfinite(float(expires_at))
+            and float(expires_at) > now
         )
 
     @staticmethod

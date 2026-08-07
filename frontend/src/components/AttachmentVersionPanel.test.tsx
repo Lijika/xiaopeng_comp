@@ -329,3 +329,210 @@ describe("AttachmentVersionPanel (T04)", () => {
     expect(submit.disabled).toBe(true);
   });
 });
+
+describe("AttachmentVersionPanel disposition announcements (T04)", () => {
+  it.each([
+    [
+      { disposition: "accepted", replayed: false },
+      "附件版本已接受",
+    ],
+    [
+      { disposition: "accepted", replayed: true },
+      "附件版本已接受（重放原回执）",
+    ],
+    [
+      { disposition: "rejected", reason_code: "intake.request_context_mismatch" },
+      "附件版本被拒绝（intake.request_context_mismatch）",
+    ],
+    [
+      { disposition: "quarantined", reason_code: "intake.integrity_failed" },
+      "附件版本被隔离（intake.integrity_failed）",
+    ],
+    [
+      { disposition: "awaiting_predecessor", reason_code: "intake.sequence_gap" },
+      "附件版本等待前驱（intake.sequence_gap）",
+    ],
+  ])(
+    "announces the truthful receipt disposition %#",
+    async (overrides: Record<string, unknown>, expected: string) => {
+      const router = await mountOpenProjection();
+      fireEvent.change(screen.getByTestId("integrator-envelope-input"), {
+        target: { value: JSON.stringify({ envelope_id: "envelope_t04disp" }) },
+      });
+      const receipt = receiptPayload(overrides);
+      const submitPath = SUBMIT_PATH;
+      router.calls.length = 0;
+      const handler = router.calls.length === 0 ? undefined : undefined;
+      void handler;
+      fetchRouter({
+        [`GET ${VIEW_PATH}`]: () => jsonResponse(projectionPayload()),
+        [`POST ${submitPath}`]: () => jsonResponse(receipt),
+      });
+      await userEvent.click(screen.getByRole("button", { name: "提交附件版本" }));
+      await waitFor(() =>
+        expect(screen.getByTestId("integrator-disposition-announcement")).toHaveTextContent(
+          expected,
+        ),
+      );
+      expect(
+        screen.getByTestId("integrator-command-status").textContent,
+      ).toContain(expected);
+      if (receipt.disposition === "accepted") {
+        expect(
+          screen.getByTestId("integrator-receipt-replayed").textContent,
+        ).toContain(String(receipt.replayed));
+      } else {
+        expect(
+          screen.getByTestId("integrator-command-status").textContent,
+        ).not.toContain("附件版本已接受");
+      }
+    },
+  );
+
+  it("announces a replayed original receipt as accepted without a second effect", async () => {
+    await mountOpenProjection();
+    fireEvent.change(screen.getByTestId("integrator-envelope-input"), {
+      target: { value: JSON.stringify({ envelope_id: "envelope_t04replay" }) },
+    });
+    const replayReceipt = receiptPayload({
+      replayed: true,
+      disposition: "accepted",
+      request_status: "open",
+    });
+    const router = fetchRouter({
+      [`GET ${VIEW_PATH}`]: () => jsonResponse(projectionPayload()),
+      [`POST ${SUBMIT_PATH}`]: () => jsonResponse(replayReceipt),
+    });
+    await userEvent.click(screen.getByRole("button", { name: "提交附件版本" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("integrator-disposition-announcement")).toHaveTextContent(
+        "附件版本已接受（重放原回执）",
+      ),
+    );
+    expect(
+      screen.getByTestId("integrator-receipt-replayed").textContent,
+    ).toContain("true");
+    expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(1);
+  });
+});
+
+describe("AttachmentVersionPanel S02 definitive classification (T04)", () => {
+  it("fences after a structured S02_FORBIDDEN 403 and rotates the key only after an authoritative reload", async () => {
+    const router = fetchRouter({
+      [`GET ${VIEW_PATH}`]: () => jsonResponse(projectionPayload()),
+      [`POST ${SUBMIT_PATH}`]: () =>
+        jsonResponse({ detail: { error: "S02_FORBIDDEN" } }, 403),
+    });
+    window.history.pushState(
+      null,
+      "",
+      `/controlled/s02/react?request=${encodeURIComponent(REQUEST_ID)}`,
+    );
+    renderWithQuery(<AttachmentVersionPanel />);
+    await waitFor(() =>
+      expect(screen.getByTestId("integrator-projection-status")).toBeInTheDocument(),
+    );
+    fireEvent.change(screen.getByTestId("integrator-envelope-input"), {
+      target: { value: JSON.stringify({ envelope_id: "envelope_t04forbidden" }) },
+    });
+    await userEvent.click(screen.getByRole("button", { name: "提交附件版本" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("integrator-reload-note")).toHaveTextContent(
+        "S02_FORBIDDEN",
+      ),
+    );
+    const submit = screen.getByRole("button", {
+      name: "提交附件版本",
+    }) as HTMLButtonElement;
+    expect(submit.disabled).toBe(true);
+    expect(
+      (screen.getByTestId("integrator-envelope-input") as HTMLTextAreaElement)
+        .disabled,
+    ).toBe(true);
+    expect(screen.queryByRole("button", { name: "重试" })).not.toBeInTheDocument();
+    const firstKey = (
+      router.calls.find((call) => call.method === "POST")?.body as {
+        idempotency_key: string;
+      }
+    ).idempotency_key;
+
+    // Authoritative projection reload clears the fence; the next semantic
+    // command uses a rotated key.
+    const reloadedRouter = fetchRouter({
+      [`GET ${VIEW_PATH}`]: () => jsonResponse(projectionPayload()),
+      [`POST ${SUBMIT_PATH}`]: () => jsonResponse(receiptPayload()),
+    });
+    await userEvent.click(screen.getByRole("button", { name: "重新加载投影" }));
+    await waitFor(() =>
+      expect(
+        (screen.getByRole("button", { name: "提交附件版本" }) as HTMLButtonElement)
+          .disabled,
+      ).toBe(false),
+    );
+    fireEvent.change(screen.getByTestId("integrator-envelope-input"), {
+      target: { value: JSON.stringify({ envelope_id: "envelope_t04forbidden2" }) },
+    });
+    await userEvent.click(screen.getByRole("button", { name: "提交附件版本" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("integrator-receipt")).toBeInTheDocument(),
+    );
+    const rejectedPosts = router.calls.filter((call) => call.method === "POST");
+    expect(rejectedPosts).toHaveLength(1);
+    const posts = reloadedRouter.calls.filter((call) => call.method === "POST");
+    expect(posts).toHaveLength(1);
+    const secondKey = (posts[0].body as { idempotency_key: string })
+      .idempotency_key;
+    expect(secondKey).not.toBe(firstKey);
+  });
+
+  it("keeps an unrecognized generic 503 unknown and replays the exact command and key", async () => {
+    let posts = 0;
+    let captured: unknown;
+    fetchRouter({
+      [`GET ${VIEW_PATH}`]: () => jsonResponse(projectionPayload()),
+      [`POST ${SUBMIT_PATH}`]: () => {
+        posts += 1;
+        return Promise.resolve(
+          jsonResponse({ detail: { message: "generic gateway" } }, 503),
+        );
+      },
+    });
+    window.history.pushState(
+      null,
+      "",
+      `/controlled/s02/react?request=${encodeURIComponent(REQUEST_ID)}`,
+    );
+    renderWithQuery(<AttachmentVersionPanel />);
+    await waitFor(() =>
+      expect(screen.getByTestId("integrator-projection-status")).toBeInTheDocument(),
+    );
+    fireEvent.change(screen.getByTestId("integrator-envelope-input"), {
+      target: { value: JSON.stringify({ envelope_id: "envelope_t04generic503" }) },
+    });
+    await userEvent.click(screen.getByRole("button", { name: "提交附件版本" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("integrator-unknown")).toHaveTextContent(
+        "结果未知",
+      ),
+    );
+    expect(screen.getByRole("button", { name: "重试" })).toBeInTheDocument();
+    captured = fetchMockLastPostBody();
+    await userEvent.click(screen.getByRole("button", { name: "重试" }));
+    await waitFor(() => expect(posts).toBe(2));
+    expect(fetchMockLastPostBody()).toEqual(captured);
+    expect(screen.queryByTestId("integrator-reload-note")).not.toBeInTheDocument();
+  });
+});
+
+function fetchMockLastPostBody(): unknown {
+  const mock = fetch as unknown as { mock: { calls: Array<[unknown, RequestInit | undefined]> } };
+  const calls = mock.mock.calls;
+  for (let index = calls.length - 1; index >= 0; index -= 1) {
+    const call = calls[index];
+    const method = (call[1]?.method ?? "GET") as string;
+    if (method === "POST" && call[1]?.body !== undefined) {
+      return JSON.parse(String(call[1].body));
+    }
+  }
+  return undefined;
+}

@@ -88,6 +88,46 @@ export function isDefinitiveRejection(
 }
 
 /**
+ * The Integrator panel's definitive-rejection classifier.  The registered
+ * S02 pre-command responses are the evidence: a structured ``S02_FORBIDDEN``
+ * 403 or ``S02_UNAVAILABLE`` 503 is definitive, as are the registered
+ * 404/409/413/422 statuses.  Every other 403/503, an unreadable payload, or
+ * a network/lost response stays unknown and retains the byte-identical
+ * command and key for exact replay.
+ */
+const INTEGRATOR_DEFINITIVE_STATUSES: ReadonlySet<number> = new Set([
+  404,
+  409,
+  413,
+  422,
+]);
+const INTEGRATOR_403_DEFINITIVE_ERROR_CODES: ReadonlySet<string> = new Set([
+  "S02_FORBIDDEN",
+]);
+const INTEGRATOR_503_DEFINITIVE_ERROR_CODES: ReadonlySet<string> = new Set([
+  "S02_UNAVAILABLE",
+]);
+
+export function isDefinitiveIntegratorRejection(
+  error: unknown,
+): error is HttpError {
+  if (!(error instanceof HttpError)) return false;
+  if (error.status === 403) {
+    return (
+      error.errorCode !== undefined &&
+      INTEGRATOR_403_DEFINITIVE_ERROR_CODES.has(error.errorCode)
+    );
+  }
+  if (error.status === 503) {
+    return (
+      error.errorCode !== undefined &&
+      INTEGRATOR_503_DEFINITIVE_ERROR_CODES.has(error.errorCode)
+    );
+  }
+  return INTEGRATOR_DEFINITIVE_STATUSES.has(error.status);
+}
+
+/**
  * The one thin same-origin JSON fetch adapter.  It owns credentials, no-store
  * requests, response decoding, and structured HTTP errors; it owns no business
  * transition and adds no generated runtime SDK.
