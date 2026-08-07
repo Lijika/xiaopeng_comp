@@ -2434,3 +2434,256 @@ def test_close_drain_fence_invalidate_restart_and_resume(
         principal=REVIEWER,
         application_id=str(request["application_id"]),
     ) == history_before_late
+
+
+def _workspace_eligibility(
+    service: ControlledScenarioService,
+    application_id: str,
+    *,
+    now: int = 100,
+) -> dict[str, object]:
+    workspace = service.workspace_view(
+        application_id,
+        role="reviewer",
+        scope=REVIEWER.scope,
+        subject=REVIEWER.subject,
+        now=now,
+    )
+    return dict(workspace["business_exception_eligibility"])
+
+
+def _reject_brand_exception(
+    service: ControlledScenarioService,
+    request: dict[str, object],
+    *,
+    now: int = 103,
+) -> dict[str, object]:
+    view = service.business_exception_view(
+        principal=APPROVER,
+        request_id=str(request["request_id"]),
+        now=now - 1,
+    )
+    claim = service.claim_exception_work_item(
+        principal=APPROVER,
+        work_item_id=str(request["work_item_id"]),
+        expected_context=view["command_context"],
+        now=now - 1,
+    )
+    return service.decide_business_exception(
+        principal=APPROVER,
+        request_id=str(request["request_id"]),
+        work_item_id=str(request["work_item_id"]),
+        decision="rejected",
+        reason_code="DOCUMENTED_VARIANCE_REJECTED",
+        expected_fence=int(claim["claim_fence"]),
+        expected_context=view["command_context"],
+        idempotency_key=f"reject-{request['request_id']}",
+        now=now,
+    )
+
+
+def test_workspace_projects_eligible_exception_for_claimed_brand_finding(
+    tmp_path: Path,
+) -> None:
+    service, application_id, _, _, _ = _ready_brand_exception(tmp_path)
+
+    assert _workspace_eligibility(service, application_id) == {
+        "eligible": True,
+        "request_reason": "DOCUMENTED_BRAND_VARIANCE",
+        "ineligible_reason_code": None,
+        "predecessor_request_id": None,
+    }
+
+
+def test_workspace_projects_unclaimed_review_as_stale_ineligible(
+    tmp_path: Path,
+) -> None:
+    service = ControlledScenarioService(
+        fixture_root=ROOT / "fixtures" / "applications",
+        rules_path=ROOT / "configs" / "rules_auto_lease.yaml",
+        state_path=tmp_path / "unclaimed.sqlite3",
+        scenario_id="app_bad_brand.json",
+        exception_approver_subject=APPROVER.subject,
+    )
+    admitted = service.submit_demo(
+        scenario_id="app_bad_brand.json",
+        idempotency_key="s05-ws-unclaimed-intake",
+        principal=INTEGRATOR,
+    )
+    assert admitted.application_id is not None
+    assert service.process_next_job().status == "complete"
+    service.refresh_projection()
+
+    eligibility = _workspace_eligibility(service, admitted.application_id)
+    assert eligibility["eligible"] is False
+    assert eligibility["request_reason"] is None
+    assert eligibility["predecessor_request_id"] is None
+    assert eligibility["ineligible_reason_code"] == "STALE_REVIEW_CONTEXT"
+
+
+def test_workspace_projects_protected_vin_finding_as_ineligible(
+    tmp_path: Path,
+) -> None:
+    service, application_id, _, _, _ = _ready_scenario_finding(
+        tmp_path,
+        scenario_id="app_s04_bad_vin.json",
+        rule_id="R_VIN_CROSS",
+    )
+
+    eligibility = _workspace_eligibility(service, application_id)
+    assert eligibility["eligible"] is False
+    assert eligibility["request_reason"] is None
+    assert eligibility["ineligible_reason_code"] == "PROTECTED_CHECK_NOT_WAIVABLE"
+
+
+def test_workspace_projects_non_waivable_model_finding_as_ineligible(
+    tmp_path: Path,
+) -> None:
+    service, application_id, _, _, _ = _ready_scenario_finding(
+        tmp_path,
+        scenario_id="app_bad_model.json",
+        rule_id="R_MODEL_CROSS",
+    )
+
+    eligibility = _workspace_eligibility(service, application_id)
+    assert eligibility["eligible"] is False
+    assert eligibility["request_reason"] is None
+    assert eligibility["ineligible_reason_code"] == (
+        "CHECK_NOT_WAIVABLE_BY_PINNED_RELEASE"
+    )
+
+
+def test_workspace_projects_closed_exception_operations_as_ineligible(
+    tmp_path: Path,
+) -> None:
+    service, application_id, _, _, _ = _ready_brand_exception(tmp_path)
+    closed = service.close_business_exception_operations(
+        principal=ROUTER,
+        idempotency_key="s05-ws-close",
+        now=101,
+    )
+    assert closed["status"] == "accepted"
+
+    eligibility = _workspace_eligibility(service, application_id, now=102)
+    assert eligibility["eligible"] is False
+    assert eligibility["request_reason"] is None
+    assert eligibility["ineligible_reason_code"] == (
+        "BUSINESS_EXCEPTION_OPERATIONS_CLOSED"
+    )
+
+
+def test_workspace_projects_same_run_rerequest_as_not_material(
+    tmp_path: Path,
+) -> None:
+    service, application_id, work_item_id, claim, finding = _ready_brand_exception(
+        tmp_path
+    )
+    request = _request_brand_exception(service, work_item_id, claim, finding)
+    rejection = _reject_brand_exception(service, request)
+    assert rejection["status"] == "accepted"
+    successor = str(rejection["successor_work_item_id"])
+    successor_view = service.review_work_item_view(
+        principal=REVIEWER,
+        work_item_id=successor,
+        now=105,
+    )
+    service.claim_review_work_item(
+        principal=REVIEWER,
+        work_item_id=successor,
+        expected_context=successor_view["command_context"],
+        now=105,
+    )
+
+    eligibility = _workspace_eligibility(service, application_id, now=105)
+    assert eligibility["eligible"] is False
+    assert eligibility["request_reason"] is None
+    assert eligibility["predecessor_request_id"] is None
+    assert eligibility["ineligible_reason_code"] == "EXCEPTION_REREQUEST_NOT_MATERIAL"
+
+
+def test_workspace_projects_new_run_rerequest_as_eligible_with_predecessor(
+    tmp_path: Path,
+) -> None:
+    service, application_id, work_item_id, claim, finding = _ready_brand_exception(
+        tmp_path
+    )
+    request = _request_brand_exception(service, work_item_id, claim, finding)
+    rejection = _reject_brand_exception(service, request)
+    successor = str(rejection["successor_work_item_id"])
+    successor_view = service.review_work_item_view(
+        principal=REVIEWER,
+        work_item_id=successor,
+        now=105,
+    )
+    successor_claim = service.claim_review_work_item(
+        principal=REVIEWER,
+        work_item_id=successor,
+        expected_context=successor_view["command_context"],
+        now=105,
+    )
+    workspace = service.workspace_view(
+        application_id,
+        role="reviewer",
+        scope=REVIEWER.scope,
+        subject=REVIEWER.subject,
+        now=105,
+    )
+    brand = next(
+        item
+        for item in workspace["mandatory_blockers"]
+        if item["rule_id"] == "R_BRAND_CROSS"
+    )
+    source = next(
+        link for link in brand["evidence_links"] if link["document_id"] == "pol"
+    )
+    corrected = service.correct_field_observation(
+        principal=REVIEWER,
+        application_id=application_id,
+        work_item_id=successor,
+        expected_fence=int(successor_claim["claim_fence"]),
+        expected_context=successor_view["command_context"],
+        idempotency_key="s05-ws-rerequest-correction",
+        correction={
+            "schema_version": "field-observation-correction/1",
+            "finding_id": brand["finding_id"],
+            "observation_id": source["observation_id"],
+            "document_id": source["document_id"],
+            "document_role": source["document_role"],
+            "field": source["field"],
+            "raw": "HONDA",
+            "source_location": {
+                key: source[key]
+                for key in ("source_sha256", "source_page", "source_region")
+            },
+            "reason_code": "SOURCE_VALUE_MISREAD",
+        },
+        now=106,
+    )
+    assert corrected["status"] == "accepted"
+    assert service.process_next_job().status == "complete"
+    service.refresh_projection()
+    queue = service.queue_view(
+        role="reviewer",
+        scope=REVIEWER.scope,
+        subject=REVIEWER.subject,
+        now=108,
+    )
+    new_item = queue["items"][0]
+    new_view = service.review_work_item_view(
+        principal=REVIEWER,
+        work_item_id=str(new_item["work_item_id"]),
+        now=108,
+    )
+    service.claim_review_work_item(
+        principal=REVIEWER,
+        work_item_id=str(new_item["work_item_id"]),
+        expected_context=new_view["command_context"],
+        now=108,
+    )
+
+    assert _workspace_eligibility(service, application_id, now=108) == {
+        "eligible": True,
+        "request_reason": "DOCUMENTED_BRAND_VARIANCE",
+        "ineligible_reason_code": None,
+        "predecessor_request_id": str(request["request_id"]),
+    }

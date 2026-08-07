@@ -1246,6 +1246,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/controlled/s05/react": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Controlled S05 React Page
+         * @description The Exception Approver React shell: the same built artifact as the
+         *     Reviewer/Integrator shells, served only under the existing Exception
+         *     Approver bearer credential and issuing no session and no authority.  The
+         *     ``request`` query value is presentation/navigation only; the shell reads
+         *     it and the S05 API remains the sole authority.
+         */
+        get: operations["controlled_s05_react_page_controlled_s05_react_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1424,6 +1448,22 @@ export interface components {
             severity: string;
             /** Verdict */
             verdict: string;
+        };
+        /**
+         * S01BusinessExceptionEligibility
+         * @description The server-owned closed request-eligibility projection.  All four keys
+         *     are always serialized with explicit nulls so the client never invents a
+         *     reason, an ineligible code, or a predecessor.
+         */
+        S01BusinessExceptionEligibility: {
+            /** Eligible */
+            eligible: boolean;
+            /** Ineligible Reason Code */
+            ineligible_reason_code?: string | null;
+            /** Predecessor Request Id */
+            predecessor_request_id?: string | null;
+            /** Request Reason */
+            request_reason?: string | null;
         };
         /** S01ClaimResult */
         S01ClaimResult: {
@@ -2513,6 +2553,7 @@ export interface components {
             application_id: string;
             /** Assigned Subject */
             assigned_subject: string;
+            business_exception_eligibility?: components["schemas"]["S01BusinessExceptionEligibility"] | null;
             /** Claim Expires At */
             claim_expires_at: number;
             /** Claim Fence */
@@ -2542,6 +2583,293 @@ export interface components {
             track: string;
             /** Work Item Id */
             work_item_id: string;
+        };
+        /** T05BusinessExceptionOperationsResult */
+        T05BusinessExceptionOperationsResult: {
+            /** Changed At */
+            changed_at?: number | null;
+            /** Invalidated Request Ids */
+            invalidated_request_ids: string[];
+            /** Operations */
+            operations: string;
+            /** Reason Code */
+            reason_code?: string | null;
+            /** Replayed */
+            replayed: boolean;
+            /** Revision */
+            revision: number;
+            /** Status */
+            status: string;
+            /** Unchanged */
+            unchanged?: boolean | null;
+            /** Unresolved Request Count */
+            unresolved_request_count: number;
+        };
+        /** T05BusinessExceptionOperationsStatus */
+        T05BusinessExceptionOperationsStatus: {
+            /** Changed At */
+            changed_at?: number | null;
+            /** Operations */
+            operations: string;
+            /** Reason Code */
+            reason_code?: string | null;
+            /** Revision */
+            revision: number;
+            /** Unresolved Request Count */
+            unresolved_request_count: number;
+        };
+        /** T05BusinessExceptionRequestResult */
+        T05BusinessExceptionRequestResult: {
+            /** Application Id */
+            application_id: string;
+            /** Evidence Revision */
+            evidence_revision: number;
+            /** Expires At */
+            expires_at: number;
+            /** Finding Id */
+            finding_id: string;
+            /** Lifecycle Revision */
+            lifecycle_revision: number;
+            /** Phase */
+            phase: string;
+            /** Replayed */
+            replayed: boolean;
+            /** Request Id */
+            request_id: string;
+            /** Route */
+            route: string;
+            /** Status */
+            status: string;
+            /** Work Item Id */
+            work_item_id: string;
+        };
+        /** T05BusinessExceptionView */
+        T05BusinessExceptionView: {
+            /** Actions */
+            actions: string[];
+            /** Application Reference */
+            application_reference: string;
+            /** Checker Build */
+            checker_build: string;
+            /** Claim Expires At */
+            claim_expires_at: number;
+            /** Claim Fence */
+            claim_fence: number;
+            /** Claim Status */
+            claim_status: string;
+            /** Claim Subject */
+            claim_subject?: string | null;
+            command_context: components["schemas"]["T05ExceptionCommandContext"];
+            /** Current */
+            current: boolean;
+            /** Currentness Reason */
+            currentness_reason: string;
+            /** Evidence References */
+            evidence_references: components["schemas"]["T05EvidenceReference"][];
+            /** Evidence Snapshot Digest */
+            evidence_snapshot_digest: string;
+            /** Evidence Snapshot Id */
+            evidence_snapshot_id: string;
+            /** Expires At */
+            expires_at: number;
+            finding: components["schemas"]["T05ExceptionFinding"];
+            /** Projection Watermark */
+            projection_watermark: number;
+            /** Release Digest */
+            release_digest: string;
+            /** Release Id */
+            release_id: string;
+            /** Request Id */
+            request_id: string;
+            /** Request Reason */
+            request_reason: string;
+            /** Requested At */
+            requested_at: number;
+            requester: components["schemas"]["T05RequesterReference"];
+            /** Run Id */
+            run_id: string;
+            /** Schema Version */
+            schema_version: string;
+            /** Scope */
+            scope: string;
+            /** Status */
+            status: string;
+            /** Waiver Policy Digest */
+            waiver_policy_digest: string;
+            /** Waiver Policy Id */
+            waiver_policy_id: string;
+            /** Work Item Id */
+            work_item_id: string;
+        };
+        /**
+         * T05EvidenceReference
+         * @description The minimized evidence reference of the approver view: metadata only,
+         *     never raw values, OCR text, credentials, or object paths.
+         */
+        T05EvidenceReference: {
+            /** Document Role */
+            document_role?: string | null;
+            /** Field */
+            field?: string | null;
+            /** Observation Id */
+            observation_id?: string | null;
+            /** Source Page */
+            source_page?: number | null;
+            /** Source Region */
+            source_region?: string | null;
+        };
+        /** T05ExceptionClaimResult */
+        T05ExceptionClaimResult: {
+            /** Claim Expires At */
+            claim_expires_at: number;
+            /** Claim Fence */
+            claim_fence: number;
+            /** Claim Subject */
+            claim_subject?: string | null;
+            /** Request Id */
+            request_id: string;
+            /** Status */
+            status: string;
+            /** Work Item Id */
+            work_item_id: string;
+        };
+        /**
+         * T05ExceptionCommandContext
+         * @description The exact fixed context of the S05 claim/decide/expire/invalidate
+         *     command surface (six keys).  The domain compares it by exact equality, so
+         *     the closed shape prevents arbitrary keys from hiding a missing revision.
+         */
+        T05ExceptionCommandContext: {
+            /** Current Context */
+            current_context: string;
+            /** Cycle */
+            cycle: number;
+            /** Evidence Revision */
+            evidence_revision: number;
+            /** Lifecycle Revision */
+            lifecycle_revision: number;
+            /** Projection Watermark */
+            projection_watermark: number;
+            /** Run Id */
+            run_id: string;
+        };
+        /** T05ExceptionDeactivationResult */
+        T05ExceptionDeactivationResult: {
+            /** Application Id */
+            application_id: string;
+            /** Evidence Revision */
+            evidence_revision: number;
+            /** Expires At */
+            expires_at: number;
+            /** Lifecycle Revision */
+            lifecycle_revision: number;
+            /** Phase */
+            phase: string;
+            /** Reason Code */
+            reason_code: string;
+            /** Replayed */
+            replayed: boolean;
+            /** Request Id */
+            request_id: string;
+            /** Route */
+            route: string;
+            /** Status */
+            status: string;
+            /** Successor Work Item Id */
+            successor_work_item_id?: string | null;
+        };
+        /** T05ExceptionDecisionResult */
+        T05ExceptionDecisionResult: {
+            /** Decision */
+            decision: string;
+            /** Decision Id */
+            decision_id: string;
+            /** Evidence Revision */
+            evidence_revision: number;
+            /** Lifecycle Revision */
+            lifecycle_revision: number;
+            /** Phase */
+            phase: string;
+            /** Replayed */
+            replayed: boolean;
+            /** Request Id */
+            request_id: string;
+            /** Route */
+            route: string;
+            routing_context?: components["schemas"]["T05RoutingContext"] | null;
+            /** Status */
+            status: string;
+            /** Successor Work Item Id */
+            successor_work_item_id?: string | null;
+            /** Work Item Id */
+            work_item_id: string;
+        };
+        /** T05ExceptionFinding */
+        T05ExceptionFinding: {
+            /** Finding Id */
+            finding_id: string;
+            /** Reason Code */
+            reason_code: string;
+            /** Rule Id */
+            rule_id: string;
+            /** Severity */
+            severity: string;
+            /** Verdict */
+            verdict: string;
+        };
+        /** T05ExceptionRouteResult */
+        T05ExceptionRouteResult: {
+            /** Application Id */
+            application_id: string;
+            /** Completion Basis */
+            completion_basis?: string | null;
+            /** Decision Id */
+            decision_id: string;
+            /** Evidence Revision */
+            evidence_revision: number;
+            /** Lifecycle Revision */
+            lifecycle_revision: number;
+            /** Phase */
+            phase: string;
+            /** Replayed */
+            replayed: boolean;
+            /** Request Id */
+            request_id: string;
+            /** Route */
+            route: string;
+            /** Status */
+            status: string;
+            /** Successor Work Item Id */
+            successor_work_item_id?: string | null;
+        };
+        /** T05RequesterReference */
+        T05RequesterReference: {
+            /** Role */
+            role: string;
+            /** Source Id */
+            source_id: string;
+            /** Subject */
+            subject: string;
+        };
+        /**
+         * T05RoutingContext
+         * @description The exact routing context of the S05 route command (seven keys).
+         */
+        T05RoutingContext: {
+            /** Current Context */
+            current_context: string;
+            /** Cycle */
+            cycle: number;
+            /** Decision Id */
+            decision_id: string;
+            /** Evidence Revision */
+            evidence_revision: number;
+            /** Lifecycle Revision */
+            lifecycle_revision: number;
+            /** Request Id */
+            request_id: string;
+            /** Run Id */
+            run_id: string;
         };
         /** ValidationError */
         ValidationError: {
@@ -3208,7 +3536,14 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** Idempotency Key */
+                    idempotency_key: string;
+                };
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -3216,9 +3551,52 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["T05BusinessExceptionOperationsResult"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
                 };
             };
         };
@@ -3230,7 +3608,14 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** Idempotency Key */
+                    idempotency_key: string;
+                };
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -3238,9 +3623,52 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["T05BusinessExceptionOperationsResult"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
                 };
             };
         };
@@ -3254,7 +3682,42 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** Decision */
+                    decision: string;
+                    /**
+                     * T05ExceptionCommandContext
+                     * @description The exact fixed context of the S05 claim/decide/expire/invalidate
+                     *     command surface (six keys).  The domain compares it by exact equality, so
+                     *     the closed shape prevents arbitrary keys from hiding a missing revision.
+                     */
+                    expected_context: {
+                        /** Current Context */
+                        current_context: string;
+                        /** Cycle */
+                        cycle: number;
+                        /** Evidence Revision */
+                        evidence_revision: number;
+                        /** Lifecycle Revision */
+                        lifecycle_revision: number;
+                        /** Projection Watermark */
+                        projection_watermark: number;
+                        /** Run Id */
+                        run_id: string;
+                    };
+                    /** Expected Fence */
+                    expected_fence: number;
+                    /** Idempotency Key */
+                    idempotency_key: string;
+                    /** Reason Code */
+                    reason_code: string;
+                    /** Work Item Id */
+                    work_item_id: string;
+                };
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -3262,18 +3725,52 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["T05ExceptionDecisionResult"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
                 };
             };
         };
@@ -3287,7 +3784,34 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": {
+                    /**
+                     * T05ExceptionCommandContext
+                     * @description The exact fixed context of the S05 claim/decide/expire/invalidate
+                     *     command surface (six keys).  The domain compares it by exact equality, so
+                     *     the closed shape prevents arbitrary keys from hiding a missing revision.
+                     */
+                    expected_context: {
+                        /** Current Context */
+                        current_context: string;
+                        /** Cycle */
+                        cycle: number;
+                        /** Evidence Revision */
+                        evidence_revision: number;
+                        /** Lifecycle Revision */
+                        lifecycle_revision: number;
+                        /** Projection Watermark */
+                        projection_watermark: number;
+                        /** Run Id */
+                        run_id: string;
+                    };
+                    /** Idempotency Key */
+                    idempotency_key: string;
+                };
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -3295,18 +3819,52 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["T05ExceptionDeactivationResult"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
                 };
             };
         };
@@ -3320,7 +3878,36 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": {
+                    /**
+                     * T05ExceptionCommandContext
+                     * @description The exact fixed context of the S05 claim/decide/expire/invalidate
+                     *     command surface (six keys).  The domain compares it by exact equality, so
+                     *     the closed shape prevents arbitrary keys from hiding a missing revision.
+                     */
+                    expected_context: {
+                        /** Current Context */
+                        current_context: string;
+                        /** Cycle */
+                        cycle: number;
+                        /** Evidence Revision */
+                        evidence_revision: number;
+                        /** Lifecycle Revision */
+                        lifecycle_revision: number;
+                        /** Projection Watermark */
+                        projection_watermark: number;
+                        /** Run Id */
+                        run_id: string;
+                    };
+                    /** Idempotency Key */
+                    idempotency_key: string;
+                    /** Reason Code */
+                    reason_code: string;
+                };
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -3328,18 +3915,52 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["T05ExceptionDeactivationResult"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
                 };
             };
         };
@@ -3353,7 +3974,34 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": {
+                    /**
+                     * T05RoutingContext
+                     * @description The exact routing context of the S05 route command (seven keys).
+                     */
+                    expected_context: {
+                        /** Current Context */
+                        current_context: string;
+                        /** Cycle */
+                        cycle: number;
+                        /** Decision Id */
+                        decision_id: string;
+                        /** Evidence Revision */
+                        evidence_revision: number;
+                        /** Lifecycle Revision */
+                        lifecycle_revision: number;
+                        /** Request Id */
+                        request_id: string;
+                        /** Run Id */
+                        run_id: string;
+                    };
+                    /** Idempotency Key */
+                    idempotency_key: string;
+                };
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -3361,18 +4009,52 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["T05ExceptionRouteResult"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
                 };
             };
         };
@@ -3386,7 +4068,32 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": {
+                    /**
+                     * T05ExceptionCommandContext
+                     * @description The exact fixed context of the S05 claim/decide/expire/invalidate
+                     *     command surface (six keys).  The domain compares it by exact equality, so
+                     *     the closed shape prevents arbitrary keys from hiding a missing revision.
+                     */
+                    expected_context: {
+                        /** Current Context */
+                        current_context: string;
+                        /** Cycle */
+                        cycle: number;
+                        /** Evidence Revision */
+                        evidence_revision: number;
+                        /** Lifecycle Revision */
+                        lifecycle_revision: number;
+                        /** Projection Watermark */
+                        projection_watermark: number;
+                        /** Run Id */
+                        run_id: string;
+                    };
+                };
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -3394,18 +4101,52 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["T05ExceptionClaimResult"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
                 };
             };
         };
@@ -3532,7 +4273,41 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": {
+                    /**
+                     * S01ReviewCommandContext
+                     * @description The closed review command context.  The domain compares it by exact
+                     *     equality (``_review_context_matches``), so a partial context is a semantic
+                     *     staleness; the schema here closes the shape so no arbitrary keys can hide
+                     *     a missing revision inside a migrated request or response.
+                     */
+                    expected_context: {
+                        /** Current Context */
+                        current_context: string;
+                        /** Evidence Revision */
+                        evidence_revision: number;
+                        /** Lifecycle Revision */
+                        lifecycle_revision: number;
+                        /** Projection Watermark */
+                        projection_watermark: number;
+                        /** Run Id */
+                        run_id: string;
+                    };
+                    /** Expected Fence */
+                    expected_fence: number;
+                    /** Finding Id */
+                    finding_id: string;
+                    /** Idempotency Key */
+                    idempotency_key: string;
+                    /** Predecessor Request Id */
+                    predecessor_request_id?: string | null;
+                    /** Reason Code */
+                    reason_code: string;
+                };
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -3540,18 +4315,52 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["T05BusinessExceptionRequestResult"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
                 };
             };
         };
@@ -4508,9 +5317,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["T05BusinessExceptionOperationsStatus"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
                 };
             };
         };
@@ -4532,9 +5348,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["T05BusinessExceptionView"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
                 };
             };
             /** @description Validation Error */
@@ -5323,6 +6146,26 @@ export interface operations {
         };
     };
     controlled_s02_react_page_controlled_s02_react_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
+            };
+        };
+    };
+    controlled_s05_react_page_controlled_s05_react_get: {
         parameters: {
             query?: never;
             header?: never;

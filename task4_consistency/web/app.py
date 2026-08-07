@@ -963,6 +963,32 @@ class S01WorkspaceFinding(BaseModel):
     evidence_links: list[S01EvidenceLink]
 
 
+class S01BusinessExceptionEligibility(BaseModel):
+    """The server-owned closed request-eligibility projection.  All four keys
+    are always serialized with explicit nulls so the client never invents a
+    reason, an ineligible code, or a predecessor."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    eligible: bool
+    request_reason: str | None = None
+    ineligible_reason_code: str | None = None
+    predecessor_request_id: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _always_emit_four_keys(self, handler, info):
+        # ``exclude_none`` filtering happens inside ``handler(self)``, so the
+        # dumped dict may already lack the null keys; the closed shape reads
+        # the model fields directly and re-emits all four keys.
+        handler(self)
+        return {
+            "eligible": self.eligible,
+            "request_reason": self.request_reason,
+            "ineligible_reason_code": self.ineligible_reason_code,
+            "predecessor_request_id": self.predecessor_request_id,
+        }
+
+
 class S01WorkspaceResponse(BaseModel):
     application_id: str
     work_item_id: str
@@ -981,6 +1007,7 @@ class S01WorkspaceResponse(BaseModel):
     projection_watermark: int
     mandatory_blockers: list[S01WorkspaceFinding]
     selected_finding: S01WorkspaceFinding | None = None
+    business_exception_eligibility: S01BusinessExceptionEligibility | None = None
     actions: list[str]
 
 
@@ -1498,6 +1525,226 @@ class S05OperationsBody(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=200, strict=True)
 
 
+class T05ExceptionCommandContext(BaseModel):
+    """The exact fixed context of the S05 claim/decide/expire/invalidate
+    command surface (six keys).  The domain compares it by exact equality, so
+    the closed shape prevents arbitrary keys from hiding a missing revision."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    cycle: int
+    lifecycle_revision: int
+    evidence_revision: int
+    run_id: str
+    projection_watermark: int
+    current_context: str
+
+
+class T05RoutingContext(BaseModel):
+    """The exact routing context of the S05 route command (seven keys)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    cycle: int
+    lifecycle_revision: int
+    evidence_revision: int
+    run_id: str
+    request_id: str
+    decision_id: str
+    current_context: str
+
+
+class T05RequestCommandBody(S05RequestBody):
+    """The T05 request body: the request binds the Reviewer's exact review
+    context, so ``expected_context`` is the closed five-key review context."""
+
+    idempotency_key: str = Field(min_length=1, max_length=200, strict=True)
+    expected_context: S01ReviewCommandContext
+
+
+class T05ClaimCommandBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_context: T05ExceptionCommandContext
+
+
+class T05DecisionCommandBody(S05DecisionBody):
+    expected_context: T05ExceptionCommandContext
+
+
+class T05RouteCommandBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_context: T05RoutingContext
+    idempotency_key: str = Field(min_length=1, max_length=200, strict=True)
+
+
+class T05ExpireCommandBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_context: T05ExceptionCommandContext
+    idempotency_key: str = Field(min_length=1, max_length=200, strict=True)
+
+
+class T05InvalidationCommandBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_context: T05ExceptionCommandContext
+    reason_code: str = Field(min_length=1, max_length=100, strict=True)
+    idempotency_key: str = Field(min_length=1, max_length=200, strict=True)
+
+
+class T05BusinessExceptionRequestResult(BaseModel):
+    status: str
+    replayed: bool
+    application_id: str
+    request_id: str
+    work_item_id: str
+    finding_id: str
+    phase: str
+    route: str
+    expires_at: int
+    lifecycle_revision: int
+    evidence_revision: int
+
+
+class T05EvidenceReference(BaseModel):
+    """The minimized evidence reference of the approver view: metadata only,
+    never raw values, OCR text, credentials, or object paths."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    observation_id: str | None = None
+    document_role: str | None = None
+    field: str | None = None
+    source_page: int | None = None
+    source_region: str | None = None
+
+
+class T05RequesterReference(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    subject: str
+    role: str
+    source_id: str
+
+
+class T05ExceptionFinding(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    finding_id: str
+    rule_id: str
+    verdict: str
+    severity: str
+    reason_code: str
+
+
+class T05BusinessExceptionView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str
+    request_id: str
+    work_item_id: str
+    status: str
+    current: bool
+    currentness_reason: str
+    application_reference: str
+    finding: T05ExceptionFinding
+    evidence_references: list[T05EvidenceReference]
+    requester: T05RequesterReference
+    request_reason: str
+    scope: str
+    requested_at: int
+    expires_at: int
+    run_id: str
+    evidence_snapshot_id: str
+    evidence_snapshot_digest: str
+    release_id: str
+    release_digest: str
+    checker_build: str
+    waiver_policy_id: str
+    waiver_policy_digest: str
+    claim_status: str
+    claim_subject: str | None = None
+    claim_fence: int
+    claim_expires_at: int
+    command_context: T05ExceptionCommandContext
+    projection_watermark: int
+    actions: list[str]
+
+
+class T05ExceptionClaimResult(BaseModel):
+    status: str
+    request_id: str
+    work_item_id: str
+    claim_subject: str | None = None
+    claim_fence: int
+    claim_expires_at: int
+
+
+class T05ExceptionDecisionResult(BaseModel):
+    status: str
+    replayed: bool
+    request_id: str
+    work_item_id: str
+    decision_id: str
+    decision: str
+    phase: str
+    route: str
+    successor_work_item_id: str | None = None
+    lifecycle_revision: int
+    evidence_revision: int
+    routing_context: T05RoutingContext | None = None
+
+
+class T05ExceptionRouteResult(BaseModel):
+    status: str
+    replayed: bool
+    application_id: str
+    request_id: str
+    decision_id: str
+    phase: str
+    route: str
+    completion_basis: str | None = None
+    successor_work_item_id: str | None = None
+    lifecycle_revision: int
+    evidence_revision: int
+
+
+class T05ExceptionDeactivationResult(BaseModel):
+    status: str
+    replayed: bool
+    application_id: str
+    request_id: str
+    phase: str
+    route: str
+    expires_at: int
+    reason_code: str
+    successor_work_item_id: str | None = None
+    lifecycle_revision: int
+    evidence_revision: int
+
+
+class T05BusinessExceptionOperationsResult(BaseModel):
+    status: str
+    replayed: bool
+    operations: str
+    revision: int
+    changed_at: int | None = None
+    unresolved_request_count: int
+    invalidated_request_ids: list[str]
+    reason_code: str | None = None
+    unchanged: bool | None = None
+
+
+class T05BusinessExceptionOperationsStatus(BaseModel):
+    operations: str
+    revision: int
+    reason_code: str | None = None
+    changed_at: int | None = None
+    unresolved_request_count: int
+
+
 class S03BatchPreviewBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1963,6 +2210,33 @@ def _s03_invalid_command(error: ValueError) -> HTTPException:
             "message": "S03 command does not match the registered contract",
         },
     )
+
+
+_S05_COMMAND_RESPONSES = {
+    404: {"model": S01ErrorResponse},
+    409: {"model": S01ErrorResponse},
+    413: {"model": S01ErrorResponse},
+    422: {"model": S01ErrorResponse},
+    503: {"model": S01ErrorResponse},
+}
+
+
+def _s05_command_request_body(model: type[BaseModel]) -> dict[str, Any]:
+    """The closed inline request body every S05 command shares: the model's
+    schema inlined so the document is self-contained for the client."""
+
+    return {
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": _inline_openapi_schema(
+                        model.model_json_schema()
+                    ),
+                }
+            },
+        },
+    }
 
 
 def _s05_command_result(result: dict[str, Any]) -> dict[str, Any]:
@@ -2708,6 +2982,19 @@ def _react_build_is_complete(index_html: str) -> bool:
     return all(_react_local_asset_path_is_clean(root, url) for url in references)
 
 
+def _react_shell_index_html() -> str | None:
+    """The built React index HTML when the production build is complete,
+    else None.  Shared by every shell route so they observe the same
+    build."""
+
+    if not S01_REACT_INDEX.is_file():
+        return None
+    index_html = S01_REACT_INDEX.read_text(encoding="utf-8")
+    if not _react_build_is_complete(index_html):
+        return None
+    return index_html
+
+
 @app.get("/controlled/s01", response_class=HTMLResponse)
 def controlled_s01_page(request: Request) -> HTMLResponse:
     _s01_service()
@@ -2721,17 +3008,9 @@ def controlled_s01_page(request: Request) -> HTMLResponse:
 @app.get("/controlled/s01/react", response_class=HTMLResponse)
 def controlled_s01_react_page(request: Request) -> HTMLResponse:
     _s01_service()
-    if not S01_REACT_INDEX.is_file():
-        raise HTTPException(
-            503,
-            detail={
-                "error": "S01_REACT_UNAVAILABLE",
-                "message": "Controlled S01 React shell is not built",
-            },
-        )
-    index_html = S01_REACT_INDEX.read_text(encoding="utf-8")
-    if not _react_build_is_complete(index_html):
-        if not S01_TEMPLATE.is_file():
+    index_html = _react_shell_index_html()
+    if index_html is None:
+        if not S01_REACT_INDEX.is_file() or not S01_TEMPLATE.is_file():
             raise HTTPException(
                 503,
                 detail={
@@ -2743,6 +3022,28 @@ def controlled_s01_react_page(request: Request) -> HTMLResponse:
             request, S01_TEMPLATE.read_text(encoding="utf-8")
         )
     return _controlled_s01_shell_response(request, index_html)
+
+
+@app.get("/controlled/s05/react", response_class=HTMLResponse)
+def controlled_s05_react_page(request: Request) -> HTMLResponse:
+    """The Exception Approver React shell: the same built artifact as the
+    Reviewer/Integrator shells, served only under the existing Exception
+    Approver bearer credential and issuing no session and no authority.  The
+    ``request`` query value is presentation/navigation only; the shell reads
+    it and the S05 API remains the sole authority."""
+    _s05_exception_approver_principal(request)
+    index_html = _react_shell_index_html()
+    if index_html is None:
+        raise HTTPException(
+            503,
+            detail={
+                "error": "S05_REACT_UNAVAILABLE",
+                "message": "Controlled S05 React shell is not built",
+            },
+        )
+    response = HTMLResponse(index_html)
+    _s01_disable_cache(response)
+    return response
 
 
 @app.post("/controlled/s01/api/session", status_code=204)
@@ -3425,7 +3726,10 @@ def controlled_s06_integrator_supplement_request_view(
 
 @app.post(
     "/controlled/s01/api/commands/review-work-items/"
-    "{work_item_id}/business-exceptions"
+    "{work_item_id}/business-exceptions",
+    response_model=T05BusinessExceptionRequestResult,
+    responses=_S05_COMMAND_RESPONSES,
+    openapi_extra=_s05_command_request_body(T05RequestCommandBody),
 )
 async def controlled_s05_request_business_exception(
     work_item_id: str,
@@ -3434,8 +3738,8 @@ async def controlled_s05_request_business_exception(
 ) -> dict[str, Any]:
     _s01_disable_cache(response)
     principal = _s04_demo_reviewer_principal(request)
-    body = await _s03_command_body(request, S05RequestBody)
-    assert isinstance(body, S05RequestBody)
+    body = await _s03_command_body(request, T05RequestCommandBody)
+    assert isinstance(body, T05RequestCommandBody)
     try:
         result = _s01_service().request_business_exception(
             principal=principal,
@@ -3444,7 +3748,7 @@ async def controlled_s05_request_business_exception(
             reason_code=body.reason_code,
             predecessor_request_id=body.predecessor_request_id,
             expected_fence=body.expected_fence,
-            expected_context=body.expected_context,
+            expected_context=body.expected_context.model_dump(mode="json"),
             idempotency_key=body.idempotency_key,
             now=S01_SESSION_CLOCK(),
         )
@@ -3456,7 +3760,11 @@ async def controlled_s05_request_business_exception(
 
 
 @app.get(
-    "/controlled/s01/api/queries/business-exceptions/{request_id}"
+    "/controlled/s01/api/queries/business-exceptions/{request_id}",
+    response_model=T05BusinessExceptionView,
+    responses={
+        404: {"model": S01ErrorResponse},
+    },
 )
 def controlled_s05_business_exception_view(
     request_id: str,
@@ -3476,7 +3784,10 @@ def controlled_s05_business_exception_view(
 
 
 @app.post(
-    "/controlled/s01/api/commands/exception-work-items/{work_item_id}/claim"
+    "/controlled/s01/api/commands/exception-work-items/{work_item_id}/claim",
+    response_model=T05ExceptionClaimResult,
+    responses=_S05_COMMAND_RESPONSES,
+    openapi_extra=_s05_command_request_body(T05ClaimCommandBody),
 )
 async def controlled_s05_claim_exception_work_item(
     work_item_id: str,
@@ -3485,13 +3796,13 @@ async def controlled_s05_claim_exception_work_item(
 ) -> dict[str, Any]:
     _s01_disable_cache(response)
     principal = _s05_exception_approver_principal(request)
-    body = await _s03_command_body(request, S03ClaimBody)
-    assert isinstance(body, S03ClaimBody)
+    body = await _s03_command_body(request, T05ClaimCommandBody)
+    assert isinstance(body, T05ClaimCommandBody)
     try:
         result = _s01_service().claim_exception_work_item(
             principal=principal,
             work_item_id=work_item_id,
-            expected_context=body.expected_context,
+            expected_context=body.expected_context.model_dump(mode="json"),
             now=S01_SESSION_CLOCK(),
         )
     except QueryNotFound as error:
@@ -3500,7 +3811,10 @@ async def controlled_s05_claim_exception_work_item(
 
 
 @app.post(
-    "/controlled/s01/api/commands/business-exceptions/{request_id}/decide"
+    "/controlled/s01/api/commands/business-exceptions/{request_id}/decide",
+    response_model=T05ExceptionDecisionResult,
+    responses=_S05_COMMAND_RESPONSES,
+    openapi_extra=_s05_command_request_body(T05DecisionCommandBody),
 )
 async def controlled_s05_decide_business_exception(
     request_id: str,
@@ -3509,8 +3823,8 @@ async def controlled_s05_decide_business_exception(
 ) -> dict[str, Any]:
     _s01_disable_cache(response)
     principal = _s05_exception_approver_principal(request)
-    body = await _s03_command_body(request, S05DecisionBody)
-    assert isinstance(body, S05DecisionBody)
+    body = await _s03_command_body(request, T05DecisionCommandBody)
+    assert isinstance(body, T05DecisionCommandBody)
     try:
         result = _s01_service().decide_business_exception(
             principal=principal,
@@ -3519,7 +3833,7 @@ async def controlled_s05_decide_business_exception(
             decision=body.decision,
             reason_code=body.reason_code,
             expected_fence=body.expected_fence,
-            expected_context=body.expected_context,
+            expected_context=body.expected_context.model_dump(mode="json"),
             idempotency_key=body.idempotency_key,
             now=S01_SESSION_CLOCK(),
         )
@@ -3531,7 +3845,10 @@ async def controlled_s05_decide_business_exception(
 
 
 @app.post(
-    "/controlled/s01/api/commands/business-exceptions/{request_id}/route"
+    "/controlled/s01/api/commands/business-exceptions/{request_id}/route",
+    response_model=T05ExceptionRouteResult,
+    responses=_S05_COMMAND_RESPONSES,
+    openapi_extra=_s05_command_request_body(T05RouteCommandBody),
 )
 async def controlled_s05_route_business_exception(
     request_id: str,
@@ -3540,13 +3857,13 @@ async def controlled_s05_route_business_exception(
 ) -> dict[str, Any]:
     _s01_disable_cache(response)
     principal = _s05_router_principal(request)
-    body = await _s03_command_body(request, S05ContextBody)
-    assert isinstance(body, S05ContextBody)
+    body = await _s03_command_body(request, T05RouteCommandBody)
+    assert isinstance(body, T05RouteCommandBody)
     try:
         result = _s01_service().determine_business_exception_route(
             principal=principal,
             request_id=request_id,
-            expected_context=body.expected_context,
+            expected_context=body.expected_context.model_dump(mode="json"),
             idempotency_key=body.idempotency_key,
             now=S01_SESSION_CLOCK(),
         )
@@ -3558,7 +3875,10 @@ async def controlled_s05_route_business_exception(
 
 
 @app.post(
-    "/controlled/s01/api/commands/business-exceptions/{request_id}/expire"
+    "/controlled/s01/api/commands/business-exceptions/{request_id}/expire",
+    response_model=T05ExceptionDeactivationResult,
+    responses=_S05_COMMAND_RESPONSES,
+    openapi_extra=_s05_command_request_body(T05ExpireCommandBody),
 )
 async def controlled_s05_expire_business_exception(
     request_id: str,
@@ -3567,13 +3887,13 @@ async def controlled_s05_expire_business_exception(
 ) -> dict[str, Any]:
     _s01_disable_cache(response)
     principal = _s05_router_principal(request)
-    body = await _s03_command_body(request, S05ContextBody)
-    assert isinstance(body, S05ContextBody)
+    body = await _s03_command_body(request, T05ExpireCommandBody)
+    assert isinstance(body, T05ExpireCommandBody)
     try:
         result = _s01_service().expire_business_exception(
             principal=principal,
             request_id=request_id,
-            expected_context=body.expected_context,
+            expected_context=body.expected_context.model_dump(mode="json"),
             idempotency_key=body.idempotency_key,
             now=S01_SESSION_CLOCK(),
         )
@@ -3585,7 +3905,10 @@ async def controlled_s05_expire_business_exception(
 
 
 @app.post(
-    "/controlled/s01/api/commands/business-exceptions/{request_id}/invalidate"
+    "/controlled/s01/api/commands/business-exceptions/{request_id}/invalidate",
+    response_model=T05ExceptionDeactivationResult,
+    responses=_S05_COMMAND_RESPONSES,
+    openapi_extra=_s05_command_request_body(T05InvalidationCommandBody),
 )
 async def controlled_s05_invalidate_business_exception(
     request_id: str,
@@ -3594,14 +3917,14 @@ async def controlled_s05_invalidate_business_exception(
 ) -> dict[str, Any]:
     _s01_disable_cache(response)
     principal = _s05_router_principal(request)
-    body = await _s03_command_body(request, S05InvalidationBody)
-    assert isinstance(body, S05InvalidationBody)
+    body = await _s03_command_body(request, T05InvalidationCommandBody)
+    assert isinstance(body, T05InvalidationCommandBody)
     try:
         result = _s01_service().invalidate_business_exception(
             principal=principal,
             request_id=request_id,
             reason_code=body.reason_code,
-            expected_context=body.expected_context,
+            expected_context=body.expected_context.model_dump(mode="json"),
             idempotency_key=body.idempotency_key,
             now=S01_SESSION_CLOCK(),
         )
@@ -3613,7 +3936,11 @@ async def controlled_s05_invalidate_business_exception(
 
 
 @app.get(
-    "/controlled/s01/api/queries/business-exception-operations"
+    "/controlled/s01/api/queries/business-exception-operations",
+    response_model=T05BusinessExceptionOperationsStatus,
+    responses={
+        404: {"model": S01ErrorResponse},
+    },
 )
 def controlled_s05_business_exception_operations_status(
     request: Request,
@@ -3631,7 +3958,10 @@ def controlled_s05_business_exception_operations_status(
 
 
 @app.post(
-    "/controlled/s01/api/commands/business-exception-operations/close"
+    "/controlled/s01/api/commands/business-exception-operations/close",
+    response_model=T05BusinessExceptionOperationsResult,
+    responses=_S05_COMMAND_RESPONSES,
+    openapi_extra=_s05_command_request_body(S05OperationsBody),
 )
 async def controlled_s05_close_business_exception_operations(
     request: Request,
@@ -3655,7 +3985,10 @@ async def controlled_s05_close_business_exception_operations(
 
 
 @app.post(
-    "/controlled/s01/api/commands/business-exception-operations/resume"
+    "/controlled/s01/api/commands/business-exception-operations/resume",
+    response_model=T05BusinessExceptionOperationsResult,
+    responses=_S05_COMMAND_RESPONSES,
+    openapi_extra=_s05_command_request_body(S05OperationsBody),
 )
 async def controlled_s05_resume_business_exception_operations(
     request: Request,

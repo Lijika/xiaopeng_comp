@@ -882,6 +882,80 @@ describe("queue shell (App)", () => {
     ).toHaveLength(0);
   });
 
+  it("mounts the Exception Approver shell on /controlled/s05 and never issues S01 reads", async () => {
+    const REQUEST_ID = "exception_request_approverapp1";
+    const router = fetchRouter({
+      [`GET /controlled/s01/api/queries/business-exceptions/${REQUEST_ID}`]: () =>
+        new Response(
+          JSON.stringify({
+            schema_version: "business-exception-approver-view/1",
+            request_id: REQUEST_ID,
+            work_item_id: "work_exception_approverapp1",
+            status: "pending",
+            current: true,
+            currentness_reason: "CURRENT_FIXED_CONTEXT",
+            application_reference: "application:abcd1234ef56",
+            finding: {
+              finding_id: "finding_approverapp1",
+              rule_id: "R_BRAND_CROSS",
+              verdict: "inconsistent",
+              severity: "critical",
+              reason_code: "BRAND_CROSS_INCONSISTENT",
+            },
+            evidence_references: [],
+            requester: {
+              subject: "c-demo-test-user",
+              role: "reviewer",
+              source_id: "c-demo-review-console",
+            },
+            request_reason: "DOCUMENTED_BRAND_VARIANCE",
+            scope: "one_application_cycle_run_finding",
+            requested_at: 100,
+            expires_at: 9999999999,
+            run_id: "run_approverapp1",
+            evidence_snapshot_id: "snapshot_approverapp1",
+            evidence_snapshot_digest: "b".repeat(64),
+            release_id: "auto_lease@1.9.0",
+            release_digest: "c".repeat(64),
+            checker_build: "s01-target-checker/6",
+            waiver_policy_id: "c-demo-brand-exception/1",
+            waiver_policy_digest: "d".repeat(64),
+            claim_status: "unclaimed",
+            claim_subject: null,
+            claim_fence: 0,
+            claim_expires_at: 0,
+            command_context: {
+              cycle: 1,
+              lifecycle_revision: 7,
+              evidence_revision: 1,
+              run_id: "run_approverapp1",
+              projection_watermark: 2,
+              current_context: "a".repeat(64),
+            },
+            projection_watermark: 2,
+            actions: ["claim"],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    window.history.pushState(
+      null,
+      "",
+      `/controlled/s05/react?request=${encodeURIComponent(REQUEST_ID)}`,
+    );
+    renderWithQuery(<App />);
+    await waitFor(() =>
+      expect(screen.getByTestId("approver-view")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("approver-boundary-gate")).toHaveTextContent(
+      "S05",
+    );
+    expect(screen.queryByTestId("queue-panel")).not.toBeInTheDocument();
+    expect(
+      router.calls.filter((call) => call.url.includes("/queries/queue")),
+    ).toHaveLength(0);
+  });
+
   it("keeps the Reviewer workbench on the legacy pathname even without the S02 prefix", async () => {
     fetchRouter({
       "GET /controlled/s01/api/queries/queue": () =>

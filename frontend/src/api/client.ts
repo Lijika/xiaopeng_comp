@@ -21,6 +21,15 @@ export type IntegratorSupplementRequestView =
   components["schemas"]["S01IntegratorSupplementRequestView"];
 export type AttachmentSubmissionResponse =
   components["schemas"]["S01AttachmentSubmissionResponse"];
+export type BusinessExceptionRequestResult =
+  components["schemas"]["T05BusinessExceptionRequestResult"];
+export type BusinessExceptionView =
+  components["schemas"]["T05BusinessExceptionView"];
+export type ExceptionClaimResult = components["schemas"]["T05ExceptionClaimResult"];
+export type ExceptionDecisionResult =
+  components["schemas"]["T05ExceptionDecisionResult"];
+export type BusinessExceptionOperationsStatus =
+  components["schemas"]["T05BusinessExceptionOperationsStatus"];
 
 /** A structured server rejection; never invents identifiers or evidence. */
 export class HttpError extends Error {

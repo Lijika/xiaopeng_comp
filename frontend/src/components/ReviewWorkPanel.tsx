@@ -6,11 +6,14 @@ import {
   HttpError,
   isDefinitiveRejection,
   type ApplicationHistoryResponse,
+  type CurrentRouteResponse,
   type ReviewWorkResponse,
   type WorkspaceResponse,
 } from "../api/client";
 import {
   MANUAL_WORK_KEY,
+  HISTORY_KEY,
+  ROUTE_KEY,
   SUPPLEMENT_REQUEST_KEY,
   useApplicationHistory,
   useClaimWorkItem,
@@ -21,15 +24,18 @@ import {
   useManualWork,
   useReleaseWorkItem,
   useRenewWorkItem,
+  useRequestBusinessException,
   useRequestSupplement,
   useRevealFieldObservation,
   useSubmitVerification,
   useSupplementRequest,
   useWorkspace,
+  type BusinessExceptionRequestResult,
   type ClaimCommand,
   type CorrectionCommand,
   type CorrectionConvergence,
   type CorrectionResult,
+  type ExceptionRequestCommand,
   type FencedCommand,
   type RevealCommand,
   type RevealResult,
@@ -54,7 +60,8 @@ type Action =
   | "submit"
   | "reveal"
   | "correct"
-  | "supplement";
+  | "supplement"
+  | "exception";
 
 type Outcome = "confirmed" | "not_confirmed" | "inconclusive";
 
@@ -141,7 +148,8 @@ type PendingCommand =
   | { action: "submit"; command: SubmitCommand }
   | { action: "reveal"; command: RevealCommand }
   | { action: "correct"; command: CorrectionCommand }
-  | { action: "supplement"; command: SupplementRequestCommand };
+  | { action: "supplement"; command: SupplementRequestCommand }
+  | { action: "exception"; command: ExceptionRequestCommand };
 
 const ACTION_LABELS: Record<Action, string> = {
   claim: "认领",
@@ -151,6 +159,7 @@ const ACTION_LABELS: Record<Action, string> = {
   reveal: "揭示",
   correct: "更正",
   supplement: "补充请求",
+  exception: "请求业务例外",
 };
 
 /** Builds the structured manual verification from the Reviewer's explicit
@@ -589,6 +598,40 @@ function HistorySection({
           </ul>
         </>
       )}
+      {history.data.business_exceptions.length > 0 && (
+        <>
+          <h4>业务例外（服务端权威）</h4>
+          <ul data-testid="review-history-exceptions">
+            {history.data.business_exceptions.map((item) => (
+              <li
+                key={item.request_id}
+                data-testid="review-history-exception"
+              >
+                {item.request_id}
+                {" · "}
+                {item.status}
+                {item.current === true ? " · 当前" : " · 非当前"}
+                {" · "}
+                {item.rule_id}
+                {" · "}
+                {item.machine_verdict}
+                {item.decision !== null && item.decision !== undefined && (
+                  <>
+                    {" · "}
+                    决策 {item.decision}
+                  </>
+                )}
+                {item.route !== null && item.route !== undefined && (
+                  <>
+                    {" · "}
+                    路由 {item.route}
+                  </>
+                )}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
       <dl className="facts">
         <div>
           <dt>当前运行决策</dt>
@@ -620,6 +663,69 @@ function HistorySection({
           </ol>
         </div>
       )}
+    </section>
+  );
+}
+
+/** The Reviewer's authoritative facts after an accepted business-exception
+ * request: the request id, the Lifecycle-owned route, and the request's own
+ * history entry rendered verbatim.  The browser never infers a phase. */
+function ExceptionAcceptedBlock({
+  accepted,
+  history,
+  gate,
+  onReload,
+  reloadDisabled,
+}: {
+  accepted: { requestId: string };
+  history: UseQueryResult<ApplicationHistoryResponse>;
+  gate: UseQueryResult<CurrentRouteResponse>;
+  onReload: () => void;
+  reloadDisabled: boolean;
+}) {
+  const record = history.data?.business_exceptions.find(
+    (item) => item.request_id === accepted.requestId,
+  );
+  return (
+    <section
+      className="panel"
+      data-testid="exception-request-accepted"
+      aria-labelledby="exception-accepted-title"
+    >
+      <h3 id="exception-accepted-title">业务例外请求（服务端权威）</h3>
+      <dl className="facts">
+        <div>
+          <dt>请求编号</dt>
+          <dd data-testid="exception-request-id">{accepted.requestId}</dd>
+        </div>
+        <div>
+          <dt>当前路由</dt>
+          <dd data-testid="exception-route">{gate.data?.route ?? "unavailable"}</dd>
+        </div>
+        <div>
+          <dt>请求状态</dt>
+          <dd data-testid="exception-status">
+            {record === undefined
+              ? "等待服务端投影"
+              : `${record.status}${record.current === true ? " · 当前" : " · 非当前"}`}
+          </dd>
+        </div>
+      </dl>
+      {record !== undefined && record.decision !== null && (
+        <p className="text-sm text-muted-foreground" data-testid="exception-decision">
+          决策：{record.decision}
+        </p>
+      )}
+      <div className="recovery-actions" data-testid="exception-request-actions">
+        <Button
+          variant="secondary"
+          onClick={onReload}
+          disabled={reloadDisabled}
+          data-testid="exception-reload-button"
+        >
+          重新加载
+        </Button>
+      </div>
     </section>
   );
 }
@@ -913,10 +1019,18 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     applicationId: string;
     requestId: string;
   } | null>(null);
+  // After an accepted business-exception request the phase leaves Manual
+  // Review and the workspace existence-hides; the request id latch keeps the
+  // shell alive across the authoritative route/history refetch.
+  const [acceptedException, setAcceptedException] = useState<{
+    applicationId: string;
+    requestId: string;
+  } | null>(null);
   const applicationId =
     work.data?.application_id ??
     acceptedCorrection?.applicationId ??
     acceptedSupplement?.applicationId ??
+    acceptedException?.applicationId ??
     null;
   const workspace = useWorkspace(
     work.data !== undefined && work.data.status !== "completed"
@@ -953,6 +1067,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
   const reveal = useRevealFieldObservation(workId);
   const correct = useCorrectFieldObservation(workId);
   const supplement = useRequestSupplement(workId);
+  const exception = useRequestBusinessException(workId);
 
   const [renewKey, setRenewKey] = useState(newIdempotencyKey);
   const [releaseKey, setReleaseKey] = useState(newIdempotencyKey);
@@ -960,6 +1075,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
   const [revealKey, setRevealKey] = useState(newIdempotencyKey);
   const [correctionKey, setCorrectionKey] = useState(newIdempotencyKey);
   const [supplementKey, setSupplementKey] = useState(newIdempotencyKey);
+  const [exceptionKey, setExceptionKey] = useState(newIdempotencyKey);
   const [pendingCommand, setPendingCommand] = useState<PendingCommand | null>(
     null,
   );
@@ -1093,7 +1209,8 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     submit.isPending ||
     reveal.isPending ||
     correct.isPending ||
-    supplement.isPending;
+    supplement.isPending ||
+    exception.isPending;
 
   const mutations: Record<
     Action,
@@ -1106,6 +1223,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     reveal,
     correct,
     supplement,
+    exception,
   };
   const active = pendingCommand === null ? null : pendingCommand.action;
   const activeMutation = active === null ? undefined : mutations[active];
@@ -1123,6 +1241,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     reveal: () => setRevealKey(newIdempotencyKey()),
     correct: () => setCorrectionKey(newIdempotencyKey()),
     supplement: () => setSupplementKey(newIdempotencyKey()),
+    exception: () => setExceptionKey(newIdempotencyKey()),
   };
 
   const accepted = (action: Action) => () => {
@@ -1265,6 +1384,54 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     supplement.mutate(command, {
       onSuccess: handleSupplementAccepted,
       onError: rejected("supplement"),
+    });
+  };
+
+  /** The server-owned request eligibility for the workspace's selected
+   * finding; the DTO is the sole gate.  Absent DTO data means no request
+   * surface at all (the browser never infers eligibility). */
+  const exceptionEligibility =
+    workspace.data?.business_exception_eligibility ?? null;
+  const exceptionEligibleFinding =
+    workspace.data?.selected_finding ?? null;
+
+  const handleExceptionAccepted = (result: BusinessExceptionRequestResult) => {
+    setAcceptedException({
+      applicationId: result.application_id,
+      requestId: result.request_id,
+    });
+    accepted("exception")();
+  };
+
+  const handleRequestException = () => {
+    if (work.data === undefined || anyPending || pendingCommand !== null) return;
+    if (requiresReload || work.isError || !owningReadsCurrent) return;
+    if (gate.data?.route !== "manual_review") return;
+    if (exceptionEligibility === null || exceptionEligibility.eligible !== true) {
+      return;
+    }
+    if (exceptionEligibleFinding === null) return;
+    if (
+      exceptionEligibility.request_reason === null ||
+      exceptionEligibility.request_reason === undefined
+    ) {
+      return;
+    }
+    invalidateRestricted();
+    const command: ExceptionRequestCommand = {
+      finding_id: exceptionEligibleFinding.finding_id,
+      reason_code: exceptionEligibility.request_reason,
+      expected_fence: work.data.claim_fence,
+      expected_context: work.data.command_context,
+      idempotency_key: exceptionKey,
+      predecessor_request_id: exceptionEligibility.predecessor_request_id,
+    };
+    setPendingCommand({ action: "exception", command });
+    setLastAccepted(null);
+    setRejectedAction(null);
+    exception.mutate(command, {
+      onSuccess: handleExceptionAccepted,
+      onError: rejected("exception"),
     });
   };
 
@@ -1499,6 +1666,11 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
         onSuccess: handleSupplementAccepted,
         onError: rejected("supplement"),
       });
+    } else if (pendingCommand.action === "exception") {
+      exception.mutate(pendingCommand.command, {
+        onSuccess: handleExceptionAccepted,
+        onError: rejected("exception"),
+      });
     } else {
       submit.mutate(pendingCommand.command, {
         onSuccess: accepted("submit"),
@@ -1552,6 +1724,26 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     await queryClient.invalidateQueries({ queryKey: ["s01"] });
   };
 
+  /** Authoritative refetch while an accepted exception request keeps the
+   * shell alive: current-route and history are refetched first (the old
+   * workspace existence-hides), then the server-owned S01 reads reconverge. */
+  const handleExceptionReload = async () => {
+    if (anyPending || acceptedException === null) return;
+    try {
+      await queryClient.refetchQueries(
+        { queryKey: ROUTE_KEY(acceptedException.applicationId) },
+        { throwOnError: true },
+      );
+      await queryClient.refetchQueries(
+        { queryKey: HISTORY_KEY(acceptedException.applicationId) },
+        { throwOnError: true },
+      );
+    } catch {
+      return;
+    }
+    await queryClient.invalidateQueries({ queryKey: ["s01"] });
+  };
+
   let statusText = "等待操作";
   if (anyPending && active !== null) {
     statusText = `${ACTION_LABELS[active]}提交中…`;
@@ -1578,9 +1770,13 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
 
   const correctionAccepted = acceptedCorrection !== null;
   const supplementAccepted = acceptedSupplement !== null;
+  const exceptionAccepted = acceptedException !== null;
   // Both accepted evidence flows invalidate the old work item; the shell,
-  // authoritative reads and history stay usable in either state.
-  const acceptedEvidenceFlow = correctionAccepted || supplementAccepted;
+  // authoritative reads and history stay usable in either state.  An accepted
+  // exception request likewise leaves Manual Review, so the shell keeps the
+  // route/history alive instead of degrading into the workspace 404.
+  const acceptedEvidenceFlow =
+    correctionAccepted || supplementAccepted || exceptionAccepted;
   const workspaceRequired =
     work.data !== undefined && work.data.status !== "completed";
   // After an accepted correction the invalidated old workspace existence-hides
@@ -1627,6 +1823,15 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
               currentRunId={gate.data?.current_run_id ?? null}
               route={gate.data?.route ?? null}
               onReload={handleSupplementReload}
+              reloadDisabled={anyPending}
+            />
+          )}
+          {exceptionAccepted && (
+            <ExceptionAcceptedBlock
+              accepted={acceptedException}
+              history={history}
+              gate={gate}
+              onReload={handleExceptionReload}
               reloadDisabled={anyPending}
             />
           )}
@@ -1703,6 +1908,23 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     owningReadsCurrent &&
     gate.data?.route === "manual_review" &&
     supplementEligibleFinding() !== undefined;
+  // The request gate is the server-owned eligibility DTO: the button exists
+  // only when the workspace carries the projection, and acts only when the
+  // server says the exact current finding is eligible.
+  const exceptionEligible =
+    exceptionEligibility !== null &&
+    exceptionEligibility.eligible === true &&
+    exceptionEligibility.request_reason !== null &&
+    exceptionEligibleFinding !== null;
+  const canRequestException =
+    claimed &&
+    !claimExpired &&
+    !acceptedEvidenceFlow &&
+    !commandBlocked &&
+    !work.isError &&
+    owningReadsCurrent &&
+    gate.data?.route === "manual_review" &&
+    exceptionEligible;
 
   return (
     <section
@@ -1729,6 +1951,15 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
           currentRunId={gate.data?.current_run_id ?? null}
           route={gate.data?.route ?? null}
           onReload={handleSupplementReload}
+          reloadDisabled={anyPending}
+        />
+      )}
+      {exceptionAccepted && (
+        <ExceptionAcceptedBlock
+          accepted={acceptedException}
+          history={history}
+          gate={gate}
+          onReload={handleExceptionReload}
           reloadDisabled={anyPending}
         />
       )}
@@ -1800,6 +2031,25 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
             >
               请求补充材料
             </Button>
+          )}
+          {exceptionEligibility !== null && !acceptedEvidenceFlow && (
+            <>
+              <Button
+                onClick={handleRequestException}
+                disabled={!canRequestException || anyPending}
+                data-testid="exception-request-button"
+              >
+                请求业务例外
+              </Button>
+              {exceptionEligibility.eligible !== true && (
+                <p
+                  className="text-sm text-muted-foreground"
+                  data-testid="exception-ineligible"
+                >
+                  当前发现不可申请业务例外（{exceptionEligibility.ineligible_reason_code ?? "unknown"}）
+                </p>
+              )}
+            </>
           )}
           {claimed && (
             <label className="text-sm">

@@ -8839,6 +8839,125 @@ class ControlledScenarioService:
         rules = [rule for rule in release.rules if rule.rule_id == finding.get("rule_id")]
         return rules[0] if len(rules) == 1 else None
 
+    def _exception_waiver_satisfied(
+        self,
+        *,
+        app: dict[str, Any],
+        run: dict[str, Any],
+        rule: Any | None,
+    ) -> bool:
+        """True when the pinned release's rule admits a business exception
+        for this finding.  Shared by the command and its read-only
+        projection so the eligibility contract cannot drift from the
+        commit-time check."""
+
+        if (
+            rule is None
+            or rule.waivable is not True
+            or rule.waiver_policy_id != self._EXCEPTION_POLICY_ID
+            or rule.waiver_policy_digest
+            != run["spec"]["baseline_release"].get("waiver_policy_digest")
+            or rule.waiver_reasons != (self._EXCEPTION_REQUEST_REASON,)
+            or rule.waiver_scope != self._EXCEPTION_SCOPE
+            or rule.waiver_ttl_seconds != self._EXCEPTION_TTL_SECONDS
+        ):
+            return False
+        return True
+
+    def _exception_request_history(
+        self, *, application_id: str, rule_id: str
+    ) -> list[dict[str, Any]]:
+        """The recorded business-exception requests for one rule of one
+        application, oldest first.  Shared by the command and its read-only
+        projection."""
+
+        return [
+            record
+            for record in self._store.review_records
+            if record.get("record_type") == "business_exception_request"
+            and record.get("application_id") == application_id
+            and record.get("rule_id") == rule_id
+        ]
+
+    def _exception_request_conflict_reason(
+        self,
+        *,
+        work_item: dict[str, Any],
+        finding_id: str,
+        rule: Any | None,
+        request_history: list[dict[str, Any]],
+        active_request_ids: set[str],
+        reason_code: str,
+        validate_supplied_predecessor: bool = False,
+        supplied_predecessor: str | None = None,
+    ) -> str | None:
+        """The shared request-history conflict chain of the command and its
+        read-only projection: the stable reason code of the first blocking
+        condition, or None when the request does not collide with history.
+
+        The commit path additionally validates the client-supplied
+        predecessor against the recorded chain in the exact order the
+        command enforces; the projection never has a client value and skips
+        those branches."""
+
+        if any(
+            record.get("cycle") == work_item["cycle"]
+            and record.get("run_id") == work_item["run_id"]
+            and record.get("finding_id") == finding_id
+            and record.get("request_id") in active_request_ids
+            for record in request_history
+        ):
+            return "ACTIVE_EXCEPTION_REQUEST_EXISTS"
+        predecessor = request_history[-1] if request_history else None
+        if predecessor is None:
+            if validate_supplied_predecessor and supplied_predecessor is not None:
+                return "EXCEPTION_PREDECESSOR_MISMATCH"
+            return None
+        if validate_supplied_predecessor:
+            if supplied_predecessor is None:
+                return "EXCEPTION_PREDECESSOR_REQUIRED"
+            if supplied_predecessor != predecessor["request_id"]:
+                return "EXCEPTION_PREDECESSOR_MISMATCH"
+        if predecessor["request_id"] in active_request_ids:
+            return "ACTIVE_EXCEPTION_REQUEST_EXISTS"
+        if rule is not None and (
+            predecessor["run_id"] == work_item["run_id"]
+            and predecessor["waiver_policy_id"] == rule.waiver_policy_id
+            and predecessor["waiver_policy_digest"] == rule.waiver_policy_digest
+            and predecessor["reason_code"] == reason_code
+        ):
+            return "EXCEPTION_REREQUEST_NOT_MATERIAL"
+        return None
+
+    def _exception_write_gate_failure(
+        self, *, app: dict[str, Any]
+    ) -> tuple[str, str] | None:
+        """The side-effect-free subset of ``_review_write_gate`` as the
+        ``(status, failure_reason_code)`` pair it returns, for read-only
+        projections: unlike the write gate it never stops a cohort.  Shared
+        by the command and its eligibility projection so both observe the
+        same failures."""
+
+        if not self.audit_available:
+            return "unavailable", "AUDIT_UNAVAILABLE"
+        if not self.storage_available:
+            return "unavailable", "STORAGE_UNAVAILABLE"
+        cohort_stop = self._local_cohort_stop or self._store.cohort_stop
+        if (
+            cohort_stop is not None
+            and cohort_stop.get("reason_code") == self._RUNTIME_STOP_REASON
+        ):
+            return (
+                "stopped",
+                str(
+                    cohort_stop.get("failure_reason_code")
+                    or self._RUNTIME_STOP_REASON
+                ),
+            )
+        if not self._review_source_evidence_readable(app):
+            return "stopped", self._REVIEW_SOURCE_FAILURE
+        return None
+
     def _business_exception_current_context(
         self, request: dict[str, Any], *, now: float
     ) -> tuple[
@@ -9101,15 +9220,8 @@ class ControlledScenarioService:
                     "work_item_id": work_item_id,
                     "reason_code": "PROTECTED_CHECK_NOT_WAIVABLE",
                 }
-            if (
-                rule is None
-                or rule.waivable is not True
-                or rule.waiver_policy_id != self._EXCEPTION_POLICY_ID
-                or rule.waiver_policy_digest
-                != run["spec"]["baseline_release"].get("waiver_policy_digest")
-                or rule.waiver_reasons != (self._EXCEPTION_REQUEST_REASON,)
-                or rule.waiver_scope != self._EXCEPTION_SCOPE
-                or rule.waiver_ttl_seconds != self._EXCEPTION_TTL_SECONDS
+            if not self._exception_waiver_satisfied(
+                app=app, run=run, rule=rule
             ):
                 return {
                     "status": "rejected",
@@ -9118,13 +9230,10 @@ class ControlledScenarioService:
                     "work_item_id": work_item_id,
                     "reason_code": "CHECK_NOT_WAIVABLE_BY_PINNED_RELEASE",
                 }
-            request_history = [
-                record
-                for record in self._store.review_records
-                if record.get("record_type") == "business_exception_request"
-                and record.get("application_id") == work_item["application_id"]
-                and record.get("rule_id") == finding["rule_id"]
-            ]
+            request_history = self._exception_request_history(
+                application_id=work_item["application_id"],
+                rule_id=finding["rule_id"],
+            )
             active_request_ids = set(self._unresolved_business_exception_ids())
             conflict = {
                 "status": "conflict",
@@ -9132,49 +9241,27 @@ class ControlledScenarioService:
                 "application_id": work_item["application_id"],
                 "work_item_id": work_item_id,
             }
-            if any(
-                record.get("cycle") == work_item["cycle"]
-                and record.get("run_id") == work_item["run_id"]
-                and record.get("finding_id") == finding_id
-                and record.get("request_id") in active_request_ids
-                for record in request_history
-            ):
+            conflict_reason = self._exception_request_conflict_reason(
+                work_item=work_item,
+                finding_id=finding_id,
+                rule=rule,
+                request_history=request_history,
+                active_request_ids=active_request_ids,
+                reason_code=reason_code,
+                validate_supplied_predecessor=True,
+                supplied_predecessor=predecessor_request_id,
+            )
+            if conflict_reason is not None:
+                return {**conflict, "reason_code": conflict_reason}
+            write_failure = self._exception_write_gate_failure(app=app)
+            if write_failure is not None:
+                status, failure = write_failure
                 return {
-                    **conflict,
-                    "reason_code": "ACTIVE_EXCEPTION_REQUEST_EXISTS",
-                }
-            predecessor = request_history[-1] if request_history else None
-            if predecessor is None:
-                if predecessor_request_id is not None:
-                    return {
-                        **conflict,
-                        "reason_code": "EXCEPTION_PREDECESSOR_MISMATCH",
-                    }
-            elif predecessor_request_id is None:
-                return {
-                    **conflict,
-                    "reason_code": "EXCEPTION_PREDECESSOR_REQUIRED",
-                }
-            elif predecessor_request_id != predecessor["request_id"]:
-                return {
-                    **conflict,
-                    "reason_code": "EXCEPTION_PREDECESSOR_MISMATCH",
-                }
-            elif predecessor["request_id"] in active_request_ids:
-                return {
-                    **conflict,
-                    "reason_code": "ACTIVE_EXCEPTION_REQUEST_EXISTS",
-                }
-            elif (
-                predecessor["run_id"] == work_item["run_id"]
-                and predecessor["waiver_policy_id"] == rule.waiver_policy_id
-                and predecessor["waiver_policy_digest"]
-                == rule.waiver_policy_digest
-                and predecessor["reason_code"] == reason_code
-            ):
-                return {
-                    **conflict,
-                    "reason_code": "EXCEPTION_REREQUEST_NOT_MATERIAL",
+                    "status": status,
+                    "replayed": False,
+                    "application_id": work_item["application_id"],
+                    "work_item_id": work_item_id,
+                    "reason_code": failure,
                 }
             gate = self._review_write_gate(app=app)
             if gate is not None:
@@ -9408,6 +9495,116 @@ class ControlledScenarioService:
                 }
             self._store = staged
             return result
+
+    def _business_exception_eligibility(
+        self,
+        work_item: dict[str, Any],
+        review_state: dict[str, Any],
+        finding: dict[str, Any],
+        *,
+        now: float,
+        subject: str,
+    ) -> dict[str, Any]:
+        """The server-owned closed eligibility projection for one finding.
+
+        Mirrors every side-effect-free precondition of
+        ``request_business_exception`` over the same policy/context helpers
+        (no rule id is hard-coded here): a request posted right now is
+        accepted only when ``eligible`` is true, and the projection never
+        writes.  The command re-verifies at commit the conditions the
+        read-only projection cannot see — the claim fence, the app phase and
+        run/revision binding, and the full write gate — so a projection miss
+        can only fail a later commit, never admit one.  Every authority
+        failure fails closed with the stable reason code."""
+
+        closed: dict[str, Any] = {
+            "eligible": False,
+            "request_reason": None,
+            "ineligible_reason_code": None,
+            "predecessor_request_id": None,
+        }
+        try:
+            if (
+                self._business_exception_operations_state()["operations"]
+                != "open"
+            ):
+                return {
+                    **closed,
+                    "ineligible_reason_code": self._EXCEPTION_OPERATIONS_CLOSED,
+                }
+            if (
+                review_state["status"] != "claimed"
+                or review_state["claim_subject"] != subject
+                or float(review_state["claim_expires_at"]) <= float(now)
+            ):
+                return {
+                    **closed,
+                    "ineligible_reason_code": "STALE_REVIEW_CONTEXT",
+                }
+            if (
+                finding.get("mandatory") is not True
+                or finding.get("verdict") != "inconsistent"
+            ):
+                return {
+                    **closed,
+                    "ineligible_reason_code": "FINDING_NOT_EXCEPTION_ELIGIBLE",
+                }
+            if finding.get("rule_id") in self._PROTECTED_EXCEPTION_CHECKS:
+                return {
+                    **closed,
+                    "ineligible_reason_code": "PROTECTED_CHECK_NOT_WAIVABLE",
+                }
+            app, run, _ = self._review_current_context(work_item)
+            rule = self._exception_policy_rule(app, run, finding)
+            if not self._exception_waiver_satisfied(
+                app=app, run=run, rule=rule
+            ):
+                return {
+                    **closed,
+                    "ineligible_reason_code": (
+                        "CHECK_NOT_WAIVABLE_BY_PINNED_RELEASE"
+                    ),
+                }
+            request_history = self._exception_request_history(
+                application_id=work_item["application_id"],
+                rule_id=finding["rule_id"],
+            )
+            active_request_ids = set(self._unresolved_business_exception_ids())
+            predecessor = request_history[-1] if request_history else None
+            conflict_reason = self._exception_request_conflict_reason(
+                work_item=work_item,
+                finding_id=finding["finding_id"],
+                rule=rule,
+                request_history=request_history,
+                active_request_ids=active_request_ids,
+                reason_code=self._EXCEPTION_REQUEST_REASON,
+            )
+            if conflict_reason is not None:
+                return {
+                    **closed,
+                    "ineligible_reason_code": conflict_reason,
+                }
+            write_failure = self._exception_write_gate_failure(app=app)
+            if write_failure is not None:
+                return {
+                    **closed,
+                    "ineligible_reason_code": write_failure[1],
+                }
+        except (KeyError, RuntimeError):
+            return {
+                **closed,
+                "ineligible_reason_code": self._APPLICATION_STATE_FAILURE,
+            }
+        return {
+            "eligible": True,
+            "request_reason": self._EXCEPTION_REQUEST_REASON,
+            "ineligible_reason_code": None,
+            "predecessor_request_id": (
+                str(predecessor["request_id"])
+                if predecessor is not None
+                else None
+            ),
+        }
 
     def business_exception_view(
         self,
@@ -11818,6 +12015,16 @@ class ControlledScenarioService:
                         "real_cross_document_opportunities": 0,
                         "performance_status": "not_estimable",
                     }
+                )
+            if selected is not None:
+                result["business_exception_eligibility"] = (
+                    self._business_exception_eligibility(
+                        work_item=work_item,
+                        review_state=review_state,
+                        finding=selected,
+                        now=query_time,
+                        subject=query_subject,
+                    )
                 )
             return result
 

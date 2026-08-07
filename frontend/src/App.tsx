@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { useQueue } from "./api/hooks";
 import AttachmentVersionPanel from "./components/AttachmentVersionPanel";
+import BusinessExceptionApproverPanel from "./components/BusinessExceptionApproverPanel";
 import QueuePanel from "./components/QueuePanel";
 import RecoveryWorkPanel from "./components/RecoveryWorkPanel";
 import ReviewWorkPanel from "./components/ReviewWorkPanel";
@@ -17,6 +18,9 @@ function readParam(name: string): string | null {
 function isIntegratorShell(): boolean {
   return window.location.pathname.startsWith("/controlled/s02");
 }
+function isExceptionApproverShell(): boolean {
+  return window.location.pathname.startsWith("/controlled/s05");
+}
 function IntegratorShell() {
   return (
     <div className="mx-auto max-w-4xl px-4 py-6">
@@ -31,6 +35,26 @@ function IntegratorShell() {
       </header>
       <main>
         <AttachmentVersionPanel />
+      </main>
+    </div>
+  );
+}
+
+/** The Exception Approver shell mounted only for ``/controlled/s05/react``;
+ * the ``request`` query value is presentation/navigation only and the S05 API
+ * remains the sole authority.  The Approver never mounts any S01/S02 read. */
+function ExceptionApproverShell() {
+  const requestId = readParam("request");
+  return (
+    <div className="mx-auto max-w-4xl px-4 py-6">
+      <header className="app-header">
+        <h1>业务例外审批工作台</h1>
+        <span className="boundary" data-testid="approver-boundary-gate">
+          S05
+        </span>
+      </header>
+      <main>
+        <BusinessExceptionApproverPanel requestId={requestId} />
       </main>
     </div>
   );
@@ -97,6 +121,9 @@ function ReviewerWorkbench() {
 export default function App() {
   if (isIntegratorShell()) {
     return <IntegratorShell />;
+  }
+  if (isExceptionApproverShell()) {
+    return <ExceptionApproverShell />;
   }
   return <ReviewerWorkbench />;
 }

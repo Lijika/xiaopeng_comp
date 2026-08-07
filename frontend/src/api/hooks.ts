@@ -39,6 +39,13 @@ export type IntegratorSupplementRequestView =
   components["schemas"]["S01IntegratorSupplementRequestView"];
 export type AttachmentSubmissionResponse =
   components["schemas"]["S01AttachmentSubmissionResponse"];
+export type BusinessExceptionRequestResult =
+  components["schemas"]["T05BusinessExceptionRequestResult"];
+export type BusinessExceptionView =
+  components["schemas"]["T05BusinessExceptionView"];
+export type ExceptionClaimResult = components["schemas"]["T05ExceptionClaimResult"];
+export type ExceptionDecisionResult =
+  components["schemas"]["T05ExceptionDecisionResult"];
 
 export const QUEUE_KEY = ["s01", "queue"] as const;
 export const WORK_KEY = (workId: string) =>
@@ -55,6 +62,8 @@ export const SUPPLEMENT_REQUEST_KEY = (requestId: string) =>
   ["s01", "supplement-request", requestId] as const;
 export const INTEGRATOR_REQUEST_KEY = (requestId: string) =>
   ["s02", "supplement-request", requestId] as const;
+export const EXCEPTION_VIEW_KEY = (requestId: string) =>
+  ["s05", "exception-request", requestId] as const;
 
 /**
  * The S01 manual-review command bodies are bound to the generated OpenAPI
@@ -78,6 +87,14 @@ export type AttachmentSubmissionCommand = NonNullable<paths["/controlled/s02/api
  * schema; a backend contract change fails strict typecheck here.
  */
 export type VerifyRecoveryCommand = paths["/controlled/s01/api/commands/recovery-work-items/{recovery_work_id}/verify"]["post"]["requestBody"]["content"]["application/json"];
+
+/**
+ * The T05 business-exception commands are bound to the generated OpenAPI
+ * request schemas; a backend contract change fails strict typecheck here.
+ */
+export type ExceptionRequestCommand = NonNullable<paths["/controlled/s01/api/commands/review-work-items/{work_item_id}/business-exceptions"]["post"]["requestBody"]>["content"]["application/json"];
+export type ExceptionClaimCommand = NonNullable<paths["/controlled/s01/api/commands/exception-work-items/{work_item_id}/claim"]["post"]["requestBody"]>["content"]["application/json"];
+export type ExceptionDecisionCommand = NonNullable<paths["/controlled/s01/api/commands/business-exceptions/{request_id}/decide"]["post"]["requestBody"]>["content"]["application/json"];
 
 const TRANSIENT_HTTP_STATUSES = new Set([408, 429, 502, 503, 504]);
 
@@ -171,19 +188,21 @@ export function useApplicationHistory(
 }
 
 /**
- * The four manual-review command hooks share one shape: a retry:false POST
- * through the thin same-origin adapter whose acceptance invalidates the
- * server-owned S01 queries.
+ * The manual-review and S05 command hooks share one shape: a retry:false
+ * POST through the thin same-origin adapter whose acceptance invalidates the
+ * server-owned queries named by ``invalidateKeys``.  No optimistic
+ * transition is ever applied.
  */
 function useReviewCommandMutation<TResult, TCommand>(
   path: string,
+  invalidateKeys: readonly string[] = ["s01"],
 ): UseMutationResult<TResult, Error, TCommand> {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (command: TCommand) =>
       request<TResult>(path, { method: "POST", body: JSON.stringify(command) }),
     retry: false,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["s01"] }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: invalidateKeys }),
   });
 }
 
@@ -463,4 +482,53 @@ export function useSubmitAttachmentVersion(): UseMutationResult<
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: ["s02"] }),
   });
+}
+
+/** The Exception Approver's minimized view of one business-exception request.
+ * Existence-hiding 404 is never retried; only transient statuses are. */
+export function useBusinessExceptionView(
+  requestId: string | null,
+): UseQueryResult<BusinessExceptionView> {
+  return useQuery({
+    queryKey: EXCEPTION_VIEW_KEY(requestId ?? ""),
+    enabled: requestId !== null,
+    queryFn: () =>
+      request<BusinessExceptionView>(
+        `/controlled/s01/api/queries/business-exceptions/${encodeURIComponent(requestId ?? "")}`,
+      ),
+    retry: retryPolicy,
+  });
+}
+
+/** The Reviewer's business-exception request; acceptance refetches the
+ * server-owned S01 reads (workspace, current-route, history). */
+export function useRequestBusinessException(
+  workId: string,
+): UseMutationResult<BusinessExceptionRequestResult, Error, ExceptionRequestCommand> {
+  return useReviewCommandMutation<
+    BusinessExceptionRequestResult,
+    ExceptionRequestCommand
+  >(
+    `/controlled/s01/api/commands/review-work-items/${encodeURIComponent(workId)}/business-exceptions`,
+  );
+}
+
+/** The Exception Approver's claim command for one exception work item. */
+export function useClaimExceptionWorkItem(
+  workId: string,
+): UseMutationResult<ExceptionClaimResult, Error, ExceptionClaimCommand> {
+  return useReviewCommandMutation<ExceptionClaimResult, ExceptionClaimCommand>(
+    `/controlled/s01/api/commands/exception-work-items/${encodeURIComponent(workId)}/claim`,
+    ["s05"],
+  );
+}
+
+/** The Exception Approver's approve/reject decision command. */
+export function useDecideBusinessException(
+  requestId: string,
+): UseMutationResult<ExceptionDecisionResult, Error, ExceptionDecisionCommand> {
+  return useReviewCommandMutation<ExceptionDecisionResult, ExceptionDecisionCommand>(
+    `/controlled/s01/api/commands/business-exceptions/${encodeURIComponent(requestId)}/decide`,
+    ["s05"],
+  );
 }

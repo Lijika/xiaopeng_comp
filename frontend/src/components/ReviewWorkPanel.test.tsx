@@ -2486,3 +2486,251 @@ describe("ReviewWorkPanel supplement request (T04)", () => {
     ).toBe(1);
   });
 });
+
+describe("ReviewWorkPanel business exception request (T05)", () => {
+  const REQUEST_PATH =
+    "/controlled/s01/api/commands/review-work-items/work_t02panel1234567890abcdef/business-exceptions";
+  const REQUEST_ID = "exception_request_t05abcdef";
+
+  function claimedPayload() {
+    return workPayload({
+      status: "claimed",
+      claim_subject: "t02-reviewer",
+      claim_fence: 1,
+      claim_expires_at: 9999999999,
+    });
+  }
+
+  function eligibleWorkspace() {
+    return workspacePayload({
+      claim_fence: 1,
+      claim_expires_at: 9999999999,
+      business_exception_eligibility: {
+        eligible: true,
+        request_reason: "DOCUMENTED_BRAND_VARIANCE",
+        ineligible_reason_code: null,
+        predecessor_request_id: null,
+      },
+    });
+  }
+
+  it("requests only when the DTO says eligible and never posts an operator command", async () => {
+    let phase: "manual_review" | "pending_exception_approval" = "manual_review";
+    const router = fetchRouter({
+      [`GET ${WORK_PATH}`]: () =>
+        router.jsonResponse(
+          phase === "manual_review"
+            ? claimedPayload()
+            : workPayload({
+                status: "exception_requested",
+                claim_subject: null,
+                claim_fence: 0,
+                claim_expires_at: 0,
+                completed_finding_ids: [FINDING_ID],
+              }),
+        ),
+      [`GET ${WORKSPACE_PATH}`]: () =>
+        phase === "manual_review"
+          ? router.jsonResponse(eligibleWorkspace())
+          : router.errorResponse(404, "S01_NOT_FOUND"),
+      [`GET ${ROUTE_PATH}`]: () =>
+        router.jsonResponse(
+          phase === "manual_review"
+            ? routePayload()
+            : routePayload({
+                phase: "Pending Exception Approval",
+                route: "pending_exception_approval",
+              }),
+        ),
+      [`GET ${HISTORY_PATH}`]: () =>
+        router.jsonResponse(
+          phase === "manual_review"
+            ? historyPayload()
+            : historyPayload({
+                business_exceptions: [
+                  {
+                    request_id: REQUEST_ID,
+                    run_id: "run_t02panel",
+                    finding_id: FINDING_ID,
+                    rule_id: "R_ENGINE_CROSS",
+                    machine_verdict: "inconsistent",
+                    status: "pending",
+                    current: true,
+                    request_reason: "DOCUMENTED_BRAND_VARIANCE",
+                    scope: "one_application_cycle_run_finding",
+                    requested_at: 10,
+                    expires_at: 9999999999,
+                    decision_id: null,
+                    decision: null,
+                    routed: false,
+                    route: null,
+                    completion_basis: null,
+                  },
+                ],
+              }),
+        ),
+      [`POST ${REQUEST_PATH}`]: () => {
+        phase = "pending_exception_approval";
+        return router.jsonResponse({
+          status: "accepted",
+          replayed: false,
+          application_id: APP_ID,
+          request_id: REQUEST_ID,
+          work_item_id: "work_exception_t05",
+          finding_id: FINDING_ID,
+          phase: "Pending Exception Approval",
+          route: "pending_exception_approval",
+          expires_at: 9999999999,
+          lifecycle_revision: 7,
+          evidence_revision: 1,
+        });
+      },
+    });
+    const user = userEvent.setup();
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("exception-request-button")).toBeEnabled(),
+    );
+    await user.click(screen.getByTestId("exception-request-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("exception-request-accepted")).toBeInTheDocument(),
+    );
+    const posts = router.calls.filter(
+      (call) => call.method === "POST" && call.url.includes("/business-exceptions"),
+    );
+    expect(posts).toHaveLength(1);
+    expect(posts[0].body).toMatchObject({
+      finding_id: FINDING_ID,
+      reason_code: "DOCUMENTED_BRAND_VARIANCE",
+      expected_fence: 1,
+      expected_context: CONTEXT,
+      predecessor_request_id: null,
+    });
+    expect(
+      typeof (posts[0].body as Record<string, unknown>).idempotency_key,
+    ).toBe("string");
+    const operatorCommands = router.calls.filter((call) =>
+      /\/route|\/expire|\/invalidate|\/close|\/resume/.test(call.url),
+    );
+    expect(operatorCommands).toHaveLength(0);
+    expect(
+      restrictedElement("exception-request-accepted").textContent,
+    ).toContain(REQUEST_ID);
+    expect(
+      (restrictedElement("exception-request-accepted").textContent ?? "").includes(
+        "pending_exception_approval",
+      ),
+    ).toBe(true);
+  });
+
+  it("disables the request and shows the server ineligible reason when denied", async () => {
+    const router = fetchRouter({
+      [`GET ${WORK_PATH}`]: () => router.jsonResponse(claimedPayload()),
+      [`GET ${WORKSPACE_PATH}`]: () =>
+        router.jsonResponse(
+          workspacePayload({
+            claim_fence: 1,
+            claim_expires_at: 9999999999,
+            business_exception_eligibility: {
+              eligible: false,
+              request_reason: null,
+              ineligible_reason_code: "PROTECTED_CHECK_NOT_WAIVABLE",
+              predecessor_request_id: null,
+            },
+          }),
+        ),
+      [`GET ${ROUTE_PATH}`]: () => router.jsonResponse(routePayload()),
+      [`GET ${HISTORY_PATH}`]: () => router.jsonResponse(historyPayload()),
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("exception-ineligible")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("exception-ineligible")).toHaveTextContent(
+      "PROTECTED_CHECK_NOT_WAIVABLE",
+    );
+    expect(screen.getByTestId("exception-request-button")).toBeDisabled();
+  });
+
+  it("surfaces a definitive stale rejection and keeps the key for unknown outcomes", async () => {
+    let outcome: "ok" | "stale" | "unknown" = "ok";
+    const router = fetchRouter({
+      [`GET ${WORK_PATH}`]: () => router.jsonResponse(claimedPayload()),
+      [`GET ${WORKSPACE_PATH}`]: () => router.jsonResponse(eligibleWorkspace()),
+      [`GET ${ROUTE_PATH}`]: () => router.jsonResponse(routePayload()),
+      [`GET ${HISTORY_PATH}`]: () => router.jsonResponse(historyPayload()),
+      [`POST ${REQUEST_PATH}`]: () => {
+        if (outcome === "stale") {
+          return router.errorResponse(409, "S05_STALE", "STALE_REVIEW_CONTEXT");
+        }
+        if (outcome === "unknown") {
+          return router.errorResponse(500, "S05_INTERNAL_ERROR");
+        }
+        outcome = "stale";
+        return router.errorResponse(409, "S05_STALE", "STALE_REVIEW_CONTEXT");
+      },
+    });
+    const user = userEvent.setup();
+    const { unmount } = renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("exception-request-button")).toBeEnabled(),
+    );
+    await user.click(screen.getByTestId("exception-request-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("review-command-status")).toHaveTextContent(
+        "未接受",
+      ),
+    );
+    expect(screen.getByTestId("review-command-status").textContent).toContain(
+      "STALE_REVIEW_CONTEXT",
+    );
+    expect(screen.getByTestId("review-reload-note")).toBeInTheDocument();
+    unmount();
+
+    outcome = "unknown";
+    const second = fetchRouter({
+      [`GET ${WORK_PATH}`]: () => router.jsonResponse(claimedPayload()),
+      [`GET ${WORKSPACE_PATH}`]: () => router.jsonResponse(eligibleWorkspace()),
+      [`GET ${ROUTE_PATH}`]: () => router.jsonResponse(routePayload()),
+      [`GET ${HISTORY_PATH}`]: () => router.jsonResponse(historyPayload()),
+      [`POST ${REQUEST_PATH}`]: () => {
+        if (outcome === "unknown") {
+          outcome = "ok";
+          return router.errorResponse(500, "S05_INTERNAL_ERROR");
+        }
+        return router.jsonResponse({
+          status: "accepted",
+          replayed: false,
+          application_id: APP_ID,
+          request_id: REQUEST_ID,
+          work_item_id: "work_exception_t05",
+          finding_id: FINDING_ID,
+          phase: "Pending Exception Approval",
+          route: "pending_exception_approval",
+          expires_at: 9999999999,
+          lifecycle_revision: 7,
+          evidence_revision: 1,
+        });
+      },
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("exception-request-button")).toBeEnabled(),
+    );
+    await user.click(screen.getByTestId("exception-request-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("retry-button")).toBeInTheDocument(),
+    );
+    await user.click(screen.getByTestId("retry-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("exception-request-accepted")).toBeInTheDocument(),
+    );
+    const posts = second.calls.filter(
+      (call) => call.method === "POST" && call.url.includes("/business-exceptions"),
+    );
+    expect(posts).toHaveLength(2);
+    const firstKey = (posts[0].body as Record<string, unknown>).idempotency_key;
+    const secondKey = (posts[1].body as Record<string, unknown>).idempotency_key;
+    expect(firstKey).toBe(secondKey);
+  });
+});

@@ -694,6 +694,54 @@
         "title": "S01AutomaticFinding",
         "type": "object"
       },
+      "S01BusinessExceptionEligibility": {
+        "additionalProperties": false,
+        "description": "The server-owned closed request-eligibility projection.  All four keys\nare always serialized with explicit nulls so the client never invents a\nreason, an ineligible code, or a predecessor.",
+        "properties": {
+          "eligible": {
+            "title": "Eligible",
+            "type": "boolean"
+          },
+          "ineligible_reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ineligible Reason Code"
+          },
+          "predecessor_request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Predecessor Request Id"
+          },
+          "request_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Reason"
+          }
+        },
+        "required": [
+          "eligible"
+        ],
+        "title": "S01BusinessExceptionEligibility",
+        "type": "object"
+      },
       "S01ClaimResult": {
         "properties": {
           "application_id": {
@@ -3774,6 +3822,16 @@
             "title": "Assigned Subject",
             "type": "string"
           },
+          "business_exception_eligibility": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/S01BusinessExceptionEligibility"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "claim_expires_at": {
             "title": "Claim Expires At",
             "type": "integer"
@@ -3882,6 +3940,824 @@
           "actions"
         ],
         "title": "S01WorkspaceResponse",
+        "type": "object"
+      },
+      "T05BusinessExceptionOperationsResult": {
+        "properties": {
+          "changed_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Changed At"
+          },
+          "invalidated_request_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Invalidated Request Ids",
+            "type": "array"
+          },
+          "operations": {
+            "title": "Operations",
+            "type": "string"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Code"
+          },
+          "replayed": {
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "unchanged": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unchanged"
+          },
+          "unresolved_request_count": {
+            "title": "Unresolved Request Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "status",
+          "replayed",
+          "operations",
+          "revision",
+          "unresolved_request_count",
+          "invalidated_request_ids"
+        ],
+        "title": "T05BusinessExceptionOperationsResult",
+        "type": "object"
+      },
+      "T05BusinessExceptionOperationsStatus": {
+        "properties": {
+          "changed_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Changed At"
+          },
+          "operations": {
+            "title": "Operations",
+            "type": "string"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Code"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "unresolved_request_count": {
+            "title": "Unresolved Request Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "operations",
+          "revision",
+          "unresolved_request_count"
+        ],
+        "title": "T05BusinessExceptionOperationsStatus",
+        "type": "object"
+      },
+      "T05BusinessExceptionRequestResult": {
+        "properties": {
+          "application_id": {
+            "title": "Application Id",
+            "type": "string"
+          },
+          "evidence_revision": {
+            "title": "Evidence Revision",
+            "type": "integer"
+          },
+          "expires_at": {
+            "title": "Expires At",
+            "type": "integer"
+          },
+          "finding_id": {
+            "title": "Finding Id",
+            "type": "string"
+          },
+          "lifecycle_revision": {
+            "title": "Lifecycle Revision",
+            "type": "integer"
+          },
+          "phase": {
+            "title": "Phase",
+            "type": "string"
+          },
+          "replayed": {
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "route": {
+            "title": "Route",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "work_item_id": {
+            "title": "Work Item Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "replayed",
+          "application_id",
+          "request_id",
+          "work_item_id",
+          "finding_id",
+          "phase",
+          "route",
+          "expires_at",
+          "lifecycle_revision",
+          "evidence_revision"
+        ],
+        "title": "T05BusinessExceptionRequestResult",
+        "type": "object"
+      },
+      "T05BusinessExceptionView": {
+        "additionalProperties": false,
+        "properties": {
+          "actions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Actions",
+            "type": "array"
+          },
+          "application_reference": {
+            "title": "Application Reference",
+            "type": "string"
+          },
+          "checker_build": {
+            "title": "Checker Build",
+            "type": "string"
+          },
+          "claim_expires_at": {
+            "title": "Claim Expires At",
+            "type": "integer"
+          },
+          "claim_fence": {
+            "title": "Claim Fence",
+            "type": "integer"
+          },
+          "claim_status": {
+            "title": "Claim Status",
+            "type": "string"
+          },
+          "claim_subject": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Claim Subject"
+          },
+          "command_context": {
+            "$ref": "#/components/schemas/T05ExceptionCommandContext"
+          },
+          "current": {
+            "title": "Current",
+            "type": "boolean"
+          },
+          "currentness_reason": {
+            "title": "Currentness Reason",
+            "type": "string"
+          },
+          "evidence_references": {
+            "items": {
+              "$ref": "#/components/schemas/T05EvidenceReference"
+            },
+            "title": "Evidence References",
+            "type": "array"
+          },
+          "evidence_snapshot_digest": {
+            "title": "Evidence Snapshot Digest",
+            "type": "string"
+          },
+          "evidence_snapshot_id": {
+            "title": "Evidence Snapshot Id",
+            "type": "string"
+          },
+          "expires_at": {
+            "title": "Expires At",
+            "type": "integer"
+          },
+          "finding": {
+            "$ref": "#/components/schemas/T05ExceptionFinding"
+          },
+          "projection_watermark": {
+            "title": "Projection Watermark",
+            "type": "integer"
+          },
+          "release_digest": {
+            "title": "Release Digest",
+            "type": "string"
+          },
+          "release_id": {
+            "title": "Release Id",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "request_reason": {
+            "title": "Request Reason",
+            "type": "string"
+          },
+          "requested_at": {
+            "title": "Requested At",
+            "type": "integer"
+          },
+          "requester": {
+            "$ref": "#/components/schemas/T05RequesterReference"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "waiver_policy_digest": {
+            "title": "Waiver Policy Digest",
+            "type": "string"
+          },
+          "waiver_policy_id": {
+            "title": "Waiver Policy Id",
+            "type": "string"
+          },
+          "work_item_id": {
+            "title": "Work Item Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "request_id",
+          "work_item_id",
+          "status",
+          "current",
+          "currentness_reason",
+          "application_reference",
+          "finding",
+          "evidence_references",
+          "requester",
+          "request_reason",
+          "scope",
+          "requested_at",
+          "expires_at",
+          "run_id",
+          "evidence_snapshot_id",
+          "evidence_snapshot_digest",
+          "release_id",
+          "release_digest",
+          "checker_build",
+          "waiver_policy_id",
+          "waiver_policy_digest",
+          "claim_status",
+          "claim_fence",
+          "claim_expires_at",
+          "command_context",
+          "projection_watermark",
+          "actions"
+        ],
+        "title": "T05BusinessExceptionView",
+        "type": "object"
+      },
+      "T05EvidenceReference": {
+        "additionalProperties": false,
+        "description": "The minimized evidence reference of the approver view: metadata only,\nnever raw values, OCR text, credentials, or object paths.",
+        "properties": {
+          "document_role": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Role"
+          },
+          "field": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Field"
+          },
+          "observation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observation Id"
+          },
+          "source_page": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Page"
+          },
+          "source_region": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Region"
+          }
+        },
+        "title": "T05EvidenceReference",
+        "type": "object"
+      },
+      "T05ExceptionClaimResult": {
+        "properties": {
+          "claim_expires_at": {
+            "title": "Claim Expires At",
+            "type": "integer"
+          },
+          "claim_fence": {
+            "title": "Claim Fence",
+            "type": "integer"
+          },
+          "claim_subject": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Claim Subject"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "work_item_id": {
+            "title": "Work Item Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "request_id",
+          "work_item_id",
+          "claim_fence",
+          "claim_expires_at"
+        ],
+        "title": "T05ExceptionClaimResult",
+        "type": "object"
+      },
+      "T05ExceptionCommandContext": {
+        "additionalProperties": false,
+        "description": "The exact fixed context of the S05 claim/decide/expire/invalidate\ncommand surface (six keys).  The domain compares it by exact equality, so\nthe closed shape prevents arbitrary keys from hiding a missing revision.",
+        "properties": {
+          "current_context": {
+            "title": "Current Context",
+            "type": "string"
+          },
+          "cycle": {
+            "title": "Cycle",
+            "type": "integer"
+          },
+          "evidence_revision": {
+            "title": "Evidence Revision",
+            "type": "integer"
+          },
+          "lifecycle_revision": {
+            "title": "Lifecycle Revision",
+            "type": "integer"
+          },
+          "projection_watermark": {
+            "title": "Projection Watermark",
+            "type": "integer"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "cycle",
+          "lifecycle_revision",
+          "evidence_revision",
+          "run_id",
+          "projection_watermark",
+          "current_context"
+        ],
+        "title": "T05ExceptionCommandContext",
+        "type": "object"
+      },
+      "T05ExceptionDeactivationResult": {
+        "properties": {
+          "application_id": {
+            "title": "Application Id",
+            "type": "string"
+          },
+          "evidence_revision": {
+            "title": "Evidence Revision",
+            "type": "integer"
+          },
+          "expires_at": {
+            "title": "Expires At",
+            "type": "integer"
+          },
+          "lifecycle_revision": {
+            "title": "Lifecycle Revision",
+            "type": "integer"
+          },
+          "phase": {
+            "title": "Phase",
+            "type": "string"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "replayed": {
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "route": {
+            "title": "Route",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "successor_work_item_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Successor Work Item Id"
+          }
+        },
+        "required": [
+          "status",
+          "replayed",
+          "application_id",
+          "request_id",
+          "phase",
+          "route",
+          "expires_at",
+          "reason_code",
+          "lifecycle_revision",
+          "evidence_revision"
+        ],
+        "title": "T05ExceptionDeactivationResult",
+        "type": "object"
+      },
+      "T05ExceptionDecisionResult": {
+        "properties": {
+          "decision": {
+            "title": "Decision",
+            "type": "string"
+          },
+          "decision_id": {
+            "title": "Decision Id",
+            "type": "string"
+          },
+          "evidence_revision": {
+            "title": "Evidence Revision",
+            "type": "integer"
+          },
+          "lifecycle_revision": {
+            "title": "Lifecycle Revision",
+            "type": "integer"
+          },
+          "phase": {
+            "title": "Phase",
+            "type": "string"
+          },
+          "replayed": {
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "route": {
+            "title": "Route",
+            "type": "string"
+          },
+          "routing_context": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/T05RoutingContext"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "successor_work_item_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Successor Work Item Id"
+          },
+          "work_item_id": {
+            "title": "Work Item Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "replayed",
+          "request_id",
+          "work_item_id",
+          "decision_id",
+          "decision",
+          "phase",
+          "route",
+          "lifecycle_revision",
+          "evidence_revision"
+        ],
+        "title": "T05ExceptionDecisionResult",
+        "type": "object"
+      },
+      "T05ExceptionFinding": {
+        "additionalProperties": false,
+        "properties": {
+          "finding_id": {
+            "title": "Finding Id",
+            "type": "string"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "rule_id": {
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "severity": {
+            "title": "Severity",
+            "type": "string"
+          },
+          "verdict": {
+            "title": "Verdict",
+            "type": "string"
+          }
+        },
+        "required": [
+          "finding_id",
+          "rule_id",
+          "verdict",
+          "severity",
+          "reason_code"
+        ],
+        "title": "T05ExceptionFinding",
+        "type": "object"
+      },
+      "T05ExceptionRouteResult": {
+        "properties": {
+          "application_id": {
+            "title": "Application Id",
+            "type": "string"
+          },
+          "completion_basis": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completion Basis"
+          },
+          "decision_id": {
+            "title": "Decision Id",
+            "type": "string"
+          },
+          "evidence_revision": {
+            "title": "Evidence Revision",
+            "type": "integer"
+          },
+          "lifecycle_revision": {
+            "title": "Lifecycle Revision",
+            "type": "integer"
+          },
+          "phase": {
+            "title": "Phase",
+            "type": "string"
+          },
+          "replayed": {
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "route": {
+            "title": "Route",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "successor_work_item_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Successor Work Item Id"
+          }
+        },
+        "required": [
+          "status",
+          "replayed",
+          "application_id",
+          "request_id",
+          "decision_id",
+          "phase",
+          "route",
+          "lifecycle_revision",
+          "evidence_revision"
+        ],
+        "title": "T05ExceptionRouteResult",
+        "type": "object"
+      },
+      "T05RequesterReference": {
+        "additionalProperties": false,
+        "properties": {
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "source_id": {
+            "title": "Source Id",
+            "type": "string"
+          },
+          "subject": {
+            "title": "Subject",
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject",
+          "role",
+          "source_id"
+        ],
+        "title": "T05RequesterReference",
+        "type": "object"
+      },
+      "T05RoutingContext": {
+        "additionalProperties": false,
+        "description": "The exact routing context of the S05 route command (seven keys).",
+        "properties": {
+          "current_context": {
+            "title": "Current Context",
+            "type": "string"
+          },
+          "cycle": {
+            "title": "Cycle",
+            "type": "integer"
+          },
+          "decision_id": {
+            "title": "Decision Id",
+            "type": "string"
+          },
+          "evidence_revision": {
+            "title": "Evidence Revision",
+            "type": "integer"
+          },
+          "lifecycle_revision": {
+            "title": "Lifecycle Revision",
+            "type": "integer"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "cycle",
+          "lifecycle_revision",
+          "evidence_revision",
+          "run_id",
+          "request_id",
+          "decision_id",
+          "current_context"
+        ],
+        "title": "T05RoutingContext",
         "type": "object"
       },
       "ValidationError": {
@@ -4633,18 +5509,89 @@
     "/controlled/s01/api/commands/business-exception-operations/close": {
       "post": {
         "operationId": "controlled_s05_close_business_exception_operations_controlled_s01_api_commands_business_exception_operations_close_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "idempotency_key": {
+                    "maxLength": 200,
+                    "minLength": 1,
+                    "title": "Idempotency Key",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "idempotency_key"
+                ],
+                "title": "S05OperationsBody",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Controlled S05 Close Business Exception Operations Controlled S01 Api Commands Business Exception Operations Close Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/T05BusinessExceptionOperationsResult"
                 }
               }
             },
             "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "summary": "Controlled S05 Close Business Exception Operations"
@@ -4653,18 +5600,89 @@
     "/controlled/s01/api/commands/business-exception-operations/resume": {
       "post": {
         "operationId": "controlled_s05_resume_business_exception_operations_controlled_s01_api_commands_business_exception_operations_resume_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "idempotency_key": {
+                    "maxLength": 200,
+                    "minLength": 1,
+                    "title": "Idempotency Key",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "idempotency_key"
+                ],
+                "title": "S05OperationsBody",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Controlled S05 Resume Business Exception Operations Controlled S01 Api Commands Business Exception Operations Resume Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/T05BusinessExceptionOperationsResult"
                 }
               }
             },
             "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "summary": "Controlled S05 Resume Business Exception Operations"
@@ -4684,28 +5702,155 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "decision": {
+                    "maxLength": 20,
+                    "minLength": 1,
+                    "title": "Decision",
+                    "type": "string"
+                  },
+                  "expected_context": {
+                    "additionalProperties": false,
+                    "description": "The exact fixed context of the S05 claim/decide/expire/invalidate\ncommand surface (six keys).  The domain compares it by exact equality, so\nthe closed shape prevents arbitrary keys from hiding a missing revision.",
+                    "properties": {
+                      "current_context": {
+                        "title": "Current Context",
+                        "type": "string"
+                      },
+                      "cycle": {
+                        "title": "Cycle",
+                        "type": "integer"
+                      },
+                      "evidence_revision": {
+                        "title": "Evidence Revision",
+                        "type": "integer"
+                      },
+                      "lifecycle_revision": {
+                        "title": "Lifecycle Revision",
+                        "type": "integer"
+                      },
+                      "projection_watermark": {
+                        "title": "Projection Watermark",
+                        "type": "integer"
+                      },
+                      "run_id": {
+                        "title": "Run Id",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "cycle",
+                      "lifecycle_revision",
+                      "evidence_revision",
+                      "run_id",
+                      "projection_watermark",
+                      "current_context"
+                    ],
+                    "title": "T05ExceptionCommandContext",
+                    "type": "object"
+                  },
+                  "expected_fence": {
+                    "minimum": 1,
+                    "title": "Expected Fence",
+                    "type": "integer"
+                  },
+                  "idempotency_key": {
+                    "title": "Idempotency Key",
+                    "type": "string"
+                  },
+                  "reason_code": {
+                    "maxLength": 100,
+                    "minLength": 1,
+                    "title": "Reason Code",
+                    "type": "string"
+                  },
+                  "work_item_id": {
+                    "maxLength": 200,
+                    "minLength": 1,
+                    "title": "Work Item Id",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "expected_context",
+                  "expected_fence",
+                  "idempotency_key",
+                  "work_item_id",
+                  "decision",
+                  "reason_code"
+                ],
+                "title": "T05DecisionCommandBody",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Controlled S05 Decide Business Exception Controlled S01 Api Commands Business Exceptions  Request Id  Decide Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/T05ExceptionDecisionResult"
                 }
               }
             },
             "description": "Successful Response"
           },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/S01ErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "summary": "Controlled S05 Decide Business Exception"
@@ -4725,28 +5870,130 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "expected_context": {
+                    "additionalProperties": false,
+                    "description": "The exact fixed context of the S05 claim/decide/expire/invalidate\ncommand surface (six keys).  The domain compares it by exact equality, so\nthe closed shape prevents arbitrary keys from hiding a missing revision.",
+                    "properties": {
+                      "current_context": {
+                        "title": "Current Context",
+                        "type": "string"
+                      },
+                      "cycle": {
+                        "title": "Cycle",
+                        "type": "integer"
+                      },
+                      "evidence_revision": {
+                        "title": "Evidence Revision",
+                        "type": "integer"
+                      },
+                      "lifecycle_revision": {
+                        "title": "Lifecycle Revision",
+                        "type": "integer"
+                      },
+                      "projection_watermark": {
+                        "title": "Projection Watermark",
+                        "type": "integer"
+                      },
+                      "run_id": {
+                        "title": "Run Id",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "cycle",
+                      "lifecycle_revision",
+                      "evidence_revision",
+                      "run_id",
+                      "projection_watermark",
+                      "current_context"
+                    ],
+                    "title": "T05ExceptionCommandContext",
+                    "type": "object"
+                  },
+                  "idempotency_key": {
+                    "maxLength": 200,
+                    "minLength": 1,
+                    "title": "Idempotency Key",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "expected_context",
+                  "idempotency_key"
+                ],
+                "title": "T05ExpireCommandBody",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Controlled S05 Expire Business Exception Controlled S01 Api Commands Business Exceptions  Request Id  Expire Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/T05ExceptionDeactivationResult"
                 }
               }
             },
             "description": "Successful Response"
           },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/S01ErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "summary": "Controlled S05 Expire Business Exception"
@@ -4766,28 +6013,137 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "expected_context": {
+                    "additionalProperties": false,
+                    "description": "The exact fixed context of the S05 claim/decide/expire/invalidate\ncommand surface (six keys).  The domain compares it by exact equality, so\nthe closed shape prevents arbitrary keys from hiding a missing revision.",
+                    "properties": {
+                      "current_context": {
+                        "title": "Current Context",
+                        "type": "string"
+                      },
+                      "cycle": {
+                        "title": "Cycle",
+                        "type": "integer"
+                      },
+                      "evidence_revision": {
+                        "title": "Evidence Revision",
+                        "type": "integer"
+                      },
+                      "lifecycle_revision": {
+                        "title": "Lifecycle Revision",
+                        "type": "integer"
+                      },
+                      "projection_watermark": {
+                        "title": "Projection Watermark",
+                        "type": "integer"
+                      },
+                      "run_id": {
+                        "title": "Run Id",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "cycle",
+                      "lifecycle_revision",
+                      "evidence_revision",
+                      "run_id",
+                      "projection_watermark",
+                      "current_context"
+                    ],
+                    "title": "T05ExceptionCommandContext",
+                    "type": "object"
+                  },
+                  "idempotency_key": {
+                    "maxLength": 200,
+                    "minLength": 1,
+                    "title": "Idempotency Key",
+                    "type": "string"
+                  },
+                  "reason_code": {
+                    "maxLength": 100,
+                    "minLength": 1,
+                    "title": "Reason Code",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "expected_context",
+                  "reason_code",
+                  "idempotency_key"
+                ],
+                "title": "T05InvalidationCommandBody",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Controlled S05 Invalidate Business Exception Controlled S01 Api Commands Business Exceptions  Request Id  Invalidate Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/T05ExceptionDeactivationResult"
                 }
               }
             },
             "description": "Successful Response"
           },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/S01ErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "summary": "Controlled S05 Invalidate Business Exception"
@@ -4807,28 +6163,135 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "expected_context": {
+                    "additionalProperties": false,
+                    "description": "The exact routing context of the S05 route command (seven keys).",
+                    "properties": {
+                      "current_context": {
+                        "title": "Current Context",
+                        "type": "string"
+                      },
+                      "cycle": {
+                        "title": "Cycle",
+                        "type": "integer"
+                      },
+                      "decision_id": {
+                        "title": "Decision Id",
+                        "type": "string"
+                      },
+                      "evidence_revision": {
+                        "title": "Evidence Revision",
+                        "type": "integer"
+                      },
+                      "lifecycle_revision": {
+                        "title": "Lifecycle Revision",
+                        "type": "integer"
+                      },
+                      "request_id": {
+                        "title": "Request Id",
+                        "type": "string"
+                      },
+                      "run_id": {
+                        "title": "Run Id",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "cycle",
+                      "lifecycle_revision",
+                      "evidence_revision",
+                      "run_id",
+                      "request_id",
+                      "decision_id",
+                      "current_context"
+                    ],
+                    "title": "T05RoutingContext",
+                    "type": "object"
+                  },
+                  "idempotency_key": {
+                    "maxLength": 200,
+                    "minLength": 1,
+                    "title": "Idempotency Key",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "expected_context",
+                  "idempotency_key"
+                ],
+                "title": "T05RouteCommandBody",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Controlled S05 Route Business Exception Controlled S01 Api Commands Business Exceptions  Request Id  Route Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/T05ExceptionRouteResult"
                 }
               }
             },
             "description": "Successful Response"
           },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/S01ErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "summary": "Controlled S05 Route Business Exception"
@@ -4848,28 +6311,123 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "expected_context": {
+                    "additionalProperties": false,
+                    "description": "The exact fixed context of the S05 claim/decide/expire/invalidate\ncommand surface (six keys).  The domain compares it by exact equality, so\nthe closed shape prevents arbitrary keys from hiding a missing revision.",
+                    "properties": {
+                      "current_context": {
+                        "title": "Current Context",
+                        "type": "string"
+                      },
+                      "cycle": {
+                        "title": "Cycle",
+                        "type": "integer"
+                      },
+                      "evidence_revision": {
+                        "title": "Evidence Revision",
+                        "type": "integer"
+                      },
+                      "lifecycle_revision": {
+                        "title": "Lifecycle Revision",
+                        "type": "integer"
+                      },
+                      "projection_watermark": {
+                        "title": "Projection Watermark",
+                        "type": "integer"
+                      },
+                      "run_id": {
+                        "title": "Run Id",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "cycle",
+                      "lifecycle_revision",
+                      "evidence_revision",
+                      "run_id",
+                      "projection_watermark",
+                      "current_context"
+                    ],
+                    "title": "T05ExceptionCommandContext",
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "expected_context"
+                ],
+                "title": "T05ClaimCommandBody",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Controlled S05 Claim Exception Work Item Controlled S01 Api Commands Exception Work Items  Work Item Id  Claim Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/T05ExceptionClaimResult"
                 }
               }
             },
             "description": "Successful Response"
           },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/S01ErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "summary": "Controlled S05 Claim Exception Work Item"
@@ -5054,28 +6612,159 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "The T05 request body: the request binds the Reviewer's exact review\ncontext, so ``expected_context`` is the closed five-key review context.",
+                "properties": {
+                  "expected_context": {
+                    "additionalProperties": false,
+                    "description": "The closed review command context.  The domain compares it by exact\nequality (``_review_context_matches``), so a partial context is a semantic\nstaleness; the schema here closes the shape so no arbitrary keys can hide\na missing revision inside a migrated request or response.",
+                    "properties": {
+                      "current_context": {
+                        "title": "Current Context",
+                        "type": "string"
+                      },
+                      "evidence_revision": {
+                        "title": "Evidence Revision",
+                        "type": "integer"
+                      },
+                      "lifecycle_revision": {
+                        "title": "Lifecycle Revision",
+                        "type": "integer"
+                      },
+                      "projection_watermark": {
+                        "title": "Projection Watermark",
+                        "type": "integer"
+                      },
+                      "run_id": {
+                        "title": "Run Id",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "lifecycle_revision",
+                      "evidence_revision",
+                      "run_id",
+                      "projection_watermark",
+                      "current_context"
+                    ],
+                    "title": "S01ReviewCommandContext",
+                    "type": "object"
+                  },
+                  "expected_fence": {
+                    "minimum": 1,
+                    "title": "Expected Fence",
+                    "type": "integer"
+                  },
+                  "finding_id": {
+                    "maxLength": 200,
+                    "minLength": 1,
+                    "title": "Finding Id",
+                    "type": "string"
+                  },
+                  "idempotency_key": {
+                    "maxLength": 200,
+                    "minLength": 1,
+                    "title": "Idempotency Key",
+                    "type": "string"
+                  },
+                  "predecessor_request_id": {
+                    "anyOf": [
+                      {
+                        "maxLength": 200,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Predecessor Request Id"
+                  },
+                  "reason_code": {
+                    "maxLength": 100,
+                    "minLength": 1,
+                    "title": "Reason Code",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "expected_context",
+                  "expected_fence",
+                  "idempotency_key",
+                  "finding_id",
+                  "reason_code"
+                ],
+                "title": "T05RequestCommandBody",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Controlled S05 Request Business Exception Controlled S01 Api Commands Review Work Items  Work Item Id  Business Exceptions Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/T05BusinessExceptionRequestResult"
                 }
               }
             },
             "description": "Successful Response"
           },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/S01ErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "summary": "Controlled S05 Request Business Exception"
@@ -6505,13 +8194,21 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Controlled S05 Business Exception Operations Status Controlled S01 Api Queries Business Exception Operations Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/T05BusinessExceptionOperationsStatus"
                 }
               }
             },
             "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
           }
         },
         "summary": "Controlled S05 Business Exception Operations Status"
@@ -6536,13 +8233,21 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Controlled S05 Business Exception View Controlled S01 Api Queries Business Exceptions  Request Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/T05BusinessExceptionView"
                 }
               }
             },
             "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
           },
           "422": {
             "content": {
@@ -7478,6 +9183,25 @@
           }
         },
         "summary": "Controlled S02 React Page"
+      }
+    },
+    "/controlled/s05/react": {
+      "get": {
+        "description": "The Exception Approver React shell: the same built artifact as the\nReviewer/Integrator shells, served only under the existing Exception\nApprover bearer credential and issuing no session and no authority.  The\n``request`` query value is presentation/navigation only; the shell reads\nit and the S05 API remains the sole authority.",
+        "operationId": "controlled_s05_react_page_controlled_s05_react_get",
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Controlled S05 React Page"
       }
     }
   }

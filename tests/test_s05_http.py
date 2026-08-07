@@ -552,3 +552,245 @@ def test_operator_close_drain_and_resume_over_http(tmp_path: Path) -> None:
     assert final.json()["status"] == "invalidated"
     assert final.json()["current"] is False
     assert fresh["work_item_id"] != request["work_item_id"]
+
+
+def test_workspace_projects_eligibility_over_http(tmp_path: Path) -> None:
+    with UvicornLoopback(
+        _environment(tmp_path / "target.sqlite3"),
+        app_target="task4_consistency.web.app:create_s01_test_app",
+        app_factory=True,
+    ) as server:
+        server.open_s01_session()
+        admitted = server.request(
+            "POST",
+            "/controlled/s01/api/commands/submit",
+            body={
+                "scenario_id": "app_bad_brand.json",
+                "idempotency_key": "s05-http-eligibility-intake",
+            },
+            headers=headers("integrator"),
+        )
+        assert admitted.status == 200, admitted.text
+        application_id = admitted.json()["application_id"]
+        queue_item = wait_for_projected_queue_item(server, application_id)
+        work = server.request(
+            "GET",
+            f"/controlled/s01/api/queries/review-work-items/{queue_item['work_item_id']}",
+            headers=headers("reviewer"),
+        )
+        claimed = server.request(
+            "POST",
+            f"/controlled/s01/api/commands/review-work-items/{queue_item['work_item_id']}/claim",
+            body={"expected_context": work.json()["command_context"]},
+            headers=headers("reviewer"),
+        )
+        assert claimed.status == 200, claimed.text
+        workspace = server.request(
+            "GET",
+            f"/controlled/s01/api/queries/applications/{application_id}/workspace",
+            headers=headers("reviewer"),
+        )
+
+    assert workspace.status == 200, workspace.text
+    eligibility = workspace.json()["business_exception_eligibility"]
+    assert eligibility == {
+        "eligible": True,
+        "request_reason": "DOCUMENTED_BRAND_VARIANCE",
+        "ineligible_reason_code": None,
+        "predecessor_request_id": None,
+    }
+
+
+_S05_OPENAPI_PATHS = (
+    "/controlled/s01/api/commands/review-work-items/{work_item_id}/business-exceptions",
+    "/controlled/s01/api/queries/business-exceptions/{request_id}",
+    "/controlled/s01/api/commands/exception-work-items/{work_item_id}/claim",
+    "/controlled/s01/api/commands/business-exceptions/{request_id}/decide",
+    "/controlled/s01/api/commands/business-exceptions/{request_id}/route",
+    "/controlled/s01/api/commands/business-exceptions/{request_id}/expire",
+    "/controlled/s01/api/commands/business-exceptions/{request_id}/invalidate",
+    "/controlled/s01/api/queries/business-exception-operations",
+    "/controlled/s01/api/commands/business-exception-operations/close",
+    "/controlled/s01/api/commands/business-exception-operations/resume",
+)
+
+
+def _schema_is_closed(schema: dict) -> bool:
+    """True when the schema is a typed object that cannot accept arbitrary
+    extra keys and exposes at least one declared property."""
+    if not isinstance(schema, dict):
+        return False
+    if schema.get("additionalProperties") is True:
+        return False
+    if schema.get("additionalProperties") is None and "properties" not in schema:
+        return False
+    return isinstance(schema.get("properties"), dict) and len(schema["properties"]) > 0
+
+
+def test_s05_openapi_contract_is_closed_and_typed() -> None:
+    from task4_consistency.web.app import app as web_app
+
+    spec = web_app.openapi()
+    components = spec.get("components", {}).get("schemas", {})
+    seen: set[str] = set()
+    for path in _S05_OPENAPI_PATHS:
+        operations = spec["paths"][path]
+        for method in ("get", "post"):
+            if method not in operations:
+                continue
+            operation = operations[method]
+            responses = operation.get("responses", {})
+            assert "200" in responses, f"{path} {method} lacks a 200 response"
+            content = responses["200"].get("content", {})
+            schema = content.get("application/json", {}).get("schema")
+            if schema is None:
+                # A response model is absent only when the path has none;
+                # the T05 contract requires one everywhere.
+                raise AssertionError(f"{path} {method} 200 response is untyped")
+            if "$ref" in schema:
+                name = schema["$ref"].rsplit("/", 1)[-1]
+                seen.add(name)
+                assert _schema_is_closed(components[name]), (
+                    f"{path} {method} response component {name} is not closed"
+                )
+            else:
+                assert _schema_is_closed(schema), f"{path} {method} response is not closed"
+            expected_envelopes = (
+                ("404", "409", "422", "503") if method == "post" else ("404",)
+            )
+            for status in expected_envelopes:
+                registered = responses.get(status)
+                assert registered is not None, f"{path} {method} lacks {status}"
+                assert "model" in registered or "content" in registered, (
+                    f"{path} {method} {status} has no envelope model"
+                )
+            request_body = operation.get("requestBody")
+            if method == "post":
+                assert request_body is not None, f"{path} has no requestBody"
+                request_schema = request_body["content"]["application/json"]["schema"]
+                assert _schema_is_closed(request_schema), (
+                    f"{path} request schema is not closed"
+                )
+                if "expected_context" in request_schema.get("properties", {}):
+                    context = request_schema["properties"]["expected_context"]
+                    assert context.get("additionalProperties") is False, (
+                        f"{path} expected_context is not closed"
+                    )
+                    actual_fields = set(context.get("properties", {}))
+                    review_context = {
+                        "lifecycle_revision",
+                        "evidence_revision",
+                        "run_id",
+                        "projection_watermark",
+                        "current_context",
+                    }
+                    exception_context = review_context | {"cycle"}
+                    routing_context = {
+                        "cycle",
+                        "lifecycle_revision",
+                        "evidence_revision",
+                        "run_id",
+                        "request_id",
+                        "decision_id",
+                        "current_context",
+                    }
+                    assert actual_fields in {
+                        frozenset(review_context),
+                        frozenset(exception_context),
+                        frozenset(routing_context),
+                    }, f"{path} expected_context misses fixed fields"
+    assert "S01BusinessExceptionEligibility" in components
+    assert _schema_is_closed(components["S01BusinessExceptionEligibility"])
+
+
+def test_s05_approver_react_shell_auth_and_no_store(tmp_path: Path) -> None:
+    with UvicornLoopback(
+        _environment(tmp_path / "target.sqlite3"),
+        app_target="task4_consistency.web.app:create_s01_test_app",
+        app_factory=True,
+    ) as server:
+        denied = server.request(
+            "GET",
+            "/controlled/s05/react?request=missing",
+            use_session=False,
+        )
+        reviewer = server.request(
+            "GET",
+            "/controlled/s05/react?request=missing",
+            headers=headers("reviewer"),
+            use_session=False,
+        )
+        shell = server.request(
+            "GET",
+            "/controlled/s05/react?request=missing",
+            headers=_approver_headers(),
+            use_session=False,
+        )
+
+    assert denied.status == 404
+    assert reviewer.status == 404
+    assert shell.status == 200
+    assert shell.headers["cache-control"] == "no-store"
+    assert shell.headers["pragma"] == "no-cache"
+    assert "set-cookie" not in shell.headers
+    assert "type=\"module\"" in shell.text
+
+
+def test_s05_dto_shapes_over_http(tmp_path: Path) -> None:
+    with UvicornLoopback(
+        _environment(tmp_path / "target.sqlite3"),
+        app_target="task4_consistency.web.app:create_s01_test_app",
+        app_factory=True,
+    ) as server:
+        _, _, request = _ready_request(server, "s05-http-dtos")
+        view, claim = _claim_exception(server, request)
+        decided = server.request(
+            "POST",
+            f"/controlled/s01/api/commands/business-exceptions/{request['request_id']}/decide",
+            body={
+                "work_item_id": request["work_item_id"],
+                "decision": "approved",
+                "reason_code": "DOCUMENTED_VARIANCE_ACCEPTED",
+                "expected_fence": claim["claim_fence"],
+                "expected_context": view["command_context"],
+                "idempotency_key": "s05-http-dto-decision",
+            },
+            headers=_approver_headers(),
+            use_session=False,
+        )
+
+    assert decided.status == 200, decided.text
+    request_keys = {"status", "replayed", "application_id", "request_id",
+                    "work_item_id", "finding_id", "phase", "route",
+                    "expires_at", "lifecycle_revision", "evidence_revision"}
+    claim_keys = {"status", "request_id", "work_item_id", "claim_subject",
+                  "claim_fence", "claim_expires_at"}
+    view_keys = {
+        "schema_version", "request_id", "work_item_id", "status", "current",
+        "currentness_reason", "application_reference", "finding",
+        "evidence_references", "requester", "request_reason", "scope",
+        "requested_at", "expires_at", "run_id", "evidence_snapshot_id",
+        "evidence_snapshot_digest", "release_id", "release_digest",
+        "checker_build", "waiver_policy_id", "waiver_policy_digest",
+        "claim_status", "claim_subject", "claim_fence", "claim_expires_at",
+        "command_context", "projection_watermark", "actions",
+    }
+    decision_keys = {
+        "status", "replayed", "request_id", "work_item_id", "decision_id",
+        "decision", "phase", "route", "successor_work_item_id",
+        "lifecycle_revision", "evidence_revision", "routing_context",
+    }
+    assert set(request) == request_keys
+    assert set(claim) == claim_keys
+    assert set(view) == view_keys
+    assert set(view["command_context"]) == {
+        "cycle", "lifecycle_revision", "evidence_revision", "run_id",
+        "projection_watermark", "current_context",
+    }
+    assert set(decided.json()) == decision_keys
+    assert set(decided.json()["routing_context"]) == {
+        "cycle", "lifecycle_revision", "evidence_revision", "run_id",
+        "request_id", "decision_id", "current_context",
+    }
+    assert view["requester"]["subject"] == "c-demo-test-user"
+    assert view["requester"]["role"] == "reviewer"
