@@ -485,9 +485,8 @@ describe("AttachmentVersionPanel S02 definitive classification (T04)", () => {
     expect(secondKey).not.toBe(firstKey);
   });
 
-  it("keeps an unrecognized generic 503 unknown and replays the exact command and key", async () => {
+  it("keeps an unrecognized generic 503 unknown and replays the exact raw command and key", async () => {
     let posts = 0;
-    let captured: unknown;
     fetchRouter({
       [`GET ${VIEW_PATH}`]: () => jsonResponse(projectionPayload()),
       [`POST ${SUBMIT_PATH}`]: () => {
@@ -516,23 +515,33 @@ describe("AttachmentVersionPanel S02 definitive classification (T04)", () => {
       ),
     );
     expect(screen.getByRole("button", { name: "重试" })).toBeInTheDocument();
-    captured = fetchMockLastPostBody();
+    const first = fetchMockLastPostWire();
     await userEvent.click(screen.getByRole("button", { name: "重试" }));
     await waitFor(() => expect(posts).toBe(2));
-    expect(fetchMockLastPostBody()).toEqual(captured);
+    // Byte-identical replay proof on the raw wire body plus the exact
+    // semantic key; failures compare booleans, never the payloads.
+    const second = fetchMockLastPostWire();
+    expect(second.raw === first.raw).toBe(true);
+    expect(second.key === first.key).toBe(true);
     expect(screen.queryByTestId("integrator-reload-note")).not.toBeInTheDocument();
   });
 });
 
-function fetchMockLastPostBody(): unknown {
+/** The raw wire body string and the extracted semantic key of the most
+ * recent POST; no payload is ever printed by the caller. */
+function fetchMockLastPostWire(): { raw: string; key: string } {
   const mock = fetch as unknown as { mock: { calls: Array<[unknown, RequestInit | undefined]> } };
   const calls = mock.mock.calls;
   for (let index = calls.length - 1; index >= 0; index -= 1) {
     const call = calls[index];
     const method = (call[1]?.method ?? "GET") as string;
     if (method === "POST" && call[1]?.body !== undefined) {
-      return JSON.parse(String(call[1].body));
+      const raw = String(call[1].body);
+      return {
+        raw,
+        key: (JSON.parse(raw) as { idempotency_key: string }).idempotency_key,
+      };
     }
   }
-  return undefined;
+  throw new Error("no POST recorded");
 }

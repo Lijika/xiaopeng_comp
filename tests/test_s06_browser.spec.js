@@ -31,8 +31,29 @@ async function reservePort() {
   return port;
 }
 
-async function startServer() {
+/** Starts the S06 server.  With ``clockSeconds`` set, a test-only expiring
+ * S02 session factory is used whose session clock is backed by a file under
+ * this harness's own temporary root, and the S02 session TTL is shortened,
+ * so retained-token expiry can be exercised without a production backdoor. */
+async function startServer({
+  appTarget = "task4_consistency.web.app:create_s02_test_app",
+  extraEnv = {},
+  clockSeconds = null,
+} = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "xiaopeng-s06-browser-"));
+  let clockPath = null;
+  if (clockSeconds !== null) {
+    clockPath = path.join(root, "session-clock.txt");
+    // The clock baseline matches the browser epoch so claim/expiry
+    // comparisons stay live while the short S02 TTL can genuinely expire.
+    fs.writeFileSync(clockPath, String(Math.floor(Date.now() / 1000)), "ascii");
+    appTarget = "tests.test_s06_http:create_expiring_s02_session_app";
+    extraEnv = {
+      ...extraEnv,
+      TASK4_S01_TEST_SESSION_CLOCK_PATH: clockPath,
+      TASK4_S02_TEST_SESSION_TTL_SECONDS: String(clockSeconds),
+    };
+  }
   const objectRoot = path.join(root, "objects");
   fs.mkdirSync(objectRoot);
   const page = Buffer.from(
@@ -105,7 +126,7 @@ async function startServer() {
     [
       "-m",
       "uvicorn",
-      "task4_consistency.web.app:create_s02_test_app",
+      appTarget,
       "--factory",
       "--host",
       "127.0.0.1",
@@ -135,6 +156,7 @@ async function startServer() {
         TASK4_S02_SOURCE_SYSTEM_ID: SOURCE,
         TASK4_S02_TEST_SCENARIO_ID: "app_missing_vin_docs.json",
         TASK4_S02_TEST_BACKGROUND_ENABLED: "1",
+        ...extraEnv,
       },
       stdio: ["ignore", "pipe", "pipe"],
     },
@@ -146,7 +168,7 @@ async function startServer() {
   while (Date.now() < deadline && child.exitCode === null) {
     try {
       if ((await fetch(`${baseURL}/api/health`)).ok) {
-        return { baseURL, child, output, page, result };
+        return { baseURL, child, output, page, result, clockPath, root };
       }
     } catch (_) {}
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -526,10 +548,18 @@ function t04SubmissionFromProjection(projection, server, { closed, batchId, stre
 const GENERIC_404_CONSOLE =
   "Failed to load resource: the server responded with a status of 404 (Not Found)";
 
-/** Exact browser diagnostics for the T04 flows (fix round 1): every >=400
- * response, console error, page error, and failed request is captured with
- * sanitized method/path/status only — never bodies, cookies, keys, hashes,
- * or raw envelopes. */
+/** Secret-safe browser diagnostics for the T04 flows: every >=400 response,
+ * console error, page error, and failed request is classified at capture
+ * time into a stable category plus sanitized method/path/status.  Raw
+ * message/error/failure text, bodies, cookies, keys, hashes, envelopes,
+ * internal IDs, and rendered surfaces are never retained, so a failing
+ * assertion can only print categories. */
+const CONSOLE_RESOURCE_404 = "console:resource-404";
+const CONSOLE_NET_FAILURE = "console:net-failure";
+const CONSOLE_UNEXPECTED = "console:unexpected";
+const PAGE_ERROR = "page-error";
+const NETWORK_FAILURE = "network-failure";
+
 function trackT04Diagnostics(pages) {
   const records = {
     responses: [],
@@ -548,16 +578,22 @@ function trackT04Diagnostics(pages) {
       }
     });
     page.on("console", (message) => {
-      if (message.type() === "error") {
-        records.consoleErrors.push(message.text());
+      if (message.type() !== "error") return;
+      const text = message.text();
+      if (text === GENERIC_404_CONSOLE) {
+        records.consoleErrors.push(CONSOLE_RESOURCE_404);
+      } else if (text.startsWith("Failed to load resource: net::")) {
+        records.consoleErrors.push(CONSOLE_NET_FAILURE);
+      } else {
+        records.consoleErrors.push(CONSOLE_UNEXPECTED);
       }
     });
-    page.on("pageerror", (error) => records.pageErrors.push(String(error)));
+    page.on("pageerror", () => records.pageErrors.push(PAGE_ERROR));
     page.on("requestfailed", (request) => {
       records.failedRequests.push({
         method: request.method(),
         path: new URL(request.url()).pathname,
-        failure: request.failure()?.errorText ?? "",
+        category: NETWORK_FAILURE,
       });
     });
   }
@@ -565,9 +601,9 @@ function trackT04Diagnostics(pages) {
 }
 
 /** Every allowed diagnostic is matched by exact URL/status/count; all other
- * console/network/page diagnostics fail.  The only permitted console errors
- * are the generic Chromium 404 messages correlated one-to-one with the
- * expected API 404s, plus one net:: failure message per aborted POST. */
+ * console/network/page diagnostics fail.  The only permitted console
+ * categories are the resource-404 messages correlated one-to-one with the
+ * expected API 404s, plus one net-failure category per aborted POST. */
 function expectExactDiagnostics(records, { api404s, abortedPosts = [] }) {
   const observed404s = records.responses.filter((entry) => entry.status === 404);
   expect(observed404s).toEqual(api404s);
@@ -575,29 +611,37 @@ function expectExactDiagnostics(records, { api404s, abortedPosts = [] }) {
   expect(
     records.failedRequests.map((entry) => `${entry.method} ${entry.path}`),
   ).toEqual(abortedPosts.map((entry) => `${entry.method} ${entry.path}`));
-  for (const failure of records.failedRequests) {
-    expect(failure.failure).not.toBe("");
-  }
+  expect(records.failedRequests.map((entry) => entry.category)).toEqual(
+    abortedPosts.map(() => NETWORK_FAILURE),
+  );
   expect(records.pageErrors).toEqual([]);
-  const generic404Count = records.consoleErrors.filter(
-    (message) => message === GENERIC_404_CONSOLE,
+  const resource404Count = records.consoleErrors.filter(
+    (entry) => entry === CONSOLE_RESOURCE_404,
   ).length;
-  expect(generic404Count).toBe(api404s.length);
-  const remaining = records.consoleErrors.filter(
-    (message) => message !== GENERIC_404_CONSOLE,
-  );
-  expect(remaining.map((message) => message.split(":")[0])).toEqual(
-    abortedPosts.map(() => "Failed to load resource"),
-  );
-  for (const message of remaining) {
-    expect(message).toMatch(/^Failed to load resource: net::/);
-  }
+  expect(resource404Count).toBe(api404s.length);
+  expect(
+    records.consoleErrors.filter((entry) => entry === CONSOLE_NET_FAILURE),
+  ).toEqual(abortedPosts.map(() => CONSOLE_NET_FAILURE));
+  expect(
+    records.consoleErrors.filter((entry) => entry === CONSOLE_UNEXPECTED),
+  ).toEqual([]);
+}
+
+/** Boolean surface predicate with a category-only failure label: a failing
+ * assertion never prints the surface text or the searched value. */
+async function surfaceContains(page, testId, needle) {
+  const text = (await page.getByTestId(testId).textContent()) ?? "";
+  return text.includes(needle);
+}
+
+async function expectSurfaceAbsent(page, testId, needle, label) {
+  expect(await surfaceContains(page, testId, needle), label).toBe(false);
 }
 
 /** Starts one T04 server plus the separate Reviewer/Integrator contexts and
  * returns the running flow handles. */
-async function startT04Flow(browser, { viewport }) {
-  const server = await startServer();
+async function startT04Flow(browser, { viewport, serverOptions = {} }) {
+  const server = await startServer(serverOptions);
   const reviewerContext = await browser.newContext({
     viewport,
     extraHTTPHeaders: { Authorization: `Bearer ${REVIEWER_CREDENTIAL}` },
@@ -667,10 +711,13 @@ async function integratorOpensProjection(integrator, server, requestId) {
     { timeout: 10000 },
   );
   expect(
-    await integrator
-      .getByTestId("integrator-projection-request-id")
-      .textContent(),
-  ).toContain(requestId);
+    (
+      (await integrator
+        .getByTestId("integrator-projection-request-id")
+        .textContent()) ?? ""
+    ).includes(requestId),
+    "integrator-projection: bound request id rendered",
+  ).toBe(true);
 }
 
 /** Fills the envelope textarea and submits through the panel; returns the
@@ -698,29 +745,18 @@ async function integratorProjection(integrator, requestId) {
   return response.body;
 }
 
-/** Reviewer authoritative refetch and the exact post-fulfillment assertions:
- * exactly one server-current successor run matching current-route, v1
- * non-current and v2 current. */
+/** Reviewer authoritative refetch and the exact post-fulfillment
+ * assertions.  The API reads remain the authority; the visible banner and
+ * history must then carry that exact current run and route, and the history
+ * must mark that run current exactly once.  Restricted run/attachment ids
+ * are only ever compared through boolean predicates with category-only
+ * labels. */
 async function reviewerConverges(flow) {
   const { reviewer, server } = flow;
   await reviewer.getByTestId("supplement-reload-button").click();
   await expect(reviewer.getByTestId("review-supplement-converged")).toBeVisible({
     timeout: 20000,
   });
-  const converged = await reviewer
-    .getByTestId("review-supplement-converged")
-    .textContent();
-  expect(converged).toContain("证据修订 2");
-  const attachments = await reviewer
-    .getByTestId("review-history-attachments")
-    .textContent();
-  expect(attachments).toContain("v1");
-  expect(attachments).toContain("v2");
-  expect(attachments.match(/· 当前/g) ?? []).toHaveLength(1);
-  expect(attachments.match(/· 非当前/g) ?? []).toHaveLength(1);
-  const runs = await reviewer.getByTestId("review-history-runs").textContent();
-  expect(runs.match(/· 当前/g) ?? []).toHaveLength(1);
-  expect(runs.match(/· 非当前/g) ?? []).toHaveLength(1);
   const route = await api(
     reviewer,
     "GET",
@@ -733,8 +769,55 @@ async function reviewerConverges(flow) {
   );
   expect(route.status).toBe(200);
   expect(history.status).toBe(200);
+  const currentRunId = route.body.current_run_id;
+  expect(typeof currentRunId).toBe("string");
+  expect(currentRunId.length).toBeGreaterThan(0);
   expect(route.body.phase).toBe("Manual Review");
-  expect(history.body.current_run_id).toBe(route.body.current_run_id);
+
+  // The visible banner carries that exact current run and route.
+  const bannerText =
+    (await reviewer.getByTestId("review-supplement-converged").textContent()) ?? "";
+  expect(bannerText.includes("证据修订 2"), "converged banner: revision").toBe(true);
+  expect(
+    bannerText.includes(currentRunId),
+    "converged banner: exact current run id",
+  ).toBe(true);
+  expect(
+    bannerText.includes(route.body.route),
+    "converged banner: exact current route",
+  ).toBe(true);
+
+  // The visible history marks that exact run current exactly once and the
+  // predecessor run non-current.
+  const historyRunIds = await reviewer.evaluate(() =>
+    Array.from(
+      document.querySelectorAll('[data-testid="review-history-runs"] li'),
+    ).map((li) => {
+      const parts = (li.textContent ?? "").split(" · ");
+      return { runId: parts[0] ?? "", current: parts.includes("当前") };
+    }),
+  );
+  expect(
+    historyRunIds.filter((entry) => entry.current).length,
+    "history runs: exactly one current",
+  ).toBe(1);
+  expect(
+    historyRunIds.some(
+      (entry) => entry.current && entry.runId === currentRunId,
+    ),
+    "history runs: the current run is the authoritative run",
+  ).toBe(true);
+  expect(
+    historyRunIds.filter((entry) => entry.runId === currentRunId).length,
+    "history runs: authoritative run appears exactly once",
+  ).toBe(1);
+  expect(
+    historyRunIds.filter((entry) => !entry.current).length,
+    "history runs: predecessor run is non-current",
+  ).toBe(1);
+
+  // v1 non-current, v2 current (server authority).
+  expect(history.body.current_run_id).toBe(currentRunId);
   expect(history.body.runs.map((run) => run.current)).toEqual([false, true]);
   expect(history.body.attachment_versions.map((item) => item.version)).toEqual([
     1,
@@ -744,6 +827,16 @@ async function reviewerConverges(flow) {
     false,
     true,
   ]);
+  const attachmentsText =
+    (await reviewer.getByTestId("review-history-attachments").textContent()) ?? "";
+  expect(
+    attachmentsText.match(/· 当前/g)?.length === 1,
+    "attachment history: exactly one current version",
+  ).toBe(true);
+  expect(
+    attachmentsText.match(/· 非当前/g)?.length === 1,
+    "attachment history: exactly one non-current version",
+  ).toBe(true);
 }
 
 /** The exact expected Reviewer 404 set: the invalidated work item's
@@ -829,19 +922,27 @@ for (const viewport of [
       ).toHaveText("fulfilled", { timeout: 10000 });
 
       await reviewerConverges(flow);
-      await expectViewportIntegrity(reviewer, [
-        "review-panel",
-        "review-supplement-request",
-        "supplement-reload-button",
-        "review-history-attachments",
-      ]);
-      await expectViewportIntegrity(integrator, [
-        "integrator-projection",
-        "integrator-envelope-input",
-        "integrator-reload-button",
-        "integrator-submit-button",
-        "integrator-receipt",
-      ]);
+      await expectViewportIntegrity(
+        reviewer,
+        [
+          "review-panel",
+          "review-supplement-request",
+          "supplement-reload-button",
+          "review-history-attachments",
+        ],
+        viewport,
+      );
+      await expectViewportIntegrity(
+        integrator,
+        [
+          "integrator-projection",
+          "integrator-envelope-input",
+          "integrator-reload-button",
+          "integrator-submit-button",
+          "integrator-receipt",
+        ],
+        viewport,
+      );
       expectExactDiagnostics(diagnostics, {
         api404s: expectedReviewerWorkspace404s(flow),
       });
@@ -857,34 +958,60 @@ for (const viewport of [
       // unauthorized identifier.
       const integratorUrl = integrator.url();
       expect(integratorUrl).toMatch(/^[^?#]*\?request=[A-Za-z0-9_:-]+$/);
-      expect(integratorUrl).not.toMatch(/[0-9a-f]{64}/);
-      expect(integratorUrl).not.toContain("envelope");
-      expect(integratorUrl).not.toContain("idempotency");
-      expect(integratorUrl).not.toContain(flow.applicationId);
-      // No foreign facts in either panel surface.
-      const publicSurface = JSON.stringify([
-        openProjection,
-        afterProgress,
-        await reviewer.getByTestId("review-panel").textContent(),
-        await integrator.getByTestId("integrator-panel").textContent(),
-        integratorUrl,
-      ]);
-      expect(publicSurface).not.toContain("LSVAA4182N2444555");
+      expect(integratorUrl.match(/[0-9a-f]{64}/) === null).toBe(true);
+      expect(
+        integratorUrl.includes("envelope"),
+        "integrator url: no envelope marker",
+      ).toBe(false);
+      expect(
+        integratorUrl.includes("idempotency"),
+        "integrator url: no idempotency marker",
+      ).toBe(false);
+      expect(
+        integratorUrl.includes(flow.applicationId),
+        "integrator url: no reviewer application identifier",
+      ).toBe(false);
+      // No foreign facts in either panel surface; boolean predicates with
+      // category-only labels never print restricted values.
+      await expectSurfaceAbsent(
+        reviewer,
+        "review-panel",
+        "LSVAA4182N2444555",
+        "review-panel: no raw lease value",
+      );
+      await expectSurfaceAbsent(
+        integrator,
+        "integrator-panel",
+        "LSVAA4182N2444555",
+        "integrator-panel: no raw lease value",
+      );
+      expect(
+        integratorUrl.includes("LSVAA4182N2444555"),
+        "integrator url: no raw lease value",
+      ).toBe(false);
     } finally {
       await stopT04Flow(flow);
     }
   });
 }
 
-/** Viewport integrity: no horizontal overflow, no clipped control, and no
- * pairwise-overlapping text boxes among the primary panel controls. */
-async function expectViewportIntegrity(page, testIds) {
+/** Viewport oracle: the expected viewport is asserted exactly, the document
+ * scroll extents are recorded, and every targeted surface's leaf-control /
+ * rendered-text rectangle is checked against the viewport and its clipping
+ * ancestor.  Assertion messages carry stable test IDs/categories only —
+ * never rendered text. */
+async function expectViewportIntegrity(page, testIds, viewport) {
   const layout = await page.evaluate(() => ({
-    scrollWidth: document.documentElement.scrollWidth,
-    clientWidth: document.documentElement.clientWidth,
     innerWidth: window.innerWidth,
     innerHeight: window.innerHeight,
+    scrollWidth: document.documentElement.scrollWidth,
+    clientWidth: document.documentElement.clientWidth,
+    scrollHeight: document.documentElement.scrollHeight,
+    clientHeight: document.documentElement.clientHeight,
   }));
+  expect(layout.innerWidth).toBe(viewport.width);
+  expect(layout.innerHeight).toBe(viewport.height);
+  // No horizontal overflow: the document never scrolls sideways.
   expect(layout.scrollWidth).toBeLessThanOrEqual(layout.clientWidth);
   const boxes = await page.evaluate(
     (ids) =>
@@ -900,7 +1027,10 @@ async function expectViewportIntegrity(page, testIds) {
         return {
           id,
           x: rect.x,
-          y: rect.y,
+          // Document coordinates: the clipping ancestor is the document,
+          // so an element scrolled out above the viewport keeps a valid
+          // document-space position.
+          y: rect.y + window.scrollY,
           w: rect.width,
           h: rect.height,
           ancestor,
@@ -911,14 +1041,25 @@ async function expectViewportIntegrity(page, testIds) {
   const present = boxes.filter((box) => box !== null);
   expect(present.length).toBeGreaterThan(0);
   for (const box of present) {
-    // No horizontal clipping: every control spans only the viewport width.
-    expect(box.x).toBeGreaterThanOrEqual(-1);
-    expect(box.x + box.w).toBeLessThanOrEqual(layout.innerWidth + 1);
-    expect(box.w).toBeGreaterThan(0);
-    expect(box.h).toBeGreaterThan(0);
+    // Not clipped horizontally: the rectangle spans only the viewport width.
+    expect(box.x, `${box.id}: no horizontal clipping (x)`).toBeGreaterThanOrEqual(
+      -1,
+    );
+    expect(
+      box.x + box.w,
+      `${box.id}: no horizontal clipping (right edge)`,
+    ).toBeLessThanOrEqual(layout.innerWidth + 1);
+    // Within the clipping ancestor (the document): the rectangle never
+    // extends past the scroll extent, and it is never collapsed.
+    expect(box.y, `${box.id}: within document (y)`).toBeGreaterThanOrEqual(-1);
+    expect(
+      box.y + box.h,
+      `${box.id}: within document (bottom edge)`,
+    ).toBeLessThanOrEqual(layout.scrollHeight + 1);
+    expect(box.w, `${box.id}: non-zero width`).toBeGreaterThan(0);
+    expect(box.h, `${box.id}: non-zero height`).toBeGreaterThan(0);
   }
-  // No overlapping text among sibling/peer controls (ancestor containment
-  // is normal block nesting, not an overlap).
+  // Unrelated peers (no ancestor/descendant nesting) never intersect.
   for (let i = 0; i < present.length; i += 1) {
     for (let j = i + 1; j < present.length; j += 1) {
       const a = present[i];
@@ -928,13 +1069,7 @@ async function expectViewportIntegrity(page, testIds) {
       }
       const intersects =
         a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
-      expect(
-        intersects,
-        `${a.id} overlaps ${b.id} at ${JSON.stringify([
-          { id: a.id, x: a.x, y: a.y, w: a.w, h: a.h },
-          { id: b.id, x: b.x, y: b.y, w: b.w, h: b.h },
-        ])}`,
-      ).toBe(false);
+      expect(intersects, `${a.id} must not overlap ${b.id}`).toBe(false);
     }
   }
 }
@@ -965,27 +1100,34 @@ test("T04 React: lost-response exact replay returns the original receipt and a s
 
     let submitCount = 0;
     let firstKey = null;
-    let firstBody = null;
-    let conflictBody = null;
+    let firstRaw = null;
+    let retryRaw = null;
+    let retryKey = null;
+    let conflictBodyDigest = null;
+    const rawDigest = (value) => sha256(Buffer.from(value, "utf8"));
     await integrator.route(
       "**/api/commands/submit-attachment-version",
       async (route) => {
         submitCount += 1;
+        const postRaw = route.request().postData() ?? "";
         const post = route.request().postDataJSON();
         if (submitCount === 1) {
           // The server commits the progress receipt, then the response is
           // lost at the transport: the panel must hold the exact command
-          // and key for replay.
+          // and key for replay.  Only digests/booleans are retained so a
+          // failure can never print the raw envelope or the key.
           firstKey = post.idempotency_key;
-          firstBody = post.submission;
+          firstRaw = rawDigest(postRaw);
           await route.fetch();
           await route.abort("connectionrefused");
         } else if (submitCount === 2) {
+          retryRaw = rawDigest(postRaw);
+          retryKey = post.idempotency_key;
           await route.continue();
         } else if (submitCount === 3) {
           // Same semantic key with a different fingerprint: the domain
           // answers a definitive conflict receipt with no second effect.
-          conflictBody = post.submission;
+          conflictBodyDigest = rawDigest(postRaw);
           const rewritten = { ...post, idempotency_key: firstKey };
           const response = await route.fetch({
             postData: JSON.stringify(rewritten),
@@ -1015,7 +1157,20 @@ test("T04 React: lost-response exact replay returns the original receipt and a s
       (await integrator.getByTestId("integrator-envelope-input").isDisabled()),
     ).toBe(true);
 
-    // Exact replay: same command bytes and the same key, no third POST.
+    // Baseline after the single committed attempt (the lost response): the
+    // progress effect advanced the attachment evidence once.
+    const baselineHistory = await api(
+      reviewer,
+      "GET",
+      `/controlled/s01/api/queries/applications/${flow.applicationId}/history`,
+    );
+    expect(baselineHistory.body.runs).toHaveLength(1);
+    expect(baselineHistory.body.attachment_versions).toHaveLength(2);
+    expect(baselineHistory.body.runs[0].evidence_revision).toBe(1);
+    expect(baselineHistory.body.attachment_versions[1].evidence_revision).toBe(2);
+
+    // Exact replay: byte-identical raw wire body and the same semantic key,
+    // no third POST.  Comparisons are boolean/digest only.
     await integrator.getByRole("button", { name: "重试" }).click();
     await expect(
       integrator.getByTestId("integrator-disposition-announcement"),
@@ -1024,9 +1179,13 @@ test("T04 React: lost-response exact replay returns the original receipt and a s
       "true",
     );
     expect(submitCount).toBe(2);
-    expect(firstKey).toMatch(/^[0-9a-f-]{36}$/);
-    // One committed progress effect only: the next revision advances once
-    // and no evidence/job/run/route changed.
+    expect(retryRaw !== null && retryRaw === firstRaw).toBe(true);
+    expect(retryKey !== null && retryKey === firstKey).toBe(true);
+    expect(typeof firstKey).toBe("string");
+    expect(firstKey.length).toBeGreaterThan(0);
+    // One committed progress effect only: the replay advanced nothing —
+    // evidence revision, runs and attachments are byte-identical to the
+    // baseline, and the next request revision advanced exactly once.
     const afterReplay = await integratorProjection(integrator, requestId);
     expect(afterReplay.next_request_progress_revision).toBe(2);
     expect(afterReplay.status).toBe("open");
@@ -1035,7 +1194,15 @@ test("T04 React: lost-response exact replay returns the original receipt and a s
       "GET",
       `/controlled/s01/api/queries/applications/${flow.applicationId}/history`,
     );
-    expect(historyAfterReplay.body.evidence_revision ?? historyAfterReplay.body.runs[0].evidence_revision).toBe(1);
+    expect(historyAfterReplay.body.runs).toHaveLength(1);
+    expect(historyAfterReplay.body.attachment_versions).toHaveLength(2);
+    expect(historyAfterReplay.body.evidence_revision).toBe(
+      baselineHistory.body.evidence_revision,
+    );
+    expect(historyAfterReplay.body.runs).toEqual(baselineHistory.body.runs);
+    expect(historyAfterReplay.body.attachment_versions).toEqual(
+      baselineHistory.body.attachment_versions,
+    );
 
     // Same key, different fingerprint: definitive conflict, no second effect.
     const conflictingSubmission = structuredClone(openSubmission);
@@ -1051,7 +1218,9 @@ test("T04 React: lost-response exact replay returns the original receipt and a s
       timeout: 10000,
     });
     expect(submitCount).toBe(3);
-    expect(JSON.stringify(conflictBody)).not.toBe(JSON.stringify(firstBody));
+    expect(
+      conflictBodyDigest !== null && conflictBodyDigest !== firstRaw,
+    ).toBe(true);
     const afterConflict = await integratorProjection(integrator, requestId);
     expect(afterConflict.next_request_progress_revision).toBe(2);
     expect(afterConflict.status).toBe("open");
@@ -1139,21 +1308,25 @@ test("T04 React: awaiting_predecessor, rejected and quarantined receipts create 
       integrator.getByTestId("integrator-receipt-disposition"),
     ).toHaveText("rejected");
 
-    // Invalid attachment version breaks the canonical lineage contract:
-    // quarantined at the envelope boundary with the stable reason.
+    // Request-bound version rejection: the lineage is canonical and
+    // structurally valid (attachment_version == predecessor + 1) but the
+    // pair is inconsistent with the server's expected predecessor version,
+    // so the request-context gate rejects it.
     const versionSubmission = structuredClone(baseSubmission);
+    versionSubmission.attachment_lineage.predecessor_attachment_version =
+      openProjection.expected_predecessor_attachment_version + 1;
     versionSubmission.attachment_lineage.attachment_version =
-      openProjection.next_attachment_version + 1;
+      openProjection.expected_predecessor_attachment_version + 2;
     const versionAnnouncement = await integratorSubmitsEnvelope(
       integrator,
       versionSubmission,
     );
     expect(versionAnnouncement).toBe(
-      "附件版本被隔离（evidence.provenance_invalid）",
+      "附件版本被拒绝（intake.request_context_mismatch）",
     );
     await expect(
       integrator.getByTestId("integrator-receipt-disposition"),
-    ).toHaveText("quarantined");
+    ).toHaveText("rejected");
 
     // Bad hash / integrity failure: quarantined.
     const hashSubmission = structuredClone(baseSubmission);
@@ -1251,12 +1424,14 @@ test("T04 React: wrong role/request scope and lost sessions are existence-hiding
       "请求未找到或无权访问",
       { timeout: 10000 },
     );
-    expect(
-      await integrator.getByTestId("integrator-projection-error").textContent(),
-    ).not.toContain("S02_NOT_FOUND");
+    await expectSurfaceAbsent(
+      integrator,
+      "integrator-projection-error",
+      "S02_NOT_FOUND",
+      "integrator-projection-error: sanitized copy only",
+    );
 
-    // A valid projection loads, then the session disappears: the panel
-    // suppresses every protected fact and submission.
+    // A valid projection loads and still leaks no protected fact.
     await integratorOpensProjection(integrator, server, requestId);
     const protectedFacts = [
       flow.applicationId,
@@ -1266,29 +1441,14 @@ test("T04 React: wrong role/request scope and lost sessions are existence-hiding
       "requester_subject",
       "snapshot_",
     ];
-    const loadedText = await integrator
-      .getByTestId("integrator-panel")
-      .textContent();
     for (const fact of protectedFacts) {
-      expect(loadedText).not.toContain(fact);
+      await expectSurfaceAbsent(
+        integrator,
+        "integrator-panel",
+        fact,
+        "integrator-panel: no reviewer/application/finding/run/snapshot/raw facts",
+      );
     }
-    await flow.integratorContext.clearCookies();
-    await integrator.getByTestId("integrator-reload-button").click();
-    await expect(integrator.getByTestId("integrator-projection-error")).toHaveText(
-      "请求未找到或无权访问",
-      { timeout: 10000 },
-    );
-    expect(await integrator.getByTestId("integrator-panel").textContent()).not.toContain(
-      flow.applicationId,
-    );
-    expect(
-      await integrator
-        .getByTestId("integrator-panel")
-        .textContent(),
-    ).not.toContain("LSVAA4182N2444555");
-    expect(
-      await integrator.getByRole("button", { name: "提交附件版本" }).isHidden(),
-    ).toBe(true);
 
     // Wrong workload on the command seam: rejected receipt, no effect.
     await integrator.goto(
@@ -1330,6 +1490,111 @@ test("T04 React: wrong role/request scope and lost sessions are existence-hiding
         {
           method: "GET",
           path: `/controlled/s02/api/queries/supplement-requests/${encodeURIComponent("supplement_request_missing00000000000000000000000")}`,
+          status: 404,
+        },
+      ],
+    });
+  } finally {
+    await stopT04Flow(flow);
+  }
+});
+
+test("T04 React: a genuinely expired retained s02 session is existence-hiding and suppresses cached protected facts", async ({
+  browser,
+}) => {
+  test.setTimeout(120_000);
+  // The harness-owned clock file backs the session clock; the S02 session
+  // TTL is shortened so the retained token can actually expire.
+  const flow = await startT04Flow(browser, {
+    viewport: { width: 1280, height: 800 },
+    serverOptions: { clockSeconds: 30 },
+  });
+  const { reviewer, integrator, server, diagnostics } = flow;
+  try {
+    expect(flow.server.clockPath).toBeTruthy();
+    expect(
+      (await reviewer.goto(`${server.baseURL}/controlled/s01/react`)).status(),
+    ).toBe(200);
+    await integrator.goto(`${server.baseURL}/controlled/s02/react`);
+    const requestId = await reviewerCreatesSupplementRequest(reviewer, server);
+    flow.applicationId = (
+      await api(
+        reviewer,
+        "GET",
+        `/controlled/s01/api/queries/supplement-requests/${encodeURIComponent(requestId)}`,
+      )
+    ).body.application_id;
+    await integratorOpensProjection(integrator, server, requestId);
+
+    // The retained token is present and valid.
+    const cookieNames = (await flow.integratorContext.cookies()).map(
+      (cookie) => cookie.name,
+    );
+    expect(cookieNames).toContain("s02_session");
+    const validProjection = await integratorProjection(integrator, requestId);
+    expect(validProjection.request_id).toBe(requestId);
+
+    // Advance the server clock beyond the short TTL; the cookie is retained
+    // but the identity is genuinely expired.
+    const clockBaseline = Math.floor(Date.now() / 1000);
+    fs.writeFileSync(
+      flow.server.clockPath,
+      String(clockBaseline + 31),
+      "ascii",
+    );
+    await integrator.getByTestId("integrator-reload-button").click();
+    await expect(integrator.getByTestId("integrator-projection-error")).toHaveText(
+      "请求未找到或无权访问",
+      { timeout: 10000 },
+    );
+    expect(
+      (await flow.integratorContext.cookies()).some(
+        (cookie) => cookie.name === "s02_session",
+      ),
+    ).toBe(true);
+    // The cached request/protected facts are suppressed from the rendered
+    // surface; submission is gone.
+    await expectSurfaceAbsent(
+      integrator,
+      "integrator-panel",
+      requestId,
+      "integrator-panel: no request identifier after expiry",
+    );
+    await expectSurfaceAbsent(
+      integrator,
+      "integrator-panel",
+      flow.applicationId,
+      "integrator-panel: no reviewer application identifier after expiry",
+    );
+    await expectSurfaceAbsent(
+      integrator,
+      "integrator-panel",
+      "LSVAA4182N2444555",
+      "integrator-panel: no raw lease value after expiry",
+    );
+    expect(
+      await integrator.getByRole("button", { name: "提交附件版本" }).isHidden(),
+    ).toBe(true);
+
+    // The same retained cookie answers the query seam with the sanitized 404.
+    const expiredRead = await api(
+      integrator,
+      "GET",
+      `/controlled/s02/api/queries/supplement-requests/${encodeURIComponent(requestId)}`,
+    );
+    expect(expiredRead.status).toBe(404);
+    expect(expiredRead.body).toEqual({ detail: { error: "S02_NOT_FOUND" } });
+
+    expectExactDiagnostics(diagnostics, {
+      api404s: [
+        {
+          method: "GET",
+          path: `/controlled/s01/api/queries/applications/${flow.applicationId}/workspace`,
+          status: 404,
+        },
+        {
+          method: "GET",
+          path: `/controlled/s02/api/queries/supplement-requests/${encodeURIComponent(requestId)}`,
           status: 404,
         },
         {

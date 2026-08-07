@@ -3,6 +3,7 @@ from __future__ import annotations
 from http.cookies import SimpleCookie
 import hashlib
 import json
+import os
 from pathlib import Path
 import sqlite3
 import time
@@ -723,3 +724,17 @@ def test_t04_integrator_projection_http_fails_closed_on_malformed_expiry(
             assert "request_id" not in response.text
             assert "application_id" not in response.text
             assert request_id not in response.text
+
+
+def create_expiring_s02_session_app() -> Any:
+    """Test-only S02 shell factory with a file-backed session clock and a
+    short S02 session TTL, so a browser test can exercise genuine retained-
+    token expiry without any production clock/file backdoor."""
+    import task4_consistency.web.app as web
+
+    clock_path = Path(os.environ["TASK4_S01_TEST_SESSION_CLOCK_PATH"])
+    web.S01_SESSION_CLOCK = lambda: float(clock_path.read_text(encoding="ascii"))
+    web.S02_SESSION_TTL_SECONDS = int(
+        os.environ["TASK4_S02_TEST_SESSION_TTL_SECONDS"]
+    )
+    return web.create_s02_test_app()
