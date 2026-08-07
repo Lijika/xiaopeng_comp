@@ -654,7 +654,30 @@ async function expectSurfaceAbsent(page, testId, needle, label) {
   expect(await surfaceContains(page, testId, needle), label).toBe(false);
 }
 
-test("T04 diagnostic path oracle removes dynamic resource identifiers", () => {
+/** T04 renders protected values, so its failures must not persist page,
+ * screenshot, or trace artifacts. */
+const t04Test = test.extend({
+  t04NoFailureArtifacts: [
+    async ({}, use) => {
+      const previous = process.env.PLAYWRIGHT_NO_COPY_PROMPT;
+      process.env.PLAYWRIGHT_NO_COPY_PROMPT = "1";
+      try {
+        await use();
+      } finally {
+        if (previous === undefined) {
+          delete process.env.PLAYWRIGHT_NO_COPY_PROMPT;
+        } else {
+          process.env.PLAYWRIGHT_NO_COPY_PROMPT = previous;
+        }
+      }
+    },
+    { auto: true, scope: "worker" },
+  ],
+  screenshot: "off",
+  trace: "off",
+});
+
+t04Test("T04 diagnostic path oracle removes dynamic resource identifiers", () => {
   const cases = [
     {
       id: "app_t04_secret_identifier",
@@ -897,7 +920,7 @@ for (const viewport of [
   { name: "desktop 1280x800", width: 1280, height: 800 },
   { name: "mobile 390x844", width: 390, height: 844 },
 ]) {
-  test(`T04 React tracer (${viewport.name}): Reviewer request -> Integrator current projection -> valid progress/closure -> Reviewer current route/history`, async ({
+  t04Test(`T04 React tracer (${viewport.name}): Reviewer request -> Integrator current projection -> valid progress/closure -> Reviewer current route/history`, async ({
     browser,
   }) => {
     test.setTimeout(120_000);
@@ -1237,7 +1260,7 @@ async function expectViewportIntegrity(page, testIds, viewport) {
   );
 }
 
-test("T04 viewport oracle rejects clipped text and overlapping leaf controls", async ({
+t04Test("T04 viewport oracle rejects clipped text and overlapping leaf controls", async ({
   page,
 }) => {
   const viewport = { width: 390, height: 844 };
@@ -1262,7 +1285,7 @@ test("T04 viewport oracle rejects clipped text and overlapping leaf controls", a
   ).rejects.toThrow();
 });
 
-test("T04 React: lost-response exact replay returns the original receipt and a same-key conflict has no second effect", async ({
+t04Test("T04 React: lost-response exact replay returns the original receipt and a same-key conflict has no second effect", async ({
   browser,
 }) => {
   test.setTimeout(120_000);
@@ -1441,7 +1464,7 @@ test("T04 React: lost-response exact replay returns the original receipt and a s
   }
 });
 
-test("T04 React: awaiting_predecessor, rejected and quarantined receipts create no evidence/job/run/route/fulfillment effect", async ({
+t04Test("T04 React: awaiting_predecessor, rejected and quarantined receipts create no evidence/job/run/route/fulfillment effect", async ({
   browser,
 }) => {
   test.setTimeout(120_000);
@@ -1573,7 +1596,7 @@ test("T04 React: awaiting_predecessor, rejected and quarantined receipts create 
   }
 });
 
-test("T04 React: wrong role/request scope and lost sessions are existence-hiding with no foreign facts", async ({
+t04Test("T04 React: wrong role/request scope and lost sessions are existence-hiding with no foreign facts", async ({
   browser,
 }) => {
   test.setTimeout(120_000);
@@ -1687,7 +1710,7 @@ test("T04 React: wrong role/request scope and lost sessions are existence-hiding
   }
 });
 
-test("T04 React: a genuinely expired retained s02 session is existence-hiding and suppresses cached protected facts", async ({
+t04Test("T04 React: a genuinely expired retained s02 session is existence-hiding and suppresses cached protected facts", async ({
   browser,
 }) => {
   test.setTimeout(120_000);
@@ -1820,7 +1843,7 @@ async function tabToTestId(page, testId, { maxTabs = 100 } = {}) {
   throw new Error(`keyboard navigation could not reach ${testId}`);
 }
 
-test("T04 React: the full operator flow works by keyboard with visible focus and truthful live status", async ({
+t04Test("T04 React: the full operator flow works by keyboard with visible focus and truthful live status", async ({
   browser,
 }) => {
   test.setTimeout(120_000);
