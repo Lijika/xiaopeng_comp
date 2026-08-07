@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import { HttpError, isDefinitiveRejection } from "../api/client";
+import { HttpError, isDefinitiveS05Rejection } from "../api/client";
 import {
   useBusinessExceptionView,
   useClaimExceptionWorkItem,
@@ -22,7 +22,15 @@ type PendingCommand =
  * shell.  It renders the server-owned minimized view, claims with the exact
  * server context, and offers approve/reject only when the server action list
  * says so.  It never issues route/expire/invalidate/operations commands and
- * never optimistically transitions any Lifecycle state. */
+ * never optimistically transitions any Lifecycle state.
+ *
+ * Every rejection — definitive or transport-unknown — raises an
+ * authoritative-reconciliation fence: claim/decision controls are disabled
+ * until ``useBusinessExceptionView`` refetches successfully.  A claim is
+ * never blindly replayed (it has no idempotency contract): the fresh view
+ * decides whether it committed.  An unknown decision keeps its byte-identical
+ * command and key and is retried only when the fresh view still offers the
+ * decision action.  A fresh key is used after a definitive outcome. */
 export default function BusinessExceptionApproverPanel({
   requestId,
 }: {
@@ -41,6 +49,9 @@ export default function BusinessExceptionApproverPanel({
     reasonCode: string | null;
     unknown: boolean;
   } | null>(null);
+  // Raised by every rejection; cleared only by a successful authoritative
+  // view refetch, which then decides what actions remain.
+  const [reconcileFence, setReconcileFence] = useState(false);
 
   const active = pendingCommand === null ? null : pendingCommand.action;
   const anyPending = claim.isPending || decide.isPending;
@@ -51,26 +62,39 @@ export default function BusinessExceptionApproverPanel({
       (active === "decide" && decide.isError)) &&
     outcome !== null &&
     outcome.unknown === true;
+  const canRetryDecision =
+    !reconcileFence &&
+    pendingCommand !== null &&
+    pendingCommand.action === "decide" &&
+    transportUnknown &&
+    !view.isFetching;
 
-  const handleRejection = (error: Error) => {
-    if (!isDefinitiveRejection(error)) {
+  const handleRejection = (
+    error: Error,
+    action: PendingCommand["action"],
+  ) => {
+    if (!isDefinitiveS05Rejection(error)) {
       setOutcome({
-        text: "结果未知：网络未确认，重试将使用同一幂等键",
+        text: "结果未知：网络未确认，请重新加载权威视图后再试",
         reasonCode: null,
         unknown: true,
       });
-      return;
+    } else {
+      if (action === "decide") setDecisionKey(newIdempotencyKey());
+      setPendingCommand(null);
+      setOutcome({
+        text: "命令未接受：请重新加载权威视图后再试",
+        reasonCode: error.reasonCode ?? null,
+        unknown: false,
+      });
     }
-    setPendingCommand(null);
-    setOutcome({
-      text: "命令未接受，请重新加载权威视图后再试",
-      reasonCode: error.reasonCode ?? null,
-      unknown: false,
-    });
+    // Every rejection stays fenced until the authoritative view refetches.
+    setReconcileFence(true);
   };
 
   const handleClaim = () => {
     if (view.data === undefined || anyPending || pendingCommand !== null) return;
+    if (reconcileFence || view.isFetching) return;
     if (!view.data.actions.includes("claim")) return;
     const command: ExceptionClaimCommand = {
       expected_context: view.data.command_context,
@@ -82,12 +106,13 @@ export default function BusinessExceptionApproverPanel({
         setPendingCommand(null);
         setOutcome({ text: "已认领，可进行决策", reasonCode: null, unknown: false });
       },
-      onError: handleRejection,
+      onError: (error) => handleRejection(error, "claim"),
     });
   };
 
   const handleDecide = (decision: "approved" | "rejected") => {
     if (view.data === undefined || anyPending || pendingCommand !== null) return;
+    if (reconcileFence || view.isFetching) return;
     if (!view.data.actions.includes("decide")) return;
     const command: ExceptionDecisionCommand = {
       work_item_id: view.data.work_item_id,
@@ -112,35 +137,86 @@ export default function BusinessExceptionApproverPanel({
           unknown: false,
         });
       },
-      onError: handleRejection,
+      onError: (error) => handleRejection(error, "decide"),
+    });
+  };
+
+  /** The one authoritative reload: the fresh server view decides what
+   * remains actionable and what the live outcome is.  A failed refetch
+   * keeps the fence up and leaves the panel recoverable. */
+  const handleReconcile = () => {
+    if (view.isFetching) return;
+    const command = pendingCommand;
+    void view.refetch().then((result) => {
+      if (result.status === "error" || result.data === undefined) return;
+      setReconcileFence(false);
+      if (command === null) {
+        // A definitive rejection: the fresh DTO alone re-authorizes new
+        // semantic commands; nothing is retained and nothing is announced.
+        setOutcome(null);
+        return;
+      }
+      if (command.action === "claim") {
+        // A claim is never replayed: the fresh DTO proves whether it
+        // committed and announces the server-derived live status.
+        setPendingCommand(null);
+        setOutcome({
+          text:
+            result.data.claim_status === "claimed"
+              ? "已认领，可进行决策"
+              : "未认领",
+          reasonCode: null,
+          unknown: false,
+        });
+        return;
+      }
+      if (result.data.actions.includes("decide")) {
+        // The lost decision is still actionable: retain the byte-identical
+        // command and key with its unknown/retry state.
+        setOutcome({
+          text: "结果未知：网络未确认，重试将使用同一幂等键",
+          reasonCode: null,
+          unknown: true,
+        });
+        return;
+      }
+      // The lost decision is now terminal on the server: clear the retained
+      // command and announce the fresh server status.
+      setDecisionKey(newIdempotencyKey());
+      setPendingCommand(null);
+      setOutcome({
+        text: `已决策（${result.data.status}）`,
+        reasonCode: null,
+        unknown: false,
+      });
     });
   };
 
   const handleRetry = () => {
-    if (pendingCommand === null || anyPending) return;
-    if (pendingCommand.action === "claim") {
-      claim.mutate(pendingCommand.command, {
-        onSuccess: () => {
-          setPendingCommand(null);
-          setOutcome({
-            text: "已认领，可进行决策",
-            reasonCode: null,
-            unknown: false,
-          });
-        },
-        onError: handleRejection,
-      });
-    } else {
-      decide.mutate(pendingCommand.command, {
-        onSuccess: () => {
-          setDecisionKey(newIdempotencyKey());
-          setPendingCommand(null);
-          setOutcome({ text: "已决策", reasonCode: null, unknown: false });
-        },
-        onError: handleRejection,
-      });
-    }
+    if (pendingCommand === null || anyPending || view.isFetching) return;
+    if (pendingCommand.action !== "decide") return;
+    decide.mutate(pendingCommand.command, {
+      onSuccess: () => {
+        setDecisionKey(newIdempotencyKey());
+        setPendingCommand(null);
+        setOutcome({ text: "已决策", reasonCode: null, unknown: false });
+      },
+      onError: (error) => handleRejection(error, "decide"),
+    });
   };
+
+  /** The one authoritative-reload control, shared by the fenced error
+   * branch and the main branch so a failed refetch always stays retryable. */
+  const reconcileControl = (
+    <Button
+      variant="outline"
+      onClick={handleReconcile}
+      disabled={view.isFetching}
+      data-testid="approver-reconcile-button"
+    >
+      {view.isFetching ? "重新加载中…" : "重新加载权威视图"}
+    </Button>
+  );
 
   if (requestId === null) {
     return (
@@ -161,6 +237,26 @@ export default function BusinessExceptionApproverPanel({
   if (view.isError || view.data === undefined) {
     const notFound =
       view.error instanceof HttpError && view.error.status === 404;
+    if (reconcileFence) {
+      // A failed authoritative refetch keeps the fence up: the panel stays
+      // visibly unavailable/stale, exposes no claim/decision controls, and
+      // keeps the one reconciliation control alive for another attempt.
+      return (
+        <section className="panel" data-testid="approver-unavailable">
+          <h2>业务例外审批</h2>
+          <p>{notFound ? "未找到或无权访问" : "请求不可用"}</p>
+          <p
+            role="status"
+            aria-live="polite"
+            aria-label="审批结果"
+            data-testid="approver-outcome"
+          >
+            权威状态不可用（重新加载失败）：请重试权威读取
+          </p>
+          <div className="recovery-actions">{reconcileControl}</div>
+        </section>
+      );
+    }
     return (
       <section className="panel" data-testid="approver-not-found">
         <h2>业务例外审批</h2>
@@ -172,11 +268,15 @@ export default function BusinessExceptionApproverPanel({
   const canClaim =
     data.actions.includes("claim") &&
     !anyPending &&
-    pendingCommand === null;
+    pendingCommand === null &&
+    !reconcileFence &&
+    !view.isFetching;
   const canDecide =
     data.actions.includes("decide") &&
     !anyPending &&
-    pendingCommand === null;
+    pendingCommand === null &&
+    !reconcileFence &&
+    !view.isFetching;
 
   return (
     <section
@@ -283,17 +383,24 @@ export default function BusinessExceptionApproverPanel({
             </Button>
           </>
         )}
-        {transportUnknown && pendingCommand !== null && (
+        {reconcileFence && reconcileControl}
+        {canRetryDecision && (
           <Button
             variant="outline"
             onClick={handleRetry}
+            disabled={decide.isPending}
             data-testid="approver-retry-button"
           >
-            重试
+            重试（同一幂等键）
           </Button>
         )}
       </div>
-      <p role="status" aria-live="polite" data-testid="approver-outcome">
+      <p
+        role="status"
+        aria-live="polite"
+        aria-label="审批结果"
+        data-testid="approver-outcome"
+      >
         {outcome === null
           ? "等待操作"
           : outcome.reasonCode !== null

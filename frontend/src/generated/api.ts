@@ -1459,11 +1459,11 @@ export interface components {
             /** Eligible */
             eligible: boolean;
             /** Ineligible Reason Code */
-            ineligible_reason_code?: string | null;
+            ineligible_reason_code: string | null;
             /** Predecessor Request Id */
-            predecessor_request_id?: string | null;
+            predecessor_request_id: string | null;
             /** Request Reason */
-            request_reason?: string | null;
+            request_reason: string | null;
         };
         /** S01ClaimResult */
         S01ClaimResult: {
@@ -2702,6 +2702,28 @@ export interface components {
             work_item_id: string;
         };
         /**
+         * T05ErrorDetail
+         * @description The closed S05 error detail: the registered error code plus the
+         *     optional reason/message/hint, with no arbitrary keys.
+         */
+        T05ErrorDetail: {
+            /** Error */
+            error: string;
+            /** Hint */
+            hint?: string | null;
+            /** Message */
+            message?: string | null;
+            /** Reason Code */
+            reason_code?: string | null;
+        };
+        /**
+         * T05ErrorResponse
+         * @description The closed S05 error envelope registered on every S05 response.
+         */
+        T05ErrorResponse: {
+            detail: components["schemas"]["T05ErrorDetail"];
+        };
+        /**
          * T05EvidenceReference
          * @description The minimized evidence reference of the approver view: metadata only,
          *     never raw values, OCR text, credentials, or object paths.
@@ -3560,7 +3582,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
             /** @description Conflict */
@@ -3569,7 +3591,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
             /** @description Request Entity Too Large */
@@ -3578,7 +3600,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
             /** @description Unprocessable Entity */
@@ -3587,7 +3609,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
             /** @description Service Unavailable */
@@ -3596,7 +3618,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
         };
@@ -3632,7 +3654,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
             /** @description Conflict */
@@ -3641,7 +3663,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
             /** @description Request Entity Too Large */
@@ -3650,7 +3672,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
             /** @description Unprocessable Entity */
@@ -3659,7 +3681,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
             /** @description Service Unavailable */
@@ -3668,7 +3690,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
         };
@@ -3734,7 +3756,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
             /** @description Conflict */
@@ -3743,7 +3765,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
             /** @description Request Entity Too Large */
@@ -3752,7 +3774,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
             /** @description Unprocessable Entity */
@@ -3761,7 +3783,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
             /** @description Service Unavailable */
@@ -3770,7 +3792,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
         };
@@ -3828,7 +3850,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
             /** @description Conflict */
@@ -3837,7 +3859,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
             /** @description Request Entity Too Large */
@@ -3846,7 +3868,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
             /** @description Unprocessable Entity */
@@ -3855,7 +3877,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
             /** @description Service Unavailable */
@@ -3864,7 +3886,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
         };
@@ -3924,7 +3946,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
             /** @description Conflict */
@@ -3933,7 +3955,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
             /** @description Request Entity Too Large */
@@ -3942,7 +3964,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
             /** @description Unprocessable Entity */
@@ -3951,7 +3973,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
             /** @description Service Unavailable */
@@ -3960,7 +3982,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
         };
@@ -4018,7 +4040,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
             /** @description Conflict */
@@ -4027,7 +4049,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
             /** @description Request Entity Too Large */
@@ -4036,7 +4058,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
             /** @description Unprocessable Entity */
@@ -4045,7 +4067,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
             /** @description Service Unavailable */
@@ -4054,7 +4076,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
         };
@@ -4110,7 +4132,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
             /** @description Conflict */
@@ -4119,7 +4141,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
             /** @description Request Entity Too Large */
@@ -4128,7 +4150,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
             /** @description Unprocessable Entity */
@@ -4137,7 +4159,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
             /** @description Service Unavailable */
@@ -4146,7 +4168,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
         };
@@ -4324,7 +4346,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
             /** @description Conflict */
@@ -4333,7 +4355,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
             /** @description Request Entity Too Large */
@@ -4342,7 +4364,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
             /** @description Unprocessable Entity */
@@ -4351,7 +4373,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
             /** @description Service Unavailable */
@@ -4360,7 +4382,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
         };
@@ -5326,7 +5348,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
         };
@@ -5357,16 +5388,25 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Unprocessable Entity */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["T05ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["T05ErrorResponse"];
                 };
             };
         };

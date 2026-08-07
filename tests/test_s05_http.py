@@ -617,12 +617,11 @@ _S05_OPENAPI_PATHS = (
 
 def _schema_is_closed(schema: dict) -> bool:
     """True when the schema is a typed object that cannot accept arbitrary
-    extra keys and exposes at least one declared property."""
+    extra keys: JSON Schema allows extras unless ``additionalProperties`` is
+    literally ``false``, so an absent keyword is open, not closed."""
     if not isinstance(schema, dict):
         return False
-    if schema.get("additionalProperties") is True:
-        return False
-    if schema.get("additionalProperties") is None and "properties" not in schema:
+    if schema.get("additionalProperties") is not False:
         return False
     return isinstance(schema.get("properties"), dict) and len(schema["properties"]) > 0
 
@@ -656,14 +655,76 @@ def test_s05_openapi_contract_is_closed_and_typed() -> None:
             else:
                 assert _schema_is_closed(schema), f"{path} {method} response is not closed"
             expected_envelopes = (
-                ("404", "409", "422", "503") if method == "post" else ("404",)
+                ("404", "409", "413", "422", "503")
+                if method == "post"
+                else ("404", "503")
             )
             for status in expected_envelopes:
                 registered = responses.get(status)
                 assert registered is not None, f"{path} {method} lacks {status}"
-                assert "model" in registered or "content" in registered, (
-                    f"{path} {method} {status} has no envelope model"
+                envelope_ref = (
+                    registered.get("content", {})
+                    .get("application/json", {})
+                    .get("schema", {})
+                    .get("$ref")
                 )
+                assert envelope_ref is not None, (
+                    f"{path} {method} {status} has no envelope schema"
+                )
+                envelope = envelope_ref.rsplit("/", 1)[-1]
+                envelope_schema = components[envelope]
+                assert _schema_is_closed(envelope_schema), (
+                    f"{path} {method} {status} envelope {envelope} is not closed"
+                )
+                detail_ref = (
+                    envelope_schema.get("properties", {})
+                    .get("detail", {})
+                    .get("$ref")
+                )
+                detail_name = detail_ref.rsplit("/", 1)[-1] if detail_ref else None
+                detail_schema = components.get(detail_name or "")
+                assert detail_schema is not None, (
+                    f"{path} {method} {status} error detail is not a component"
+                )
+                assert (
+                    detail_schema.get("additionalProperties") is False
+                ), f"{path} {method} {status} error detail is not closed"
+            # Every response actually documented on the operation must be a
+            # literally closed envelope (or, for 200, the closed success
+            # schema asserted above); the automatic HTTPValidationError 422
+            # must never leak onto the T05 surface.
+            for status, registered in responses.items():
+                if status == "200":
+                    continue
+                envelope_ref = (
+                    registered.get("content", {})
+                    .get("application/json", {})
+                    .get("schema", {})
+                    .get("$ref")
+                )
+                assert envelope_ref is not None, (
+                    f"{path} {method} documented {status} has no envelope schema"
+                )
+                envelope = envelope_ref.rsplit("/", 1)[-1]
+                assert _schema_is_closed(components[envelope]), (
+                    f"{path} {method} documented {status} envelope {envelope} "
+                    "is not closed"
+                )
+            if (
+                path
+                == "/controlled/s01/api/queries/business-exceptions/{request_id}"
+                and method == "get"
+            ):
+                view_422 = responses.get("422", {})
+                view_422_ref = (
+                    view_422.get("content", {})
+                    .get("application/json", {})
+                    .get("schema", {})
+                    .get("$ref", "")
+                )
+                assert view_422_ref.endswith(
+                    "/T05ErrorResponse"
+                ), "the business-exception view GET 422 must use the T05 envelope"
             request_body = operation.get("requestBody")
             if method == "post":
                 assert request_body is not None, f"{path} has no requestBody"
@@ -701,6 +762,39 @@ def test_s05_openapi_contract_is_closed_and_typed() -> None:
                     }, f"{path} expected_context misses fixed fields"
     assert "S01BusinessExceptionEligibility" in components
     assert _schema_is_closed(components["S01BusinessExceptionEligibility"])
+    eligibility = components["S01BusinessExceptionEligibility"]
+    assert set(eligibility.get("required", [])) == {
+        "eligible",
+        "request_reason",
+        "ineligible_reason_code",
+        "predecessor_request_id",
+    }, "the four-key eligibility projection is not required at the schema"
+    for key in ("request_reason", "ineligible_reason_code", "predecessor_request_id"):
+        property_schema = eligibility["properties"][key]
+        nullable = property_schema.get("nullable") is True or "null" in str(
+            property_schema.get("type")
+        ) or any(
+            branch.get("type") == "null"
+            for branch in property_schema.get("anyOf", [])
+            if isinstance(branch, dict)
+        )
+        assert nullable, f"eligibility {key} is not nullable"
+    for name in (
+        "T05BusinessExceptionRequestResult",
+        "T05ExceptionClaimResult",
+        "T05ExceptionDecisionResult",
+        "T05ExceptionRouteResult",
+        "T05ExceptionDeactivationResult",
+        "T05BusinessExceptionOperationsResult",
+        "T05BusinessExceptionOperationsStatus",
+        "T05BusinessExceptionView",
+        "T05ExceptionCommandContext",
+        "T05RoutingContext",
+        "T05ErrorResponse",
+        "T05ErrorDetail",
+    ):
+        assert name in components, f"{name} is missing from the components"
+        assert _schema_is_closed(components[name]), f"{name} is not closed"
 
 
 def test_s05_approver_react_shell_auth_and_no_store(tmp_path: Path) -> None:
@@ -729,6 +823,51 @@ def test_s05_approver_react_shell_auth_and_no_store(tmp_path: Path) -> None:
 
     assert denied.status == 404
     assert reviewer.status == 404
+    assert shell.status == 200
+    assert shell.headers["cache-control"] == "no-store"
+    assert shell.headers["pragma"] == "no-cache"
+    assert "set-cookie" not in shell.headers
+    assert "type=\"module\"" in shell.text
+
+    with UvicornLoopback(
+        {
+            **_environment(tmp_path / "target.sqlite3"),
+            "TASK4_WEB_TOKEN": "global-token-different-from-approver",
+        },
+        app_target="task4_consistency.web.app:create_s01_test_app",
+        app_factory=True,
+    ) as server:
+        global_token = server.request(
+            "GET",
+            "/controlled/s05/react?request=missing",
+            headers={"Authorization": "Bearer global-token-different-from-approver"},
+            use_session=False,
+        )
+        denied = server.request(
+            "GET",
+            "/controlled/s05/react?request=missing",
+            use_session=False,
+        )
+        reviewer = server.request(
+            "GET",
+            "/controlled/s05/react?request=missing",
+            headers=headers("reviewer"),
+            use_session=False,
+        )
+        shell = server.request(
+            "GET",
+            "/controlled/s05/react?request=missing",
+            headers=_approver_headers(),
+            use_session=False,
+        )
+
+    assert global_token.status == 404
+    assert global_token.headers["cache-control"] == "no-store"
+    assert global_token.headers["pragma"] == "no-cache"
+    assert denied.status == 404
+    assert denied.headers["cache-control"] == "no-store"
+    assert reviewer.status == 404
+    assert reviewer.headers["cache-control"] == "no-store"
     assert shell.status == 200
     assert shell.headers["cache-control"] == "no-store"
     assert shell.headers["pragma"] == "no-cache"

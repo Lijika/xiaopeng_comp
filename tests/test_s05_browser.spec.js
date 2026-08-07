@@ -342,14 +342,54 @@ async function uiRequestException(reviewer, server, applicationId, workItemId) {
   await expect(reviewer.getByTestId("review-panel")).toBeVisible({ timeout: 10_000 });
   await expect(reviewer.getByTestId("claim-button")).toBeEnabled({ timeout: 10_000 });
   await reviewer.getByTestId("claim-button").click();
-  await expect(reviewer.getByTestId("exception-request-button")).toBeEnabled({ timeout: 10_000 });
+  const requestButton = reviewer.getByRole("button", { name: "请求业务例外" });
+  await expect(requestButton).toBeEnabled({ timeout: 10_000 });
   await expect(reviewer.getByTestId("review-workspace-verdict")).toHaveText("inconsistent");
-  await reviewer.getByTestId("exception-request-button").click();
+  await assertControlWithinViewport(reviewer, "exception-request-button");
+  await requestButton.focus();
+  await reviewer.keyboard.press("Enter");
   await expect(reviewer.getByTestId("exception-request-accepted")).toBeVisible({ timeout: 10_000 });
   const requestId = (await reviewer.getByTestId("exception-request-id").textContent()).trim();
   expect(requestId.length).toBeGreaterThan(0);
   await expect(reviewer.getByTestId("exception-route")).toHaveText("pending_exception_approval");
   return requestId;
+}
+
+/** Assert one actionable control is visible, within the current viewport
+ * (after scrolling it into view), and not clipped by it. */
+async function assertControlWithinViewport(page, testid) {
+  await page.getByTestId(testid).scrollIntoViewIfNeeded();
+  await expect(page.getByTestId(testid)).toBeVisible();
+  const box = await page.getByTestId(testid).boundingBox();
+  expect(box).not.toBeNull();
+  const viewport = page.viewportSize();
+  expect(box.x).toBeGreaterThanOrEqual(0);
+  expect(box.y).toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);
+  expect(box.y + box.height).toBeLessThanOrEqual(viewport.height);
+}
+
+/** Assert the listed controls do not overlap one another (layout property,
+ * independent of scroll position). */
+async function assertNoOverlap(page, testids) {
+  const boxes = [];
+  for (const id of testids) {
+    const box = await page.getByTestId(id).boundingBox();
+    expect(box, `control ${id} missing`).not.toBeNull();
+    boxes.push({ id, box });
+  }
+  for (let i = 0; i < boxes.length; i++) {
+    for (let j = i + 1; j < boxes.length; j++) {
+      const a = boxes[i].box;
+      const b = boxes[j].box;
+      const overlap =
+        a.x < b.x + b.width &&
+        b.x < a.x + a.width &&
+        a.y < b.y + b.height &&
+        b.y < a.y + a.height;
+      expect(overlap, `${boxes[i].id} overlaps ${boxes[j].id}`).toBe(false);
+    }
+  }
 }
 
 test("UI-driven request to independent approve with operator routing and reviewer refetch", async ({
@@ -451,30 +491,42 @@ test("UI-driven reject, expiry, claim race, operations recovery, accessibility a
   const server = await startServer();
   const reviewerContext = await browser.newContext({
     extraHTTPHeaders: { Authorization: `Bearer ${REVIEWER_CREDENTIAL}` },
+    viewport: { width: 1280, height: 800 },
   });
   const rejectReviewerContext = await browser.newContext({
     extraHTTPHeaders: { Authorization: `Bearer ${REVIEWER_CREDENTIAL}` },
+    viewport: { width: 1280, height: 800 },
   });
   const expiryReviewerContext = await browser.newContext({
     extraHTTPHeaders: { Authorization: `Bearer ${REVIEWER_CREDENTIAL}` },
+    viewport: { width: 1280, height: 800 },
   });
   const recoveryReviewerContext = await browser.newContext({
     extraHTTPHeaders: { Authorization: `Bearer ${REVIEWER_CREDENTIAL}` },
-  });
-  const reopenedReviewerContext = await browser.newContext({
-    extraHTTPHeaders: { Authorization: `Bearer ${REVIEWER_CREDENTIAL}` },
+    viewport: { width: 1280, height: 800 },
   });
   const approverContext = await browser.newContext({
     extraHTTPHeaders: { Authorization: `Bearer ${APPROVER_CREDENTIAL}` },
+    viewport: { width: 1280, height: 800 },
   });
   const racerContext = await browser.newContext({
     extraHTTPHeaders: { Authorization: `Bearer ${APPROVER_CREDENTIAL}` },
+    viewport: { width: 1280, height: 800 },
+  });
+  const mobileReviewerContext = await browser.newContext({
+    extraHTTPHeaders: { Authorization: `Bearer ${REVIEWER_CREDENTIAL}` },
+    viewport: { width: 390, height: 844 },
+  });
+  const mobileApproverContext = await browser.newContext({
+    extraHTTPHeaders: { Authorization: `Bearer ${APPROVER_CREDENTIAL}` },
+    viewport: { width: 390, height: 844 },
   });
   const reviewer = await reviewerContext.newPage();
   const rejectReviewer = await rejectReviewerContext.newPage();
   const expiryReviewer = await expiryReviewerContext.newPage();
   const recoveryReviewer = await recoveryReviewerContext.newPage();
-  const reopenedReviewer = await reopenedReviewerContext.newPage();
+  const mobileReviewer = await mobileReviewerContext.newPage();
+  const mobileApprover = await mobileApproverContext.newPage();
   const approver = await approverContext.newPage();
   const racer = await racerContext.newPage();
   try {
@@ -482,7 +534,7 @@ test("UI-driven reject, expiry, claim race, operations recovery, accessibility a
     await rejectReviewer.goto(`${server.baseURL}/controlled/s01`);
     await expiryReviewer.goto(`${server.baseURL}/controlled/s01`);
     await recoveryReviewer.goto(`${server.baseURL}/controlled/s01`);
-    await reopenedReviewer.goto(`${server.baseURL}/controlled/s01`);
+    await mobileReviewer.goto(`${server.baseURL}/controlled/s01`);
 
     // --- reject leg with a live-claim race observed by a second approver ---
     const rejectedPrep = await uiPrepareApplication(rejectReviewer, "s05-ui-reject");
@@ -503,8 +555,25 @@ test("UI-driven reject, expiry, claim race, operations recovery, accessibility a
     await expect(racer.getByTestId("approver-claim-status")).toHaveText("claimed");
     await expect(racer.getByTestId("approver-claim-fence")).toHaveText("1");
     await expect(racer.locator('[data-testid="approver-claim-button"]')).toHaveCount(0);
-    await approver.getByTestId("approver-reject-button").click();
+    // Keyboard decision on the desktop Approver: accessible role/name, the
+    // live controls within the 1280x800 viewport, and no overlap.
+    await expect(approver.getByRole("button", { name: "批准" })).toBeEnabled({
+      timeout: 10_000,
+    });
+    const rejectButton = approver.getByRole("button", { name: "拒绝" });
+    await expect(rejectButton).toBeEnabled();
+    await assertControlWithinViewport(approver, "approver-approve-button");
+    await assertControlWithinViewport(approver, "approver-reject-button");
+    await assertNoOverlap(approver, ["approver-approve-button", "approver-reject-button"]);
+    await rejectButton.focus();
+    await approver.keyboard.press("Enter");
     await expect(approver.getByTestId("approver-status")).toHaveText("rejected", { timeout: 10_000 });
+    // The Approver live outcome is a named status region announcing the
+    // server decision.
+    await expect(approver.getByRole("status", { name: "审批结果" })).toHaveText(
+      "已拒绝",
+      { timeout: 10_000 },
+    );
     // The successor returns to Manual Review; the fresh work item projects the
     // same-run re-request as not material.
     let successor;
@@ -564,6 +633,11 @@ test("UI-driven reject, expiry, claim race, operations recovery, accessibility a
     await expect(expiryReviewer.getByTestId("exception-route")).toHaveText("manual_review", {
       timeout: 10_000,
     });
+    // The Reviewer accepted-exception recovery is a named status region
+    // announcing the authoritative reconvergence after the in-page reload.
+    await expect(
+      expiryReviewer.getByRole("status", { name: "业务例外恢复状态" }),
+    ).toHaveText("权威状态正常", { timeout: 10_000 });
     await expect(expiryReviewer.getByTestId("review-history-exceptions")).toContainText(
       expiringRequestId,
       { timeout: 10_000 },
@@ -626,49 +700,53 @@ test("UI-driven reject, expiry, claim race, operations recovery, accessibility a
     );
     expect(resumed.status).toBe(200);
     expect(resumed.body.operations).toBe("open");
-    // A request created after the resume works end to end again.
-    const reopenedPrep = await uiPrepareApplication(reopenedReviewer, "s05-ui-reopened");
+    // A request created after the resume works end to end again.  The
+    // reopened leg runs on the 390x844 contexts: the Reviewer request
+    // control and the Approver live claim/decision controls are exercised
+    // there with viewport and overlap assertions.
+    const reopenedPrep = await uiPrepareApplication(mobileReviewer, "s05-ui-reopened");
     const reopenedRequestId = await uiRequestException(
-      reopenedReviewer,
+      mobileReviewer,
       server,
       reopenedPrep.applicationId,
       reopenedPrep.workItemId,
     );
-    await approver.goto(`${server.baseURL}/controlled/s05/react?request=${encodeURIComponent(reopenedRequestId)}`);
-    await expect(approver.getByTestId("approver-claim-button")).toBeEnabled({ timeout: 10_000 });
-    await approver.getByTestId("approver-claim-button").click();
-    await expect(approver.getByTestId("approver-approve-button")).toBeEnabled({ timeout: 10_000 });
-    await approver.getByTestId("approver-approve-button").click();
-    await expect(approver.getByTestId("approver-status")).toHaveText("approved", { timeout: 10_000 });
+    await mobileApprover.goto(`${server.baseURL}/controlled/s05/react?request=${encodeURIComponent(reopenedRequestId)}`);
+    await expect(mobileApprover.getByTestId("approver-claim-button")).toBeEnabled({
+      timeout: 10_000,
+    });
+    await expect(mobileApprover.getByRole("button", { name: "认领" })).toBeEnabled();
+    await assertControlWithinViewport(mobileApprover, "approver-claim-button");
+    await mobileApprover.getByTestId("approver-claim-button").click();
+    await expect(mobileApprover.getByTestId("approver-approve-button")).toBeEnabled({
+      timeout: 10_000,
+    });
+    await assertControlWithinViewport(mobileApprover, "approver-approve-button");
+    await assertControlWithinViewport(mobileApprover, "approver-reject-button");
+    await assertNoOverlap(mobileApprover, ["approver-approve-button", "approver-reject-button"]);
+    await mobileApprover.getByTestId("approver-approve-button").click();
+    await expect(mobileApprover.getByTestId("approver-status")).toHaveText("approved", {
+      timeout: 10_000,
+    });
+    await expect(
+      mobileReviewer.getByTestId("exception-request-accepted"),
+    ).toBeVisible({ timeout: 10_000 });
+    await assertControlWithinViewport(mobileReviewer, "exception-reload-button");
 
-    // --- accessibility and viewports on both shells ---
-    for (const page of [reviewer, approver]) {
+    // --- accessibility and viewports on both shells at both sizes ---
+    for (const page of [reviewer, approver, mobileReviewer, mobileApprover]) {
       const noOverflow = await page.evaluate(
         () => document.documentElement.scrollWidth <= window.innerWidth,
       );
       expect(noOverflow).toBe(true);
-    }
-    const mobileContext = await browser.newContext({
-      extraHTTPHeaders: { Authorization: `Bearer ${APPROVER_CREDENTIAL}` },
-      viewport: { width: 390, height: 844 },
-    });
-    const mobile = await mobileContext.newPage();
-    try {
-      await mobile.goto(`${server.baseURL}/controlled/s05/react?request=${encodeURIComponent(reopenedRequestId)}`);
-      await expect(mobile.getByTestId("approver-view")).toBeVisible({ timeout: 10_000 });
-      const noOverflow = await mobile.evaluate(
-        () => document.documentElement.scrollWidth <= window.innerWidth,
-      );
-      expect(noOverflow).toBe(true);
-    } finally {
-      await mobileContext.close();
     }
   } finally {
     await reviewerContext.close();
     await rejectReviewerContext.close();
     await expiryReviewerContext.close();
     await recoveryReviewerContext.close();
-    await reopenedReviewerContext.close();
+    await mobileReviewerContext.close();
+    await mobileApproverContext.close();
     await approverContext.close();
     await racerContext.close();
     await stopServer(server);

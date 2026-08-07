@@ -347,7 +347,7 @@ class OptionalTokenAuth(BaseHTTPMiddleware):
 
     _PUBLIC_PREFIXES = ("/static",)
     _PUBLIC_EXACT = {"/api/health"}
-    _OWN_AUTH_PREFIXES = ("/controlled/s01", "/controlled/s02")
+    _OWN_AUTH_PREFIXES = ("/controlled/s01", "/controlled/s02", "/controlled/s05")
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         token = os.environ.get("TASK4_WEB_TOKEN", "").strip()
@@ -394,9 +394,16 @@ class S01ResponsePolicy(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         path = request.url.path
-        if not path.startswith(("/controlled/s01", "/controlled/s02")):
+        if not path.startswith(
+            ("/controlled/s01", "/controlled/s02", "/controlled/s05")
+        ):
             return await call_next(request)
-        slice_id = "S02" if path.startswith("/controlled/s02") else "S01"
+        if path.startswith("/controlled/s05"):
+            slice_id = "S05"
+        elif path.startswith("/controlled/s02"):
+            slice_id = "S02"
+        else:
+            slice_id = "S01"
         try:
             response = await call_next(request)
         except Exception:
@@ -762,6 +769,26 @@ class S01ErrorResponse(BaseModel):
     detail: S01ErrorDetail
 
 
+class T05ErrorDetail(BaseModel):
+    """The closed S05 error detail: the registered error code plus the
+    optional reason/message/hint, with no arbitrary keys."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    error: str
+    reason_code: str | None = None
+    message: str | None = None
+    hint: str | None = None
+
+
+class T05ErrorResponse(BaseModel):
+    """The closed S05 error envelope registered on every S05 response."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    detail: T05ErrorDetail
+
+
 class S01ValidationErrorItem(BaseModel):
     loc: list[str | int]
     msg: str
@@ -971,9 +998,9 @@ class S01BusinessExceptionEligibility(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     eligible: bool
-    request_reason: str | None = None
-    ineligible_reason_code: str | None = None
-    predecessor_request_id: str | None = None
+    request_reason: str | None
+    ineligible_reason_code: str | None
+    predecessor_request_id: str | None
 
     @model_serializer(mode="wrap")
     def _always_emit_four_keys(self, handler, info):
@@ -1595,6 +1622,8 @@ class T05InvalidationCommandBody(BaseModel):
 
 
 class T05BusinessExceptionRequestResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     status: str
     replayed: bool
     application_id: str
@@ -1674,6 +1703,8 @@ class T05BusinessExceptionView(BaseModel):
 
 
 class T05ExceptionClaimResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     status: str
     request_id: str
     work_item_id: str
@@ -1683,6 +1714,8 @@ class T05ExceptionClaimResult(BaseModel):
 
 
 class T05ExceptionDecisionResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     status: str
     replayed: bool
     request_id: str
@@ -1698,6 +1731,8 @@ class T05ExceptionDecisionResult(BaseModel):
 
 
 class T05ExceptionRouteResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     status: str
     replayed: bool
     application_id: str
@@ -1712,6 +1747,8 @@ class T05ExceptionRouteResult(BaseModel):
 
 
 class T05ExceptionDeactivationResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     status: str
     replayed: bool
     application_id: str
@@ -1726,6 +1763,8 @@ class T05ExceptionDeactivationResult(BaseModel):
 
 
 class T05BusinessExceptionOperationsResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     status: str
     replayed: bool
     operations: str
@@ -1738,6 +1777,8 @@ class T05BusinessExceptionOperationsResult(BaseModel):
 
 
 class T05BusinessExceptionOperationsStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     operations: str
     revision: int
     reason_code: str | None = None
@@ -2213,11 +2254,11 @@ def _s03_invalid_command(error: ValueError) -> HTTPException:
 
 
 _S05_COMMAND_RESPONSES = {
-    404: {"model": S01ErrorResponse},
-    409: {"model": S01ErrorResponse},
-    413: {"model": S01ErrorResponse},
-    422: {"model": S01ErrorResponse},
-    503: {"model": S01ErrorResponse},
+    404: {"model": T05ErrorResponse},
+    409: {"model": T05ErrorResponse},
+    413: {"model": T05ErrorResponse},
+    422: {"model": T05ErrorResponse},
+    503: {"model": T05ErrorResponse},
 }
 
 
@@ -3763,7 +3804,9 @@ async def controlled_s05_request_business_exception(
     "/controlled/s01/api/queries/business-exceptions/{request_id}",
     response_model=T05BusinessExceptionView,
     responses={
-        404: {"model": S01ErrorResponse},
+        404: {"model": T05ErrorResponse},
+        422: {"model": T05ErrorResponse},
+        503: {"model": T05ErrorResponse},
     },
 )
 def controlled_s05_business_exception_view(
@@ -3939,7 +3982,8 @@ async def controlled_s05_invalidate_business_exception(
     "/controlled/s01/api/queries/business-exception-operations",
     response_model=T05BusinessExceptionOperationsStatus,
     responses={
-        404: {"model": S01ErrorResponse},
+        404: {"model": T05ErrorResponse},
+        503: {"model": T05ErrorResponse},
     },
 )
 def controlled_s05_business_exception_operations_status(

@@ -2497,14 +2497,14 @@ describe("ReviewWorkPanel business exception request (T05)", () => {
       status: "claimed",
       claim_subject: "t02-reviewer",
       claim_fence: 1,
-      claim_expires_at: 9999999999,
+      claim_expires_at: LIVE_CLAIM_EXPIRES_AT,
     });
   }
 
   function eligibleWorkspace() {
     return workspacePayload({
       claim_fence: 1,
-      claim_expires_at: 9999999999,
+      claim_expires_at: LIVE_CLAIM_EXPIRES_AT,
       business_exception_eligibility: {
         eligible: true,
         request_reason: "DOCUMENTED_BRAND_VARIANCE",
@@ -2630,7 +2630,7 @@ describe("ReviewWorkPanel business exception request (T05)", () => {
         router.jsonResponse(
           workspacePayload({
             claim_fence: 1,
-            claim_expires_at: 9999999999,
+            claim_expires_at: LIVE_CLAIM_EXPIRES_AT,
             business_exception_eligibility: {
               eligible: false,
               request_reason: null,
@@ -2732,5 +2732,251 @@ describe("ReviewWorkPanel business exception request (T05)", () => {
     const firstKey = (posts[0].body as Record<string, unknown>).idempotency_key;
     const secondKey = (posts[1].body as Record<string, unknown>).idempotency_key;
     expect(firstKey).toBe(secondKey);
+  });
+
+  it("surfaces a failed authoritative refetch as unavailable and clears it only after both queries succeed", async () => {
+    let phase: "manual_review" | "pending_exception_approval" = "manual_review";
+    let failRefetch = false;
+    const router = fetchRouter({
+      [`GET ${WORK_PATH}`]: () =>
+        router.jsonResponse(
+          phase === "manual_review"
+            ? claimedPayload()
+            : workPayload({
+                status: "exception_requested",
+                claim_subject: null,
+                claim_fence: 0,
+                claim_expires_at: 0,
+                completed_finding_ids: [FINDING_ID],
+              }),
+        ),
+      [`GET ${WORKSPACE_PATH}`]: () =>
+        phase === "manual_review"
+          ? router.jsonResponse(eligibleWorkspace())
+          : router.errorResponse(404, "S01_NOT_FOUND"),
+      [`GET ${ROUTE_PATH}`]: () =>
+        failRefetch
+          ? router.errorResponse(500, "S01_INTERNAL_ERROR")
+          : router.jsonResponse(
+              phase === "manual_review"
+                ? routePayload()
+                : routePayload({
+                    phase: "Pending Exception Approval",
+                    route: "pending_exception_approval",
+                  }),
+            ),
+      [`GET ${HISTORY_PATH}`]: () =>
+        failRefetch
+          ? router.errorResponse(500, "S01_INTERNAL_ERROR")
+          : router.jsonResponse(
+              phase === "manual_review"
+                ? historyPayload()
+                : historyPayload({
+                    business_exceptions: [
+                      {
+                        request_id: REQUEST_ID,
+                        run_id: "run_t02panel",
+                        finding_id: FINDING_ID,
+                        rule_id: "R_ENGINE_CROSS",
+                        machine_verdict: "inconsistent",
+                        status: "pending",
+                        current: true,
+                        request_reason: "DOCUMENTED_BRAND_VARIANCE",
+                        scope: "one_application_cycle_run_finding",
+                        requested_at: 10,
+                        expires_at: LIVE_CLAIM_EXPIRES_AT,
+                        decision_id: null,
+                        decision: null,
+                        routed: false,
+                        route: null,
+                        completion_basis: null,
+                      },
+                    ],
+                  }),
+            ),
+      [`POST ${REQUEST_PATH}`]: () => {
+        phase = "pending_exception_approval";
+        return router.jsonResponse({
+          status: "accepted",
+          replayed: false,
+          application_id: APP_ID,
+          request_id: REQUEST_ID,
+          work_item_id: "work_exception_t05",
+          finding_id: FINDING_ID,
+          phase: "Pending Exception Approval",
+          route: "pending_exception_approval",
+          expires_at: LIVE_CLAIM_EXPIRES_AT,
+          lifecycle_revision: 7,
+          evidence_revision: 1,
+        });
+      },
+    });
+    const user = userEvent.setup();
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("exception-request-button")).toBeEnabled(),
+    );
+    await user.click(screen.getByTestId("exception-request-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("exception-request-accepted")).toBeInTheDocument(),
+    );
+    expect(
+      (restrictedElement("exception-request-accepted").textContent ?? "").includes(
+        "pending · 当前",
+      ),
+    ).toBe(true);
+
+    failRefetch = true;
+    await user.click(screen.getByTestId("exception-reload-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("exception-route")).toHaveTextContent(
+        "unavailable",
+      ),
+    );
+    expect(screen.getByTestId("exception-status")).toHaveTextContent(
+      "不可用（权威重新加载失败）",
+    );
+    const staleText = restrictedElement("exception-request-accepted").textContent ?? "";
+    expect(staleText.includes("pending · 当前")).toBe(false);
+
+    failRefetch = false;
+    await user.click(screen.getByTestId("exception-reload-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("exception-route")).toHaveTextContent(
+        "pending_exception_approval",
+      ),
+    );
+    expect(screen.getByTestId("exception-status")).toHaveTextContent(
+      "pending · 当前",
+    );
+  });
+
+  it("marks accepted recovery unavailable when an owning query fails automatically and recovers on owner success", async () => {
+    let phase: "manual_review" | "pending_exception_approval" = "manual_review";
+    let failOwners = false;
+    const router = fetchRouter({
+      [`GET ${WORK_PATH}`]: () =>
+        router.jsonResponse(
+          phase === "manual_review"
+            ? claimedPayload()
+            : workPayload({
+                status: "exception_requested",
+                claim_subject: null,
+                claim_fence: 0,
+                claim_expires_at: 0,
+                completed_finding_ids: [FINDING_ID],
+              }),
+        ),
+      [`GET ${WORKSPACE_PATH}`]: () =>
+        phase === "manual_review"
+          ? router.jsonResponse(eligibleWorkspace())
+          : router.errorResponse(404, "S01_NOT_FOUND"),
+      [`GET ${ROUTE_PATH}`]: () =>
+        failOwners
+          ? router.errorResponse(500, "S01_INTERNAL_ERROR")
+          : router.jsonResponse(
+              phase === "manual_review"
+                ? routePayload()
+                : routePayload({
+                    phase: "Pending Exception Approval",
+                    route: "pending_exception_approval",
+                  }),
+            ),
+      [`GET ${HISTORY_PATH}`]: () =>
+        failOwners
+          ? router.errorResponse(500, "S01_INTERNAL_ERROR")
+          : router.jsonResponse(
+              phase === "manual_review"
+                ? historyPayload()
+                : historyPayload({
+                    business_exceptions: [
+                      {
+                        request_id: REQUEST_ID,
+                        run_id: "run_t02panel",
+                        finding_id: FINDING_ID,
+                        rule_id: "R_ENGINE_CROSS",
+                        machine_verdict: "inconsistent",
+                        status: "pending",
+                        current: true,
+                        request_reason: "DOCUMENTED_BRAND_VARIANCE",
+                        scope: "one_application_cycle_run_finding",
+                        requested_at: 10,
+                        expires_at: LIVE_CLAIM_EXPIRES_AT,
+                        decision_id: null,
+                        decision: null,
+                        routed: false,
+                        route: null,
+                        completion_basis: null,
+                      },
+                    ],
+                  }),
+            ),
+      [`POST ${REQUEST_PATH}`]: () => {
+        phase = "pending_exception_approval";
+        return router.jsonResponse({
+          status: "accepted",
+          replayed: false,
+          application_id: APP_ID,
+          request_id: REQUEST_ID,
+          work_item_id: "work_exception_t05",
+          finding_id: FINDING_ID,
+          phase: "Pending Exception Approval",
+          route: "pending_exception_approval",
+          expires_at: LIVE_CLAIM_EXPIRES_AT,
+          lifecycle_revision: 7,
+          evidence_revision: 1,
+        });
+      },
+    });
+    const user = userEvent.setup();
+    const { client } = renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("exception-request-button")).toBeEnabled(),
+    );
+    await user.click(screen.getByTestId("exception-request-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("exception-request-accepted")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("exception-recovery-status")).toHaveTextContent(
+      "权威状态正常",
+    );
+    expect(screen.getByTestId("exception-status")).toHaveTextContent(
+      "pending · 当前",
+    );
+
+    // An automatic refetch (not the manual reload action) fails: the owners
+    // are in error, so retained facts are never presented as current.
+    failOwners = true;
+    client.invalidateQueries({ queryKey: ["s01"] });
+    await waitFor(() =>
+      expect(screen.getByTestId("exception-route")).toHaveTextContent(
+        "unavailable",
+      ),
+    );
+    expect(screen.getByTestId("exception-status")).toHaveTextContent(
+      "不可用（权威读取失败）",
+    );
+    expect(screen.getByTestId("exception-recovery-status")).toHaveTextContent(
+      "权威状态不可用（读取失败）",
+    );
+    const staleText =
+      restrictedElement("exception-request-accepted").textContent ?? "";
+    expect(staleText.includes("pending · 当前")).toBe(false);
+    expect(staleText.includes("权威状态正常")).toBe(false);
+
+    // The owners succeed again: currentness returns naturally.
+    failOwners = false;
+    client.invalidateQueries({ queryKey: ["s01"] });
+    await waitFor(() =>
+      expect(screen.getByTestId("exception-route")).toHaveTextContent(
+        "pending_exception_approval",
+      ),
+    );
+    expect(screen.getByTestId("exception-status")).toHaveTextContent(
+      "pending · 当前",
+    );
+    expect(screen.getByTestId("exception-recovery-status")).toHaveTextContent(
+      "权威状态正常",
+    );
   });
 });

@@ -9253,16 +9253,6 @@ class ControlledScenarioService:
             )
             if conflict_reason is not None:
                 return {**conflict, "reason_code": conflict_reason}
-            write_failure = self._exception_write_gate_failure(app=app)
-            if write_failure is not None:
-                status, failure = write_failure
-                return {
-                    "status": status,
-                    "replayed": False,
-                    "application_id": work_item["application_id"],
-                    "work_item_id": work_item_id,
-                    "reason_code": failure,
-                }
             gate = self._review_write_gate(app=app)
             if gate is not None:
                 status, failure = gate

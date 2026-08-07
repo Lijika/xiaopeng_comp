@@ -82,6 +82,10 @@ body {
   padding-inline-start: 1.25rem;
 }
 
+.history-list li {
+  overflow-wrap: anywhere;
+}
+
 .recovery-actions {
   display: flex;
   flex-wrap: wrap;

@@ -1769,6 +1769,91 @@ def test_exception_request_write_gates_fail_closed_without_effect(
     assert _authority_snapshot(service) == before
 
 
+def test_exception_request_source_fault_persists_cohort_stop(tmp_path: Path) -> None:
+    service, application_id, work_item_id, claim, finding = _ready_brand_exception(
+        tmp_path
+    )
+    view = service.review_work_item_view(
+        principal=REVIEWER,
+        work_item_id=work_item_id,
+        now=100,
+    )
+    before = _authority_snapshot(service)
+
+    def fail_source_read(read_point: str) -> None:
+        if read_point == "review.source_read":
+            raise OSError("injected source-read failure")
+
+    faulty = ControlledScenarioService(
+        fixture_root=service.fixture_root,
+        rules_path=service.rules_path,
+        state_path=tmp_path / "target.sqlite3",
+        scenario_id="app_bad_brand.json",
+        exception_approver_subject=APPROVER.subject,
+        fault_injector=fail_source_read,
+    )
+    stopped = faulty.request_business_exception(
+        principal=REVIEWER,
+        work_item_id=work_item_id,
+        finding_id=str(finding["finding_id"]),
+        reason_code="DOCUMENTED_BRAND_VARIANCE",
+        expected_fence=int(claim["claim_fence"]),
+        expected_context=view["command_context"],
+        idempotency_key="s05-source-fault-request",
+        now=101,
+    )
+
+    assert stopped == {
+        "status": "stopped",
+        "replayed": False,
+        "application_id": application_id,
+        "work_item_id": work_item_id,
+        "reason_code": "SOURCE_EVIDENCE_UNAVAILABLE",
+    }
+    after = _authority_snapshot(service)
+    assert after["review_records"] == before["review_records"]
+    assert after["work_items"] == before["work_items"]
+    assert after["lifecycle_events"] == before["lifecycle_events"]
+    assert after["idempotency"] == before["idempotency"]
+    assert after["audit_events"][:-1] == before["audit_events"]
+    stop_event = after["audit_events"][-1]
+    assert stop_event["action"] == "controlled_cohort_stop"
+    assert stop_event["result"] == "stopped"
+    assert stop_event["reason_code"] == "S01_RUNTIME_UNHEALTHY"
+    assert stop_event["failure_reason_code"] == "SOURCE_EVIDENCE_UNAVAILABLE"
+    assert stop_event["admission_after_stop"] == {
+        "track": "C-DEMO",
+        "admission": "stopped",
+        "reason_code": "S01_RUNTIME_UNHEALTHY",
+        "failure_reason_code": "SOURCE_EVIDENCE_UNAVAILABLE",
+    }
+    assert service._unresolved_business_exception_ids() == []
+    expected_status = {
+        "track": "C-DEMO",
+        "admission": "stopped",
+        "reason_code": "S01_RUNTIME_UNHEALTHY",
+        "failure_reason_code": "SOURCE_EVIDENCE_UNAVAILABLE",
+    }
+    assert faulty.cohort_status() == expected_status
+    assert service.cohort_status() == expected_status
+
+    restarted = ControlledScenarioService(
+        fixture_root=service.fixture_root,
+        rules_path=service.rules_path,
+        state_path=tmp_path / "target.sqlite3",
+        scenario_id="app_bad_brand.json",
+        exception_approver_subject=APPROVER.subject,
+    )
+    assert restarted.cohort_status()["admission"] == "stopped"
+    readmitted = restarted.submit_demo(
+        scenario_id="app_bad_brand.json",
+        idempotency_key="s05-source-fault-readmit",
+        principal=INTEGRATOR,
+    )
+    assert readmitted.disposition is AdmissionDisposition.REJECTED
+    assert readmitted.reason_code == "S01_RUNTIME_UNHEALTHY"
+
+
 @pytest.mark.parametrize(
     "fault_point",
     (

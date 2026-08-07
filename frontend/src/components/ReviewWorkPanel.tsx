@@ -5,6 +5,7 @@ import type { components } from "../generated/api";
 import {
   HttpError,
   isDefinitiveRejection,
+  isDefinitiveS05Rejection,
   type ApplicationHistoryResponse,
   type CurrentRouteResponse,
   type ReviewWorkResponse,
@@ -601,7 +602,7 @@ function HistorySection({
       {history.data.business_exceptions.length > 0 && (
         <>
           <h4>业务例外（服务端权威）</h4>
-          <ul data-testid="review-history-exceptions">
+          <ul className="history-list" data-testid="review-history-exceptions">
             {history.data.business_exceptions.map((item) => (
               <li
                 key={item.request_id}
@@ -669,23 +670,42 @@ function HistorySection({
 
 /** The Reviewer's authoritative facts after an accepted business-exception
  * request: the request id, the Lifecycle-owned route, and the request's own
- * history entry rendered verbatim.  The browser never infers a phase. */
+ * history entry rendered verbatim.  The browser never infers a phase.
+ * Currentness is query-owned: while either owning query (route/history) is
+ * in error, or a manual reload has failed, retained values are never
+ * presented as current and a named live region announces the state. */
 function ExceptionAcceptedBlock({
   accepted,
   history,
   gate,
   onReload,
   reloadDisabled,
+  reloadFailed,
 }: {
   accepted: { requestId: string };
   history: UseQueryResult<ApplicationHistoryResponse>;
   gate: UseQueryResult<CurrentRouteResponse>;
   onReload: () => void;
   reloadDisabled: boolean;
+  reloadFailed: boolean;
 }) {
   const record = history.data?.business_exceptions.find(
     (item) => item.request_id === accepted.requestId,
   );
+  const ownersInError = gate.isError || history.isError;
+  const unavailable = reloadFailed || ownersInError;
+  const statusText = reloadFailed
+    ? "不可用（权威重新加载失败）"
+    : ownersInError
+      ? "不可用（权威读取失败）"
+      : record === undefined
+        ? "等待服务端投影"
+        : `${record.status}${record.current === true ? " · 当前" : " · 非当前"}`;
+  const recoveryStatus = reloadFailed
+    ? "权威状态不可用（重新加载失败）：请重试权威读取"
+    : ownersInError
+      ? "权威状态不可用（读取失败）：等待权威读取恢复"
+      : "权威状态正常";
   return (
     <section
       className="panel"
@@ -700,22 +720,30 @@ function ExceptionAcceptedBlock({
         </div>
         <div>
           <dt>当前路由</dt>
-          <dd data-testid="exception-route">{gate.data?.route ?? "unavailable"}</dd>
+          <dd data-testid="exception-route">
+            {unavailable || gate.data === undefined
+              ? "unavailable"
+              : gate.data.route}
+          </dd>
         </div>
         <div>
           <dt>请求状态</dt>
-          <dd data-testid="exception-status">
-            {record === undefined
-              ? "等待服务端投影"
-              : `${record.status}${record.current === true ? " · 当前" : " · 非当前"}`}
-          </dd>
+          <dd data-testid="exception-status">{statusText}</dd>
         </div>
       </dl>
-      {record !== undefined && record.decision !== null && (
+      {!unavailable && record !== undefined && record.decision !== null && (
         <p className="text-sm text-muted-foreground" data-testid="exception-decision">
           决策：{record.decision}
         </p>
       )}
+      <p
+        role="status"
+        aria-live="polite"
+        aria-label="业务例外恢复状态"
+        data-testid="exception-recovery-status"
+      >
+        {recoveryStatus}
+      </p>
       <div className="recovery-actions" data-testid="exception-request-actions">
         <Button
           variant="secondary"
@@ -1259,16 +1287,24 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
   /** A definitive rejection proves the semantic key was never accepted, so
    * the key rotates once at that proof and the rejected action stays latched
    * until the owning work-item refetch succeeds (FIX-1).  It is also a
-   * definitive-error boundary: every restricted surface is scrubbed. */
-  const rejected = (action: Action) => (error: Error) => {
-    if (!isDefinitiveRejection(error)) return;
-    keyRotations[action]();
-    setPendingCommand(null);
-    setRejectedAction(action);
-    setRequiresReload(true);
-    setConflictReason(error.reasonCode ?? "conflict");
-    invalidateRestricted();
-  };
+   * definitive-error boundary: every restricted surface is scrubbed.  The
+   * exception request runs on the S05 command surface, so it classifies its
+   * structured S05 rejections (including ``S05_STOPPED``/``S05_UNAVAILABLE``
+   * 503s) instead of the S03 set. */
+  const rejected =
+    (
+      action: Action,
+      classifier: (error: unknown) => error is HttpError = isDefinitiveRejection,
+    ) =>
+    (error: Error) => {
+      if (!classifier(error)) return;
+      keyRotations[action]();
+      setPendingCommand(null);
+      setRejectedAction(action);
+      setRequiresReload(true);
+      setConflictReason(error.reasonCode ?? "conflict");
+      invalidateRestricted();
+    };
 
   const handleClaim = () => {
     if (work.data === undefined || anyPending || pendingCommand !== null) return;
@@ -1431,7 +1467,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     setRejectedAction(null);
     exception.mutate(command, {
       onSuccess: handleExceptionAccepted,
-      onError: rejected("exception"),
+      onError: rejected("exception", isDefinitiveS05Rejection),
     });
   };
 
@@ -1669,7 +1705,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     } else if (pendingCommand.action === "exception") {
       exception.mutate(pendingCommand.command, {
         onSuccess: handleExceptionAccepted,
-        onError: rejected("exception"),
+        onError: rejected("exception", isDefinitiveS05Rejection),
       });
     } else {
       submit.mutate(pendingCommand.command, {
@@ -1726,7 +1762,11 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
 
   /** Authoritative refetch while an accepted exception request keeps the
    * shell alive: current-route and history are refetched first (the old
-   * workspace existence-hides), then the server-owned S01 reads reconverge. */
+   * workspace existence-hides), then the server-owned S01 reads reconverge.
+   * A failed refetch is surfaced as unavailable/stale and cached route and
+   * history facts are never labeled current; the state clears only when
+   * both owning queries refetch successfully. */
+  const [exceptionReloadFailed, setExceptionReloadFailed] = useState(false);
   const handleExceptionReload = async () => {
     if (anyPending || acceptedException === null) return;
     try {
@@ -1739,9 +1779,11 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
         { throwOnError: true },
       );
     } catch {
+      setExceptionReloadFailed(true);
       return;
     }
     await queryClient.invalidateQueries({ queryKey: ["s01"] });
+    setExceptionReloadFailed(false);
   };
 
   let statusText = "等待操作";
@@ -1833,6 +1875,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
               gate={gate}
               onReload={handleExceptionReload}
               reloadDisabled={anyPending}
+              reloadFailed={exceptionReloadFailed}
             />
           )}
           {correctionAccepted && (
@@ -1961,6 +2004,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
           gate={gate}
           onReload={handleExceptionReload}
           reloadDisabled={anyPending}
+          reloadFailed={exceptionReloadFailed}
         />
       )}
       <WorkFacts work={data} />

@@ -80,6 +80,11 @@ const REVIEW_503_DEFINITIVE_ERROR_CODES: ReadonlySet<string> = new Set([
   "S03_STOPPED",
   "S03_UNAVAILABLE",
 ]);
+/** The structured S05 codes that prove a 503 was rejected before any commit. */
+const S05_503_DEFINITIVE_ERROR_CODES: ReadonlySet<string> = new Set([
+  "S05_STOPPED",
+  "S05_UNAVAILABLE",
+]);
 
 export function isDefinitiveRejection(
   error: unknown,
@@ -94,6 +99,23 @@ export function isDefinitiveRejection(
     );
   }
   return statuses.has(error.status);
+}
+
+/**
+ * The S05 command surface's definitive-rejection classifier: the registered
+ * S05 pre-command responses.  The structured ``S05_STOPPED``/``S05_UNAVAILABLE``
+ * 503 codes are definitive, as are the registered 404/409/413/422 statuses.
+ * A generic or unstructured 503 stays unknown and retains the command.
+ */
+export function isDefinitiveS05Rejection(error: unknown): error is HttpError {
+  if (!(error instanceof HttpError)) return false;
+  if (error.status === 503) {
+    return (
+      error.errorCode !== undefined &&
+      S05_503_DEFINITIVE_ERROR_CODES.has(error.errorCode)
+    );
+  }
+  return REVIEW_DEFINITIVE_STATUSES.has(error.status);
 }
 
 /**

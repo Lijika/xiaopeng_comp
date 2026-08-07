@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   HttpError,
   isDefinitiveIntegratorRejection,
+  isDefinitiveS05Rejection,
   request,
 } from "./client";
 
@@ -137,5 +138,36 @@ describe("Integrator definitive rejection classifier (T04)", () => {
         true,
       );
     }
+  });
+});
+
+describe("S05 definitive rejection classifier (T05)", () => {
+  function httpError(status: number, errorCode: string | undefined): HttpError {
+    return new HttpError(status, errorCode === undefined ? {} : { error: errorCode });
+  }
+
+  it("treats the structured S05_STOPPED and S05_UNAVAILABLE 503s as definitive", () => {
+    expect(isDefinitiveS05Rejection(httpError(503, "S05_STOPPED"))).toBe(true);
+    expect(isDefinitiveS05Rejection(httpError(503, "S05_UNAVAILABLE"))).toBe(
+      true,
+    );
+  });
+
+  it("keeps a generic or unrelated 503 unknown", () => {
+    expect(isDefinitiveS05Rejection(httpError(503, undefined))).toBe(false);
+    expect(isDefinitiveS05Rejection(httpError(503, "S03_UNAVAILABLE"))).toBe(
+      false,
+    );
+    expect(isDefinitiveS05Rejection(httpError(503, "S05_OTHER"))).toBe(false);
+  });
+
+  it("treats the registered S05 404/409/413/422 statuses as definitive", () => {
+    for (const status of [404, 409, 413, 422]) {
+      expect(isDefinitiveS05Rejection(httpError(status, "S05_X"))).toBe(true);
+    }
+  });
+
+  it("keeps non-HTTP transport failures unknown", () => {
+    expect(isDefinitiveS05Rejection(new TypeError("fetch failed"))).toBe(false);
   });
 });

@@ -346,14 +346,14 @@ describe("BusinessExceptionApproverPanel (T05)", () => {
     });
   });
 
-  it("shows definitive claim conflicts and unavailable outcomes", async () => {
+  it("fences definitive conflicts and structured 503s until the authoritative view reloads", async () => {
     let mode: "conflict" | "stopped" = "conflict";
     const router = fetchRouter({
       [`GET ${VIEW_PATH}`]: () =>
         router.jsonResponse(
           mode === "conflict"
             ? viewPayload()
-            : viewPayload({ actions: [], claim_status: "claimed" }),
+            : viewPayload({ claim_status: "unclaimed" }),
         ),
       [`POST ${CLAIM_PATH}`]: () => {
         if (mode === "conflict") {
@@ -379,5 +379,368 @@ describe("BusinessExceptionApproverPanel (T05)", () => {
         "EXCEPTION_WORK_ITEM_ALREADY_CLAIMED",
       ),
     );
+    expect(screen.queryByTestId("approver-claim-button")).toBeNull();
+    expect(screen.getByTestId("approver-reconcile-button")).toBeEnabled();
+
+    mode = "stopped";
+    await user.click(screen.getByTestId("approver-reconcile-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("approver-claim-button")).toBeEnabled(),
+    );
+    await user.click(screen.getByTestId("approver-claim-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("approver-outcome")).toHaveTextContent(
+        "命令未接受",
+      ),
+    );
+    expect(screen.queryByTestId("approver-claim-button")).toBeNull();
+    expect(screen.getByTestId("approver-reconcile-button")).toBeEnabled();
+  });
+
+  it("uses a fresh idempotency key for a new decision after definitive rejection and reconciliation", async () => {
+    const router = fetchRouter({
+      [`GET ${VIEW_PATH}`]: () =>
+        router.jsonResponse(
+          viewPayload({
+            actions: ["decide"],
+            claim_status: "claimed",
+            claim_subject: "s05-approver",
+            claim_fence: 1,
+            claim_expires_at: 9999999999,
+          }),
+        ),
+      [`POST ${DECIDE_PATH}`]: () =>
+        router.errorResponse(409, "S05_CONFLICT", "DECISION_CONTEXT_STALE"),
+    });
+    const user = userEvent.setup();
+    renderWithQuery(
+      <BusinessExceptionApproverPanel requestId={REQUEST_ID} />,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("approver-approve-button")).toBeEnabled(),
+    );
+
+    await user.click(screen.getByTestId("approver-approve-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("approver-reconcile-button")).toBeEnabled(),
+    );
+    const firstDecision = router.calls.filter(
+      (call) => call.method === "POST" && call.url.endsWith("/decide"),
+    );
+    expect(firstDecision).toHaveLength(1);
+    const firstKey = (firstDecision[0].body as Record<string, unknown>)
+      .idempotency_key;
+
+    await user.click(screen.getByTestId("approver-reconcile-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("approver-reject-button")).toBeEnabled(),
+    );
+    expect(
+      router.calls.filter(
+        (call) => call.method === "POST" && call.url.endsWith("/decide"),
+      ),
+    ).toHaveLength(1);
+
+    await user.click(screen.getByTestId("approver-reject-button"));
+    await waitFor(() =>
+      expect(
+        router.calls.filter(
+          (call) => call.method === "POST" && call.url.endsWith("/decide"),
+        ),
+      ).toHaveLength(2),
+    );
+    const decisions = router.calls.filter(
+      (call) => call.method === "POST" && call.url.endsWith("/decide"),
+    );
+    expect(decisions[0].body).toMatchObject({ decision: "approved" });
+    expect(decisions[1].body).toMatchObject({ decision: "rejected" });
+    expect(
+      (decisions[1].body as Record<string, unknown>).idempotency_key,
+    ).not.toBe(firstKey);
+  });
+
+  it("reconciles an accepted-but-response-lost claim with the fresh server status and a single claim POST", async () => {
+    let claimed = false;
+    const router = fetchRouter({
+      [`GET ${VIEW_PATH}`]: () =>
+        router.jsonResponse(
+          claimed
+            ? viewPayload({
+                actions: ["decide"],
+                claim_status: "claimed",
+                claim_subject: "s05-approver",
+                claim_fence: 1,
+                claim_expires_at: 9999999999,
+              })
+            : viewPayload(),
+        ),
+      [`POST ${CLAIM_PATH}`]: () => {
+        claimed = true;
+        return Promise.reject(new TypeError("claim response lost"));
+      },
+    });
+    const user = userEvent.setup();
+    renderWithQuery(
+      <BusinessExceptionApproverPanel requestId={REQUEST_ID} />,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("approver-claim-button")).toBeEnabled(),
+    );
+    await user.click(screen.getByTestId("approver-claim-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("approver-outcome")).toHaveTextContent(
+        "结果未知",
+      ),
+    );
+    expect(screen.queryByTestId("approver-retry-button")).toBeNull();
+    expect(screen.getByTestId("approver-reconcile-button")).toBeEnabled();
+
+    await user.click(screen.getByTestId("approver-reconcile-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("approver-approve-button")).toBeEnabled(),
+    );
+    // The fresh DTO announces the resolved live status; no more unknown.
+    expect(screen.getByTestId("approver-outcome")).toHaveTextContent(
+      "已认领，可进行决策",
+    );
+    expect(
+      screen.getByTestId("approver-outcome").textContent,
+    ).not.toContain("结果未知");
+    const claimPosts = router.calls.filter(
+      (call) => call.method === "POST" && call.url.endsWith("/claim"),
+    );
+    expect(claimPosts).toHaveLength(1);
+    await user.click(screen.getByTestId("approver-approve-button"));
+    await waitFor(() =>
+      expect(
+        router.calls.filter(
+          (call) => call.method === "POST" && call.url.endsWith("/decide"),
+        ),
+      ).toHaveLength(1),
+    );
+  });
+
+  it("keeps failed reconciliation recoverable and fenced with no claim/decision controls", async () => {
+    let failView = false;
+    const router = fetchRouter({
+      [`GET ${VIEW_PATH}`]: () =>
+        failView
+          ? router.errorResponse(500, "S05_INTERNAL_ERROR")
+          : router.jsonResponse(viewPayload()),
+      [`POST ${CLAIM_PATH}`]: () =>
+        Promise.reject(new TypeError("claim response lost")),
+    });
+    const user = userEvent.setup();
+    renderWithQuery(
+      <BusinessExceptionApproverPanel requestId={REQUEST_ID} />,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("approver-claim-button")).toBeEnabled(),
+    );
+    await user.click(screen.getByTestId("approver-claim-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("approver-reconcile-button")).toBeEnabled(),
+    );
+
+    // The first authoritative refetch fails: the fence stays up and the
+    // panel stays visibly unavailable with the reconciliation control.
+    failView = true;
+    await user.click(screen.getByTestId("approver-reconcile-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("approver-unavailable")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("approver-outcome")).toHaveTextContent(
+      "权威状态不可用（重新加载失败）",
+    );
+    expect(screen.getByTestId("approver-reconcile-button")).toBeEnabled();
+    expect(screen.queryByTestId("approver-claim-button")).toBeNull();
+    expect(screen.queryByTestId("approver-approve-button")).toBeNull();
+    expect(screen.queryByTestId("approver-retry-button")).toBeNull();
+
+    // A second attempt succeeds: the fence clears and the fresh DTO decides.
+    failView = false;
+    await user.click(screen.getByTestId("approver-reconcile-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("approver-claim-button")).toBeEnabled(),
+    );
+    expect(screen.queryByTestId("approver-unavailable")).toBeNull();
+    expect(
+      router.calls.filter(
+        (call) => call.method === "POST" && call.url.endsWith("/claim"),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("reconciles a terminal lost decision to the fresh server status without a retry", async () => {
+    let claimed = false;
+    let decided = false;
+    const router = fetchRouter({
+      [`GET ${VIEW_PATH}`]: () =>
+        router.jsonResponse(
+          decided
+            ? viewPayload({
+                status: "approved",
+                actions: [],
+                claim_status: "completed",
+                claim_subject: "s05-approver",
+                claim_fence: 1,
+                claim_expires_at: 9999999999,
+              })
+            : claimed
+              ? viewPayload({
+                  actions: ["decide"],
+                  claim_status: "claimed",
+                  claim_subject: "s05-approver",
+                  claim_fence: 1,
+                  claim_expires_at: 9999999999,
+                })
+              : viewPayload(),
+        ),
+      [`POST ${CLAIM_PATH}`]: () => {
+        claimed = true;
+        return router.jsonResponse({
+          status: "claimed",
+          request_id: REQUEST_ID,
+          work_item_id: WORK_ITEM_ID,
+          claim_subject: "s05-approver",
+          claim_fence: 1,
+          claim_expires_at: 9999999999,
+        });
+      },
+      [`POST ${DECIDE_PATH}`]: () => {
+        decided = true;
+        return Promise.reject(new TypeError("decision response lost"));
+      },
+    });
+    const user = userEvent.setup();
+    renderWithQuery(
+      <BusinessExceptionApproverPanel requestId={REQUEST_ID} />,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("approver-claim-button")).toBeEnabled(),
+    );
+    await user.click(screen.getByTestId("approver-claim-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("approver-approve-button")).toBeEnabled(),
+    );
+    await user.click(screen.getByTestId("approver-approve-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("approver-outcome")).toHaveTextContent(
+        "结果未知",
+      ),
+    );
+    expect(screen.queryByTestId("approver-retry-button")).toBeNull();
+    expect(screen.getByTestId("approver-reconcile-button")).toBeEnabled();
+
+    await user.click(screen.getByTestId("approver-reconcile-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("approver-status")).toHaveTextContent(
+        "approved",
+      ),
+    );
+    // The fresh terminal server status is announced; the retained decision
+    // command is cleared and no retry/decision control remains.
+    expect(screen.getByTestId("approver-outcome")).toHaveTextContent(
+      "已决策（approved）",
+    );
+    expect(screen.queryByTestId("approver-retry-button")).toBeNull();
+    expect(screen.queryByTestId("approver-approve-button")).toBeNull();
+    const decidePosts = router.calls.filter(
+      (call) => call.method === "POST" && call.url.endsWith("/decide"),
+    );
+    expect(decidePosts).toHaveLength(1);
+  });
+
+  it("keeps an unknown decision's byte-identical key and lets the refetch decide whether actions remain", async () => {
+    let claimed = false;
+    let decideFails = true;
+    const router = fetchRouter({
+      [`GET ${VIEW_PATH}`]: () =>
+        router.jsonResponse(
+          claimed
+            ? viewPayload({
+                actions: ["decide"],
+                claim_status: "claimed",
+                claim_subject: "s05-approver",
+                claim_fence: 1,
+                claim_expires_at: 9999999999,
+              })
+            : viewPayload(),
+        ),
+      [`POST ${CLAIM_PATH}`]: () => {
+        claimed = true;
+        return router.jsonResponse({
+          status: "claimed",
+          request_id: REQUEST_ID,
+          work_item_id: WORK_ITEM_ID,
+          claim_subject: "s05-approver",
+          claim_fence: 1,
+          claim_expires_at: 9999999999,
+        });
+      },
+      [`POST ${DECIDE_PATH}`]: () => {
+        if (decideFails) {
+          return Promise.reject(new TypeError("decision response lost"));
+        }
+        return router.jsonResponse({
+          status: "accepted",
+          replayed: false,
+          request_id: REQUEST_ID,
+          work_item_id: WORK_ITEM_ID,
+          decision_id: "exception_decision_approver_retry",
+          decision: "approved",
+          phase: "Routing Determination",
+          route: "routing_determination",
+          successor_work_item_id: null,
+          lifecycle_revision: 8,
+          evidence_revision: 1,
+        });
+      },
+    });
+    const user = userEvent.setup();
+    renderWithQuery(
+      <BusinessExceptionApproverPanel requestId={REQUEST_ID} />,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("approver-claim-button")).toBeEnabled(),
+    );
+    await user.click(screen.getByTestId("approver-claim-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("approver-approve-button")).toBeEnabled(),
+    );
+    await user.click(screen.getByTestId("approver-approve-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("approver-outcome")).toHaveTextContent(
+        "结果未知",
+      ),
+    );
+    const firstDecide = router.calls.filter(
+      (call) => call.method === "POST" && call.url.endsWith("/decide"),
+    );
+    expect(firstDecide).toHaveLength(1);
+    const firstKey = (firstDecide[0].body as Record<string, unknown>)
+      .idempotency_key;
+    expect(typeof firstKey).toBe("string");
+    expect(screen.queryByTestId("approver-retry-button")).toBeNull();
+
+    await user.click(screen.getByTestId("approver-reconcile-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("approver-retry-button")).toBeEnabled(),
+    );
+    decideFails = false;
+    await user.click(screen.getByTestId("approver-retry-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("approver-outcome")).toHaveTextContent(
+        "已决策",
+      ),
+    );
+    const retried = router.calls.filter(
+      (call) => call.method === "POST" && call.url.endsWith("/decide"),
+    );
+    expect(retried).toHaveLength(2);
+    expect(retried[1].body).toEqual(firstDecide[0].body);
+    expect(
+      (retried[1].body as Record<string, unknown>).idempotency_key,
+    ).toBe(firstKey);
   });
 });
