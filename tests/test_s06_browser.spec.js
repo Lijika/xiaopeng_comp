@@ -1388,8 +1388,11 @@ t04Test("T04 React: lost-response exact replay returns the original receipt and 
       "GET",
       `/controlled/s01/api/queries/applications/${flow.applicationId}/history`,
     );
-    expect(baselineHistory.body.runs).toHaveLength(1);
-    expect(baselineHistory.body.attachment_versions).toHaveLength(2);
+    expect(baselineHistory.body.runs.length, "replay baseline: one run").toBe(1);
+    expect(
+      baselineHistory.body.attachment_versions.length,
+      "replay baseline: two attachment versions",
+    ).toBe(2);
     expect(baselineHistory.body.runs[0].evidence_revision).toBe(1);
     expect(baselineHistory.body.attachment_versions[1].evidence_revision).toBe(2);
 
@@ -1418,8 +1421,11 @@ t04Test("T04 React: lost-response exact replay returns the original receipt and 
       "GET",
       `/controlled/s01/api/queries/applications/${flow.applicationId}/history`,
     );
-    expect(historyAfterReplay.body.runs).toHaveLength(1);
-    expect(historyAfterReplay.body.attachment_versions).toHaveLength(2);
+    expect(historyAfterReplay.body.runs.length, "replay result: one run").toBe(1);
+    expect(
+      historyAfterReplay.body.attachment_versions.length,
+      "replay result: two attachment versions",
+    ).toBe(2);
     expect(historyAfterReplay.body.evidence_revision).toBe(
       baselineHistory.body.evidence_revision,
     );
@@ -1585,9 +1591,14 @@ t04Test("T04 React: awaiting_predecessor, rejected and quarantined receipts crea
       "GET",
       `/controlled/s01/api/queries/applications/${flow.applicationId}/history`,
     );
-    expect(history.body.runs).toHaveLength(1);
+    expect(history.body.runs.length, "invalid dispositions: one unchanged run").toBe(
+      1,
+    );
     expect(history.body.runs[0].evidence_revision).toBe(1);
-    expect(history.body.attachment_versions).toHaveLength(1);
+    expect(
+      history.body.attachment_versions.length,
+      "invalid dispositions: one unchanged attachment version",
+    ).toBe(1);
     expect(history.body.attachment_versions[0].version).toBe(1);
     const route = await api(
       reviewer,
