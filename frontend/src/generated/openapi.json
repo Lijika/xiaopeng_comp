@@ -62,6 +62,208 @@
         "title": "CheckBody",
         "type": "object"
       },
+      "DemoBatchCheckResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "completed": {
+            "title": "Completed",
+            "type": "integer"
+          },
+          "data_scope": {
+            "const": "synthetic",
+            "title": "Data Scope",
+            "type": "string"
+          },
+          "failed": {
+            "title": "Failed",
+            "type": "integer"
+          },
+          "outcome": {
+            "enum": [
+              "completed",
+              "partial",
+              "failed"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "requested": {
+            "title": "Requested",
+            "type": "integer"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/DemoBatchItem"
+            },
+            "title": "Results",
+            "type": "array"
+          },
+          "totals": {
+            "$ref": "#/components/schemas/DemoBatchTotals"
+          },
+          "track": {
+            "const": "C-DEMO",
+            "title": "Track",
+            "type": "string"
+          }
+        },
+        "required": [
+          "track",
+          "data_scope",
+          "requested",
+          "completed",
+          "failed",
+          "outcome",
+          "totals",
+          "results"
+        ],
+        "title": "DemoBatchCheckResponse",
+        "type": "object"
+      },
+      "DemoBatchIssue": {
+        "additionalProperties": false,
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "reason_codes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reason Codes",
+            "type": "array"
+          },
+          "rule_id": {
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "verdict": {
+            "enum": [
+              "consistent",
+              "inconsistent",
+              "uncertain",
+              "skipped"
+            ],
+            "title": "Verdict",
+            "type": "string"
+          }
+        },
+        "required": [
+          "rule_id",
+          "verdict",
+          "message"
+        ],
+        "title": "DemoBatchIssue",
+        "type": "object"
+      },
+      "DemoBatchItem": {
+        "additionalProperties": false,
+        "properties": {
+          "application_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Application Id"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "fixture_id": {
+            "title": "Fixture Id",
+            "type": "string"
+          },
+          "issues": {
+            "items": {
+              "$ref": "#/components/schemas/DemoBatchIssue"
+            },
+            "title": "Issues",
+            "type": "array"
+          },
+          "outcome": {
+            "enum": [
+              "completed",
+              "failed"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DemoSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "fixture_id",
+          "outcome"
+        ],
+        "title": "DemoBatchItem",
+        "type": "object"
+      },
+      "DemoBatchRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "fixture_ids": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Fixture Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "fixture_ids"
+        ],
+        "title": "DemoBatchRequest",
+        "type": "object"
+      },
+      "DemoBatchTotals": {
+        "additionalProperties": false,
+        "properties": {
+          "consistent": {
+            "default": 0,
+            "title": "Consistent",
+            "type": "integer"
+          },
+          "inconsistent": {
+            "default": 0,
+            "title": "Inconsistent",
+            "type": "integer"
+          },
+          "skipped": {
+            "default": 0,
+            "title": "Skipped",
+            "type": "integer"
+          },
+          "uncertain": {
+            "default": 0,
+            "title": "Uncertain",
+            "type": "integer"
+          }
+        },
+        "title": "DemoBatchTotals",
+        "type": "object"
+      },
       "DemoCheckItem": {
         "additionalProperties": false,
         "properties": {
@@ -354,6 +556,197 @@
         "title": "DemoErrorResponse",
         "type": "object"
       },
+      "DemoEvalCounts": {
+        "additionalProperties": false,
+        "properties": {
+          "decisive_pairs": {
+            "title": "Decisive Pairs",
+            "type": "integer"
+          },
+          "false_negative": {
+            "title": "False Negative",
+            "type": "integer"
+          },
+          "false_positive": {
+            "title": "False Positive",
+            "type": "integer"
+          },
+          "n_apps_loaded": {
+            "title": "N Apps Loaded",
+            "type": "integer"
+          },
+          "n_check_fail": {
+            "title": "N Check Fail",
+            "type": "integer"
+          },
+          "n_check_ok": {
+            "title": "N Check Ok",
+            "type": "integer"
+          },
+          "n_expected_inconsistent": {
+            "title": "N Expected Inconsistent",
+            "type": "integer"
+          },
+          "n_inconsistent_labeled_decisive": {
+            "title": "N Inconsistent Labeled Decisive",
+            "type": "integer"
+          },
+          "n_missed_inconsistent": {
+            "title": "N Missed Inconsistent",
+            "type": "integer"
+          },
+          "total_pairs": {
+            "title": "Total Pairs",
+            "type": "integer"
+          },
+          "true_negative": {
+            "title": "True Negative",
+            "type": "integer"
+          },
+          "true_positive": {
+            "title": "True Positive",
+            "type": "integer"
+          },
+          "uncertain_when_labeled": {
+            "title": "Uncertain When Labeled",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "n_apps_loaded",
+          "n_check_ok",
+          "n_check_fail",
+          "total_pairs",
+          "decisive_pairs",
+          "true_positive",
+          "true_negative",
+          "false_positive",
+          "false_negative",
+          "uncertain_when_labeled",
+          "n_inconsistent_labeled_decisive",
+          "n_expected_inconsistent",
+          "n_missed_inconsistent"
+        ],
+        "title": "DemoEvalCounts",
+        "type": "object"
+      },
+      "DemoEvalRates": {
+        "additionalProperties": false,
+        "properties": {
+          "accuracy": {
+            "title": "Accuracy",
+            "type": "number"
+          },
+          "coverage": {
+            "title": "Coverage",
+            "type": "number"
+          },
+          "false_negative_rate": {
+            "title": "False Negative Rate",
+            "type": "number"
+          },
+          "false_positive_rate": {
+            "title": "False Positive Rate",
+            "type": "number"
+          },
+          "mean_app_coverage": {
+            "title": "Mean App Coverage",
+            "type": "number"
+          },
+          "miss_rate": {
+            "title": "Miss Rate",
+            "type": "number"
+          },
+          "uncertain_rate": {
+            "title": "Uncertain Rate",
+            "type": "number"
+          }
+        },
+        "required": [
+          "coverage",
+          "false_positive_rate",
+          "false_negative_rate",
+          "accuracy",
+          "miss_rate",
+          "uncertain_rate",
+          "mean_app_coverage"
+        ],
+        "title": "DemoEvalRates",
+        "type": "object"
+      },
+      "DemoEvaluationSummaryResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "claim": {
+            "const": "C-DEV-REG",
+            "title": "Claim",
+            "type": "string"
+          },
+          "counts": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DemoEvalCounts"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "honesty_note": {
+            "default": "",
+            "title": "Honesty Note",
+            "type": "string"
+          },
+          "performance_gap": {
+            "const": "UNVERIFIED",
+            "title": "Performance Gap",
+            "type": "string"
+          },
+          "rates": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DemoEvalRates"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          },
+          "suite": {
+            "const": "main",
+            "title": "Suite",
+            "type": "string"
+          },
+          "summary_state": {
+            "enum": [
+              "available",
+              "empty"
+            ],
+            "title": "Summary State",
+            "type": "string"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "summary_state",
+          "suite",
+          "claim",
+          "performance_gap",
+          "scope"
+        ],
+        "title": "DemoEvaluationSummaryResponse",
+        "type": "object"
+      },
       "DemoEvidenceLink": {
         "additionalProperties": false,
         "properties": {
@@ -427,6 +820,10 @@
       "DemoFixturesResponse": {
         "additionalProperties": false,
         "properties": {
+          "batch_max_n": {
+            "title": "Batch Max N",
+            "type": "integer"
+          },
           "fixtures": {
             "items": {
               "$ref": "#/components/schemas/DemoFixtureOption"
@@ -436,7 +833,8 @@
           }
         },
         "required": [
-          "fixtures"
+          "fixtures",
+          "batch_max_n"
         ],
         "title": "DemoFixturesResponse",
         "type": "object"
@@ -5591,6 +5989,104 @@
           }
         },
         "summary": "Demo Check"
+      }
+    },
+    "/api/demo/check/batch": {
+      "post": {
+        "description": "One bounded synchronous run of server-resident synthetic fixtures.\n\nThe count cap is enforced before any fixture I/O or allow-list work, and\nan unknown id fails closed before any check runs.  Each item is an\nexplicit completed/failed terminal outcome; the enclosing outcome is\ncompleted/partial/failed.  No async queue, job, or evaluate batch exists.",
+        "operationId": "demo_batch_check_api_demo_check_batch_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DemoBatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemoBatchCheckResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemoErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemoErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemoErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemoErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Demo Batch Check"
+      }
+    },
+    "/api/demo/evaluate/summary": {
+      "get": {
+        "description": "Read-only fixed-main evaluation summary projection.\n\nThe computation stays on the existing evaluate_suite('main') authority;\nonly summary counts/rates, warnings, the honesty note, and the\nserver-owned claim metadata cross the API — no legacy HTML, pairs,\nper-application labels, pass_thresholds, or rules paths.  An empty/smoke\ncorpus is an explicit empty state with nullable rates; unavailable\nevaluation is a distinct closed 503.",
+        "operationId": "demo_evaluate_summary_api_demo_evaluate_summary_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemoEvaluationSummaryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemoErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Demo Evaluate Summary"
       }
     },
     "/api/demo/fixtures": {

@@ -89,6 +89,21 @@ def test_web_batch_and_evaluate_summary():
     assert "html" in r.json()
 
 
+def test_legacy_batch_and_evaluate_summary_wire_shapes_unchanged():
+    """T07: the legacy /api/check/batch and /api/evaluate/summary routes stay
+    wire-compatible (rollback path); the demo projections are additive."""
+    client = TestClient(app)
+    files = [x["file"] for x in client.get("/api/fixtures").json()["fixtures"][:2]]
+    r = client.post("/api/check/batch", json={"fixture_files": files})
+    assert r.status_code == 200, r.text
+    assert set(r.json().keys()) == {"n", "totals", "results", "rules_path"}
+
+    r = client.get("/api/evaluate/summary")
+    assert r.status_code == 200, r.text
+    assert set(r.json().keys()) == {"metrics", "html", "rules_path", "suite"}
+    assert "pass_thresholds" in r.json()["metrics"]
+
+
 def test_web_batch_check_max_n():
     """Round26: check/batch soft cap; no evaluate/batch API."""
     from task4_consistency.web import app as webapp
@@ -100,6 +115,24 @@ def test_web_batch_check_max_n():
     while len(files) < n:
         files = files + files
     r = client.post("/api/check/batch", json={"fixture_files": files[:n]})
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert detail["error"] == "batch_too_large"
+    assert detail["max_n"] == webapp.BATCH_CHECK_MAX_N
+
+
+def test_legacy_batch_cap_enforced_before_fixture_io():
+    """T07 plan invariant: the legacy route rejects an over-cap batch before
+    any fixture read — an over-cap batch of nonexistent names is the cap
+    rejection, never a 404."""
+    from task4_consistency.web import app as webapp
+
+    client = TestClient(app)
+    n = webapp.BATCH_CHECK_MAX_N + 1
+    r = client.post(
+        "/api/check/batch",
+        json={"fixture_files": ["no_such_fixture_1.json"] * n},
+    )
     assert r.status_code == 400
     detail = r.json()["detail"]
     assert detail["error"] == "batch_too_large"

@@ -96,6 +96,58 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/demo/check/batch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Demo Batch Check
+         * @description One bounded synchronous run of server-resident synthetic fixtures.
+         *
+         *     The count cap is enforced before any fixture I/O or allow-list work, and
+         *     an unknown id fails closed before any check runs.  Each item is an
+         *     explicit completed/failed terminal outcome; the enclosing outcome is
+         *     completed/partial/failed.  No async queue, job, or evaluate batch exists.
+         */
+        post: operations["demo_batch_check_api_demo_check_batch_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/demo/evaluate/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Demo Evaluate Summary
+         * @description Read-only fixed-main evaluation summary projection.
+         *
+         *     The computation stays on the existing evaluate_suite('main') authority;
+         *     only summary counts/rates, warnings, the honesty note, and the
+         *     server-owned claim metadata cross the API — no legacy HTML, pairs,
+         *     per-application labels, pass_thresholds, or rules paths.  An empty/smoke
+         *     corpus is an explicit empty state with nullable rates; unavailable
+         *     evaluation is a distinct closed 503.
+         */
+        get: operations["demo_evaluate_summary_api_demo_evaluate_summary_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/demo/fixtures": {
         parameters: {
             query?: never;
@@ -1362,6 +1414,92 @@ export interface components {
             /** Rules Path */
             rules_path?: string | null;
         };
+        /** DemoBatchCheckResponse */
+        DemoBatchCheckResponse: {
+            /** Completed */
+            completed: number;
+            /**
+             * Data Scope
+             * @constant
+             */
+            data_scope: "synthetic";
+            /** Failed */
+            failed: number;
+            /**
+             * Outcome
+             * @enum {string}
+             */
+            outcome: "completed" | "partial" | "failed";
+            /** Requested */
+            requested: number;
+            /** Results */
+            results: components["schemas"]["DemoBatchItem"][];
+            totals: components["schemas"]["DemoBatchTotals"];
+            /**
+             * Track
+             * @constant
+             */
+            track: "C-DEMO";
+        };
+        /** DemoBatchIssue */
+        DemoBatchIssue: {
+            /** Message */
+            message: string;
+            /** Reason Codes */
+            reason_codes?: string[];
+            /** Rule Id */
+            rule_id: string;
+            /**
+             * Verdict
+             * @enum {string}
+             */
+            verdict: "consistent" | "inconsistent" | "uncertain" | "skipped";
+        };
+        /** DemoBatchItem */
+        DemoBatchItem: {
+            /** Application Id */
+            application_id?: string | null;
+            /** Error */
+            error?: string | null;
+            /** Fixture Id */
+            fixture_id: string;
+            /** Issues */
+            issues?: components["schemas"]["DemoBatchIssue"][];
+            /**
+             * Outcome
+             * @enum {string}
+             */
+            outcome: "completed" | "failed";
+            summary?: components["schemas"]["DemoSummary"] | null;
+        };
+        /** DemoBatchRequest */
+        DemoBatchRequest: {
+            /** Fixture Ids */
+            fixture_ids: string[];
+        };
+        /** DemoBatchTotals */
+        DemoBatchTotals: {
+            /**
+             * Consistent
+             * @default 0
+             */
+            consistent: number;
+            /**
+             * Inconsistent
+             * @default 0
+             */
+            inconsistent: number;
+            /**
+             * Skipped
+             * @default 0
+             */
+            skipped: number;
+            /**
+             * Uncertain
+             * @default 0
+             */
+            uncertain: number;
+        };
         /** DemoCheckItem */
         DemoCheckItem: {
             diff_highlight?: components["schemas"]["DemoDiffHighlight"] | null;
@@ -1459,6 +1597,86 @@ export interface components {
         DemoErrorResponse: {
             detail: components["schemas"]["DemoErrorDetail"];
         };
+        /** DemoEvalCounts */
+        DemoEvalCounts: {
+            /** Decisive Pairs */
+            decisive_pairs: number;
+            /** False Negative */
+            false_negative: number;
+            /** False Positive */
+            false_positive: number;
+            /** N Apps Loaded */
+            n_apps_loaded: number;
+            /** N Check Fail */
+            n_check_fail: number;
+            /** N Check Ok */
+            n_check_ok: number;
+            /** N Expected Inconsistent */
+            n_expected_inconsistent: number;
+            /** N Inconsistent Labeled Decisive */
+            n_inconsistent_labeled_decisive: number;
+            /** N Missed Inconsistent */
+            n_missed_inconsistent: number;
+            /** Total Pairs */
+            total_pairs: number;
+            /** True Negative */
+            true_negative: number;
+            /** True Positive */
+            true_positive: number;
+            /** Uncertain When Labeled */
+            uncertain_when_labeled: number;
+        };
+        /** DemoEvalRates */
+        DemoEvalRates: {
+            /** Accuracy */
+            accuracy: number;
+            /** Coverage */
+            coverage: number;
+            /** False Negative Rate */
+            false_negative_rate: number;
+            /** False Positive Rate */
+            false_positive_rate: number;
+            /** Mean App Coverage */
+            mean_app_coverage: number;
+            /** Miss Rate */
+            miss_rate: number;
+            /** Uncertain Rate */
+            uncertain_rate: number;
+        };
+        /** DemoEvaluationSummaryResponse */
+        DemoEvaluationSummaryResponse: {
+            /**
+             * Claim
+             * @constant
+             */
+            claim: "C-DEV-REG";
+            counts?: components["schemas"]["DemoEvalCounts"] | null;
+            /**
+             * Honesty Note
+             * @default
+             */
+            honesty_note: string;
+            /**
+             * Performance Gap
+             * @constant
+             */
+            performance_gap: "UNVERIFIED";
+            rates?: components["schemas"]["DemoEvalRates"] | null;
+            /** Scope */
+            scope: string;
+            /**
+             * Suite
+             * @constant
+             */
+            suite: "main";
+            /**
+             * Summary State
+             * @enum {string}
+             */
+            summary_state: "available" | "empty";
+            /** Warnings */
+            warnings?: string[];
+        };
         /** DemoEvidenceLink */
         DemoEvidenceLink: {
             /** Href */
@@ -1493,6 +1711,8 @@ export interface components {
         };
         /** DemoFixturesResponse */
         DemoFixturesResponse: {
+            /** Batch Max N */
+            batch_max_n: number;
             /** Fixtures */
             fixtures: components["schemas"]["DemoFixtureOption"][];
         };
@@ -3342,6 +3562,95 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DemoErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DemoErrorResponse"];
+                };
+            };
+        };
+    };
+    demo_batch_check_api_demo_check_batch_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DemoBatchRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DemoBatchCheckResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DemoErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DemoErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DemoErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DemoErrorResponse"];
+                };
+            };
+        };
+    };
+    demo_evaluate_summary_api_demo_evaluate_summary_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DemoEvaluationSummaryResponse"];
                 };
             };
             /** @description Service Unavailable */

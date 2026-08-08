@@ -48,8 +48,20 @@ export type ExceptionDecisionResult =
   components["schemas"]["T05ExceptionDecisionResult"];
 export type DemoFixturesResponse = components["schemas"]["DemoFixturesResponse"];
 export type DemoCheckResponse = components["schemas"]["DemoCheckResponse"];
+export type DemoBatchCheckResponse =
+  components["schemas"]["DemoBatchCheckResponse"];
+export type DemoBatchItem = components["schemas"]["DemoBatchItem"];
+export type DemoEvaluationSummaryResponse =
+  components["schemas"]["DemoEvaluationSummaryResponse"];
+
+/**
+ * The demo batch POST body is bound to the generated OpenAPI request schema;
+ * a backend contract change fails strict typecheck here.
+ */
+export type DemoBatchCommand = paths["/api/demo/check/batch"]["post"]["requestBody"]["content"]["application/json"];
 
 export const DEMO_FIXTURES_KEY = ["demo", "fixtures"] as const;
+export const DEMO_EVAL_SUMMARY_KEY = ["demo", "evaluate-summary"] as const;
 
 export const QUEUE_KEY = ["s01", "queue"] as const;
 export const WORK_KEY = (workId: string) =>
@@ -559,6 +571,41 @@ export function useDemoCheck(): UseMutationResult<
         method: "POST",
         body: JSON.stringify({ fixture_id: fixtureId }),
       }),
+    retry: false,
+  });
+}
+
+/**
+ * The bounded synchronous batch mutation.  It sends fixture ids only and is
+ * never retried: a batch runs once per explicit user action and cannot
+ * replay from a mount or StrictMode effect.
+ */
+export function useDemoBatchCheck(): UseMutationResult<
+  DemoBatchCheckResponse,
+  Error,
+  DemoBatchCommand
+> {
+  return useMutation({
+    mutationFn: (command: DemoBatchCommand) =>
+      request<DemoBatchCheckResponse>("/api/demo/check/batch", {
+        method: "POST",
+        body: JSON.stringify(command),
+      }),
+    retry: false,
+  });
+}
+
+/**
+ * The read-only fixed-main evaluation summary.  ``enabled: false`` makes the
+ * explicit load click the only trigger, and ``retry: false`` means a failed
+ * read never replays on its own.
+ */
+export function useDemoEvaluationSummary(): UseQueryResult<DemoEvaluationSummaryResponse> {
+  return useQuery({
+    queryKey: DEMO_EVAL_SUMMARY_KEY,
+    queryFn: () =>
+      request<DemoEvaluationSummaryResponse>("/api/demo/evaluate/summary"),
+    enabled: false,
     retry: false,
   });
 }

@@ -58,7 +58,10 @@ def test_demo_fixtures_closed_allow_list():
     r = client.get("/api/demo/fixtures")
     assert r.status_code == 200, r.text
     payload = r.json()
-    assert set(payload.keys()) == {"fixtures"}
+    # T07 additive: the server-owned batch cap is exposed on the option list
+    # so React never hard-codes a second limit.
+    assert set(payload.keys()) == {"fixtures", "batch_max_n"}
+    assert payload["batch_max_n"] == 50
     options = payload["fixtures"]
     assert [o["fixture_id"] for o in options] == EXPECTED_FIXTURE_IDS
     assert [o["title"] for o in options] == EXPECTED_NEUTRAL_TITLES
@@ -435,7 +438,11 @@ def test_openapi_demo_contract_closed():
     assert resp["properties"]["data_scope"].get("const") == "synthetic"
 
     fixtures_schema = schemas["DemoFixturesResponse"]
-    assert set(fixtures_schema["properties"].keys()) == {"fixtures"}
+    assert set(fixtures_schema["properties"].keys()) == {
+        "fixtures",
+        "batch_max_n",
+    }
+    assert fixtures_schema["properties"]["batch_max_n"]["type"] == "integer"
 
     # every T06-owned schema is closed, not merely "not open"
     for name in CLOSED_DEMO_SCHEMAS:

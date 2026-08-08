@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useQueue } from "./api/hooks";
 import AttachmentVersionPanel from "./components/AttachmentVersionPanel";
 import BusinessExceptionApproverPanel from "./components/BusinessExceptionApproverPanel";
+import DemoBatchSummaryPanel from "./components/DemoBatchSummaryPanel";
 import DemoCheckPanel from "./components/DemoCheckPanel";
 import QueuePanel from "./components/QueuePanel";
 import RecoveryWorkPanel from "./components/RecoveryWorkPanel";
@@ -26,8 +27,8 @@ function isExceptionApproverShell(): boolean {
   return window.location.pathname.startsWith("/controlled/s05");
 }
 
-/** The T06 competition demo shell: only the closed synthetic facade mounts
- * here; no S01/S02/S05 read can fire. */
+/** The T06/T07 competition demo shell: only the closed synthetic facade
+ * mounts here; no S01/S02/S05 read can fire. */
 function DemoShell() {
   return (
     <div className="mx-auto max-w-4xl px-4 py-6">
@@ -42,6 +43,7 @@ function DemoShell() {
       </header>
       <main>
         <DemoCheckPanel />
+        <DemoBatchSummaryPanel />
       </main>
     </div>
   );

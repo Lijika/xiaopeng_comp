@@ -301,6 +301,19 @@ async def _sanitized_validation_handler(
 ) -> JSONResponse:
     """Validation 422s never reflect rejected input, context, credentials,
     or oversized payload content back to the client."""
+    if request.url.path == "/api/demo/check/batch":
+        # T07 closed contract: every invalid batch request shape fails with
+        # the exact fixed envelope registered as DemoErrorResponse, with no
+        # caller-controlled reflection.
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": {
+                    "error": "DEMO_BATCH_INVALID",
+                    "message": "批量校验请求无效",
+                }
+            },
+        )
     return JSONResponse(
         status_code=422,
         content={"detail": _sanitized_validation_detail(exc.errors())},
@@ -4404,22 +4417,21 @@ class BatchCheckBody(BaseModel):
 
 @app.post("/api/check/batch")
 def api_check_batch(body: BatchCheckBody) -> dict[str, Any]:
+    fixture_files = list(body.fixture_files or [])
     apps: list[dict[str, Any]] = list(body.applications or [])
-    for name in body.fixture_files or []:
-        if "/" in name or ".." in name:
-            raise HTTPException(400, f"invalid fixture name: {name}")
-        fp = FIXTURES / name
-        if not fp.exists():
-            raise HTTPException(404, f"fixture not found: {name}")
-        apps.append(json.loads(fp.read_text(encoding="utf-8")))
-    if not apps:
+    if not apps and not fixture_files:
         raise HTTPException(400, "applications or fixture_files required")
-    if len(apps) > BATCH_CHECK_MAX_N:
+    # Round26/plan invariant: the count cap is enforced before any fixture
+    # read or check, so an over-cap batch is rejected without touching I/O.
+    if len(apps) + len(fixture_files) > BATCH_CHECK_MAX_N:
         raise HTTPException(
             400,
             detail={
                 "error": "batch_too_large",
-                "message": f"batch size {len(apps)} exceeds max {BATCH_CHECK_MAX_N}",
+                "message": (
+                    f"batch size {len(apps) + len(fixture_files)} exceeds "
+                    f"max {BATCH_CHECK_MAX_N}"
+                ),
                 "hint": (
                     f"拆分批次（建议 ≤{BATCH_CHECK_MAX_N}）；"
                     "全量带标签评估请用 CLI: "
@@ -4429,6 +4441,13 @@ def api_check_batch(body: BatchCheckBody) -> dict[str, Any]:
                 "max_n": BATCH_CHECK_MAX_N,
             },
         )
+    for name in fixture_files:
+        if "/" in name or ".." in name:
+            raise HTTPException(400, f"invalid fixture name: {name}")
+        fp = FIXTURES / name
+        if not fp.exists():
+            raise HTTPException(404, f"fixture not found: {name}")
+        apps.append(json.loads(fp.read_text(encoding="utf-8")))
 
     eng = _engine()
     results = []
@@ -4846,6 +4865,13 @@ _DEMO_ERRORS: dict[str, tuple[int, str]] = {
     "DEMO_FIXTURE_NOT_FOUND": (404, "未找到演示样例"),
     "DEMO_FIXTURE_UNAVAILABLE": (503, "演示样例暂不可用"),
     "DEMO_CHECK_FAILED": (500, "校验执行失败，请稍后重试"),
+    # T07: the cap number is server-owned and fixed; the evaluation 503 is a
+    # distinct closed contract from any fixture 503.
+    "DEMO_BATCH_TOO_LARGE": (
+        400,
+        f"批量校验数量超过服务端上限 {BATCH_CHECK_MAX_N}",
+    ),
+    "DEMO_EVALUATION_UNAVAILABLE": (503, "评估摘要暂不可用"),
 }
 
 
@@ -4868,6 +4894,9 @@ class DemoFixturesResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     fixtures: list[DemoFixtureOption]
+    # The server-owned batch cap (T07): React renders it but never re-derives
+    # a second limit from the client.
+    batch_max_n: int
 
 
 class DemoCheckRequest(BaseModel):
@@ -5023,7 +5052,9 @@ def demo_fixtures() -> DemoFixturesResponse:
                 step2_sample_id=str(meta["step2_sample_id"]),
             )
         )
-    return DemoFixturesResponse(fixtures=options)
+    return DemoFixturesResponse(
+        fixtures=options, batch_max_n=BATCH_CHECK_MAX_N
+    )
 
 
 @app.post(
@@ -5090,6 +5121,302 @@ def demo_react_shell() -> HTMLResponse:
     response = HTMLResponse(index_html)
     _s01_disable_cache(response)
     return response
+
+
+# --- T07 / Issue #41: bounded demo batch check + read-only fixed-main
+# evaluation-summary projection ---------------------------------------------
+
+# The fixed generic per-item failure text: exception text and internal paths
+# stay in the server logs via chaining, never in the API payload.
+_DEMO_BATCH_ITEM_FAILED = "条目校验失败，请稍后重试"
+
+# Server-owned scope copy for the read-only evaluation summary; React renders
+# it verbatim and never edits or re-derives it.
+_DEMO_EVAL_SCOPE = "合成开发/回归语料（suite=main）"
+
+
+class DemoBatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    fixture_ids: list[str] = Field(min_length=1)
+
+
+class DemoBatchTotals(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    consistent: int = 0
+    inconsistent: int = 0
+    uncertain: int = 0
+    skipped: int = 0
+
+
+class DemoBatchIssue(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rule_id: str
+    verdict: Literal["consistent", "inconsistent", "uncertain", "skipped"]
+    message: str
+    reason_codes: list[str] = Field(default_factory=list)
+
+
+class DemoBatchItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    fixture_id: str
+    # Explicit terminal outcome: absence never implies success.
+    outcome: Literal["completed", "failed"]
+    application_id: str | None = None
+    summary: DemoSummary | None = None
+    issues: list[DemoBatchIssue] = Field(default_factory=list)
+    error: str | None = None
+
+
+class DemoBatchCheckResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    track: Literal["C-DEMO"]
+    data_scope: Literal["synthetic"]
+    requested: int
+    completed: int
+    failed: int
+    # Enclosing outcome over all requested items: completed / partial /
+    # failed, so a partially-failed run is never presented as success.
+    outcome: Literal["completed", "partial", "failed"]
+    totals: DemoBatchTotals
+    results: list[DemoBatchItem]
+
+
+@app.post(
+    "/api/demo/check/batch",
+    response_model=DemoBatchCheckResponse,
+    responses={
+        400: {"model": DemoErrorResponse},
+        404: {"model": DemoErrorResponse},
+        422: {"model": DemoErrorResponse},
+        503: {"model": DemoErrorResponse},
+    },
+)
+def demo_batch_check(body: DemoBatchRequest) -> DemoBatchCheckResponse:
+    """One bounded synchronous run of server-resident synthetic fixtures.
+
+    The count cap is enforced before any fixture I/O or allow-list work, and
+    an unknown id fails closed before any check runs.  Each item is an
+    explicit completed/failed terminal outcome; the enclosing outcome is
+    completed/partial/failed.  No async queue, job, or evaluate batch exists.
+    """
+    ids = body.fixture_ids
+    if len(ids) > BATCH_CHECK_MAX_N:
+        raise _demo_error("DEMO_BATCH_TOO_LARGE")
+    for fixture_id in ids:
+        if fixture_id not in DEMO_FIXTURES:
+            raise _demo_error("DEMO_FIXTURE_NOT_FOUND")
+
+    # One synchronous request observes exactly one rules/engine snapshot:
+    # the engine is built once and every item runs on it, so no mixed rule
+    # versions can combine in one response.
+    try:
+        engine = _engine()
+    except Exception:
+        # Bounded closed failure: no engine snapshot could be built; every
+        # requested item fails generically with zero completed-only totals.
+        failed_items = [
+            DemoBatchItem(
+                fixture_id=fid,
+                outcome="failed",
+                error=_DEMO_BATCH_ITEM_FAILED,
+            )
+            for fid in ids
+        ]
+        return DemoBatchCheckResponse(
+            track="C-DEMO",
+            data_scope="synthetic",
+            requested=len(ids),
+            completed=0,
+            failed=len(ids),
+            outcome="failed",
+            totals=DemoBatchTotals(),
+            results=failed_items,
+        )
+
+    results: list[DemoBatchItem] = []
+    totals = DemoBatchTotals()
+    for fixture_id in ids:
+        try:
+            data = _load_demo_fixture(fixture_id)
+            app_obj = Application.from_dict(data)
+            report = engine.run(app_obj)
+            summary = report.summary
+            issues = [
+                DemoBatchIssue(
+                    rule_id=c.rule_id,
+                    verdict=c.verdict.value,
+                    message=c.message,
+                    reason_codes=list(c.reason_codes or []),
+                )
+                for c in report.checks
+                if c.verdict.value in ("inconsistent", "uncertain")
+            ]
+            item = DemoBatchItem(
+                fixture_id=fixture_id,
+                outcome="completed",
+                application_id=report.application_id,
+                summary=DemoSummary(**summary.to_dict()),
+                issues=issues,
+            )
+            # Commit counts to completed-only totals only after the whole
+            # item (including the issue projection) succeeded, so a late
+            # failure can never leave partial counts.
+            results.append(item)
+            totals.consistent += summary.consistent
+            totals.inconsistent += summary.inconsistent
+            totals.uncertain += summary.uncertain
+            totals.skipped += summary.skipped
+        except Exception:
+            # Bounded per-item failure: the fixed generic message only;
+            # exception text and internal paths stay in the server logs.
+            results.append(
+                DemoBatchItem(
+                    fixture_id=fixture_id,
+                    outcome="failed",
+                    error=_DEMO_BATCH_ITEM_FAILED,
+                )
+            )
+    completed = sum(1 for item in results if item.outcome == "completed")
+    failed = len(results) - completed
+    if completed == 0:
+        outcome: Literal["completed", "partial", "failed"] = "failed"
+    elif failed == 0:
+        outcome = "completed"
+    else:
+        outcome = "partial"
+    return DemoBatchCheckResponse(
+        track="C-DEMO",
+        data_scope="synthetic",
+        requested=len(ids),
+        completed=completed,
+        failed=failed,
+        outcome=outcome,
+        totals=totals,
+        results=results,
+    )
+
+
+class DemoEvalCounts(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    n_apps_loaded: int
+    n_check_ok: int
+    n_check_fail: int
+    total_pairs: int
+    decisive_pairs: int
+    true_positive: int
+    true_negative: int
+    false_positive: int
+    false_negative: int
+    uncertain_when_labeled: int
+    n_inconsistent_labeled_decisive: int
+    n_expected_inconsistent: int
+    n_missed_inconsistent: int
+
+
+class DemoEvalRates(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    coverage: float
+    false_positive_rate: float
+    false_negative_rate: float
+    accuracy: float
+    miss_rate: float
+    uncertain_rate: float
+    mean_app_coverage: float
+
+
+class DemoEvaluationSummaryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # available = labeled fixed-main computation; empty = smoke/empty corpus
+    # with nullable counts/rates, never zero-valued success.
+    summary_state: Literal["available", "empty"]
+    suite: Literal["main"]
+    # Server-owned claim metadata: development/regression scope only, and the
+    # explicit gap to any formal/production evaluation.
+    claim: Literal["C-DEV-REG"]
+    performance_gap: Literal["UNVERIFIED"]
+    scope: str
+    counts: DemoEvalCounts | None = None
+    rates: DemoEvalRates | None = None
+    warnings: list[str] = Field(default_factory=list)
+    honesty_note: str = ""
+
+
+@app.get(
+    "/api/demo/evaluate/summary",
+    response_model=DemoEvaluationSummaryResponse,
+    responses={503: {"model": DemoErrorResponse}},
+)
+def demo_evaluate_summary() -> DemoEvaluationSummaryResponse:
+    """Read-only fixed-main evaluation summary projection.
+
+    The computation stays on the existing evaluate_suite('main') authority;
+    only summary counts/rates, warnings, the honesty note, and the
+    server-owned claim metadata cross the API — no legacy HTML, pairs,
+    per-application labels, pass_thresholds, or rules paths.  An empty/smoke
+    corpus is an explicit empty state with nullable rates; unavailable
+    evaluation is a distinct closed 503.
+    """
+    from task4_consistency.evaluate import evaluate_suite
+
+    try:
+        metrics = evaluate_suite("main", _active_rules_path())
+    except Exception as e:
+        raise _demo_error("DEMO_EVALUATION_UNAVAILABLE") from e
+
+    warnings_list = list(metrics.warnings or [])
+    if metrics.mode == "smoke" or metrics.total_pairs == 0:
+        return DemoEvaluationSummaryResponse(
+            summary_state="empty",
+            suite="main",
+            claim="C-DEV-REG",
+            performance_gap="UNVERIFIED",
+            scope=_DEMO_EVAL_SCOPE,
+            counts=None,
+            rates=None,
+            warnings=warnings_list,
+            honesty_note=metrics.honesty_note,
+        )
+    return DemoEvaluationSummaryResponse(
+        summary_state="available",
+        suite="main",
+        claim="C-DEV-REG",
+        performance_gap="UNVERIFIED",
+        scope=_DEMO_EVAL_SCOPE,
+        counts=DemoEvalCounts(
+            n_apps_loaded=metrics.n_apps_loaded,
+            n_check_ok=metrics.n_check_ok,
+            n_check_fail=metrics.n_check_fail,
+            total_pairs=metrics.total_pairs,
+            decisive_pairs=metrics.decisive_pairs,
+            true_positive=metrics.true_positive,
+            true_negative=metrics.true_negative,
+            false_positive=metrics.false_positive,
+            false_negative=metrics.false_negative,
+            uncertain_when_labeled=metrics.uncertain_when_labeled,
+            n_inconsistent_labeled_decisive=metrics.n_inconsistent_labeled_decisive,
+            n_expected_inconsistent=metrics.n_expected_inconsistent,
+            n_missed_inconsistent=metrics.n_missed_inconsistent,
+        ),
+        rates=DemoEvalRates(
+            coverage=metrics.coverage,
+            false_positive_rate=metrics.false_positive_rate,
+            false_negative_rate=metrics.false_negative_rate,
+            accuracy=metrics.accuracy,
+            miss_rate=metrics.miss_rate,
+            uncertain_rate=metrics.uncertain_rate,
+            mean_app_coverage=metrics.mean_app_coverage,
+        ),
+        warnings=warnings_list,
+        honesty_note=metrics.honesty_note,
+    )
 
 
 def create_app() -> FastAPI:

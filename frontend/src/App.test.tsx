@@ -991,6 +991,7 @@ describe("queue shell (App)", () => {
                 step2_sample_id: "JFL25P02L080310-01",
               },
             ],
+            batch_max_n: 50,
           }),
           { status: 200, headers: { "Content-Type": "application/json" } },
         ),
@@ -1006,9 +1007,22 @@ describe("queue shell (App)", () => {
     expect(screen.getByTestId("demo-boundary-scope")).toHaveTextContent(
       "synthetic",
     );
+    // T07: the batch + read-only summary panel mounts here too, but neither
+    // fires a batch POST nor a summary GET without an explicit action.
+    expect(screen.getByTestId("demo-batch-panel")).toBeInTheDocument();
+    expect(screen.getByTestId("demo-eval-panel")).toBeInTheDocument();
+    expect(screen.getByTestId("demo-eval-status")).toHaveTextContent("未加载");
     expect(screen.queryByTestId("queue-panel")).not.toBeInTheDocument();
     expect(
       router.calls.filter((call) => call.url.includes("/controlled/")),
     ).toHaveLength(0);
+    expect(
+      router.calls.filter(
+        (call) => call.url === "/api/demo/evaluate/summary",
+      ),
+    ).toHaveLength(0);
+    expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(
+      0,
+    );
   });
 });

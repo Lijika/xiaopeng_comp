@@ -39,6 +39,11 @@ export type DemoDiffHighlight = components["schemas"]["DemoDiffHighlight"];
 export type DemoSummary = components["schemas"]["DemoSummary"];
 export type DemoConfigInfo = components["schemas"]["DemoConfigInfo"];
 export type DemoEvidenceLink = components["schemas"]["DemoEvidenceLink"];
+export type DemoBatchCheckResponse =
+  components["schemas"]["DemoBatchCheckResponse"];
+export type DemoBatchItem = components["schemas"]["DemoBatchItem"];
+export type DemoEvaluationSummaryResponse =
+  components["schemas"]["DemoEvaluationSummaryResponse"];
 
 /** A structured server rejection; never invents identifiers or evidence. */
 export class HttpError extends Error {
