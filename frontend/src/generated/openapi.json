@@ -5173,17 +5173,13 @@
             "type": "string"
           },
           "expected_governance_revision": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Expected Governance Revision"
+            "minimum": 0.0,
+            "title": "Expected Governance Revision",
+            "type": "integer"
           },
           "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 1,
             "title": "Idempotency Key",
             "type": "string"
           },
@@ -5194,6 +5190,7 @@
         },
         "required": [
           "idempotency_key",
+          "expected_governance_revision",
           "candidate_id",
           "activation_time",
           "recovery_release_id"
@@ -5209,23 +5206,20 @@
             "type": "string"
           },
           "expected_governance_revision": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Expected Governance Revision"
+            "minimum": 0.0,
+            "title": "Expected Governance Revision",
+            "type": "integer"
           },
           "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 1,
             "title": "Idempotency Key",
             "type": "string"
           }
         },
         "required": [
           "idempotency_key",
+          "expected_governance_revision",
           "candidate_id"
         ],
         "title": "S08CandidateCommandBody",
@@ -5621,23 +5615,20 @@
             "type": "string"
           },
           "expected_governance_revision": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Expected Governance Revision"
+            "minimum": 0.0,
+            "title": "Expected Governance Revision",
+            "type": "integer"
           },
           "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 1,
             "title": "Idempotency Key",
             "type": "string"
           }
         },
         "required": [
           "idempotency_key",
+          "expected_governance_revision",
           "draft_id"
         ],
         "title": "S08FreezeCandidateBody",
@@ -5647,17 +5638,13 @@
         "additionalProperties": false,
         "properties": {
           "expected_governance_revision": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Expected Governance Revision"
+            "minimum": 0.0,
+            "title": "Expected Governance Revision",
+            "type": "integer"
           },
           "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 1,
             "title": "Idempotency Key",
             "type": "string"
           },
@@ -5668,6 +5655,7 @@
         },
         "required": [
           "idempotency_key",
+          "expected_governance_revision",
           "source_bundle_id"
         ],
         "title": "S08ImportLegacyBody",
@@ -5681,17 +5669,13 @@
             "type": "string"
           },
           "expected_governance_revision": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Expected Governance Revision"
+            "minimum": 0.0,
+            "title": "Expected Governance Revision",
+            "type": "integer"
           },
           "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 1,
             "title": "Idempotency Key",
             "type": "string"
           },
@@ -5702,6 +5686,7 @@
         },
         "required": [
           "idempotency_key",
+          "expected_governance_revision",
           "candidate_id",
           "reason_code"
         ],
@@ -5716,17 +5701,13 @@
             "type": "string"
           },
           "expected_governance_revision": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Expected Governance Revision"
+            "minimum": 0.0,
+            "title": "Expected Governance Revision",
+            "type": "integer"
           },
           "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 1,
             "title": "Idempotency Key",
             "type": "string"
           },
@@ -5738,6 +5719,7 @@
         },
         "required": [
           "idempotency_key",
+          "expected_governance_revision",
           "draft_id",
           "metadata"
         ],
@@ -5756,23 +5738,20 @@
             "type": "string"
           },
           "expected_governance_revision": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Expected Governance Revision"
+            "minimum": 0.0,
+            "title": "Expected Governance Revision",
+            "type": "integer"
           },
           "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 1,
             "title": "Idempotency Key",
             "type": "string"
           }
         },
         "required": [
           "idempotency_key",
+          "expected_governance_revision",
           "approval_binding_id",
           "activation_at"
         ],
@@ -5845,17 +5824,13 @@
         "additionalProperties": false,
         "properties": {
           "expected_governance_revision": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Expected Governance Revision"
+            "minimum": 0.0,
+            "title": "Expected Governance Revision",
+            "type": "integer"
           },
           "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 1,
             "title": "Idempotency Key",
             "type": "string"
           },
@@ -5866,6 +5841,7 @@
         },
         "required": [
           "idempotency_key",
+          "expected_governance_revision",
           "reason_code"
         ],
         "title": "S08StopActivationsBody",

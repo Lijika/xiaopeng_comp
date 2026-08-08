@@ -190,6 +190,21 @@ class AlwaysFailChecker:
         raise RuntimeError("injected permanent checker failure")
 
 
+class FailThriceChecker:
+    """Fail the first three checker executions (enough to exhaust the S01
+    retry budget), then succeed so a repair probe can verify the healthy
+    pinned checker path."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self, _application: object) -> object:
+        self.calls += 1
+        if self.calls <= 3:
+            raise RuntimeError("injected transient checker failure")
+        return _application
+
+
 class ExplodingSnapshots(list[object]):
     def __iter__(self):
         raise RuntimeError("injected result conversion failure")
@@ -1990,14 +2005,17 @@ def test_terminal_checker_recovery_requires_a_live_projection_boundary(
     assert restarted.fact_counts() == before
 
 
-def test_terminal_checker_recovery_ignores_drifted_legacy_rules(
-    tmp_path: Path,
+@pytest.mark.parametrize("rules_change", ("modified", "removed"))
+def test_terminal_checker_recovery_uses_only_pinned_registry_release(
+    tmp_path: Path, rules_change: str
 ) -> None:
-    """A terminal checker failure recovers only through the pinned Registry
-    release; drifting the legacy rules file changes nothing."""
+    """After a terminal checker failure, recovery is verified through the
+    healthy pinned Registry checker: modifying or removing the legacy rules
+    file has zero effect on the recovery outcome or the pinned digest."""
     service, policy, rules_path = _governed_release_service(
-        tmp_path, checker_runner=AlwaysFailChecker()
+        tmp_path, checker_runner=FailThriceChecker()
     )
+    pinned_digest = _pinned_release_digest(policy)
     original_rules = rules_path.read_bytes()
     service.submit_demo(
         principal=TEST_INTEGRATOR,
@@ -2009,36 +2027,32 @@ def test_terminal_checker_recovery_ignores_drifted_legacy_rules(
     assert driver.process_next_job(now=1).status == "failed"
     assert driver.process_next_job(now=3).status == "stopped"
 
-    rules_path.write_bytes(
-        original_rules.replace(
-            b"low_confidence_threshold: 0.6",
-            b"low_confidence_threshold: 1.0",
+    if rules_change == "modified":
+        rules_path.write_bytes(
+            original_rules.replace(
+                b"low_confidence_threshold: 0.6",
+                b"low_confidence_threshold: 1.0",
+            )
         )
-    )
-    drifted = ControlledScenarioService(
+    else:
+        rules_path.unlink()
+    restarted = ControlledScenarioService(
         fixture_root=ROOT / "fixtures" / "applications",
         rules_path=rules_path,
         state_path=service._store.state_path,
         policy_governance=policy,
-        checker_runner=AlwaysFailChecker(),
     )
-    runtime_stop = drifted.cohort_status()
-    before = drifted.fact_counts()
-
-    rejected = drifted.recover_runtime(
+    recovery = restarted.recover_runtime(
         principal=TEST_OPERATOR,
         expected_failure_reason_code="CHECKER_EXCEPTION_RETRY_EXHAUSTED"
     )
+    assert recovery["recovery"] == "scheduled", recovery
+    assert recovery["requeued_jobs"] == 1
+    assert restarted.cohort_status() == {"track": "C-DEMO", "admission": "open"}
 
-    assert rejected == {
-        "track": "C-DEMO",
-        "recovery": "rejected",
-        "reason_code": "S01_RUNTIME_REPAIR_NOT_VERIFIED",
-        "failure_reason_code": "CHECKER_EXCEPTION_RETRY_EXHAUSTED",
-        "requeued_jobs": 0,
-    }
-    assert drifted.cohort_status() == runtime_stop
-    assert drifted.fact_counts() == before
+    recovered = restarted.process_next_job()
+    assert recovered.status == "complete", recovered
+    assert recovered.release_digest == pinned_digest
 
 
 @pytest.mark.parametrize(

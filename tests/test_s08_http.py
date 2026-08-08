@@ -10,6 +10,8 @@ the complete manifest.
 from __future__ import annotations
 
 import hashlib
+import json
+import sqlite3
 import time
 
 import pytest
@@ -19,6 +21,7 @@ from typing import Any
 from tests.test_s01_http import (
     UvicornLoopback,
     demo_auth_headers,
+    submit,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -615,3 +618,265 @@ def test_role_auth_claim_labels_stop_activation_and_restart_reconciliation(
         run = _wait_for_complete_run(server, submit_result.json()["application_id"])
         assert run["active_generation"] == 1
         assert run["manifest_digest"] == active_after["manifest_digest"]
+
+
+def test_approver_can_read_exact_candidate_diff_but_cannot_mutate(
+    tmp_path: Path,
+) -> None:
+    """The independent Policy Approver reads the complete candidate workspace
+    (manifest, validation bundle, machine diff and fixed approval binding) but
+    cannot mutate governance; the author cannot self-approve."""
+    state_path = tmp_path / "target.sqlite3"
+    env = {
+        "TASK4_S01_TEST_FIXTURE_ROOT": str(ROOT / "fixtures" / "applications"),
+        "TASK4_S01_TEST_STATE_PATH": str(state_path),
+    }
+    with s08_test_loopback(env) as server:
+        bootstrap = _active_query(server)
+
+        # Admin drives import -> revise -> freeze -> validate -> review.
+        import_result = _post_command(
+            server,
+            "import_legacy",
+            {
+                "source_bundle_id": SOURCE_BUNDLE_ID,
+                "idempotency_key": "g3-import-1",
+                "expected_governance_revision": _governance_revision(server),
+            },
+            admin_headers(),
+        )
+        draft_id = import_result["draft_id"]
+        _post_command(
+            server,
+            "revise_draft",
+            {
+                "draft_id": draft_id,
+                "metadata": {
+                    "scope": S08_SCOPE,
+                    "validity": {"valid_from": "2000-01-01T00:00:00Z"},
+                    "source": SOURCE_BUNDLE_ID,
+                    "reason": "G3 approver read drill",
+                },
+                "idempotency_key": "g3-revise-1",
+                "expected_governance_revision": _governance_revision(server),
+            },
+            admin_headers(),
+        )
+        freeze = _post_command(
+            server,
+            "freeze_candidate",
+            {
+                "draft_id": draft_id,
+                "idempotency_key": "g3-freeze-1",
+                "expected_governance_revision": _governance_revision(server),
+            },
+            admin_headers(),
+        )
+        candidate_id = freeze["candidate_id"]
+        _post_command(
+            server,
+            "request_validation",
+            {
+                "candidate_id": candidate_id,
+                "idempotency_key": "g3-validate-1",
+                "expected_governance_revision": _governance_revision(server),
+            },
+            admin_headers(),
+        )
+        _wait_for_candidate_status(server, candidate_id, "validated")
+        _post_command(
+            server,
+            "submit_review",
+            {
+                "candidate_id": candidate_id,
+                "idempotency_key": "g3-review-1",
+                "expected_governance_revision": _governance_revision(server),
+            },
+            admin_headers(),
+        )
+        _wait_for_candidate_status(server, candidate_id, "in_review")
+
+        # 1. The approver reads the exact candidate workspace pre-approval:
+        #    manifest and validation bundle with every digest.
+        workspace = server.request(
+            "GET",
+            f"/controlled/s08/api/queries/candidate/{candidate_id}",
+            headers=approver_headers(),
+        )
+        assert workspace.status == 200
+        body = workspace.json()
+        assert body["status"] == "in_review"
+        assert body["manifest_digest"] == freeze["manifest_digest"]
+        assert body["manifest"]["digest"] == freeze["manifest_digest"]
+        assert body["manifest"]["components"] == freeze["components"]
+        assert body["validation_bundle_digest"]
+        bundle = body["validation_bundle"]
+        assert bundle["schema_version"] == "s08-validation-bundle/1"
+        assert bundle["candidate_id"] == candidate_id
+        assert bundle["status"] == "validated"
+        assert bundle["inputs"]["component_digests"] == {
+            item["type"]: item["digest"] for item in freeze["components"]
+        }
+        assert "approval_binding" not in body
+
+        # 2. The approver cannot mutate governance: every admin/operator
+        #    command fails with the stable S08_FORBIDDEN error.
+        for name, payload in [
+            ("import_legacy", {"source_bundle_id": SOURCE_BUNDLE_ID}),
+            ("revise_draft", {"draft_id": draft_id, "metadata": {"scope": S08_SCOPE}}),
+            ("freeze_candidate", {"draft_id": draft_id}),
+            ("request_validation", {"candidate_id": candidate_id}),
+            ("submit_review", {"candidate_id": candidate_id}),
+            (
+                "schedule",
+                {
+                    "approval_binding_id": "approval_sha256_" + "0" * 64,
+                    "activation_at": int(time.time()) + 60,
+                },
+            ),
+            ("stop_activations", {"reason_code": "S08_G3_DENIED"}),
+        ]:
+            denied = server.request(
+                "POST",
+                f"/controlled/s08/api/commands/{name}",
+                body={
+                    "idempotency_key": f"g3-approver-{name}",
+                    "expected_governance_revision": _governance_revision(server),
+                    **payload,
+                },
+                headers=approver_headers(),
+            )
+            assert denied.status == 403
+            assert denied.json()["detail"]["error"] == "S08_FORBIDDEN"
+
+        # 3. The author (admin) cannot approve the candidate.
+        denied = server.request(
+            "POST",
+            "/controlled/s08/api/commands/approve",
+            body={
+                "candidate_id": candidate_id,
+                "activation_time": int(time.time()) + 60,
+                "recovery_release_id": bootstrap["candidate_id"],
+                "idempotency_key": "g3-admin-approve",
+                "expected_governance_revision": _governance_revision(server),
+            },
+            headers=admin_headers(),
+        )
+        assert denied.status == 403
+        assert denied.json()["detail"]["error"] == "S08_FORBIDDEN"
+
+        # 4. The approver approves; the fixed binding is readable and pins
+        #    the exact machine diff, digests, scope and activation time.
+        activation_time = int(time.time())
+        approval = _post_command(
+            server,
+            "approve",
+            {
+                "candidate_id": candidate_id,
+                "activation_time": activation_time,
+                "recovery_release_id": bootstrap["candidate_id"],
+                "idempotency_key": "g3-approve-1",
+                "expected_governance_revision": _governance_revision(server),
+            },
+            approver_headers(),
+        )
+        assert approval["status"] == "accepted"
+        _wait_for_candidate_status(server, candidate_id, "approved")
+        workspace = server.request(
+            "GET",
+            f"/controlled/s08/api/queries/candidate/{candidate_id}",
+            headers=approver_headers(),
+        )
+        assert workspace.status == 200
+        body = workspace.json()
+        assert body["approval_binding_id"] == approval["approval_binding_id"]
+        binding = body["approval_binding"]
+        assert binding["schema_version"] == "s08-approval-binding/1"
+        assert binding["candidate_id"] == candidate_id
+        assert binding["candidate_digest"] == freeze["manifest_digest"]
+        assert binding["validation_bundle_digest"] == approval["validation_bundle_digest"]
+        assert binding["scope"] == S08_SCOPE
+        assert binding["activation_time"] == activation_time
+        assert binding["recovery_release_id"] == bootstrap["candidate_id"]
+        assert binding["approved_by"] == "c-demo-policy-approver"
+        diff = binding["diff"]
+        assert diff["schema_version"] == "s08-machine-diff/1"
+        assert diff["anchor_candidate_id"] == bootstrap["candidate_id"]
+        assert diff["anchor_components"] == {
+            item["type"]: item["digest"] for item in bootstrap["components"]
+        }
+        assert diff["candidate_components"] == {
+            item["type"]: item["digest"] for item in freeze["components"]
+        }
+        assert diff["changes"] == []
+
+
+@pytest.mark.parametrize("missing", ("admin", "approver", "operator"))
+def test_missing_s08_identities_disable_scope_without_default_subjects(
+    tmp_path: Path, missing: str
+) -> None:
+    """Removing any single independent identity closes the whole S08 scope:
+    routes fail stable with no default shared subject, no bootstrap side
+    effect is written, and the legacy S01 surface stays live."""
+    state_path = tmp_path / "target.sqlite3"
+    env = {
+        "TASK4_S01_TEST_FIXTURE_ROOT": str(ROOT / "fixtures" / "applications"),
+        "TASK4_S01_TEST_STATE_PATH": str(state_path),
+    }
+    upper = missing.upper()
+    env[f"TASK4_S08_{upper}_CREDENTIAL"] = ""
+    env[f"TASK4_S08_{upper}_SUBJECT"] = ""
+    with s08_test_loopback(env) as server:
+        # The legacy S01 surface remains live and fully functional.
+        health = server.request("GET", "/api/health")
+        assert health.status == 200
+        page = server.request(
+            "GET", "/controlled/s01", headers=demo_auth_headers(), use_session=False
+        )
+        assert page.status == 200
+        accepted = submit(server, f"s08-{missing}-missing").json()
+        assert accepted["disposition"] == "accepted"
+
+        # Every S08 route fails closed with a stable error; the response
+        # never leaks a default shared subject.
+        for path, request_headers in [
+            (f"/controlled/s08/api/queries/status?scope={S08_SCOPE}", admin_headers()),
+            (f"/controlled/s08/api/queries/candidates?scope={S08_SCOPE}", admin_headers()),
+            (
+                f"/controlled/s08/api/queries/candidate/candidate_000000000000000000000000",
+                admin_headers(),
+            ),
+            (f"/controlled/s08/api/queries/active?scope={S08_SCOPE}", admin_headers()),
+        ]:
+            response = server.request("GET", path, headers=request_headers)
+            assert response.status in (403, 503)
+            error = response.json()["detail"]["error"]
+            assert error in ("S08_FORBIDDEN", "S08_UNAVAILABLE")
+            assert "c-demo-policy" not in response.text
+        denied = server.request(
+            "POST",
+            "/controlled/s08/api/commands/import_legacy",
+            body={
+                "source_bundle_id": SOURCE_BUNDLE_ID,
+                "idempotency_key": "closed-import-1",
+                "expected_governance_revision": 0,
+            },
+            headers=admin_headers(),
+        )
+        assert denied.status in (403, 503)
+        assert denied.json()["detail"]["error"] in ("S08_FORBIDDEN", "S08_UNAVAILABLE")
+
+    # No bootstrap side effect: the governance ledger stayed empty.
+    with sqlite3.connect(state_path) as connection:
+        counts = {
+            "events": connection.execute(
+                "SELECT COUNT(*) FROM policy_governance_events"
+            ).fetchone()[0],
+            "artifacts": connection.execute(
+                "SELECT COUNT(*) FROM policy_artifacts"
+            ).fetchone()[0],
+            "projections": connection.execute(
+                "SELECT COUNT(*) FROM policy_active_projections"
+            ).fetchone()[0],
+        }
+    assert counts == {"events": 0, "artifacts": 0, "projections": 0}

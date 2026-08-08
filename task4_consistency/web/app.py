@@ -152,15 +152,20 @@ def _s08_policy_service(
     clock: Callable[[], int],
     corpus_root: Path | None = None,
 ) -> PolicyGovernanceService | None:
+    """S08 is gated on complete independent identities: without every
+    Admin/Approver/Operator credential and subject the scope stays closed
+    and no default shared subject or automatic bootstrap may run."""
+    if not S08_CONFIGURED:
+        return None
     try:
         return PolicyGovernanceService(
             state_path=state_path,
             audit_available=audit_available,
             storage_available=storage_available,
             migration_admin_subject=S08_MIGRATION_ADMIN_SUBJECT,
-            admin_subject=S08_ADMIN_SUBJECT or "c-demo-policy-admin",
-            approver_subject=S08_APPROVER_SUBJECT or "c-demo-policy-approver",
-            operator_subject=S08_OPERATOR_SUBJECT or "c-demo-policy-operator",
+            admin_subject=S08_ADMIN_SUBJECT,
+            approver_subject=S08_APPROVER_SUBJECT,
+            operator_subject=S08_OPERATOR_SUBJECT,
             source_rules_path=rules_path,
             source_kb_path=S08_DEFAULT_KB_PATH,
             corpus_root=corpus_root,
@@ -4880,14 +4885,15 @@ def kb_reload() -> dict[str, Any]:
 # --- S08 governed policy release surface ----------------------------------
 
 class S08CommandBody(BaseModel):
-    """Common command envelope: semantic payload plus expected governance
-    revision and idempotency key.  Bodies never carry paths, URLs, code,
-    I/O or credentials."""
+    """Common command envelope: semantic payload plus required expected
+    governance revision and semantic idempotency key.  Bodies never carry
+    paths, URLs, code, I/O or credentials, and neither field may be omitted
+    or nulled: every typed command is fenced by its revision CAS."""
 
     model_config = ConfigDict(extra="forbid")
 
-    idempotency_key: str
-    expected_governance_revision: int | None = None
+    idempotency_key: str = Field(min_length=1, max_length=200)
+    expected_governance_revision: int = Field(ge=0)
 
 
 class S08ImportLegacyBody(S08CommandBody):
@@ -5267,12 +5273,38 @@ def s08_query_events(request: Request, response: Response) -> dict[str, Any]:
     return _s08_query(request, response, "admin", _s08_service().query_events)
 
 
+def _s08_require_read_role(request: Request) -> PolicyPrincipal:
+    """Minimal read access for both the Rule Administrator and the
+    independent Policy Approver; mutation stays role-separated.  The
+    credential is probed first so the approver path is not rejected by
+    the admin branch's 403."""
+    credentials = {
+        "admin": (S08_ADMIN_CREDENTIAL, S08_ADMIN_SUBJECT),
+        "approver": (S08_APPROVER_CREDENTIAL, S08_APPROVER_SUBJECT),
+    }
+    for role, (credential, subject) in credentials.items():
+        if subject and _s01_has_credential(request, credential):
+            return PolicyPrincipal(
+                subject=subject,
+                role=role,
+                scope=S08_SCOPE,
+                source_id="s08-web-bearer",
+            )
+    raise HTTPException(
+        403,
+        detail={
+            "error": "S08_FORBIDDEN",
+            "message": "Registered S08 identity required",
+        },
+    )
+
+
 @app.get("/controlled/s08/api/queries/candidate/{candidate_id}")
 def s08_query_candidate(
     candidate_id: str, request: Request, response: Response
 ) -> dict[str, Any]:
     _s01_disable_cache(response)
-    principal = _s08_require_role(request, "admin")
+    principal = _s08_require_read_role(request)
     try:
         return _s08_service().query_candidate(principal, candidate_id)
     except (PolicyInvalidTransition, PolicyConflict, PolicyNotFound, PolicyUnavailable) as error:

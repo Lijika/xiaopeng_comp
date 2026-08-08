@@ -7,6 +7,7 @@ the public SQLite adapter.
 
 from __future__ import annotations
 
+import ast
 import copy
 import hashlib
 import json
@@ -23,6 +24,7 @@ from task4_consistency.rules.loader import load_rules
 from task4_consistency.controlled.s01_store import SQLiteTargetStore
 from task4_consistency.controlled.s08 import (
     PolicyConflict,
+    PolicyUnavailable,
     PolicyGovernanceService,
     PolicyInvalidTransition,
     PolicyPrincipal,
@@ -206,6 +208,23 @@ def test_import_and_validation_bundle_cover_every_source_item_with_zero_behavior
                 item["target_ref"] == f"checker.knowledge/{section}/{key}"
                 for item in ledger["items"]
             )
+    # 1b. Digests bind the resolved values, never the pointer text: mutating
+    #     a rule's content or an option's value changes the ledger digest.
+    first_rule_item = next(
+        item for item in ledger["items"] if item["source_pointer"] == "/rules/0"
+    )
+    assert first_rule_item["source_digest"] == content_digest(
+        ("rule_source", 0, rules_data["rules"][0])
+    )
+    assert first_rule_item["result_digest"] == content_digest(
+        ("rule_compiled", str(rules_data["rules"][0]["id"]), rules_data["rules"][0])
+    )
+    version_item = next(
+        item for item in ledger["items"] if item["source_pointer"] == "/version"
+    )
+    assert version_item["source_digest"] == content_digest(
+        ("option", "/version", rules_data["version"])
+    )
 
     # 2. The durable validation worker produces a complete immutable bundle.
     candidate_id, worker = freeze_and_validate(service, draft_id)
@@ -235,7 +254,8 @@ def test_import_and_validation_bundle_cover_every_source_item_with_zero_behavior
 
     # 4. Zero behavior difference against the bootstrap anchor: applicable
     #    checks, selection, normalization, findings and derived route are
-    #    identical over the whole frozen corpus.
+    #    identical over the whole frozen corpus, and the digest-bound
+    #    server-owned corpus manifest is fixed in the bundle inputs.
     corpus_diff = bundle["results"]["corpus_diff"]
     assert corpus_diff["anchor"] == "bootstrap"
     assert corpus_diff["applications_compared"] >= 1
@@ -247,12 +267,83 @@ def test_import_and_validation_bundle_cover_every_source_item_with_zero_behavior
     assert corpus_diff["route_equal"] is True
     assert "corpus_digest" in corpus_diff
     assert bundle["inputs"]["mapping_ledger_id"] == draft["mapping_ledger_id"]
+    corpus_manifest = bundle["inputs"]["corpus"]
+    assert corpus_manifest["track"] == "C-DEV-REG"
+    assert corpus_manifest["count"] >= 1
+    assert len(corpus_manifest["digest"]) == 64
+    assert corpus_manifest["digest"] == corpus_diff["corpus_digest"]
+    assert corpus_manifest["count"] == len(corpus_manifest["items"])
 
     # 5. The bundle and its candidate are immutable; a second validation run
     #    of the same candidate produces the identical bundle.
     assert service.query_active(ADMIN)["status"] == "active"
     state = service._candidate_state(service._store.policy_governance_events, candidate_id)
     assert state["status"] == "validated"
+
+    # 6. Unknown source items are never silently dropped: an unrecognized
+    #    top-level rules option is an explicit unsupported ledger entry and
+    #    the candidate is rejected by the mapping completeness check.
+    service2, rules_path2, _ = make_policy_service(tmp_path / "unknown-field")
+    rules2 = yaml.safe_load(rules_path2.read_bytes())
+    rules2["unknown_runtime_option"] = {"affects": "mystery"}
+    rules_path2.write_bytes(
+        yaml.safe_dump(rules2, sort_keys=False).encode("utf-8")
+    )
+    draft2 = import_draft(service2)
+    drafts2 = service2.query_drafts(ADMIN)["drafts"]
+    draft2_record = next(item for item in drafts2 if item["draft_id"] == draft2)
+    ledger2 = ledger_content(service2, draft2_record["mapping_ledger_id"])
+    unknown_entries = [
+        item
+        for item in ledger2["items"]
+        if item["source_pointer"] == "/unknown_runtime_option"
+    ]
+    assert len(unknown_entries) == 1
+    entry = unknown_entries[0]
+    assert entry["classification"] == "unsupported"
+    assert entry["target_ref"] is None
+    assert entry["source_digest"] == content_digest(
+        ("unknown_rules_item", "unknown_runtime_option", rules2["unknown_runtime_option"])
+    )
+    assert entry["result_digest"] == entry["source_digest"]
+    candidate2, worker2 = freeze_and_validate(service2, draft2)
+    assert worker2["outcome"] == "rejected"
+    bundle2 = validation_bundle(service2, worker2["validation_bundle_id"])
+    assert check_outcomes(bundle2)["mapping_ledger"] == "fail"
+    assert service2.query_active(ADMIN)["active_generation"] == 1
+
+    # 7. Source-byte mutation never replays the previous result under the
+    #    same key: the import fingerprint binds the raw bytes.
+    service3, rules_path3, _ = make_policy_service(tmp_path / "byte-mutation")
+    import_key = f"mutation-import-{time.time_ns()}"
+    first_import = service3.import_legacy(
+        principal=ADMIN,
+        source_bundle_id=SOURCE_BUNDLE_ID,
+        idempotency_key=import_key,
+        expected_governance_revision=governance_revision(service3),
+    )
+    before = governance_revision(service3)
+    mutated_bytes = DEFAULT_RULES.read_bytes().replace(
+        b'version: "1.9.0"', b'version: "9.9.9"'
+    )
+    assert mutated_bytes != DEFAULT_RULES.read_bytes()
+    rules_path3.write_bytes(mutated_bytes)
+    with pytest.raises(PolicyConflict):
+        service3.import_legacy(
+            principal=ADMIN,
+            source_bundle_id=SOURCE_BUNDLE_ID,
+            idempotency_key=import_key,
+            expected_governance_revision=governance_revision(service3),
+        )
+    assert governance_revision(service3) == before
+    # The same key with the new bytes is a new identity, not a replay.
+    fresh_import = service3.import_legacy(
+        principal=ADMIN,
+        source_bundle_id=SOURCE_BUNDLE_ID,
+        idempotency_key=f"mutation-import-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service3),
+    )
+    assert fresh_import["draft_id"] != first_import["draft_id"]
 
 
 def test_validation_rejects_protected_io_alias_and_nondeterminism_without_override(
@@ -417,6 +508,44 @@ def test_validation_rejects_protected_io_alias_and_nondeterminism_without_overri
         crafted=True,
         case="input-mutation",
     )
+
+    # (g) Missing/empty/invalid frozen corpus fails closed: bootstrap cannot
+    #     produce an active release without a corpus, and validation of an
+    #     ordinary candidate is rejected with the active generation intact.
+    empty_corpus = tmp_path / "empty-corpus"
+    empty_corpus.mkdir()
+    blocked_service, _, _ = make_policy_service(
+        tmp_path / "corpus-empty",
+        corpus_root=empty_corpus,
+        expect_bootstrap=False,
+    )
+    bootstrap = blocked_service.bootstrap_once()
+    assert bootstrap["status"] == "blocked"
+    with pytest.raises(PolicyUnavailable):
+        blocked_service._load_corpus()
+
+    invalid_corpus = tmp_path / "invalid-corpus"
+    invalid_corpus.mkdir()
+    (invalid_corpus / "broken.json").write_text("{not json", encoding="utf-8")
+    service, _, _ = make_policy_service(
+        tmp_path / "corpus-invalid",
+        corpus_root=invalid_corpus,
+        expect_bootstrap=False,
+    )
+    with pytest.raises(PolicyUnavailable):
+        service._load_corpus()
+
+    # A missing corpus directory is fail-closed on a warm service: the
+    # ordinary candidate is rejected and the prior active stays intact.
+    missing_corpus = tmp_path / "missing-corpus"
+    service, _, _ = make_policy_service(tmp_path / "corpus-missing")
+    draft_id = import_draft(service)
+    service._corpus_root = missing_corpus
+    candidate_id, worker = freeze_and_validate(service, draft_id)
+    assert worker["outcome"] == "rejected"
+    bundle = validation_bundle(service, worker["validation_bundle_id"])
+    assert check_outcomes(bundle)["corpus_bound"] == "fail"
+    assert service.query_active(ADMIN)["active_generation"] == 1
 
 
 def _craft_mutated_candidate(
@@ -611,7 +740,7 @@ def _full_flow(
         idempotency_key=f"rv-{time.time_ns()}",
         expected_governance_revision=governance_revision(service),
     )
-    activation_at = int(time.time()) + activation_delay
+    activation_at = int(time.time()) + max(activation_delay, 1)
     approved = service.approve(
         principal=approver,
         candidate_id=candidate_id,
@@ -686,13 +815,14 @@ def test_governance_commands_are_revisioned_idempotent_and_role_separated(
         idempotency_key=f"a-{time.time_ns()}",
         expected_governance_revision=governance_revision(service),
     )
+    approval_binding_id = next(
+        item
+        for item in service.query_candidates(ADMIN)["candidates"]
+        if item["candidate_id"] == candidate_id
+    )["approval_binding_id"]
     scheduled = service.schedule(
         principal=ADMIN,
-        approval_binding_id=next(
-            item
-            for item in service.query_candidates(ADMIN)["candidates"]
-            if item["candidate_id"] == candidate_id
-        )["approval_binding_id"],
+        approval_binding_id=approval_binding_id,
         activation_at=activation_at,
         idempotency_key=f"s-{time.time_ns()}",
         expected_governance_revision=governance_revision(service),
@@ -735,6 +865,36 @@ def test_governance_commands_are_revisioned_idempotent_and_role_separated(
             candidate_id=candidate_id,
             idempotency_key=f"stale-{time.time_ns()}",
             expected_governance_revision=before - 1,
+        )
+    assert governance_revision(service) == before
+
+    # 3b. Empty idempotency keys and missing/None expected revisions are
+    #     rejected with zero effect.
+    with pytest.raises(PolicyInvalidTransition):
+        service.revise_draft(
+            principal=ADMIN,
+            draft_id=draft_id,
+            metadata={
+                "scope": S08_SCOPE,
+                "validity": {"valid_from": "2000-01-01T00:00:00Z"},
+                "source": SOURCE_BUNDLE_ID,
+                "reason": "empty key",
+            },
+            idempotency_key="   ",
+            expected_governance_revision=governance_revision(service),
+        )
+    with pytest.raises((PolicyInvalidTransition, PolicyConflict)):
+        service.revise_draft(
+            principal=ADMIN,
+            draft_id=draft_id,
+            metadata={
+                "scope": S08_SCOPE,
+                "validity": {"valid_from": "2000-01-01T00:00:00Z"},
+                "source": SOURCE_BUNDLE_ID,
+                "reason": "missing revision",
+            },
+            idempotency_key=f"no-rev-{time.time_ns()}",
+            expected_governance_revision=None,
         )
     assert governance_revision(service) == before
 
@@ -823,9 +983,10 @@ def test_governance_commands_are_revisioned_idempotent_and_role_separated(
                 )
         assert governance_revision(service) == before_state
 
-    # 6. Candidate mutation always creates a new identity: revising the
-    #    frozen draft and freezing again yields a distinct candidate.
-    service.revise_draft(
+    # 6. Candidate mutation always creates a new identity: revising a
+    #    frozen draft forks a new draft identity, and freezing the fork
+    #    yields a distinct candidate.
+    revise_result = service.revise_draft(
         principal=ADMIN,
         draft_id=draft_id,
         metadata={
@@ -837,14 +998,15 @@ def test_governance_commands_are_revisioned_idempotent_and_role_separated(
         idempotency_key=f"fork-{time.time_ns()}",
         expected_governance_revision=governance_revision(service),
     )
+    forked_draft_id = revise_result["draft_id"]
+    assert forked_draft_id != draft_id
     forked = service.freeze_candidate(
         principal=ADMIN,
-        draft_id=draft_id,
+        draft_id=forked_draft_id,
         idempotency_key=f"fork-freeze-{time.time_ns()}",
         expected_governance_revision=governance_revision(service),
     )
     assert forked["candidate_id"] != candidate_id
-    assert forked["manifest_digest"] != service.query_active(ADMIN)["manifest_digest"] or True
     candidates = service.query_candidates(ADMIN)["candidates"]
     assert {item["candidate_id"] for item in candidates} >= {
         candidate_id,
@@ -867,6 +1029,107 @@ def test_governance_commands_are_revisioned_idempotent_and_role_separated(
         "manifest_digest"
     ]
     assert restarted_active["active_generation"] == 1
+
+    # 8. Role coexistence and cross-scope: the independent approver reads the
+    #    exact candidate workspace while the admin operates, and a
+    #    foreign-scope identity cannot touch the scope at all.
+    workspace = service.query_candidate(APPROVER, candidate_id)
+    assert workspace["candidate_id"] == candidate_id
+    assert workspace["manifest_digest"] == freeze["manifest_digest"]
+    assert workspace["approval_binding_id"] == approval_binding_id
+    foreign = PolicyPrincipal(
+        subject="c-demo-foreign-admin",
+        role="admin",
+        scope="OTHER/demo",
+        source_id="s08-test",
+    )
+    with pytest.raises(PolicyInvalidTransition):
+        service.query_active(foreign)
+    with pytest.raises(PolicyInvalidTransition):
+        service.import_legacy(
+            principal=foreign,
+            source_bundle_id=SOURCE_BUNDLE_ID,
+            idempotency_key=f"foreign-{time.time_ns()}",
+            expected_governance_revision=governance_revision(service),
+        )
+
+    # 9. Approval invalidation: the binding pins candidate digest and
+    #    activation time, so a mutated candidate can never be activated
+    #    under the original binding and schedule drift is rejected.
+    binding = service._artifact(service._store, approval_binding_id)
+    assert binding["candidate_id"] == candidate_id
+    assert binding["candidate_digest"] == freeze["manifest_digest"]
+    # The frozen fork from step 6 is a distinct candidate that must be
+    # validated, reviewed and re-approved under its own binding.
+    service.request_validation(
+        principal=ADMIN,
+        candidate_id=forked["candidate_id"],
+        idempotency_key=f"fork-v-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    service.process_next_policy_job()
+    service.submit_review(
+        principal=ADMIN,
+        candidate_id=forked["candidate_id"],
+        idempotency_key=f"fork-rv-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    fork_activation_at = int(time.time()) + 120
+    fork_approval = service.approve(
+        principal=APPROVER,
+        candidate_id=forked["candidate_id"],
+        activation_time=fork_activation_at,
+        recovery_release_id=service.query_active(ADMIN)["candidate_id"],
+        idempotency_key=f"fork-a-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    assert fork_approval["candidate_id"] == forked["candidate_id"]
+    assert fork_approval["approval_binding_id"] != approval_binding_id
+    fork_binding = service._artifact(service._store, fork_approval["approval_binding_id"])
+    assert fork_binding["candidate_id"] == forked["candidate_id"]
+    # A metadata-only fork stays behavior-equivalent (same runtime digest)
+    # but is a distinct identity that needs its own binding: the original
+    # approval never covers it.
+    assert fork_binding["candidate_digest"] == freeze["manifest_digest"]
+    assert fork_binding["candidate_id"] != candidate_id
+    # Schedule drift is rejected: the binding pins the trusted activation
+    # time, so a deviating schedule can never advance.
+    with pytest.raises(PolicyInvalidTransition):
+        service.schedule(
+            principal=ADMIN,
+            approval_binding_id=fork_approval["approval_binding_id"],
+            activation_at=fork_activation_at + 5,
+            idempotency_key=f"drift-{time.time_ns()}",
+            expected_governance_revision=governance_revision(service),
+        )
+
+    # Candidate mutation after approval invalidates the approval: corrupting
+    # the candidate manifest in the Registry makes the scheduled activation
+    # fail closed and the prior active generation is preserved.
+    import sqlite3 as sqlite3_module
+
+    with sqlite3_module.connect(service._store.state_path) as connection:
+        connection.execute(
+            "DELETE FROM policy_manifests WHERE item_id = ?", (freeze["manifest_id"],)
+        )
+        connection.execute(
+            "DELETE FROM s01_immutable_catalog WHERE table_name = 'policy_manifests' "
+            "AND item_id = ?",
+            (freeze["manifest_id"],),
+        )
+        connection.commit()
+    outcome = service.process_next_policy_job(now=activation_at + 31)
+    assert outcome["status"] == "failed", outcome
+    assert "PolicyUnavailable" in outcome["error"]
+    # The ledger is not polluted: the fold still shows generation 1, but the
+    # corrupted Registry can no longer produce a verifiable active query.
+    folded = service._fold_active_projection(
+        service._store.policy_governance_events, S08_SCOPE
+    )
+    assert folded is not None
+    assert folded["active_generation"] == 1
+    with pytest.raises(PolicyUnavailable):
+        service.query_active(ADMIN)
 
 
 def test_concurrent_overlapping_activation_has_one_winner_and_no_mixed_projection(
@@ -897,7 +1160,7 @@ def test_concurrent_overlapping_activation_has_one_winner_and_no_mixed_projectio
     #    still pending, scheduling a second approved candidate is rejected
     #    by the unique reservation constraint.
     second_draft = import_draft(first)
-    first.revise_draft(
+    second_revise = first.revise_draft(
         principal=ADMIN,
         draft_id=second_draft,
         metadata={
@@ -911,7 +1174,7 @@ def test_concurrent_overlapping_activation_has_one_winner_and_no_mixed_projectio
     )
     second_freeze = first.freeze_candidate(
         principal=ADMIN,
-        draft_id=second_draft,
+        draft_id=second_revise["draft_id"],
         idempotency_key=f"f-{time.time_ns()}",
         expected_governance_revision=governance_revision(first),
     )
@@ -1037,7 +1300,7 @@ def test_audit_or_partial_commit_failure_preserves_prior_active(
     # (1) Injected partial commit during activation: prior active preserved.
     service = make("s08.activation", "fault-activation")
     service.bootstrap_once()
-    _, candidate_id, _, _ = _full_flow(service)
+    _, candidate_id, _, activation_at = _full_flow(service)
     before = {
         "revision": governance_revision(service),
         "events": len(service._store.policy_governance_events),
@@ -1045,7 +1308,7 @@ def test_audit_or_partial_commit_failure_preserves_prior_active(
         "outbox": len(service._store.outbox),
         "generation": service.query_active(ADMIN)["active_generation"],
     }
-    result = service.process_next_policy_job()
+    result = service.process_next_policy_job(now=activation_at)
     assert result["status"] == "failed"
     assert service.query_active(ADMIN)["active_generation"] == before["generation"]
     assert governance_revision(service) == before["revision"]
@@ -1069,12 +1332,53 @@ def test_audit_or_partial_commit_failure_preserves_prior_active(
     assert pin is not None
     assert pin["active_generation"] == 1
 
+    # (1b) A successful activation commits exactly one audit, one idempotency
+    #      result, one outbox event and the activation/supersession facts.
+    service_ok, _, _ = make_policy_service(tmp_path / "success")
+    _, success_candidate, _, activation_at = _full_flow(service_ok)
+    audit_before = len(service_ok._store.audit_events)
+    outbox_before = len(service_ok._store.outbox)
+    idem_before = len(service_ok._store.idempotency)
+    worker = service_ok.process_next_policy_job(now=activation_at)
+    assert worker["status"] == "complete"
+    events = service_ok._store.policy_governance_events
+    assert sum(e.get("kind") == "activated" for e in events) == 2  # bootstrap + ordinary
+    assert sum(e.get("kind") == "superseded" for e in events) == 1
+    activation_audits = [
+        e for e in service_ok._store.audit_events
+        if e.get("action") == "s08_activation"
+    ]
+    assert len(activation_audits) == 1
+    assert len(service_ok._store.audit_events) == audit_before + 1
+    assert len(service_ok._store.outbox) == outbox_before + 1
+    assert len(service_ok._store.idempotency) == idem_before + 1
+    assert any(
+        isinstance(binding, tuple)
+        and len(binding) == 2
+        and isinstance(binding[1], dict)
+        and binding[1].get("activation_event_id") == worker["activation_event_id"]
+        for binding in service_ok._store.idempotency.values()
+    )
+    assert service_ok.query_active(ADMIN)["active_generation"] == 2
+
+    # (1c) Retroactive schedule (activation_at before trusted now) is rejected.
+    with pytest.raises(PolicyInvalidTransition):
+        service_ok.schedule(
+            principal=ADMIN,
+            approval_binding_id=service_ok.query_candidates(ADMIN)["candidates"][
+                -1
+            ]["approval_binding_id"],
+            activation_at=1,
+            idempotency_key=f"retro-{time.time_ns()}",
+            expected_governance_revision=governance_revision(service_ok),
+        )
+
     # (2) Audit unavailable during activation: prior active preserved.
     service = make(None, "fault-audit")
     service.bootstrap_once()
-    _, candidate_id, _, _ = _full_flow(service)
+    _, candidate_id, _, activation_at = _full_flow(service)
     service.audit_available = False
-    result = service.process_next_policy_job()
+    result = service.process_next_policy_job(now=activation_at)
     assert result["status"] == "failed"
     service.audit_available = True
     assert service.query_active(ADMIN)["active_generation"] == 1
@@ -1082,6 +1386,75 @@ def test_audit_or_partial_commit_failure_preserves_prior_active(
         event.get("kind") == "activated" and not event.get("bootstrap")
         for event in service._store.policy_governance_events
     )
+
+    # (2b) Owner seam failure: a failing Audit/Outbox owner aborts the whole
+    #      activation with zero protected-fact delta -- audit, outbox,
+    #      idempotency, governance facts and projection all stay unchanged.
+    from task4_consistency.controlled import s08 as s08_module
+
+    service = make(None, "fault-outbox-owner")
+    service.bootstrap_once()
+    _, candidate_id, _, activation_at = _full_flow(service)
+    before = {
+        "revision": governance_revision(service),
+        "events": len(service._store.policy_governance_events),
+        "audit": len(service._store.audit_events),
+        "outbox": len(service._store.outbox),
+        "idempotency": len(service._store.idempotency),
+        "generation": service.query_active(ADMIN)["active_generation"],
+    }
+    original_append_outbox = s08_module.AuditOutboxOwner.append_outbox
+
+    def failing_append_outbox(owner: Any, record: dict[str, Any]) -> None:
+        raise RuntimeError("outbox owner unavailable")
+
+    s08_module.AuditOutboxOwner.append_outbox = failing_append_outbox
+    try:
+        result = service.process_next_policy_job(now=activation_at)
+    finally:
+        s08_module.AuditOutboxOwner.append_outbox = original_append_outbox
+    assert result["status"] == "failed"
+    assert governance_revision(service) == before["revision"]
+    assert len(service._store.policy_governance_events) == before["events"]
+    assert len(service._store.audit_events) == before["audit"]
+    assert len(service._store.outbox) == before["outbox"]
+    assert len(service._store.idempotency) == before["idempotency"]
+    assert service.query_active(ADMIN)["active_generation"] == before["generation"]
+    assert not any(
+        event.get("kind") == "activated" and not event.get("bootstrap")
+        for event in service._store.policy_governance_events
+    )
+
+    # (2c) A failing audit owner aborts identically: the idempotency result
+    #      written to the staged snapshot never commits.
+    service = make(None, "fault-audit-owner")
+    service.bootstrap_once()
+    _, candidate_id, _, activation_at = _full_flow(service)
+    before = {
+        "revision": governance_revision(service),
+        "events": len(service._store.policy_governance_events),
+        "audit": len(service._store.audit_events),
+        "outbox": len(service._store.outbox),
+        "idempotency": len(service._store.idempotency),
+        "generation": service.query_active(ADMIN)["active_generation"],
+    }
+    original_append_audit = s08_module.AuditOutboxOwner.append_audit
+
+    def failing_append_audit(owner: Any, record: dict[str, Any]) -> None:
+        raise RuntimeError("audit owner unavailable")
+
+    s08_module.AuditOutboxOwner.append_audit = failing_append_audit
+    try:
+        result = service.process_next_policy_job(now=activation_at)
+    finally:
+        s08_module.AuditOutboxOwner.append_audit = original_append_audit
+    assert result["status"] == "failed"
+    assert governance_revision(service) == before["revision"]
+    assert len(service._store.policy_governance_events) == before["events"]
+    assert len(service._store.audit_events) == before["audit"]
+    assert len(service._store.outbox) == before["outbox"]
+    assert len(service._store.idempotency) == before["idempotency"]
+    assert service.query_active(ADMIN)["active_generation"] == before["generation"]
 
     # (3) Injected partial commit during validation: no bundle, no event,
     #     no state change for the candidate.
@@ -1242,8 +1615,8 @@ def test_run_spec_resolves_one_generation_and_worker_uses_only_pinned_registry_a
     assert active_before["active_generation"] == 1
 
     # The ordinary release activates: generation 2 is complete and atomic.
-    _, candidate_id, _, _ = _full_flow(policy, activation_delay=0)
-    policy.process_next_policy_job()
+    _, candidate_id, _, activation_at = _full_flow(policy, activation_delay=0)
+    policy.process_next_policy_job(now=activation_at)
     active = policy.query_active(ADMIN)
     assert active["active_generation"] == 2
     assert active["candidate_id"] == candidate_id
@@ -1273,6 +1646,36 @@ def test_run_spec_resolves_one_generation_and_worker_uses_only_pinned_registry_a
     assert spec["release_digest"] == policy.resolve_run_pin(
         S08_SCOPE, int(time.time())
     )["release"]["digest"]
+
+    # The validation evidence is bound to the bundle: complete corpus
+    # digest, fresh-process determinism runs and declared checker limits.
+    candidates = policy.query_candidates(ADMIN)["candidates"]
+    active_candidate = next(
+        item for item in candidates if item["candidate_id"] == candidate_id
+    )
+    bundle = validation_bundle(policy, active_candidate["validation_bundle_id"])
+    assert bundle["status"] == "validated"
+    corpus_manifest = bundle["inputs"]["corpus"]
+    assert (
+        corpus_manifest["digest"]
+        == bundle["results"]["corpus_diff"]["corpus_digest"]
+    )
+    assert bundle["results"]["corpus_diff"]["applications_skipped"] == 0
+    assert (
+        corpus_manifest["count"]
+        == bundle["results"]["corpus_diff"]["applications_compared"]
+    )
+    assert bundle["results"]["determinism"]["runs"] == 2
+    assert bundle["results"]["determinism"]["equal"] is True
+    checker_component = next(
+        item for item in active["components"] if item["type"] == "checker"
+    )
+    checker = policy._artifact(policy._store, checker_component["id"])
+    assert dict(checker["limits"]) == dict(spec["limits"])
+    assert (
+        bundle["inputs"]["component_digests"]["checker"]
+        == checker_component["digest"]
+    )
 
 
 def test_restart_ignores_deleted_legacy_files_and_poisoned_global_kb(
@@ -1345,13 +1748,25 @@ def test_missing_pinned_content_enters_s07_without_partial_or_current_run(
     service, policy, _, _ = _governed_s01(tmp_path)
     app_id = _s01_admit(service, "s08-slice4-missing-1")
 
-    # Break the active projection's manifest reference (mutable projection,
-    # immutable Registry untouched) and restart resolution.
+    # Delete the active manifest row (and its catalog seal) behind the
+    # service's back: resolution must fail closed instead of resolving a
+    # projection or falling back to files.
+    import sqlite3 as sqlite3_module
+
     policy._store.reload()
-    policy._store.policy_active_projections[S08_SCOPE]["manifest_id"] = (
-        "manifest_sha256_" + "0" * 64
-    )
-    policy._store.persist()
+    active = policy._store.policy_active_projections[S08_SCOPE]
+    manifest_id = active["manifest_id"]
+    with sqlite3_module.connect(policy._store.state_path) as connection:
+        connection.execute(
+            "DELETE FROM policy_manifests WHERE item_id = ?",
+            (manifest_id,),
+        )
+        connection.execute(
+            "DELETE FROM s01_immutable_catalog WHERE table_name = 'policy_manifests' "
+            "AND item_id = ?",
+            (manifest_id,),
+        )
+        connection.commit()
 
     before_facts = service.fact_counts()
     stopped = service.process_next_job()
@@ -1374,8 +1789,16 @@ def test_missing_pinned_content_enters_s07_without_partial_or_current_run(
     stop_audit = service._store.audit_events[-1]
     assert stop_audit["action"] == "controlled_cohort_stop"
     assert stop_audit["failure_reason_code"] == "PINNED_RELEASE_UNAVAILABLE"
-    # The bootstrap release itself remains readable.
-    assert policy.query_active(ADMIN)["active_generation"] == 1
+    # The ledger is not polluted (generation 1), but the corrupted Registry
+    # can no longer produce a verifiable active projection: the query fails
+    # closed instead of returning an unverifiable warm object.
+    folded = policy._fold_active_projection(
+        policy._store.policy_governance_events, S08_SCOPE
+    )
+    assert folded is not None
+    assert folded["active_generation"] == 1
+    with pytest.raises(PolicyUnavailable):
+        policy.query_active(ADMIN)
 
 
 # --- Slice 5: public contract, claim boundary, legacy caller inventory -----
@@ -1553,3 +1976,129 @@ def test_target_runtime_legacy_caller_inventory_is_zero(
     assert run_record["spec"]["baseline_release"]["knowledge_digest"] == pinned[
         "release"
     ]["knowledge_digest"]
+
+
+# --- Fix brief G1: runtime authority, projection rebuild, pinned content ----
+
+def test_active_projection_rebuilds_from_ledger_after_restart(
+    tmp_path: Path,
+) -> None:
+    """The active projection is a rebuildable cache: tampering with the
+    mutable projection must never change what the resolver returns, and a
+    restart folds the same active generation from the append-only Ledger."""
+    service, policy, _, _ = _governed_s01(tmp_path)
+    before = policy.query_active(ADMIN)
+    assert before["status"] == "active"
+    assert before["active_generation"] == 1
+
+    # Tamper with the mutable projection row (a rebuildable cache, not an
+    # owner); the ledger must still win.
+    policy._store.reload()
+    policy._store.policy_active_projections[S08_SCOPE]["manifest_id"] = (
+        "manifest_sha256_" + "0" * 64
+    )
+    policy._store.policy_active_projections[S08_SCOPE]["active_generation"] = 99
+    policy._store.persist()
+
+    pin = policy.resolve_run_pin(S08_SCOPE, int(time.time()))
+    assert pin is not None
+    assert pin["active_generation"] == 1
+    assert pin["manifest_digest"] == before["manifest_digest"]
+    assert pin["activation_event_id"] == before["activation_event_id"]
+
+    # A fresh service folds the identical active generation from the ledger.
+    restarted = PolicyGovernanceService(
+        state_path=service._store.state_path,
+        source_rules_path=DEFAULT_RULES,
+        source_kb_path=DEFAULT_KB,
+        corpus_root=CORPUS,
+    )
+    restarted_pin = restarted.resolve_run_pin(S08_SCOPE, int(time.time()))
+    assert restarted_pin is not None
+    assert restarted_pin["active_generation"] == pin["active_generation"]
+    assert restarted_pin["manifest_digest"] == pin["manifest_digest"]
+    assert restarted_pin["activation_event_id"] == pin["activation_event_id"]
+    assert restarted_pin["components"] == pin["components"]
+
+
+def test_warmed_pinned_checker_revalidates_registry(
+    tmp_path: Path,
+) -> None:
+    """The checker cache is a non-authoritative accelerator: after the
+    Registry artifact is deleted, both fresh and warmed services must fail
+    closed instead of returning a warm object."""
+    import sqlite3 as sqlite3_module
+
+    service, policy, _, _ = _governed_s01(tmp_path)
+    app_id = _s01_admit(service, "s08-warm-checker-1")
+    result = service.process_next_job()
+    assert result.status == "complete", result
+    run_record = next(
+        item
+        for item in service._store.runs
+        if item.get("run_id") == result.run_id
+    )
+    run_spec = run_record["spec"]
+    # Warm the checker cache.
+    warmed = policy.load_pinned_checker(run_spec)
+    assert warmed is not None
+
+    # Delete the checker artifact row (and its catalog seal) behind the
+    # service's back, simulating registry corruption.
+    policy._store.reload()
+    manifest = next(
+        item
+        for item in policy._store.policy_manifests
+        if item["manifest_id"] == run_spec["manifest_id"]
+    )
+    checker_entry = next(
+        item for item in manifest["components"] if item["type"] == "checker"
+    )
+    with sqlite3_module.connect(policy._store.state_path) as connection:
+        connection.execute(
+            "DELETE FROM policy_artifacts WHERE item_id = ?",
+            (checker_entry["id"],),
+        )
+        connection.execute(
+            "DELETE FROM s01_immutable_catalog WHERE table_name = 'policy_artifacts' "
+            "AND item_id = ?",
+            (checker_entry["id"],),
+        )
+        connection.commit()
+
+    # The warmed service must revalidate the registry before using the cache.
+    with pytest.raises(PolicyUnavailable):
+        policy.load_pinned_checker(run_spec)
+    # A fresh service must fail closed identically.
+    fresh = PolicyGovernanceService(
+        state_path=service._store.state_path,
+        source_rules_path=DEFAULT_RULES,
+        source_kb_path=DEFAULT_KB,
+        corpus_root=CORPUS,
+    )
+    with pytest.raises(PolicyUnavailable):
+        fresh.load_pinned_checker(run_spec)
+    # Resolution itself fails closed after corruption: no partial or current
+    # release can be produced from the missing artifact.
+    with pytest.raises(PolicyUnavailable):
+        fresh.resolve_run_pin(S08_SCOPE, int(time.time()))
+
+
+def test_s08_never_appends_audit_or_outbox_collections_directly() -> None:
+    """G5 architecture seam: S08 submits audit/outbox records to the
+    AuditOutboxOwner seam and never appends another module's collections
+    directly."""
+    source = (ROOT / "task4_consistency" / "controlled" / "s08.py").read_text(
+        encoding="utf-8"
+    )
+    tree = ast.parse(source)
+    violations = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr == "append":
+            value = node.value
+            if isinstance(value, ast.Attribute) and value.attr in {
+                "audit_events",
+                "outbox",
+            }:
+                violations.append((value.attr, node.lineno))
+    assert violations == [], violations

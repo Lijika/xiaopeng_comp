@@ -16,6 +16,20 @@ from typing import Any
 
 from task4_consistency.controlled.s01_checker import TargetChecker, TargetRelease
 
+# G4 resource boundary: the fresh-process worker reads at most one bounded
+# stdin payload, accepts a bounded corpus, verifies per-outcome cardinality
+# against the release's declared limits and emits one canonical small
+# outcome digest.  Anything outside these bounds is a rejected validation.
+_MAX_STDIN_BYTES = 64 * 1024 * 1024
+_MAX_CORPUS_ITEMS = 5000
+_MAX_OUTPUT_BYTES = 32 * 1024 * 1024
+_MAX_REASON_LENGTH = 512
+
+
+def _fail(message: str) -> int:
+    sys.stderr.write(message[: _MAX_REASON_LENGTH] + "\n")
+    return 2
+
 
 def _run_spec_for(release: TargetRelease, fixture: dict[str, Any]) -> dict[str, Any]:
     public = release.public_manifest()
@@ -144,15 +158,50 @@ def _outcome_for(
 
 
 def main() -> int:
-    payload = json.load(sys.stdin)
-    release = TargetRelease.from_artifact(payload["checker_artifact"])
-    outcomes = [_outcome_for(release, fixture) for fixture in payload["corpus"]]
+    stdin_bytes = sys.stdin.buffer.read(_MAX_STDIN_BYTES + 1)
+    if len(stdin_bytes) > _MAX_STDIN_BYTES:
+        return _fail("validation payload exceeds the input byte limit")
+    try:
+        payload = json.loads(stdin_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return _fail("validation payload is not valid JSON")
+    if not isinstance(payload, dict):
+        return _fail("validation payload is not an object")
+    try:
+        release = TargetRelease.from_artifact(payload["checker_artifact"])
+    except (KeyError, TypeError, ValueError):
+        return _fail("checker artifact is not materializable")
+    corpus = payload.get("corpus")
+    if not isinstance(corpus, list) or len(corpus) > _MAX_CORPUS_ITEMS:
+        return _fail("corpus is missing or exceeds the item limit")
+    declared = dict(release.limits)
+    outcomes: list[dict[str, Any]] = []
+    for fixture in corpus:
+        if not isinstance(fixture, dict):
+            return _fail("corpus fixture is not an object")
+        outcome = _outcome_for(release, fixture)
+        if "skipped" in outcome:
+            continue
+        if len(outcome["applicable"]) > int(declared.get("max_findings", 0)):
+            return _fail("outcome exceeds the declared finding limit")
+        if len(outcome["verdicts"]) > int(declared.get("max_findings", 0)):
+            return _fail("outcome exceeds the declared verdict limit")
+        if (
+            len(outcome["selection"]) > int(declared.get("max_documents", 0)) * 64
+            or len(outcome["normalization"])
+            > int(declared.get("max_documents", 0)) * 64
+        ):
+            return _fail("outcome exceeds the declared evidence limit")
+        outcomes.append(outcome)
     digest = hashlib.sha256(
         json.dumps(
             outcomes, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         ).encode("utf-8")
     ).hexdigest()
-    sys.stdout.write(json.dumps({"digest": digest, "outcomes": outcomes}))
+    output = json.dumps({"digest": digest, "outcomes": outcomes})
+    if len(output.encode("utf-8")) > _MAX_OUTPUT_BYTES:
+        return _fail("validation output exceeds the output byte limit")
+    sys.stdout.write(output)
     return 0
 
 

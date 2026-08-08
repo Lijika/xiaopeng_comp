@@ -1622,20 +1622,29 @@ def test_s01_release_initialization_failure_preserves_existing_web_liveness(
     ) as server:
         index = server.request("GET", "/")
         health = server.request("GET", "/api/health")
-        page = server.request(
-            "GET", "/controlled/s01", headers=demo_auth_headers(), use_session=False
+        unavailable = (
+            server.request("GET", "/controlled/s01"),
+            server.request(
+                "POST",
+                "/controlled/s01/api/session",
+                body={},
+                headers=demo_auth_headers(),
+                use_session=False,
+            ),
         )
-        accepted = submit(server, "s01-init-failure-run").json()
-        time.sleep(1.0)
-        queue = server.request(
-            "GET", "/controlled/s01/api/queries/queue", headers=headers("reviewer")
-        ).json()
 
     assert index.status == 200
     assert health.status == 200
-    assert page.status == 200
-    assert accepted["disposition"] == "accepted"
-    assert queue == {"items": [], "recovery_items": [], "projection_watermark": 0}
+    for response in unavailable:
+        assert response.status == 503
+        assert response.json() == {
+            "detail": {
+                "error": "S01_UNAVAILABLE",
+                "message": "Controlled S01 is unavailable",
+            }
+        }
+        assert str(rules_path) not in response.text
+        assert len(response.text) < 200
 
 
 def test_all_controlled_s01_success_and_error_responses_are_no_store(
@@ -1686,10 +1695,8 @@ def test_all_controlled_s01_success_and_error_responses_are_no_store(
     with s01_test_loopback(
         {"TASK4_S01_TEST_RULES_PATH": str(missing_rules)}
     ) as server:
-        page = server.request(
-            "GET", "/controlled/s01", headers=demo_auth_headers(), use_session=False
-        )
-    assert_no_store(page, 200)
+        unavailable = server.request("GET", "/controlled/s01")
+    assert_no_store(unavailable, 503)
 
     with UvicornLoopback(
         app_target="tests.test_s01_http:create_internal_failure_app",

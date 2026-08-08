@@ -148,6 +148,29 @@ class ScheduleReservationConflict(RuntimeError):
     """One scope may hold only one pending schedule reservation."""
 
 
+class AuditOutboxOwner:
+    """Owns the ``audit_events`` and ``outbox`` collections of a store
+    snapshot.
+
+    Modules holding business state (S08 governance) never append to these
+    collections directly: they submit immutable command records to this
+    seam, and the owner applies them to the same SQLite snapshot so audit
+    records, governance facts, idempotency results, projection updates and
+    outbox messages commit or fail together in one short transaction.
+    """
+
+    def __init__(self, store: SQLiteTargetStore) -> None:
+        self._store = store
+
+    def append_audit(self, record: dict[str, Any]) -> dict[str, Any]:
+        self._store.audit_events.append(record)
+        return record
+
+    def append_outbox(self, record: dict[str, Any]) -> dict[str, Any]:
+        self._store.outbox.append(record)
+        return record
+
+
 class SQLiteTargetStore:
     """Copyable S01 state backed by immutable facts and mutable owners."""
 

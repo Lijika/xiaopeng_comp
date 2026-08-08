@@ -40,6 +40,7 @@ from task4_consistency.controlled.s01_checker import (
     TargetRelease,
 )
 from task4_consistency.controlled.s01_store import (
+    AuditOutboxOwner,
     ScheduleReservationConflict,
     SQLiteTargetStore,
     StaleStoreRevision,
@@ -60,6 +61,55 @@ VALIDATOR_BUILD = "s08-validator/1"
 _READINESS_POLICY_ID = "c-demo-readiness/1"
 _PROTECTED_CHECK_IDS = frozenset({"R_VIN_CROSS", "R_ENGINE_CROSS", "R_ID_EXACT"})
 _BOOTSTRAP_REASON = "S08 one-time bootstrap migration release"
+
+# G4: the mapping ledger resolves every server-owned source item.  The
+# known option set mirrors exactly what the rules loader compiles; any
+# top-level key outside it is an explicit unsupported entry that blocks
+# validation instead of being silently dropped.
+_RULES_OPTION_POINTERS = (
+    "/package",
+    "/version",
+    "/low_confidence_threshold",
+    "/default_require_all_docs",
+    "/date_order",
+    "/vin_fix_ioq",
+    "/vin_strict_check_digit",
+    "/expand_id15_to_18",
+    "/critical_low_conf_compare",
+)
+_RULES_KNOWN_TOP_LEVEL = frozenset(
+    {
+        "package",
+        "version",
+        "low_confidence_threshold",
+        "default_require_all_docs",
+        "date_order",
+        "vin_fix_ioq",
+        "vin_strict_check_digit",
+        "expand_id15_to_18",
+        "critical_low_conf_compare",
+        "field_aliases",
+        "rules",
+        "changelog",
+    }
+)
+_KB_KNOWN_SECTIONS = frozenset(
+    {
+        "address_aliases",
+        "org_aliases",
+        "plate_prefixes",
+        "graph",
+        "version",
+        "description",
+    }
+)
+# G4 resource boundary: bounded fresh-process evidence input/output.  The
+# declared checker limits stay authoritative for per-run cardinality; these
+# bounds only cap the transport and the evidence surface.
+_MAX_EVIDENCE_INPUT_BYTES = 64 * 1024 * 1024
+_MAX_CORPUS_ITEMS = 5000
+_MAX_SUBPROCESS_STDOUT_BYTES = 16 * 1024 * 1024
+_MAX_SUBPROCESS_STDERR_BYTES = 4 * 1024 * 1024
 
 # Normal-state transitions; a candidate may also be rejected from validated
 # or in_review and cancelled from any pre-activation state.
@@ -281,7 +331,9 @@ class PolicyGovernanceService:
         }
         if details:
             payload.update(details)
-        staged.audit_events.append(payload)
+        # The audit collection is owned by the owner seam: S08 submits the
+        # immutable record and never appends the collection itself.
+        AuditOutboxOwner(staged).append_audit(payload)
 
     def _append_governance_event(
         self,
@@ -316,10 +368,8 @@ class PolicyGovernanceService:
 
     @staticmethod
     def _verify_governance_revision(
-        staged: SQLiteTargetStore, expected: int | None
+        staged: SQLiteTargetStore, expected: int
     ) -> None:
-        if expected is None:
-            return
         if (
             isinstance(expected, bool)
             or not isinstance(expected, int)
@@ -499,6 +549,13 @@ class PolicyGovernanceService:
         stale-store-revision retry.  The S01 background runtime commits on
         the same store, so an unrelated commit between staging and persist
         must not fail the command."""
+        if (
+            not isinstance(idempotency_key, str)
+            or not idempotency_key
+            or idempotency_key.strip() != idempotency_key
+            or len(idempotency_key) > 200
+        ):
+            raise PolicyInvalidTransition("idempotency key is invalid")
         with self._lock:
             for _ in range(3):
                 self._store.reload()
@@ -541,12 +598,6 @@ class PolicyGovernanceService:
             or idempotency_key.strip() != idempotency_key
         ):
             raise PolicyInvalidTransition("idempotency key is invalid")
-        fingerprint = self._fingerprint(
-            "import_legacy",
-            source_bundle_id,
-            str(self._source_rules_path),
-            str(self._source_kb_path),
-        )
         rules_path = self._source_rules_path
         kb_path = self._source_kb_path
         if rules_path is None or not rules_path.is_file():
@@ -557,6 +608,16 @@ class PolicyGovernanceService:
         kb_bytes = kb_path.read_bytes()
         rules_digest = raw_digest(rules_bytes)
         kb_digest = raw_digest(kb_bytes)
+        # The import identity binds the raw source bytes/digests, the bundle
+        # identity, the importer version and the semantic payload -- never
+        # filesystem path strings.
+        fingerprint = self._fingerprint(
+            "import_legacy",
+            source_bundle_id,
+            rules_digest,
+            kb_digest,
+            IMPORTER_VERSION,
+        )
         try:
             cfg = _load_rules_bytes(rules_bytes)
             knowledge = _load_knowledge_bytes(kb_bytes)
@@ -663,7 +724,7 @@ class PolicyGovernanceService:
                     "governance_event_id": event["event_id"],
                 },
             )
-            staged.outbox.append(
+            AuditOutboxOwner(staged).append_outbox(
                 {
                     "event_id": self._stable_id("outbox", f"s08:imported:{draft_id}"),
                     "kind": "s08_source_imported",
@@ -722,22 +783,58 @@ class PolicyGovernanceService:
             draft = self._require_draft(staged, draft_id)
             if draft.get("bootstrap"):
                 raise PolicyInvalidTransition("bootstrap draft is not editable")
-            draft["revision"] = int(draft.get("revision", 0)) + 1
-            draft["revised_by"] = principal.subject
-            draft["revised_at"] = self._trusted_time()
+            if draft.get("candidate_id"):
+                # A frozen draft is immutable; revisions fork a new draft
+                # identity so the frozen candidate snapshot never changes.
+                new_draft_id = self._stable_id(
+                    "draft",
+                    f"{draft_id}:fork:{self._trusted_time()}",
+                )
+                draft = {
+                    **copy.deepcopy(draft),
+                    "draft_id": new_draft_id,
+                    "revision": 1,
+                    "candidate_id": None,
+                    "forked_from": draft_id,
+                    "revised_by": principal.subject,
+                    "revised_at": self._trusted_time(),
+                }
+                staged.policy_drafts[new_draft_id] = draft
+                revised_draft_id = new_draft_id
+            else:
+                draft["revision"] = int(draft.get("revision", 0)) + 1
+                draft["revised_by"] = principal.subject
+                draft["revised_at"] = self._trusted_time()
+                staged.policy_drafts[draft_id] = draft
+                revised_draft_id = draft_id
             draft["metadata"] = copy.deepcopy(metadata)
-            staged.policy_drafts[draft_id] = draft
+            staged.policy_drafts[revised_draft_id] = draft
+            revision_event = self._append_governance_event(
+                staged,
+                kind="draft_revised",
+                principal=principal,
+                reason_code="S08_DRAFT_REVISED",
+                details={
+                    "draft_id": revised_draft_id,
+                    "draft_revision": draft["revision"],
+                    "metadata_digest": content_digest(metadata),
+                },
+            )
             self._append_audit(
                 staged,
                 action="revise_draft",
                 principal=principal,
                 result="accepted",
                 reason_code="S08_DRAFT_REVISED",
-                details={"draft_id": draft_id, "draft_revision": draft["revision"]},
+                details={
+                    "draft_id": revised_draft_id,
+                    "draft_revision": draft["revision"],
+                    "governance_event_id": revision_event["event_id"],
+                },
             )
             result = {
                 "status": "accepted",
-                "draft_id": draft_id,
+                "draft_id": revised_draft_id,
                 "draft_revision": draft["revision"],
                 "governance_revision": len(staged.policy_governance_events),
             }
@@ -819,6 +916,11 @@ class PolicyGovernanceService:
                     "manifest_id": manifest_id,
                     "manifest_digest": manifest_digest,
                     "components": components,
+                    "metadata": copy.deepcopy(metadata),
+                    "mapping_ledger_id": draft.get("mapping_ledger_id"),
+                    "mapping_ledger_digest": draft.get("mapping_ledger_digest"),
+                    "source_sha256": draft.get("source_sha256"),
+                    "knowledge_sha256": draft.get("knowledge_sha256"),
                 },
             )
             draft["candidate_id"] = candidate_id
@@ -899,7 +1001,7 @@ class PolicyGovernanceService:
                     ),
                 }
             )
-            staged.outbox.append(
+            AuditOutboxOwner(staged).append_outbox(
                 {
                     "event_id": self._stable_id("outbox", policy_job_id),
                     "kind": "s08_validation_requested",
@@ -1036,11 +1138,37 @@ class PolicyGovernanceService:
                     "recovery release is not a known governed release"
                 )
             # Re-verify the manifest and validation bundle remain registry-bound.
-            self._manifest(staged, state["manifest_id"])
+            manifest = self._manifest(staged, state["manifest_id"])
             self._artifact(staged, state["validation_bundle_id"])
+            active_projection = self._fold_active_projection(
+                staged.policy_governance_events, principal.scope
+            )
+            anchor_manifest = None
+            if active_projection is not None:
+                anchor_manifest = self._manifest(
+                    staged, active_projection["manifest_id"]
+                )
+            anchor_components = (
+                {
+                    item["type"]: item["digest"]
+                    for item in anchor_manifest["components"]
+                }
+                if anchor_manifest is not None
+                else None
+            )
+            candidate_components = {
+                item["type"]: item["digest"] for item in manifest["components"]
+            }
             diff = {
                 "schema_version": "s08-machine-diff/1",
-                "scope": "bootstrap-vs-candidate",
+                "anchor_candidate_id": (
+                    active_projection["candidate_id"]
+                    if active_projection is not None
+                    else None
+                ),
+                "anchor_components": anchor_components,
+                "candidate_components": candidate_components,
+                "applicable_check_delta": "none",
                 "behavior_delta": "none",
                 "changes": [],
             }
@@ -1213,6 +1341,8 @@ class PolicyGovernanceService:
             self._verify_governance_revision(staged, expected_governance_revision)
             if self._activation_hold(staged, principal.scope) is not None:
                 raise PolicyInvalidTransition("activation hold is in effect")
+            if activation_at < self._trusted_time():
+                raise PolicyInvalidTransition("activation time is retroactive")
             binding = self._artifact(staged, approval_binding_id)
             if binding.get("schema_version") != APPROVAL_BINDING_SCHEMA:
                 raise PolicyInvalidTransition("approval binding is not verifiable")
@@ -1276,7 +1406,7 @@ class PolicyGovernanceService:
                     ),
                 }
             )
-            staged.outbox.append(
+            AuditOutboxOwner(staged).append_outbox(
                 {
                     "event_id": self._stable_id("outbox", policy_job_id),
                     "kind": "s08_activation_scheduled",
@@ -1559,7 +1689,7 @@ class PolicyGovernanceService:
                     "validation_bundle_digest": bundle["digest"],
                 },
             )
-            staged.outbox.append(
+            AuditOutboxOwner(staged).append_outbox(
                 {
                     "event_id": self._stable_id(
                         "outbox", f"s08:validation:{candidate_id}"
@@ -1690,9 +1820,11 @@ class PolicyGovernanceService:
                     },
                 }
             )
-            prior = staged.policy_active_projections.get(scope)
+            prior = self._fold_active_projection(
+                staged.policy_governance_events, scope
+            )
             generation = (
-                int(prior.get("active_generation", 0)) + 1 if prior is not None else 1
+                int(prior["active_generation"]) + 1 if prior is not None else 1
             )
             activation_event = self._append_governance_event(
                 staged,
@@ -1711,6 +1843,7 @@ class PolicyGovernanceService:
                     "validation_bundle_digest": state["validation_bundle_digest"],
                     "manifest_id": state["manifest_id"],
                     "manifest_digest": state["manifest_digest"],
+                    "recovery_release_id": state.get("recovery_release_id"),
                     "active_generation": generation,
                     "activation_event_id": None,
                     "bootstrap": False,
@@ -1760,7 +1893,7 @@ class PolicyGovernanceService:
                 raise PolicyUnavailable("schedule reservation is no longer pending")
             reservation["status"] = "completed"
             staged.policy_schedule_reservations[job["reservation_id"]] = reservation
-            staged.outbox.append(
+            AuditOutboxOwner(staged).append_outbox(
                 {
                     "event_id": self._stable_id("outbox", activation_event_id),
                     "kind": "s08_activated",
@@ -1770,6 +1903,52 @@ class PolicyGovernanceService:
                     "active_generation": generation,
                     "status": "pending",
                 }
+            )
+            # Stable operation identity: the activation job id doubles as the
+            # idempotency key, so response loss is reconciled by replaying
+            # the original operation instead of guessing a fresh key.
+            operation_key = self._idempotency_key(
+                PolicyPrincipal(
+                    subject="s08-activator",
+                    role="operator",
+                    scope=scope,
+                    source_id="s08-policy-worker",
+                ),
+                "activate",
+                job["policy_job_id"],
+            )
+            activation_fingerprint = self._fingerprint(
+                "activate",
+                candidate_id,
+                job["approval_binding_id"],
+                job.get("activation_at"),
+            )
+            staged.idempotency[operation_key] = (
+                activation_fingerprint,
+                {
+                    "status": "accepted",
+                    "activation_event_id": activation_event_id,
+                    "active_generation": generation,
+                    "candidate_id": candidate_id,
+                },
+            )
+            self._append_audit(
+                staged,
+                action="activation",
+                principal=PolicyPrincipal(
+                    subject="s08-activator",
+                    role="operator",
+                    scope=scope,
+                    source_id="s08-policy-worker",
+                ),
+                result="accepted",
+                reason_code="S08_ACTIVATED",
+                details={
+                    "candidate_id": candidate_id,
+                    "activation_event_id": activation_event_id,
+                    "active_generation": generation,
+                    "operation_key": operation_key,
+                },
             )
             if not self._persist_worker(staged):
                 return {
@@ -1829,14 +2008,16 @@ class PolicyGovernanceService:
             self._store.reload()
             if any(
                 event.get("kind") == "activated"
-                and event.get("payload", {}).get("bootstrap")
+                and event.get("bootstrap")
                 for event in self._store.policy_governance_events
             ):
-                active = self._store.policy_active_projections.get(S08_SCOPE)
+                folded = self._fold_active_projection(
+                    self._store.policy_governance_events, S08_SCOPE
+                )
                 return {
                     "status": "already_active",
                     "active_generation": (
-                        active.get("active_generation") if active else 1
+                        folded["active_generation"] if folded is not None else 1
                     ),
                 }
             if not self.audit_available:
@@ -1986,6 +2167,11 @@ class PolicyGovernanceService:
                 "manifest_id": manifest_id,
                 "manifest_digest": manifest_digest,
                 "components": components,
+                "metadata": copy.deepcopy(draft["metadata"]),
+                "mapping_ledger_id": mapping_ledger_id,
+                "mapping_ledger_digest": mapping_ledger["digest"],
+                "source_sha256": rules_digest,
+                "knowledge_sha256": kb_digest,
             },
         )
         candidate_state = {
@@ -2109,6 +2295,7 @@ class PolicyGovernanceService:
                 "validation_bundle_digest": bundle["digest"],
                 "manifest_id": manifest_id,
                 "manifest_digest": manifest_digest,
+                "recovery_release_id": candidate_id,
                 "active_generation": 1,
                 "activation_event_id": None,
                 "bootstrap": True,
@@ -2134,7 +2321,7 @@ class PolicyGovernanceService:
             "bootstrap": True,
             "components": components,
         }
-        staged.outbox.append(
+        AuditOutboxOwner(staged).append_outbox(
             {
                 "event_id": self._stable_id("outbox", activation_event["event_id"]),
                 "kind": "s08_bootstrap_activated",
@@ -2176,51 +2363,54 @@ class PolicyGovernanceService:
         kb_bytes: bytes,
         release: TargetRelease,
     ) -> dict[str, Any]:
+        """Structured traversal of every server-owned source item.
+
+        Each ledger entry pins the real source location and the digest of
+        the resolved value (never the pointer text), the target reference,
+        an explicit classification, a stable reason and a result digest.
+        Unknown or unmapped runtime items are recorded as ``unsupported``
+        and therefore block validation: nothing is silently dropped.
+        """
         rules_text = rules_bytes.decode("utf-8")
         rules_data = yaml.safe_load(rules_text)
         kb_data = json.loads(kb_bytes.decode("utf-8"))
         items: list[dict[str, Any]] = []
         if not isinstance(rules_data, dict):
             raise ValueError("rules source must be an object")
-        for pointer in (
-            "/package",
-            "/version",
-            "/low_confidence_threshold",
-            "/default_require_all_docs",
-            "/date_order",
-            "/vin_fix_ioq",
-            "/vin_strict_check_digit",
-            "/expand_id15_to_18",
-            "/critical_low_conf_compare",
-        ):
+        if not isinstance(kb_data, dict):
+            raise ValueError("knowledge source must be an object")
+        for pointer in _RULES_OPTION_POINTERS:
+            key = pointer.lstrip("/")
+            if key not in rules_data:
+                continue
+            value = rules_data[key]
             items.append(
                 {
                     "source_pointer": pointer,
-                    "source_digest": raw_digest(
-                        pointer.encode("utf-8")
-                    ),
+                    "source_digest": content_digest(("option", pointer, value)),
                     "classification": "exact",
                     "target_ref": f"checker.options{pointer}",
                     "importer_version": IMPORTER_VERSION,
                     "reason": "declarative option mapped to canonical checker options",
-                    "result_digest": rules_digest_bytes(pointer, rules_bytes),
+                    "result_digest": content_digest(("checker_option", pointer, value)),
                 }
             )
         aliases = rules_data.get("field_aliases")
         if isinstance(aliases, dict):
             for canonical, names in sorted(aliases.items()):
+                names_tuple = tuple(names)
                 items.append(
                     {
                         "source_pointer": f"/field_aliases/{canonical}",
-                        "source_digest": raw_digest(
-                            f"/field_aliases/{canonical}".encode("utf-8")
+                        "source_digest": content_digest(
+                            ("aliases", canonical, names_tuple)
                         ),
                         "classification": "exact",
                         "target_ref": f"checker.aliases/{canonical}",
                         "importer_version": IMPORTER_VERSION,
                         "reason": "field alias chain mapped to canonical aliases",
                         "result_digest": content_digest(
-                            ("aliases", canonical, tuple(names))
+                            ("aliases", canonical, names_tuple)
                         ),
                     }
                 )
@@ -2234,20 +2424,18 @@ class PolicyGovernanceService:
             items.append(
                 {
                     "source_pointer": f"/rules/{index}",
-                    "source_digest": raw_digest(
-                        f"/rules/{index}".encode("utf-8")
-                    ),
+                    "source_digest": content_digest(("rule_source", index, rule)),
                     "classification": "exact",
                     "target_ref": f"checker.rules/{rule_id}",
                     "importer_version": IMPORTER_VERSION,
                     "reason": "declarative check mapped to canonical compiled rule",
-                    "result_digest": content_digest(("rule", rule_id)),
+                    "result_digest": content_digest(("rule_compiled", rule_id, rule)),
                 }
             )
         items.append(
             {
                 "source_pointer": "/changelog",
-                "source_digest": raw_digest("/changelog".encode("utf-8")),
+                "source_digest": content_digest(("changelog", rules_data.get("changelog"))),
                 "classification": "non_runtime_excluded",
                 "target_ref": None,
                 "importer_version": IMPORTER_VERSION,
@@ -2256,46 +2444,76 @@ class PolicyGovernanceService:
             }
         )
         for section in ("version", "description", "graph"):
-            if section in kb_data:
-                items.append(
-                    {
-                        "source_pointer": f"/{section}",
-                        "source_digest": raw_digest(f"/{section}".encode("utf-8")),
-                        "classification": (
-                            "non_runtime_excluded"
-                            if section != "graph"
-                            else "explicit_transform"
-                        ),
-                        "target_ref": (
-                            None if section != "graph" else "checker.knowledge.aliases"
-                        ),
-                        "importer_version": IMPORTER_VERSION,
-                        "reason": (
-                            "metadata only; cannot affect runtime"
-                            if section != "graph"
-                            else "same_as graph projected into alias sections"
-                        ),
-                        "result_digest": content_digest(("kb", section)),
-                    }
-                )
+            if section not in kb_data:
+                continue
+            value = kb_data[section]
+            items.append(
+                {
+                    "source_pointer": f"/{section}",
+                    "source_digest": content_digest(("kb", section, value)),
+                    "classification": (
+                        "non_runtime_excluded"
+                        if section != "graph"
+                        else "explicit_transform"
+                    ),
+                    "target_ref": (
+                        None if section != "graph" else "checker.knowledge.aliases"
+                    ),
+                    "importer_version": IMPORTER_VERSION,
+                    "reason": (
+                        "metadata only; cannot affect runtime"
+                        if section != "graph"
+                        else "same_as graph projected into alias sections"
+                    ),
+                    "result_digest": content_digest(("kb", section, value)),
+                }
+            )
         for section in ("address_aliases", "org_aliases", "plate_prefixes"):
             values = kb_data.get(section)
             if not isinstance(values, dict):
                 raise ValueError(f"knowledge section {section} is invalid")
             for key in sorted(values):
+                value = values[key]
                 items.append(
                     {
                         "source_pointer": f"/{section}/{key}",
-                        "source_digest": raw_digest(f"/{section}/{key}".encode("utf-8")),
+                        "source_digest": content_digest(("kb_alias", section, key, value)),
                         "classification": "exact",
                         "target_ref": f"checker.knowledge/{section}/{key}",
                         "importer_version": IMPORTER_VERSION,
                         "reason": "entity alias mapped into canonical knowledge",
-                        "result_digest": content_digest(
-                            ("kb_alias", section, key, values[key])
-                        ),
+                        "result_digest": content_digest(("kb_alias", section, key, value)),
                     }
                 )
+        # Unknown top-level keys are explicit unsupported entries: validation
+        # counts them and rejects the candidate instead of silently dropping
+        # a possibly-runtime item.
+        for key in sorted(set(rules_data) - _RULES_KNOWN_TOP_LEVEL):
+            value = rules_data[key]
+            items.append(
+                {
+                    "source_pointer": f"/{key}",
+                    "source_digest": content_digest(("unknown_rules_item", key, value)),
+                    "classification": "unsupported",
+                    "target_ref": None,
+                    "importer_version": IMPORTER_VERSION,
+                    "reason": "unrecognized top-level rules option; runtime effect unknown",
+                    "result_digest": content_digest(("unknown_rules_item", key, value)),
+                }
+            )
+        for key in sorted(set(kb_data) - _KB_KNOWN_SECTIONS):
+            value = kb_data[key]
+            items.append(
+                {
+                    "source_pointer": f"/{key}",
+                    "source_digest": content_digest(("unknown_kb_item", key, value)),
+                    "classification": "unsupported",
+                    "target_ref": None,
+                    "importer_version": IMPORTER_VERSION,
+                    "reason": "unrecognized knowledge section; runtime effect unknown",
+                    "result_digest": content_digest(("unknown_kb_item", key, value)),
+                }
+            )
         material = {
             "schema_version": MAPPING_LEDGER_SCHEMA,
             "importer_version": IMPORTER_VERSION,
@@ -2371,7 +2589,9 @@ class PolicyGovernanceService:
     def _activation_hold(
         owner: SQLiteTargetStore, scope: str
     ) -> dict[str, Any] | None:
-        projection = owner.policy_active_projections.get(scope)
+        projection = PolicyGovernanceService._fold_active_projection(
+            owner.policy_governance_events, scope
+        )
         hold = projection.get("activation_hold") if projection else None
         return hold if isinstance(hold, dict) else None
 
@@ -2512,13 +2732,17 @@ class PolicyGovernanceService:
                     "detail": "normalization policy digest matches compile-time digest",
                 }
             )
-        mapping_ledger_id = None
-        draft_metadata: dict[str, Any] | None = None
-        for draft in owner.policy_drafts.values():
-            if draft.get("candidate_id") == state.get("candidate_id"):
-                mapping_ledger_id = draft.get("mapping_ledger_id")
-                draft_metadata = draft.get("metadata")
-                break
+        # Validation reads only the immutable candidate snapshot pinned at
+        # freeze time; later draft edits can never influence it.
+        frozen_events = [
+            event
+            for event in owner.policy_governance_events
+            if event.get("kind") == "candidate_frozen"
+            and event.get("candidate_id") == state.get("candidate_id")
+        ]
+        frozen = frozen_events[-1] if len(frozen_events) == 1 else None
+        mapping_ledger_id = frozen.get("mapping_ledger_id") if frozen else None
+        draft_metadata = frozen.get("metadata") if frozen else None
         ledger = (
             self._find_mapping_ledger(owner, mapping_ledger_id)
             if mapping_ledger_id
@@ -2579,7 +2803,32 @@ class PolicyGovernanceService:
                     "detail": "checker artifact is not materializable",
                 }
             )
-        determinism, corpus_diff = self._fresh_process_evidence(owner, release)
+        try:
+            determinism, corpus_diff, corpus_manifest = self._fresh_process_evidence(
+                owner, release
+            )
+        except PolicyUnavailable as error:
+            reason = str(error)
+            determinism = {
+                "runs": 0,
+                "equal": False,
+                "digest": None,
+                "reason": reason,
+            }
+            corpus_diff = {
+                "anchor": None,
+                "applications_compared": 0,
+                "applications_skipped": 0,
+                "checks_equal": False,
+                "selection_equal": False,
+                "normalization_equal": False,
+                "verdicts_equal": False,
+                "route_equal": False,
+                "corpus_digest": None,
+                "equal": False,
+                "reason": reason,
+            }
+            corpus_manifest = None
         checks.append(
             {
                 "check_id": "determinism",
@@ -2602,6 +2851,31 @@ class PolicyGovernanceService:
                 ),
             }
         )
+        if corpus_manifest is None:
+            checks.append(
+                {
+                    "check_id": "corpus_bound",
+                    "outcome": "fail",
+                    "detail": "server-owned frozen corpus manifest is unavailable",
+                }
+            )
+        else:
+            checks.append(
+                {
+                    "check_id": "corpus_bound",
+                    "outcome": (
+                        "pass"
+                        if corpus_manifest["count"] > 0 and corpus_manifest["digest"]
+                        else "fail"
+                    ),
+                    "detail": (
+                        f"frozen corpus {corpus_manifest['count']} items bound to "
+                        f"{corpus_manifest['digest']}"
+                        if corpus_manifest["count"] > 0 and corpus_manifest["digest"]
+                        else "frozen corpus is not digest-bound"
+                    ),
+                }
+            )
         failed = [
             check
             for check in checks
@@ -2618,7 +2892,7 @@ class PolicyGovernanceService:
             "inputs": {
                 "component_digests": component_digests,
                 "mapping_ledger_id": mapping_ledger_id,
-                "corpus_track": "C-DEV-REG",
+                "corpus": corpus_manifest,
             },
             "results": {
                 "checks": checks,
@@ -2816,9 +3090,12 @@ class PolicyGovernanceService:
 
     def _fresh_process_evidence(
         self, owner: SQLiteTargetStore, release: TargetRelease | None
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]:
         """Determinism (two fresh-process runs) and frozen-corpus zero
-        behavior difference against the bootstrap anchor."""
+        behavior difference against the bootstrap anchor.  The third return
+        value is the digest-bound server-owned corpus manifest; missing or
+        invalid corpora fail closed with PolicyUnavailable instead of
+        producing vacuous evidence."""
         if release is None or self._corpus_root is None:
             return (
                 {
@@ -2840,16 +3117,15 @@ class PolicyGovernanceService:
                     "equal": False,
                     "reason": "checker or frozen corpus is not configured",
                 },
+                None,
             )
         corpus = self._load_corpus()
-        corpus_digest = content_digest(
-            [
-                (str(item["name"]), item["sha256"])
-                for item in sorted(corpus, key=lambda item: item["name"])
-            ]
-        )
+        corpus_manifest = self._corpus_manifest(corpus)
+        corpus_digest = corpus_manifest["digest"]
         anchor_release = release
-        active = owner.policy_active_projections.get(S08_SCOPE)
+        active = self._fold_active_projection(
+            owner.policy_governance_events, S08_SCOPE
+        )
         if active is not None:
             try:
                 anchor_checker = self._artifact(owner, self._component_id(
@@ -2879,6 +3155,7 @@ class PolicyGovernanceService:
                     "equal": False,
                     "reason": "bootstrap anchor is unavailable",
                 },
+                corpus_manifest,
             )
         # The three fresh-process passes are independent evidence runs; run
         # them concurrently so a cold bootstrap does not serialize three
@@ -2917,6 +3194,7 @@ class PolicyGovernanceService:
                     "equal": False,
                     "reason": reason,
                 },
+                corpus_manifest,
             )
         determinism = {
             "runs": 2,
@@ -2968,18 +3246,30 @@ class PolicyGovernanceService:
                 else "corpus behavior differs or fixtures are uncovered"
             ),
         }
-        return determinism, corpus_diff
+        return determinism, corpus_diff, corpus_manifest
 
     def _load_corpus(self) -> list[dict[str, Any]]:
-        if self._corpus_root is None or not self._corpus_root.is_dir():
-            return []
+        """Load the server-owned frozen corpus, failing closed on missing,
+        non-directory, empty or invalid input.  An empty or unreadable
+        corpus must never produce vacuous zero-diff evidence."""
+        if self._corpus_root is None:
+            raise PolicyUnavailable("frozen corpus is not configured")
+        corpus_root = Path(self._corpus_root)
+        if not corpus_root.is_dir():
+            raise PolicyUnavailable("frozen corpus directory is unavailable")
         items: list[dict[str, Any]] = []
-        for path in sorted(self._corpus_root.glob("*.json")):
+        for path in sorted(corpus_root.glob("*.json")):
             raw = path.read_bytes()
             try:
                 fixture = json.loads(raw.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError):
-                fixture = None
+                raise PolicyUnavailable(
+                    f"frozen corpus fixture is invalid: {path.name}"
+                ) from None
+            if not isinstance(fixture, dict):
+                raise PolicyUnavailable(
+                    f"frozen corpus fixture is not an object: {path.name}"
+                )
             items.append(
                 {
                     "name": path.name,
@@ -2987,7 +3277,29 @@ class PolicyGovernanceService:
                     "fixture": fixture,
                 }
             )
+        if not items:
+            raise PolicyUnavailable("frozen corpus is empty")
+        if len(items) > _MAX_CORPUS_ITEMS:
+            raise PolicyUnavailable("frozen corpus exceeds the item limit")
         return items
+
+    @staticmethod
+    def _corpus_manifest(corpus: list[dict[str, Any]]) -> dict[str, Any]:
+        digest = content_digest(
+            [
+                (str(item["name"]), item["sha256"])
+                for item in sorted(corpus, key=lambda item: item["name"])
+            ]
+        )
+        return {
+            "track": "C-DEV-REG",
+            "count": len(corpus),
+            "digest": digest,
+            "items": [
+                {"name": str(item["name"]), "sha256": item["sha256"]}
+                for item in sorted(corpus, key=lambda item: item["name"])
+            ],
+        }
 
     def _run_fresh_process(
         self, release: TargetRelease, corpus: list[dict[str, Any]]
@@ -3000,6 +3312,9 @@ class PolicyGovernanceService:
                 if isinstance(item["fixture"], dict)
             ],
         }
+        payload_bytes = json.dumps(payload).encode("utf-8")
+        if len(payload_bytes) > _MAX_EVIDENCE_INPUT_BYTES:
+            return None
         module_root = Path(__file__).resolve().parents[2]
         env = {
             "PYTHONDONTWRITEBYTECODE": "1",
@@ -3013,7 +3328,7 @@ class PolicyGovernanceService:
                     "-m",
                     "task4_consistency.controlled.s08_validate",
                 ],
-                input=json.dumps(payload).encode("utf-8"),
+                input=payload_bytes,
                 capture_output=True,
                 cwd=str(module_root),
                 env=env,
@@ -3022,7 +3337,11 @@ class PolicyGovernanceService:
             )
         except (OSError, subprocess.TimeoutExpired):
             return None
-        if completed.returncode != 0:
+        if (
+            completed.returncode != 0
+            or len(completed.stdout) > _MAX_SUBPROCESS_STDOUT_BYTES
+            or len(completed.stderr) > _MAX_SUBPROCESS_STDERR_BYTES
+        ):
             return None
         try:
             return json.loads(completed.stdout.decode("utf-8"))
@@ -3104,6 +3423,69 @@ class PolicyGovernanceService:
 
     # ------------------------------------------------------------ resolver
 
+    @classmethod
+    def _fold_active_projection(
+        cls, events: list[dict[str, Any]], scope: str
+    ) -> dict[str, Any] | None:
+        """Rebuild the active projection purely from append-only governance
+        facts.  The highest active generation wins; a stop event adds the
+        activation hold.  The mutable projection table is only a rebuildable
+        cache and can never override this fold."""
+        activated = [
+            event
+            for event in events
+            if event.get("kind") == "activated"
+            and event.get("scope") == scope
+        ]
+        if not activated:
+            return None
+        latest = max(
+            activated,
+            key=lambda event: (
+                int(event.get("active_generation", 0) or 0),
+                int(event.get("revision", 0) or 0),
+            ),
+        )
+        approval_binding_id = str(latest.get("approval_binding_id") or "")
+        approval_binding_digest = approval_binding_id.removeprefix(
+            "approval_sha256_"
+        )
+        holds = [
+            event
+            for event in events
+            if event.get("kind") == "activation_stopped"
+            and event.get("scope") == scope
+        ]
+        hold = None
+        if holds:
+            last_hold = holds[-1]
+            hold = {
+                "event_id": last_hold["event_id"],
+                "reason_code": last_hold.get("reason_code"),
+                "stopped_at": last_hold.get("trusted_time"),
+                "stopped_by": last_hold.get("actor", {}).get("subject"),
+            }
+        return {
+            "schema_version": "s08-active-projection/1",
+            "scope": scope,
+            "active_generation": int(latest.get("active_generation", 0) or 0),
+            "activation_event_id": str(latest.get("activation_event_id") or ""),
+            "candidate_id": str(latest.get("candidate_id") or ""),
+            "manifest_id": str(latest.get("manifest_id") or ""),
+            "manifest_digest": str(latest.get("manifest_digest") or ""),
+            "approval_binding_id": approval_binding_id,
+            "approval_binding_digest": approval_binding_digest,
+            "validation_bundle_id": str(latest.get("validation_bundle_id") or ""),
+            "validation_bundle_digest": str(
+                latest.get("validation_bundle_digest") or ""
+            ),
+            "recovery_release_id": str(latest.get("recovery_release_id") or ""),
+            "activated_at": latest.get("trusted_time"),
+            "bootstrap": bool(latest.get("bootstrap")),
+            "activation_hold": hold,
+            "components": None,
+        }
+
     def resolve_run_pin(
         self,
         scope: str,
@@ -3112,15 +3494,23 @@ class PolicyGovernanceService:
         store: SQLiteTargetStore | None = None,
     ) -> dict[str, Any] | None:
         """Resolve one complete active governed release for the scope, or None
-        when no governed activation exists (pre-cutover compatibility)."""
+        when no governed activation exists (pre-cutover compatibility).
+
+        The active generation is folded from the append-only Governance
+        Ledger; the mutable projection table is only a rebuildable cache and
+        is never read as authority here."""
         owner = store if store is not None else self._store
-        active = owner.policy_active_projections.get(scope)
+        active = self._fold_active_projection(
+            owner.policy_governance_events, scope
+        )
         if active is None:
             return None
         manifest = self._manifest(owner, active["manifest_id"])
         if manifest.get("digest") != active["manifest_digest"]:
             raise PolicyUnavailable("active manifest digest does not match")
-        self._artifact(owner, active["approval_binding_id"])
+        binding = self._artifact(owner, active["approval_binding_id"])
+        if binding.get("schema_version") != APPROVAL_BINDING_SCHEMA:
+            raise PolicyUnavailable("active approval binding is not verifiable")
         validation = self._artifact(owner, active["validation_bundle_id"])
         if validation.get("status") != "validated":
             raise PolicyUnavailable("active validation bundle is not validated")
@@ -3170,19 +3560,61 @@ class PolicyGovernanceService:
         checker = self._artifact(self._store, self._component_id(manifest, "checker"))
         return TargetRelease.from_artifact(checker)
 
+    def load_compat_release(self, run_spec: dict[str, Any]) -> TargetRelease:
+        """Exact-map a pre-cutover RunSpec to the Registry checker artifact
+        that carries the same release identity (the bootstrap migration
+        release).  Never reads legacy YAML/JSON files; a RunSpec with no
+        matching Registry artifact fails closed."""
+        release_digest = run_spec.get("release_digest")
+        release_id = run_spec.get("release_id")
+        checker_build = run_spec.get("checker_build")
+        if not all(
+            isinstance(value, str) and value
+            for value in (release_digest, release_id, checker_build)
+        ):
+            raise PolicyUnavailable("RunSpec compatibility pin is incomplete")
+        self._store.reload()
+        for manifest in self._store.policy_manifests:
+            try:
+                checker = self._artifact(
+                    self._store, self._component_id(manifest, "checker")
+                )
+            except PolicyUnavailable:
+                continue
+            try:
+                release = TargetRelease.from_artifact(checker)
+            except ValueError:
+                continue
+            public = release.public_manifest()
+            if (
+                public["digest"] == release_digest
+                and public["release_id"] == release_id
+                and public["checker_build"] == checker_build
+            ):
+                return release
+        raise PolicyUnavailable(
+            "no Registry checker artifact matches the pre-cutover RunSpec"
+        )
+
     def load_pinned_checker(
         self, run_spec: dict[str, Any]
     ) -> TargetChecker:
-        """Materialize the checker only from RunSpec-pinned Registry facts."""
+        """Materialize the checker only from RunSpec-pinned Registry facts.
+
+        The Registry is revalidated on every call; the cache is a
+        non-authoritative accelerator keyed by release digest, so a deleted
+        or tampered artifact can never be masked by a warm object."""
         manifest_digest = run_spec.get("manifest_digest")
         if not isinstance(manifest_digest, str):
             raise PolicyUnavailable("RunSpec policy pin is incomplete")
+        release = self.load_pinned_release(run_spec)
         cached = self._checker_cache.get(manifest_digest)
         if cached is not None:
-            return cached
-        release = self.load_pinned_release(run_spec)
+            cached_release_digest, cached_checker = cached
+            if cached_release_digest == release.release_digest:
+                return cached_checker
         built = TargetChecker(release)
-        self._checker_cache[manifest_digest] = built
+        self._checker_cache[manifest_digest] = (release.release_digest, built)
         return built
 
     # -------------------------------------------------------------- queries
@@ -3193,7 +3625,9 @@ class PolicyGovernanceService:
         _validate_principal(principal)
         with self._lock:
             self._store.reload()
-            active = self._store.policy_active_projections.get(principal.scope)
+            active = self._fold_active_projection(
+                self._store.policy_governance_events, principal.scope
+            )
             hold = self._activation_hold(self._store, principal.scope)
             return {
                 "track": "C-DEMO",
@@ -3212,7 +3646,9 @@ class PolicyGovernanceService:
         _validate_principal(principal)
         with self._lock:
             self._store.reload()
-            active = self._store.policy_active_projections.get(principal.scope)
+            active = self._fold_active_projection(
+                self._store.policy_governance_events, principal.scope
+            )
             if active is None:
                 return {
                     "status": "none",
@@ -3220,6 +3656,7 @@ class PolicyGovernanceService:
                     "capability_gate": "G3",
                     "scope": principal.scope,
                 }
+            manifest = self._manifest(self._store, active["manifest_id"])
             return {
                 "status": "active",
                 "track": "C-DEMO",
@@ -3228,8 +3665,8 @@ class PolicyGovernanceService:
                 "active_generation": active["active_generation"],
                 "activation_event_id": active["activation_event_id"],
                 "candidate_id": active["candidate_id"],
-                "manifest_id": active["manifest_id"],
-                "manifest_digest": active["manifest_digest"],
+                "manifest_id": manifest["manifest_id"],
+                "manifest_digest": manifest["digest"],
                 "approval_binding_id": active["approval_binding_id"],
                 "approval_binding_digest": active["approval_binding_digest"],
                 "validation_bundle_id": active["validation_bundle_id"],
@@ -3238,7 +3675,7 @@ class PolicyGovernanceService:
                 "activated_at": active["activated_at"],
                 "bootstrap": bool(active.get("bootstrap")),
                 "activation_hold": active.get("activation_hold"),
-                "components": active["components"],
+                "components": manifest["components"],
             }
 
     def query_candidates(self, principal: PolicyPrincipal) -> dict[str, Any]:
@@ -3389,11 +3826,6 @@ class PolicyGovernanceService:
             return False
         self._store = staged
         return True
-
-
-def rules_digest_bytes(pointer: str, rules_bytes: bytes) -> str:
-    """Deterministic per-pointer result digest for the mapping ledger."""
-    return content_digest(("rules_pointer", pointer, raw_digest(rules_bytes)))
 
 
 def _load_rules_bytes(rules_bytes: bytes) -> Any:

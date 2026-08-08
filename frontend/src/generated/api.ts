@@ -3415,7 +3415,7 @@ export interface components {
             /** Candidate Id */
             candidate_id: string;
             /** Expected Governance Revision */
-            expected_governance_revision?: number | null;
+            expected_governance_revision: number;
             /** Idempotency Key */
             idempotency_key: string;
             /** Recovery Release Id */
@@ -3426,7 +3426,7 @@ export interface components {
             /** Candidate Id */
             candidate_id: string;
             /** Expected Governance Revision */
-            expected_governance_revision?: number | null;
+            expected_governance_revision: number;
             /** Idempotency Key */
             idempotency_key: string;
         };
@@ -3551,14 +3551,14 @@ export interface components {
             /** Draft Id */
             draft_id: string;
             /** Expected Governance Revision */
-            expected_governance_revision?: number | null;
+            expected_governance_revision: number;
             /** Idempotency Key */
             idempotency_key: string;
         };
         /** S08ImportLegacyBody */
         S08ImportLegacyBody: {
             /** Expected Governance Revision */
-            expected_governance_revision?: number | null;
+            expected_governance_revision: number;
             /** Idempotency Key */
             idempotency_key: string;
             /** Source Bundle Id */
@@ -3569,7 +3569,7 @@ export interface components {
             /** Candidate Id */
             candidate_id: string;
             /** Expected Governance Revision */
-            expected_governance_revision?: number | null;
+            expected_governance_revision: number;
             /** Idempotency Key */
             idempotency_key: string;
             /** Reason Code */
@@ -3580,7 +3580,7 @@ export interface components {
             /** Draft Id */
             draft_id: string;
             /** Expected Governance Revision */
-            expected_governance_revision?: number | null;
+            expected_governance_revision: number;
             /** Idempotency Key */
             idempotency_key: string;
             /** Metadata */
@@ -3595,7 +3595,7 @@ export interface components {
             /** Approval Binding Id */
             approval_binding_id: string;
             /** Expected Governance Revision */
-            expected_governance_revision?: number | null;
+            expected_governance_revision: number;
             /** Idempotency Key */
             idempotency_key: string;
         };
@@ -3623,7 +3623,7 @@ export interface components {
         /** S08StopActivationsBody */
         S08StopActivationsBody: {
             /** Expected Governance Revision */
-            expected_governance_revision?: number | null;
+            expected_governance_revision: number;
             /** Idempotency Key */
             idempotency_key: string;
             /** Reason Code */

@@ -3565,8 +3565,8 @@ class ControlledScenarioService:
                 "projection_updated": projection_probe["updated"],
                 "projection_watermark": projection_probe["projection_watermark"],
                 "store_revision": self._store._store_revision,
-                "release_digest": self._legacy_run_release()["digest"],
-                "checker_build": self._legacy_run_release()["checker_build"],
+                "release_digest": probe_run_spec["release_digest"],
+                "checker_build": probe_run_spec["checker_build"],
             }
             encoded = json.dumps(
                 payload, sort_keys=True, separators=(",", ":")
@@ -3647,8 +3647,8 @@ class ControlledScenarioService:
         return {
             "kind": "frozen_checker_probe",
             "verified_targets": len(probes),
-            "release_digest": self._legacy_run_release()["digest"],
-            "checker_build": self._legacy_run_release()["checker_build"],
+            "release_digest": probes[-1]["release_digest"],
+            "checker_build": probes[-1]["checker_build"],
             "projection_updated": projection_probe["updated"],
             "projection_watermark": projection_probe["projection_watermark"],
             "probe_digest": hashlib.sha256(encoded).hexdigest(),
@@ -14848,11 +14848,16 @@ class ControlledScenarioService:
         """The complete release for a governed RunSpec pin, or the legacy
         singleton for pre-cutover runs.  S05/S07 consumers resolve the exact
         release the run pinned instead of any current singleton."""
-        if (
-            self._policy_governance is not None
-            and run_spec.get("activation_event_id")
-        ):
-            release = self._policy_governance.load_pinned_release(run_spec)
+        if self._policy_governance is not None:
+            # Governed runtimes resolve only the Registry/Ledger.  A pinned
+            # RunSpec loads its exact artifact; a pre-cutover RunSpec is
+            # exact-mapped to the Registry checker artifact with the same
+            # release identity.  The legacy singleton is never a target
+            # fallback.
+            if run_spec.get("activation_event_id"):
+                release = self._policy_governance.load_pinned_release(run_spec)
+            else:
+                release = self._policy_governance.load_compat_release(run_spec)
             public = release.public_manifest()
             return {
                 "release_id": public["release_id"],
@@ -14872,12 +14877,13 @@ class ControlledScenarioService:
 
     def _checker_for_run(self, run_spec: dict[str, Any]) -> TargetChecker:
         """Workers execute only the RunSpec-pinned Registry checker."""
-        if (
-            self._policy_governance is not None
-            and run_spec.get("activation_event_id")
-        ):
+        if self._policy_governance is not None:
             try:
-                return self._policy_governance.load_pinned_checker(run_spec)
+                if run_spec.get("activation_event_id"):
+                    return self._policy_governance.load_pinned_checker(run_spec)
+                return TargetChecker(
+                    self._pinned_release_for(run_spec)["target_release"]
+                )
             except Exception as error:
                 raise _PinnedReleaseUnavailable(
                     self._PINNED_RELEASE_FAILURE
