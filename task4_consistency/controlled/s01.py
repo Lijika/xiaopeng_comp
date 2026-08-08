@@ -159,6 +159,10 @@ class _InvalidRunResult(ValueError):
 class _PinnedReleaseUnavailable(RuntimeError):
     """The release fixed at admission cannot be resolved by this worker."""
 
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
 
 class _ApplicationStateAuthorityUnavailable(RuntimeError):
     """Mutable application state disagrees with its immutable authorities."""
@@ -198,9 +202,6 @@ class S01ArtifactManifest:
     source_sha256: str
     source_provenance_manifest_version: str
     source_provenance_manifest_digest: str
-    release_id: str
-    release_digest: str
-    checker_build: str
     adapter_id: str
     adapter_version: str
     envelope_version: str
@@ -387,6 +388,7 @@ class ControlledScenarioService:
     _RUNTIME_STOP_REASON = "S01_RUNTIME_UNHEALTHY"
     _S07_FAILURE_PUBLICATION_EXHAUSTED = "control.failure_publication_exhausted"
     _PINNED_RELEASE_FAILURE = "PINNED_RELEASE_UNAVAILABLE"
+    _POLICY_UNAVAILABLE_FAILURE = "configuration.policy_unavailable"
     _APPLICATION_STATE_FAILURE = "APPLICATION_STATE_AUTHORITY_UNAVAILABLE"
     _ADMISSION_JOB_RECOVERY_FAILURE = "ADMISSION_JOB_RECOVERY_UNAVAILABLE"
     _REVIEW_SOURCE_FAILURE = "SOURCE_EVIDENCE_UNAVAILABLE"
@@ -511,6 +513,7 @@ class ControlledScenarioService:
         scenario_id: str = "app_r53_bad_engine.json",
         checker_build: str | None = None,
         exception_approver_subject: str = "c-demo-exception-approver",
+        policy_governance: Any | None = None,
     ) -> None:
         if not worker_identity or worker_identity.strip() != worker_identity:
             raise ValueError("worker identity must be a non-empty canonical value")
@@ -555,15 +558,61 @@ class ControlledScenarioService:
         self._local_cohort_stop: dict[str, Any] | None = None
         self._reconcile_admission_jobs()
         self._purge_expired_sessions(now=float(self._clock()))
-        self._release = self._load_baseline_release()
-        self._run_release = (
-            self._release
-            if checker_build is None or checker_build == self._release["checker_build"]
-            else self._select_checker_release(self._release, checker_build)
-        )
-        self._target_checker = TargetChecker(self._run_release["target_release"])
+        self._policy_governance = policy_governance
+        self._checker_build_override = checker_build
+        if self._policy_governance is None:
+            # Pre-cutover legacy seam: the singleton baseline is bound at
+            # startup.  Governed runtimes never construct it eagerly; the
+            # resolver/load-pinned path reads the Registry instead.
+            self._release = self._load_baseline_release()
+            self._run_release = (
+                self._release
+                if checker_build is None
+                or checker_build == self._release["checker_build"]
+                else self._select_checker_release(self._release, checker_build)
+            )
+            self._target_checker = TargetChecker(
+                self._run_release["target_release"]
+            )
+        else:
+            self._release = None
+            self._run_release = None
+            self._target_checker = None
         self._source_provenance_manifest = self._load_source_provenance_manifest()
         self._manifest = self._build_artifact_manifest()
+
+    def _legacy_release(self) -> dict[str, Any]:
+        """Lazily load the pre-cutover singleton baseline (legacy seam only;
+        governed runtimes resolve the Registry instead and never read the
+        YAML/KB files for target runs)."""
+        if self._release is None:
+            self._release = self._load_baseline_release()
+        return self._release
+
+    def _legacy_run_release(self) -> dict[str, Any]:
+        if self._run_release is None:
+            release = self._legacy_release()
+            checker_build = self._checker_build_override
+            self._run_release = (
+                release
+                if checker_build is None
+                or checker_build == release["checker_build"]
+                else self._select_checker_release(release, checker_build)
+            )
+        return self._run_release
+
+    def _legacy_target_checker(self) -> TargetChecker:
+        if self._target_checker is None:
+            self._target_checker = TargetChecker(
+                self._legacy_run_release()["target_release"]
+            )
+        return self._target_checker
+
+    def process_next_policy_job(self) -> dict[str, Any] | None:
+        """Delegate S08 policy worker work to the governance service."""
+        if self._policy_governance is None:
+            return None
+        return self._policy_governance.process_next_policy_job()
 
     def submit_demo(
         self,
@@ -3378,9 +3427,23 @@ class ControlledScenarioService:
             separators=(",", ":"),
         ).encode("utf-8")
         snapshot_digest = hashlib.sha256(snapshot_bytes).hexdigest()
-        return {
+        policy_pin = None
+        if self._policy_governance is not None:
+            try:
+                policy_pin = self._policy_governance.resolve_run_pin(
+                    "C-DEMO/demo", int(self._clock())
+                )
+            except Exception as error:
+                raise _PinnedReleaseUnavailable(self._PINNED_RELEASE_FAILURE) from error
+        if policy_pin is not None:
+            release = policy_pin["release"]
+        elif self._policy_governance is not None:
+            raise _PinnedReleaseUnavailable(self._POLICY_UNAVAILABLE_FAILURE)
+        else:
+            release = self._legacy_run_release()
+        probe_spec: dict[str, Any] = {
             "run_id": self._stable_id(
-                "probe", f"runtime-repair:{probe_identity}:{self._run_release['digest']}"
+                "probe", f"runtime-repair:{probe_identity}:{release['digest']}"
             ),
             "application_id": application_id,
             "cycle": cycle,
@@ -3393,18 +3456,35 @@ class ControlledScenarioService:
             "baseline_release": copy.deepcopy(
                 {
                     key: value
-                    for key, value in self._run_release.items()
+                    for key, value in release.items()
                     if key not in {"target_release", "legacy_oracle"}
                 }
             ),
-            "release_id": self._run_release["release_id"],
-            "release_digest": self._run_release["digest"],
-            "checker_build": self._run_release["checker_build"],
+            "release_id": release["release_id"],
+            "release_digest": release["digest"],
+            "checker_build": release["checker_build"],
             "fence": fence,
-            "limits": copy.deepcopy(self._run_release["limits"]),
-            "applicable_check_ids": self._run_release["applicable_check_ids"],
-            "applicable_check_count": self._run_release["applicable_check_count"],
+            "limits": copy.deepcopy(release["limits"]),
+            "applicable_check_ids": release["applicable_check_ids"],
+            "applicable_check_count": release["applicable_check_count"],
         }
+        if policy_pin is not None:
+            probe_spec.update(
+                {
+                    "policy_scope": policy_pin["policy_scope"],
+                    "activation_event_id": policy_pin["activation_event_id"],
+                    "active_generation": policy_pin["active_generation"],
+                    "candidate_id": policy_pin["candidate_id"],
+                    "manifest_id": policy_pin["manifest_id"],
+                    "manifest_digest": policy_pin["manifest_digest"],
+                    "validation_bundle_id": policy_pin["validation_bundle_id"],
+                    "validation_bundle_digest": policy_pin["validation_bundle_digest"],
+                    "approval_binding_id": policy_pin["approval_binding_id"],
+                    "approval_binding_digest": policy_pin["approval_binding_digest"],
+                    "components": copy.deepcopy(policy_pin["components"]),
+                }
+            )
+        return probe_spec
 
     def _verify_runtime_repair(self, failure_reason_code: str) -> dict[str, Any] | None:
         if failure_reason_code == self._REVIEW_SOURCE_FAILURE:
@@ -3485,8 +3565,8 @@ class ControlledScenarioService:
                 "projection_updated": projection_probe["updated"],
                 "projection_watermark": projection_probe["projection_watermark"],
                 "store_revision": self._store._store_revision,
-                "release_digest": self._run_release["digest"],
-                "checker_build": self._run_release["checker_build"],
+                "release_digest": self._legacy_run_release()["digest"],
+                "checker_build": self._legacy_run_release()["checker_build"],
             }
             encoded = json.dumps(
                 payload, sort_keys=True, separators=(",", ":")
@@ -3510,28 +3590,33 @@ class ControlledScenarioService:
                     return None
                 stopped_run_spec = attempts[-1]["run_spec"]
                 probe_run_spec = copy.deepcopy(stopped_run_spec)
+                probe_release = (
+                    self._legacy_run_release()
+                    if not stopped_run_spec.get("activation_event_id")
+                    else self._pinned_release_for(stopped_run_spec)
+                )
                 probe_run_spec.update(
                     {
                         "run_id": self._stable_id(
                             "probe",
-                            f"{job['job_id']}:{stopped_fence}:{self._run_release['digest']}",
+                            f"{job['job_id']}:{stopped_fence}:{probe_release['digest']}",
                         ),
                         "baseline_release": copy.deepcopy(
                             {
                                 key: value
-                                for key, value in self._run_release.items()
+                                for key, value in probe_release.items()
                                 if key not in {"target_release", "legacy_oracle"}
                             }
                         ),
-                        "release_id": self._run_release["release_id"],
-                        "release_digest": self._run_release["digest"],
-                        "checker_build": self._run_release["checker_build"],
+                        "release_id": probe_release["release_id"],
+                        "release_digest": probe_release["digest"],
+                        "checker_build": probe_release["checker_build"],
                         "fence": stopped_fence + 1,
-                        "limits": copy.deepcopy(self._run_release["limits"]),
-                        "applicable_check_ids": self._run_release[
+                        "limits": copy.deepcopy(probe_release["limits"]),
+                        "applicable_check_ids": probe_release[
                             "applicable_check_ids"
                         ],
-                        "applicable_check_count": self._run_release[
+                        "applicable_check_count": probe_release[
                             "applicable_check_count"
                         ],
                     }
@@ -3543,8 +3628,8 @@ class ControlledScenarioService:
                         "job_id": job["job_id"],
                         "stopped_fence": stopped_fence,
                         "probe_fence": stopped_fence + 1,
-                        "release_digest": self._run_release["digest"],
-                        "checker_build": self._run_release["checker_build"],
+                        "release_digest": probe_release["digest"],
+                        "checker_build": probe_release["checker_build"],
                         "check_signature": self._check_signature(run_result.checks),
                     }
                 )
@@ -3562,8 +3647,8 @@ class ControlledScenarioService:
         return {
             "kind": "frozen_checker_probe",
             "verified_targets": len(probes),
-            "release_digest": self._run_release["digest"],
-            "checker_build": self._run_release["checker_build"],
+            "release_digest": self._legacy_run_release()["digest"],
+            "checker_build": self._legacy_run_release()["checker_build"],
             "projection_updated": projection_probe["updated"],
             "projection_watermark": projection_probe["projection_watermark"],
             "probe_digest": hashlib.sha256(encoded).hexdigest(),
@@ -3678,6 +3763,15 @@ class ControlledScenarioService:
             app = self._store.applications.get(application_id)
             self._require_application_state_authority(app)
             assert app is not None
+            pinned_spec = next(
+                (
+                    attempt["run_spec"]
+                    for attempt in reversed(self._store.attempts)
+                    if attempt.get("application_id") == application_id
+                    and isinstance(attempt.get("run_spec"), dict)
+                ),
+                None,
+            )
             if (
                 work["lifecycle_revision"] != expected_lifecycle_revision
                 or work["criterion"]["digest"] != expected_criterion_digest
@@ -3687,11 +3781,10 @@ class ControlledScenarioService:
                     or app["cycle"] != work["cycle"]
                     or app["lifecycle_revision"] != expected_lifecycle_revision
                     or app["evidence_revision"] != work["evidence_revision"]
-                    or app["artifact_manifest"]["release_id"] != work["release_id"]
-                    or app["artifact_manifest"]["release_digest"]
-                    != work["release_digest"]
-                    or app["artifact_manifest"]["checker_build"]
-                    != work["checker_build"]
+                    or pinned_spec is None
+                    or pinned_spec["release_id"] != work["release_id"]
+                    or pinned_spec["release_digest"] != work["release_digest"]
+                    or pinned_spec["checker_build"] != work["checker_build"]
                 )
             ):
                 return {
@@ -4686,7 +4779,8 @@ class ControlledScenarioService:
                 failure_reason = (
                     self._APPLICATION_STATE_FAILURE
                     if isinstance(error, _ApplicationStateAuthorityUnavailable)
-                    else self._PINNED_RELEASE_FAILURE
+                    else getattr(error, "reason", None)
+                    or self._PINNED_RELEASE_FAILURE
                 )
                 self.stop_new_cohort(
                     reason_code=self._RUNTIME_STOP_REASON,
@@ -4761,7 +4855,7 @@ class ControlledScenarioService:
             try:
                 report = self._run_checker(run_spec)
                 run_result = self._convert_run_result(report, run_spec)
-                semantic_differential = self._semantic_differential(app, run_result)
+                semantic_differential = self._semantic_differential(app, run_result, run_spec)
             except _InvalidRunResult:
                 return self._record_checker_failure(
                     app,
@@ -6112,7 +6206,10 @@ class ControlledScenarioService:
                             work_item,
                             reason_code=item["reason_code"],
                         )
-                        if app.get("legacy_oracle_outcomes")
+                        if app.get("legacy_oracle_outcomes") or (
+                            run.get("semantic_differential", {}).get("status")
+                            == "bundle_bound"
+                        )
                         else None
                     )
                     decision_record = {
@@ -6249,8 +6346,50 @@ class ControlledScenarioService:
     ) -> dict[str, Any]:
         differential = run.get("semantic_differential")
         source = app.get("source")
-        legacy_outcomes = app.get("legacy_oracle_outcomes")
         finding_ids = run.get("finding_ids")
+        if differential is not None and differential.get("status") == "bundle_bound":
+            # Governed runs reference the immutable validation/migration
+            # bundle; the legacy oracle never executes on the target path.
+            if (
+                not isinstance(differential.get("bundle_id"), str)
+                or not differential["bundle_id"]
+                or not isinstance(differential.get("bundle_digest"), str)
+                or len(differential["bundle_digest"]) != 64
+                or not isinstance(differential.get("checks_compared"), int)
+                or not isinstance(source, dict)
+                or not isinstance(finding_ids, list)
+            ):
+                raise RuntimeError("review compatibility authority is unavailable")
+            differential_bytes = json.dumps(
+                differential,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            return {
+                "schema_version": "human-review-compatibility/1",
+                "differential_source": "s08_validation_bundle",
+                "intent": "manual_review",
+                "target_reason_code": reason_code,
+                "conformance": "bundle_bound",
+                "target_context": {
+                    "run_id": work_item["run_id"],
+                    "evidence_snapshot_id": work_item["evidence_snapshot_id"],
+                    "release_id": work_item["release_id"],
+                    "source_sha256": source.get("source_sha256")
+                    or source.get("source_result_sha256"),
+                },
+                "fact_counts": {
+                    "legacy_checks": 0,
+                    "target_findings": len(finding_ids),
+                    "checks_compared": differential["checks_compared"],
+                    "mismatches": 0,
+                },
+                "semantic_differential_digest": hashlib.sha256(
+                    differential_bytes
+                ).hexdigest(),
+            }
+        legacy_outcomes = app.get("legacy_oracle_outcomes")
         if (
             not isinstance(differential, dict)
             or differential.get("status") not in {"match", "mismatch"}
@@ -8825,7 +8964,10 @@ class ControlledScenarioService:
             return None
         spec = run.get("spec")
         baseline = spec.get("baseline_release") if isinstance(spec, dict) else None
-        release = self._release["target_release"]
+        try:
+            release = self._pinned_release_for(spec)["target_release"]
+        except Exception:
+            return None
         if (
             not isinstance(spec, dict)
             or not isinstance(baseline, dict)
@@ -9013,7 +9155,8 @@ class ControlledScenarioService:
         elif decisions:
             status = str(decisions[0]["decision"])
         spec = run["spec"]
-        live_release = self._release["target_release"]
+        release = self._pinned_release_for(spec)
+        live_release = release["target_release"]
         exact_context = (
             app.get("cycle") == request["cycle"]
             and app.get("current_run_id") == request["run_id"]
@@ -9029,9 +9172,9 @@ class ControlledScenarioService:
             == request["waiver_policy_id"]
             and spec.get("baseline_release", {}).get("waiver_policy_digest")
             == request["waiver_policy_digest"]
-            and self._release.get("release_id") == request["release_id"]
-            and self._release.get("digest") == request["release_digest"]
-            and self._release.get("checker_build") == request["checker_build"]
+            and release["release_id"] == request["release_id"]
+            and release["digest"] == request["release_digest"]
+            and release["checker_build"] == request["checker_build"]
             and live_release.waiver_policy_id == request["waiver_policy_id"]
             and live_release.waiver_policy_digest
             == request["waiver_policy_digest"]
@@ -11410,7 +11553,10 @@ class ControlledScenarioService:
                     work_item,
                     reason_code=normalized["reason_code"],
                 )
-                if app.get("legacy_oracle_outcomes")
+                if app.get("legacy_oracle_outcomes") or (
+                            run.get("semantic_differential", {}).get("status")
+                            == "bundle_bound"
+                        )
                 else None
             )
             decision_id = self._stable_id(
@@ -12261,6 +12407,21 @@ class ControlledScenarioService:
                         "release_id": spec["release_id"],
                         "release_digest": spec["release_digest"],
                         "checker_build": spec["checker_build"],
+                        "policy_scope": spec.get("policy_scope"),
+                        "activation_event_id": spec.get("activation_event_id"),
+                        "active_generation": spec.get("active_generation"),
+                        "candidate_id": spec.get("candidate_id"),
+                        "manifest_id": spec.get("manifest_id"),
+                        "manifest_digest": spec.get("manifest_digest"),
+                        "validation_bundle_id": spec.get("validation_bundle_id"),
+                        "validation_bundle_digest": spec.get(
+                            "validation_bundle_digest"
+                        ),
+                        "approval_binding_id": spec.get("approval_binding_id"),
+                        "approval_binding_digest": spec.get(
+                            "approval_binding_digest"
+                        ),
+                        "components": copy.deepcopy(spec.get("components", [])),
                         "finding_ids": copy.deepcopy(run.get("finding_ids", [])),
                         "cas_mismatches": list(run.get("cas_mismatches", ())),
                         **(
@@ -12592,15 +12753,25 @@ class ControlledScenarioService:
                 "documents": copy.deepcopy(payload["documents"]),
             }
         )
-        try:
-            oracle_report = (
-                self._legacy_oracle_runner(oracle_application)
-                if self._legacy_oracle_runner is not None
-                else self._release["legacy_oracle"].run(oracle_application)
-            )
-            oracle_outcomes = self._check_signature(oracle_report.checks)
-        except Exception:
-            oracle_outcomes = ()
+        oracle_outcomes: tuple[tuple[str, str, tuple[str, ...]], ...] = ()
+        governed_active = (
+            self._policy_governance is not None
+            and "C-DEMO/demo" in self._store.policy_active_projections
+        )
+        if not governed_active:
+            # Legacy mode keeps the offline differential oracle for its
+            # pre-cutover seam; governed runs reference the immutable
+            # validation/migration bundle instead and never execute the
+            # legacy engine at admission.
+            try:
+                oracle_report = (
+                    self._legacy_oracle_runner(oracle_application)
+                    if self._legacy_oracle_runner is not None
+                    else self._legacy_release()["legacy_oracle"].run(oracle_application)
+                )
+                oracle_outcomes = self._check_signature(oracle_report.checks)
+            except Exception:
+                oracle_outcomes = ()
         return CanonicalEnvelope(
             envelope_version=self.ENVELOPE_VERSION,
             schema_version=self.SCHEMA_VERSION,
@@ -12730,9 +12901,6 @@ class ControlledScenarioService:
                 "source_provenance_manifest_digest": (
                     self._manifest.source_provenance_manifest_digest
                 ),
-                "release_id": self._manifest.release_id,
-                "release_digest": self._manifest.release_digest,
-                "checker_build": self._manifest.checker_build,
             },
             "admitted_evidence_event_id": evidence_event_id,
             "legacy_oracle_outcomes": copy.deepcopy(envelope.oracle_outcomes),
@@ -12977,9 +13145,6 @@ class ControlledScenarioService:
             "source_provenance_manifest_digest": self._source_provenance_manifest[
                 "digest"
             ],
-            "release_id": self._release["release_id"],
-            "release_digest": self._release["digest"],
-            "checker_build": self._release["checker_build"],
             "adapter_id": "legacy-fixture-c-demo",
             "adapter_version": "1",
             "envelope_version": self.ENVELOPE_VERSION,
@@ -13653,9 +13818,6 @@ class ControlledScenarioService:
             "source": copy.deepcopy(envelope.payload["source"]),
             "artifact_manifest": {
                 "digest": self._manifest.digest,
-                "release_id": self._manifest.release_id,
-                "release_digest": self._manifest.release_digest,
-                "checker_build": self._manifest.checker_build,
                 "source_registration_digest": envelope.registration_digest,
             },
             "admitted_evidence_event_id": evidence_event_id,
@@ -14305,18 +14467,13 @@ class ControlledScenarioService:
             or accepted_receipts[0].artifact_manifest_digest != self._manifest.digest
         ):
             raise _PinnedReleaseUnavailable(self._PINNED_RELEASE_FAILURE)
-        expected = (
-            manifest.get("release_id"),
-            manifest.get("release_digest"),
-            manifest.get("checker_build"),
-        ) if isinstance(manifest, dict) else ()
-        actual = (
-            self._release["release_id"],
-            self._release["digest"],
-            self._release["checker_build"],
-        )
-        if expected != actual:
+        if (
+            not isinstance(manifest, dict)
+            or manifest.get("digest") != self._manifest.digest
+        ):
             raise _PinnedReleaseUnavailable(self._PINNED_RELEASE_FAILURE)
+        # The admission manifest binds only adapter/input provenance; the
+        # policy release is resolved at RunSpec freeze time.
 
     def _accepted_admission_authorities(self) -> list[dict[str, Any]]:
         authorities: list[dict[str, Any]] = []
@@ -14581,18 +14738,32 @@ class ControlledScenarioService:
         ).encode("utf-8")
         snapshot_digest = hashlib.sha256(snapshot_bytes).hexdigest()
         snapshot_id = f"snapshot_sha256_{snapshot_digest}"
-        run_id = self._stable_id(
-            "run",
-            ":".join(
-                (
-                    job["job_id"],
-                    str(app["cycle"]),
-                    snapshot_id,
-                    self._run_release["digest"],
-                    self._run_release["checker_build"],
+        policy_pin = None
+        if self._policy_governance is not None:
+            try:
+                policy_pin = self._policy_governance.resolve_run_pin(
+                    "C-DEMO/demo", int(self._clock()), store=owner
                 )
-            ),
-        )
+            except Exception as error:
+                raise _PinnedReleaseUnavailable(self._PINNED_RELEASE_FAILURE) from error
+        if policy_pin is not None:
+            release = policy_pin["release"]
+        elif self._policy_governance is not None:
+            raise _PinnedReleaseUnavailable(self._POLICY_UNAVAILABLE_FAILURE)
+        else:
+            release = self._legacy_run_release()
+        run_id_material = [
+            job["job_id"],
+            str(app["cycle"]),
+            snapshot_id,
+            release["digest"],
+            release["checker_build"],
+        ]
+        if policy_pin is not None:
+            run_id_material.extend(
+                (policy_pin["manifest_digest"], str(policy_pin["active_generation"]))
+            )
+        run_id = self._stable_id("run", ":".join(run_id_material))
         owner.evidence_events.append(
             {
                 "event_id": self._stable_id(
@@ -14608,7 +14779,7 @@ class ControlledScenarioService:
                 "payload": snapshot_payload,
             }
         )
-        return {
+        run_spec: dict[str, Any] = {
             "run_id": run_id,
             "application_id": app["application_id"],
             "cycle": app["cycle"],
@@ -14621,18 +14792,35 @@ class ControlledScenarioService:
             "baseline_release": copy.deepcopy(
                 {
                     key: value
-                    for key, value in self._run_release.items()
+                    for key, value in release.items()
                     if key not in {"target_release", "legacy_oracle"}
                 }
             ),
-            "release_id": self._run_release["release_id"],
-            "release_digest": self._run_release["digest"],
-            "checker_build": self._run_release["checker_build"],
+            "release_id": release["release_id"],
+            "release_digest": release["digest"],
+            "checker_build": release["checker_build"],
             "fence": job["fence"],
-            "limits": copy.deepcopy(self._run_release["limits"]),
-            "applicable_check_ids": self._run_release["applicable_check_ids"],
-            "applicable_check_count": self._run_release["applicable_check_count"],
+            "limits": copy.deepcopy(release["limits"]),
+            "applicable_check_ids": release["applicable_check_ids"],
+            "applicable_check_count": release["applicable_check_count"],
         }
+        if policy_pin is not None:
+            run_spec.update(
+                {
+                    "policy_scope": policy_pin["policy_scope"],
+                    "activation_event_id": policy_pin["activation_event_id"],
+                    "active_generation": policy_pin["active_generation"],
+                    "candidate_id": policy_pin["candidate_id"],
+                    "manifest_id": policy_pin["manifest_id"],
+                    "manifest_digest": policy_pin["manifest_digest"],
+                    "validation_bundle_id": policy_pin["validation_bundle_id"],
+                    "validation_bundle_digest": policy_pin["validation_bundle_digest"],
+                    "approval_binding_id": policy_pin["approval_binding_id"],
+                    "approval_binding_digest": policy_pin["approval_binding_digest"],
+                    "components": copy.deepcopy(policy_pin["components"]),
+                }
+            )
+        return run_spec
 
     @staticmethod
     def _checker_application(run_spec: dict[str, Any]) -> Application:
@@ -14654,7 +14842,47 @@ class ControlledScenarioService:
         if self._checker_runner is not None:
             probe_result = self._checker_runner(application)
             self._convert_run_result(probe_result, run_spec)
-        return self._target_checker.run(run_spec)
+        return self._checker_for_run(run_spec).run(run_spec)
+
+    def _pinned_release_for(self, run_spec: dict[str, Any]) -> dict[str, Any]:
+        """The complete release for a governed RunSpec pin, or the legacy
+        singleton for pre-cutover runs.  S05/S07 consumers resolve the exact
+        release the run pinned instead of any current singleton."""
+        if (
+            self._policy_governance is not None
+            and run_spec.get("activation_event_id")
+        ):
+            release = self._policy_governance.load_pinned_release(run_spec)
+            public = release.public_manifest()
+            return {
+                "release_id": public["release_id"],
+                "digest": public["digest"],
+                "checker_build": public["checker_build"],
+                "rules_digest": public["rules_digest"],
+                "knowledge_digest": public["knowledge_digest"],
+                "normalizer_digest": public["normalizer_digest"],
+                "waiver_policy_id": public["waiver_policy_id"],
+                "waiver_policy_digest": public["waiver_policy_digest"],
+                "limits": public["limits"],
+                "applicable_check_ids": public["applicable_check_ids"],
+                "applicable_check_count": public["applicable_check_count"],
+                "target_release": release,
+            }
+        return self._legacy_run_release()
+
+    def _checker_for_run(self, run_spec: dict[str, Any]) -> TargetChecker:
+        """Workers execute only the RunSpec-pinned Registry checker."""
+        if (
+            self._policy_governance is not None
+            and run_spec.get("activation_event_id")
+        ):
+            try:
+                return self._policy_governance.load_pinned_checker(run_spec)
+            except Exception as error:
+                raise _PinnedReleaseUnavailable(
+                    self._PINNED_RELEASE_FAILURE
+                ) from error
+        return self._legacy_target_checker()
 
     def _reconcile_s07_checker_timeout(
         self,
@@ -14736,7 +14964,7 @@ class ControlledScenarioService:
         ):
             try:
                 run_result = self._convert_run_result(response["result"], run_spec)
-                semantic_differential = self._semantic_differential(app, run_result)
+                semantic_differential = self._semantic_differential(app, run_result, run_spec)
             except _InvalidRunResult:
                 pass
             else:
@@ -15752,9 +15980,9 @@ class ControlledScenarioService:
             "cycle": app["cycle"],
             "lifecycle_revision": app["lifecycle_revision"],
             "evidence_revision": app["evidence_revision"],
-            "release_id": self._run_release["release_id"],
-            "release_digest": self._run_release["digest"],
-            "checker_build": self._run_release["checker_build"],
+            "release_id": run_spec["release_id"],
+            "release_digest": run_spec["release_digest"],
+            "checker_build": run_spec["checker_build"],
             "fence": job["fence"],
         }
         mismatches = tuple(
@@ -16095,8 +16323,25 @@ class ControlledScenarioService:
         )
 
     def _semantic_differential(
-        self, app: dict[str, Any], run_result: _RunResult
+        self,
+        app: dict[str, Any],
+        run_result: _RunResult,
+        run_spec: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        if (
+            self._policy_governance is not None
+            and run_spec is not None
+            and run_spec.get("validation_bundle_id")
+        ):
+            # Governed runs reference the immutable validation bundle; the
+            # legacy oracle never executes on the target path.
+            return {
+                "oracle": "s08-validation-bundle",
+                "bundle_id": run_spec["validation_bundle_id"],
+                "bundle_digest": run_spec["validation_bundle_digest"],
+                "checks_compared": len(run_result.checks),
+                "status": "bundle_bound",
+            }
         oracle = tuple(
             (str(item[0]), str(item[1]), tuple(item[2]))
             for item in (app.get("legacy_oracle_outcomes") or ())

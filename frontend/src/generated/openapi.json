@@ -2479,6 +2479,28 @@
       },
       "S01HistoryRun": {
         "properties": {
+          "activation_event_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Activation Event Id"
+          },
+          "active_generation": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Generation"
+          },
           "applicable_decision_ids": {
             "items": {
               "type": "string"
@@ -2493,9 +2515,42 @@
             "title": "Applicable Exception Ids",
             "type": "array"
           },
+          "approval_binding_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approval Binding Digest"
+          },
+          "approval_binding_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approval Binding Id"
+          },
           "authority_digest": {
             "title": "Authority Digest",
             "type": "string"
+          },
+          "candidate_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Candidate Id"
           },
           "cas_mismatches": {
             "items": {
@@ -2514,6 +2569,13 @@
               }
             ],
             "title": "Checker Build"
+          },
+          "components": {
+            "items": {
+              "$ref": "#/components/schemas/S01HistoryRunComponent"
+            },
+            "title": "Components",
+            "type": "array"
           },
           "current": {
             "title": "Current",
@@ -2592,6 +2654,39 @@
             "title": "Lifecycle Revision",
             "type": "integer"
           },
+          "manifest_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manifest Digest"
+          },
+          "manifest_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manifest Id"
+          },
+          "policy_scope": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Scope"
+          },
           "reconciliation": {
             "anyOf": [
               {
@@ -2638,6 +2733,28 @@
           "status": {
             "title": "Status",
             "type": "string"
+          },
+          "validation_bundle_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Validation Bundle Digest"
+          },
+          "validation_bundle_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Validation Bundle Id"
           }
         },
         "required": [
@@ -2660,6 +2777,30 @@
           "invalidated_exception_ids"
         ],
         "title": "S01HistoryRun",
+        "type": "object"
+      },
+      "S01HistoryRunComponent": {
+        "additionalProperties": false,
+        "properties": {
+          "digest": {
+            "title": "Digest",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "id",
+          "digest"
+        ],
+        "title": "S01HistoryRunComponent",
         "type": "object"
       },
       "S01HistorySourceLocation": {
@@ -4844,6 +4985,890 @@
           "actions"
         ],
         "title": "S01WorkspaceResponse",
+        "type": "object"
+      },
+      "S08ActiveResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "activated_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Activated At"
+          },
+          "activation_event_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Activation Event Id"
+          },
+          "activation_hold": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Activation Hold"
+          },
+          "active_generation": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Generation"
+          },
+          "approval_binding_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approval Binding Digest"
+          },
+          "approval_binding_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approval Binding Id"
+          },
+          "bootstrap": {
+            "default": false,
+            "title": "Bootstrap",
+            "type": "boolean"
+          },
+          "candidate_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Candidate Id"
+          },
+          "capability_gate": {
+            "title": "Capability Gate",
+            "type": "string"
+          },
+          "components": {
+            "items": {
+              "$ref": "#/components/schemas/S08ComponentRef"
+            },
+            "title": "Components",
+            "type": "array"
+          },
+          "manifest_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manifest Digest"
+          },
+          "manifest_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manifest Id"
+          },
+          "recovery_release_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recovery Release Id"
+          },
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "track": {
+            "title": "Track",
+            "type": "string"
+          },
+          "validation_bundle_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Validation Bundle Digest"
+          },
+          "validation_bundle_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Validation Bundle Id"
+          }
+        },
+        "required": [
+          "status",
+          "track",
+          "capability_gate",
+          "scope"
+        ],
+        "title": "S08ActiveResponse",
+        "type": "object"
+      },
+      "S08ApproveBody": {
+        "additionalProperties": false,
+        "properties": {
+          "activation_time": {
+            "title": "Activation Time",
+            "type": "integer"
+          },
+          "candidate_id": {
+            "title": "Candidate Id",
+            "type": "string"
+          },
+          "expected_governance_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Governance Revision"
+          },
+          "idempotency_key": {
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "recovery_release_id": {
+            "title": "Recovery Release Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "candidate_id",
+          "activation_time",
+          "recovery_release_id"
+        ],
+        "title": "S08ApproveBody",
+        "type": "object"
+      },
+      "S08CandidateCommandBody": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_id": {
+            "title": "Candidate Id",
+            "type": "string"
+          },
+          "expected_governance_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Governance Revision"
+          },
+          "idempotency_key": {
+            "title": "Idempotency Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "candidate_id"
+        ],
+        "title": "S08CandidateCommandBody",
+        "type": "object"
+      },
+      "S08CandidateSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "active_generation": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Generation"
+          },
+          "approval_binding_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approval Binding Id"
+          },
+          "author_subject": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Author Subject"
+          },
+          "candidate_id": {
+            "title": "Candidate Id",
+            "type": "string"
+          },
+          "manifest_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manifest Digest"
+          },
+          "manifest_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manifest Id"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "validation_bundle_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Validation Bundle Id"
+          }
+        },
+        "required": [
+          "candidate_id",
+          "status"
+        ],
+        "title": "S08CandidateSummary",
+        "type": "object"
+      },
+      "S08CandidatesResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "candidates": {
+            "items": {
+              "$ref": "#/components/schemas/S08CandidateSummary"
+            },
+            "title": "Candidates",
+            "type": "array"
+          },
+          "capability_gate": {
+            "title": "Capability Gate",
+            "type": "string"
+          },
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          },
+          "track": {
+            "title": "Track",
+            "type": "string"
+          }
+        },
+        "required": [
+          "track",
+          "capability_gate",
+          "scope",
+          "candidates"
+        ],
+        "title": "S08CandidatesResponse",
+        "type": "object"
+      },
+      "S08ComponentRef": {
+        "additionalProperties": false,
+        "properties": {
+          "digest": {
+            "title": "Digest",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "id",
+          "digest"
+        ],
+        "title": "S08ComponentRef",
+        "type": "object"
+      },
+      "S08DraftSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "bootstrap": {
+            "default": false,
+            "title": "Bootstrap",
+            "type": "boolean"
+          },
+          "candidate_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Candidate Id"
+          },
+          "draft_id": {
+            "title": "Draft Id",
+            "type": "string"
+          },
+          "mapping_ledger_digest": {
+            "title": "Mapping Ledger Digest",
+            "type": "string"
+          },
+          "mapping_ledger_id": {
+            "title": "Mapping Ledger Id",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "source_bundle_id": {
+            "title": "Source Bundle Id",
+            "type": "string"
+          },
+          "source_sha256": {
+            "title": "Source Sha256",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "draft_id",
+          "status",
+          "revision",
+          "source_bundle_id",
+          "source_sha256",
+          "mapping_ledger_id",
+          "mapping_ledger_digest"
+        ],
+        "title": "S08DraftSummary",
+        "type": "object"
+      },
+      "S08DraftsResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "capability_gate": {
+            "title": "Capability Gate",
+            "type": "string"
+          },
+          "drafts": {
+            "items": {
+              "$ref": "#/components/schemas/S08DraftSummary"
+            },
+            "title": "Drafts",
+            "type": "array"
+          },
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          },
+          "track": {
+            "title": "Track",
+            "type": "string"
+          }
+        },
+        "required": [
+          "track",
+          "capability_gate",
+          "scope",
+          "drafts"
+        ],
+        "title": "S08DraftsResponse",
+        "type": "object"
+      },
+      "S08EventRef": {
+        "additionalProperties": false,
+        "properties": {
+          "activation_event_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Activation Event Id"
+          },
+          "active_generation": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Generation"
+          },
+          "actor": {
+            "additionalProperties": true,
+            "title": "Actor",
+            "type": "object"
+          },
+          "approval_binding_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approval Binding Id"
+          },
+          "candidate_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Candidate Id"
+          },
+          "draft_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Draft Id"
+          },
+          "event_id": {
+            "title": "Event Id",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "manifest_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manifest Id"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Code"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "trusted_time": {
+            "title": "Trusted Time",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "event_id",
+          "revision",
+          "kind",
+          "actor",
+          "trusted_time"
+        ],
+        "title": "S08EventRef",
+        "type": "object"
+      },
+      "S08EventsResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "capability_gate": {
+            "title": "Capability Gate",
+            "type": "string"
+          },
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/S08EventRef"
+            },
+            "title": "Events",
+            "type": "array"
+          },
+          "governance_revision": {
+            "title": "Governance Revision",
+            "type": "integer"
+          },
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          },
+          "track": {
+            "title": "Track",
+            "type": "string"
+          }
+        },
+        "required": [
+          "track",
+          "capability_gate",
+          "scope",
+          "governance_revision",
+          "events"
+        ],
+        "title": "S08EventsResponse",
+        "type": "object"
+      },
+      "S08FreezeCandidateBody": {
+        "additionalProperties": false,
+        "properties": {
+          "draft_id": {
+            "title": "Draft Id",
+            "type": "string"
+          },
+          "expected_governance_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Governance Revision"
+          },
+          "idempotency_key": {
+            "title": "Idempotency Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "draft_id"
+        ],
+        "title": "S08FreezeCandidateBody",
+        "type": "object"
+      },
+      "S08ImportLegacyBody": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_governance_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Governance Revision"
+          },
+          "idempotency_key": {
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "source_bundle_id": {
+            "title": "Source Bundle Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "source_bundle_id"
+        ],
+        "title": "S08ImportLegacyBody",
+        "type": "object"
+      },
+      "S08RejectBody": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_id": {
+            "title": "Candidate Id",
+            "type": "string"
+          },
+          "expected_governance_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Governance Revision"
+          },
+          "idempotency_key": {
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "candidate_id",
+          "reason_code"
+        ],
+        "title": "S08RejectBody",
+        "type": "object"
+      },
+      "S08ReviseDraftBody": {
+        "additionalProperties": false,
+        "properties": {
+          "draft_id": {
+            "title": "Draft Id",
+            "type": "string"
+          },
+          "expected_governance_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Governance Revision"
+          },
+          "idempotency_key": {
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "title": "Metadata",
+            "type": "object"
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "draft_id",
+          "metadata"
+        ],
+        "title": "S08ReviseDraftBody",
+        "type": "object"
+      },
+      "S08ScheduleBody": {
+        "additionalProperties": false,
+        "properties": {
+          "activation_at": {
+            "title": "Activation At",
+            "type": "integer"
+          },
+          "approval_binding_id": {
+            "title": "Approval Binding Id",
+            "type": "string"
+          },
+          "expected_governance_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Governance Revision"
+          },
+          "idempotency_key": {
+            "title": "Idempotency Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "approval_binding_id",
+          "activation_at"
+        ],
+        "title": "S08ScheduleBody",
+        "type": "object"
+      },
+      "S08StatusResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "activation_hold": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Activation Hold"
+          },
+          "active_generation": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Generation"
+          },
+          "bootstrap": {
+            "title": "Bootstrap",
+            "type": "boolean"
+          },
+          "capability_gate": {
+            "title": "Capability Gate",
+            "type": "string"
+          },
+          "governance_revision": {
+            "title": "Governance Revision",
+            "type": "integer"
+          },
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          },
+          "track": {
+            "title": "Track",
+            "type": "string"
+          },
+          "watermark": {
+            "title": "Watermark",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "track",
+          "capability_gate",
+          "scope",
+          "governance_revision",
+          "bootstrap",
+          "watermark"
+        ],
+        "title": "S08StatusResponse",
+        "type": "object"
+      },
+      "S08StopActivationsBody": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_governance_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Governance Revision"
+          },
+          "idempotency_key": {
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "reason_code"
+        ],
+        "title": "S08StopActivationsBody",
         "type": "object"
       },
       "T05BusinessExceptionOperationsResult": {
@@ -10391,6 +11416,537 @@
           }
         },
         "summary": "Controlled S05 React Page"
+      }
+    },
+    "/controlled/s08/api/commands/approve": {
+      "post": {
+        "operationId": "s08_approve_controlled_s08_api_commands_approve_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S08ApproveBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response S08 Approve Controlled S08 Api Commands Approve Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "S08 Approve"
+      }
+    },
+    "/controlled/s08/api/commands/cancel": {
+      "post": {
+        "operationId": "s08_cancel_controlled_s08_api_commands_cancel_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S08RejectBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response S08 Cancel Controlled S08 Api Commands Cancel Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "S08 Cancel"
+      }
+    },
+    "/controlled/s08/api/commands/freeze_candidate": {
+      "post": {
+        "operationId": "s08_freeze_candidate_controlled_s08_api_commands_freeze_candidate_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S08FreezeCandidateBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response S08 Freeze Candidate Controlled S08 Api Commands Freeze Candidate Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "S08 Freeze Candidate"
+      }
+    },
+    "/controlled/s08/api/commands/import_legacy": {
+      "post": {
+        "operationId": "s08_import_legacy_controlled_s08_api_commands_import_legacy_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S08ImportLegacyBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response S08 Import Legacy Controlled S08 Api Commands Import Legacy Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "S08 Import Legacy"
+      }
+    },
+    "/controlled/s08/api/commands/reject": {
+      "post": {
+        "operationId": "s08_reject_controlled_s08_api_commands_reject_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S08RejectBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response S08 Reject Controlled S08 Api Commands Reject Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "S08 Reject"
+      }
+    },
+    "/controlled/s08/api/commands/request_validation": {
+      "post": {
+        "operationId": "s08_request_validation_controlled_s08_api_commands_request_validation_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S08CandidateCommandBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response S08 Request Validation Controlled S08 Api Commands Request Validation Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "S08 Request Validation"
+      }
+    },
+    "/controlled/s08/api/commands/revise_draft": {
+      "post": {
+        "operationId": "s08_revise_draft_controlled_s08_api_commands_revise_draft_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S08ReviseDraftBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response S08 Revise Draft Controlled S08 Api Commands Revise Draft Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "S08 Revise Draft"
+      }
+    },
+    "/controlled/s08/api/commands/schedule": {
+      "post": {
+        "operationId": "s08_schedule_controlled_s08_api_commands_schedule_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S08ScheduleBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response S08 Schedule Controlled S08 Api Commands Schedule Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "S08 Schedule"
+      }
+    },
+    "/controlled/s08/api/commands/stop_activations": {
+      "post": {
+        "operationId": "s08_stop_activations_controlled_s08_api_commands_stop_activations_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S08StopActivationsBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response S08 Stop Activations Controlled S08 Api Commands Stop Activations Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "S08 Stop Activations"
+      }
+    },
+    "/controlled/s08/api/commands/submit_review": {
+      "post": {
+        "operationId": "s08_submit_review_controlled_s08_api_commands_submit_review_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S08CandidateCommandBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response S08 Submit Review Controlled S08 Api Commands Submit Review Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "S08 Submit Review"
+      }
+    },
+    "/controlled/s08/api/queries/active": {
+      "get": {
+        "operationId": "s08_query_active_controlled_s08_api_queries_active_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ActiveResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "S08 Query Active"
+      }
+    },
+    "/controlled/s08/api/queries/candidate/{candidate_id}": {
+      "get": {
+        "operationId": "s08_query_candidate_controlled_s08_api_queries_candidate__candidate_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "candidate_id",
+            "required": true,
+            "schema": {
+              "title": "Candidate Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response S08 Query Candidate Controlled S08 Api Queries Candidate  Candidate Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "S08 Query Candidate"
+      }
+    },
+    "/controlled/s08/api/queries/candidates": {
+      "get": {
+        "operationId": "s08_query_candidates_controlled_s08_api_queries_candidates_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08CandidatesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "S08 Query Candidates"
+      }
+    },
+    "/controlled/s08/api/queries/drafts": {
+      "get": {
+        "operationId": "s08_query_drafts_controlled_s08_api_queries_drafts_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08DraftsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "S08 Query Drafts"
+      }
+    },
+    "/controlled/s08/api/queries/events": {
+      "get": {
+        "operationId": "s08_query_events_controlled_s08_api_queries_events_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08EventsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "S08 Query Events"
+      }
+    },
+    "/controlled/s08/api/queries/status": {
+      "get": {
+        "operationId": "s08_query_status_controlled_s08_api_queries_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08StatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "S08 Query Status"
       }
     },
     "/demo/react": {

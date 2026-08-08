@@ -57,6 +57,30 @@ _PROTECTED_WAIVER_CHECKS = frozenset(
     {"R_VIN_CROSS", "R_ENGINE_CROSS", "R_ID_EXACT"}
 )
 
+_TARGET_ARTIFACT_SCHEMA = "s08-target-release/1"
+_TARGET_RELEASE_IDENTITY_SCHEMA = "s01-target-release/6"
+_TARGET_CHECKER_BUILD = "s01-target-checker/6"
+_SEMANTIC_CATALOG_SCHEMA = "s08-semantic-catalog/1"
+_NORMALIZATION_POLICY_SCHEMA = "s08-normalization-policy/1"
+_COMPARISON_POLICY_SCHEMA = "s08-comparison-policy/1"
+_READINESS_POLICY_SCHEMA = "s08-readiness-policy/1"
+_OPERATORS_SCHEMA = "s08-operators/1"
+_NORMALIZERS_SCHEMA = "s08-normalizers/1"
+_INPUT_CONTRACT_SCHEMA = "s08-input-contract/1"
+_LIMITS_SCHEMA = "s08-limits/1"
+
+# Deterministic operators the pure checker may execute.  The governed
+# manifest binds this registry so validation can refuse unknown operators.
+_TARGET_OPERATORS = frozenset(
+    {
+        "all_equal",
+        "multi_fuzzy_all",
+        "multi_numeric_all",
+        "list_contains",
+        "pre_ocr_recheck",
+    }
+)
+
 
 @dataclass(frozen=True)
 class TargetEvidenceLink:
@@ -209,12 +233,14 @@ class TargetRelease:
         config: RuleConfig,
         digest: str,
         *,
-        knowledge: dict[str, Any] | None = None,
+        knowledge: dict[str, Any],
     ) -> "TargetRelease":
-        if knowledge is None:
-            from task4_consistency.kb.store import get_kb
-
-            knowledge = get_kb().to_dict()
+        # Knowledge is always explicit: the process-global KB is not a
+        # release authority and never participates in compilation.
+        if not isinstance(knowledge, dict):
+            raise ValueError(
+                "compile requires explicit knowledge; the global KB is not a release authority"
+            )
         from task4_consistency.normalize.address import _ALIAS_MAP
 
         sections = {
@@ -330,7 +356,7 @@ class TargetRelease:
             separators=(",", ":"),
         ).encode("utf-8")
         normalizer_digest = hashlib.sha256(normalizer_bytes).hexdigest()
-        checker_build = "s01-target-checker/6"
+        checker_build = _TARGET_CHECKER_BUILD
         release_bytes = json.dumps(
             {
                 "schema_version": "s01-target-release/6",
@@ -389,6 +415,278 @@ class TargetRelease:
             "applicable_check_ids": tuple(rule.rule_id for rule in self.rules),
             "applicable_check_count": len(self.rules),
         }
+
+    def normalizer_manifest(self) -> dict[str, Any]:
+        """The canonical normalization policy content.  Reproduces the exact
+        bytes ``compile`` hashed so the governed artifact digest equals the
+        compile-time ``normalizer_digest``."""
+        used_types = {field_type for _, field_type in self.field_types}
+        return {
+            "schema_version": "s01-target-normalizers/2",
+            "field_types": self.field_types,
+            "implementations": tuple(
+                (field_type, _TARGET_NORMALIZER_BUILDS.get(field_type, "generic/1"))
+                for field_type in sorted(used_types)
+            ),
+            "artifacts": _normalizer_artifact_manifest(used_types),
+            "options": {
+                "date_order": self.date_order,
+                "vin_fix_ioq": self.vin_fix_ioq,
+                "vin_strict_check_digit": self.vin_strict_check_digit,
+                "expand_id15_to_18": self.expand_id15_to_18,
+            },
+        }
+
+    def waiver_policy(self) -> dict[str, Any]:
+        """The canonical comparison/waiver policy content.  Reproduces the
+        exact bytes ``compile`` hashed so the governed artifact digest equals
+        the compile-time ``waiver_policy_digest``."""
+        return {
+            "schema_version": "c-demo-waiver-policy/1",
+            "policy_id": self.waiver_policy_id,
+            "checks": [
+                {
+                    "rule_id": rule.rule_id,
+                    "waivable": rule.waivable,
+                    "allowed_reasons": (
+                        list(rule.waiver_reasons) if rule.waivable else []
+                    ),
+                    "scope": rule.waiver_scope if rule.waivable else None,
+                    "maximum_ttl_seconds": (
+                        rule.waiver_ttl_seconds if rule.waivable else 0
+                    ),
+                }
+                for rule in self.rules
+            ],
+        }
+
+    def operator_registry(self) -> dict[str, Any]:
+        """The deterministic operator set this release may execute."""
+        return {
+            "schema_version": _OPERATORS_SCHEMA,
+            "operators": sorted(_TARGET_OPERATORS),
+        }
+
+    def input_contract(self) -> dict[str, Any]:
+        """The input semantic contract the checker accepts."""
+        roles = sorted(
+            {
+                role
+                for rule in self.rules
+                for role in rule.document_roles
+            }
+        )
+        return {
+            "schema_version": _INPUT_CONTRACT_SCHEMA,
+            "evidence_snapshot_schema": "s01-evidence-snapshot/1",
+            "document_roles": roles,
+        }
+
+    def to_artifact(self) -> dict[str, Any]:
+        """Canonical, content-addressed checker artifact.
+
+        The artifact excludes ``release_digest``: ``from_artifact`` recomputes
+        it from the same release identity material ``compile`` hashed, so a
+        governed checker materialized from the Registry has the identical
+        digest to the legacy compile-time release it replaces."""
+        return {
+            "schema_version": _TARGET_ARTIFACT_SCHEMA,
+            "release_id": self.release_id,
+            "rules_digest": self.rules_digest,
+            "knowledge_digest": self.knowledge_digest,
+            "normalizer_digest": self.normalizer_digest,
+            "waiver_policy_id": self.waiver_policy_id,
+            "waiver_policy_digest": self.waiver_policy_digest,
+            "checker_build": self.checker_build,
+            "knowledge": self.knowledge,
+            "aliases": self.aliases,
+            "field_types": self.field_types,
+            "rules": tuple(_rule_to_dict(rule) for rule in self.rules),
+            "low_confidence_threshold": self.low_confidence_threshold,
+            "critical_low_conf_compare": self.critical_low_conf_compare,
+            "date_order": self.date_order,
+            "vin_fix_ioq": self.vin_fix_ioq,
+            "vin_strict_check_digit": self.vin_strict_check_digit,
+            "expand_id15_to_18": self.expand_id15_to_18,
+            "limits": self.limits,
+        }
+
+    @classmethod
+    def from_artifact(cls, artifact: dict[str, Any]) -> "TargetRelease":
+        """Rebuild a checker release purely from Registry bytes.
+
+        Recomputes the release digest, validates the schema/build/operator
+        compatibility, and never touches files, network or the global KB."""
+        if not isinstance(artifact, dict):
+            raise ValueError("governed checker artifact must be an object")
+        if artifact.get("schema_version") != _TARGET_ARTIFACT_SCHEMA:
+            raise ValueError("governed checker artifact schema is not supported")
+        checker_build = artifact.get("checker_build")
+        if checker_build != _TARGET_CHECKER_BUILD:
+            raise ValueError(
+                f"governed checker build {checker_build!r} is not compatible"
+            )
+        identity = {
+            "schema_version": _TARGET_RELEASE_IDENTITY_SCHEMA,
+            "release_id": artifact.get("release_id"),
+            "rules_digest": artifact.get("rules_digest"),
+            "knowledge_digest": artifact.get("knowledge_digest"),
+            "normalizer_digest": artifact.get("normalizer_digest"),
+            "waiver_policy_id": artifact.get("waiver_policy_id"),
+            "waiver_policy_digest": artifact.get("waiver_policy_digest"),
+            "checker_build": checker_build,
+        }
+        release_digest = hashlib.sha256(
+            json.dumps(
+                identity, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()
+        rules_data = artifact.get("rules")
+        if not isinstance(rules_data, (list, tuple)) or not rules_data:
+            raise ValueError("governed checker artifact has no compiled rules")
+        rules = tuple(_rule_from_dict(item) for item in rules_data)
+        knowledge_data = artifact.get("knowledge")
+        aliases_data = artifact.get("aliases")
+        field_types_data = artifact.get("field_types")
+        limits_data = artifact.get("limits")
+        if not all(
+            isinstance(item, (list, tuple))
+            for item in (
+                knowledge_data,
+                aliases_data,
+                field_types_data,
+                limits_data,
+            )
+        ):
+            raise ValueError("governed checker artifact is structurally invalid")
+        return cls(
+            release_id=str(artifact["release_id"]),
+            release_digest=release_digest,
+            checker_build=checker_build,
+            rules_digest=str(artifact["rules_digest"]),
+            knowledge_digest=str(artifact["knowledge_digest"]),
+            normalizer_digest=str(artifact["normalizer_digest"]),
+            waiver_policy_id=str(artifact["waiver_policy_id"]),
+            waiver_policy_digest=str(artifact["waiver_policy_digest"]),
+            knowledge=tuple(
+                (str(section), tuple((str(k), str(v)) for k, v in values))
+                for section, values in knowledge_data
+            ),
+            aliases=tuple(
+                (str(canonical), tuple(str(name) for name in names))
+                for canonical, names in aliases_data
+            ),
+            field_types=tuple(
+                (str(field), str(field_type)) for field, field_type in field_types_data
+            ),
+            rules=rules,
+            low_confidence_threshold=float(artifact["low_confidence_threshold"]),
+            critical_low_conf_compare=bool(artifact["critical_low_conf_compare"]),
+            date_order=artifact.get("date_order"),
+            vin_fix_ioq=bool(artifact["vin_fix_ioq"]),
+            vin_strict_check_digit=bool(artifact["vin_strict_check_digit"]),
+            expand_id15_to_18=bool(artifact["expand_id15_to_18"]),
+            limits=tuple((str(key), int(value)) for key, value in limits_data),
+        )
+
+    def component_artifacts(self) -> list[dict[str, Any]]:
+        """Canonical non-source components of this release, excluding the raw
+        rules/KB source artifacts and the checker artifact itself.  Each entry
+        is ``{"type", "content"}`` with a JSON-serializable content dict."""
+        return [
+            {
+                "type": "semantic_catalog",
+                "content": {
+                    "schema_version": _SEMANTIC_CATALOG_SCHEMA,
+                    "field_types": self.field_types,
+                },
+            },
+            {
+                "type": "normalization_policy",
+                "content": self.normalizer_manifest(),
+            },
+            {"type": "comparison_policy", "content": self.waiver_policy()},
+            {
+                "type": "readiness_policy",
+                "content": {
+                    "schema_version": _READINESS_POLICY_SCHEMA,
+                    "policy_id": "c-demo-readiness/1",
+                },
+            },
+            {"type": "operators", "content": self.operator_registry()},
+            {
+                "type": "normalizers",
+                "content": {
+                    "schema_version": _NORMALIZERS_SCHEMA,
+                    "normalizers": dict(sorted(_TARGET_NORMALIZER_BUILDS.items())),
+                },
+            },
+            {"type": "input_contract", "content": self.input_contract()},
+            {
+                "type": "limits",
+                "content": {"schema_version": _LIMITS_SCHEMA, "limits": dict(self.limits)},
+            },
+        ]
+
+
+def _rule_to_dict(rule: TargetRule) -> dict[str, Any]:
+    return {
+        "rule_id": rule.rule_id,
+        "rule_type": rule.rule_type,
+        "field": rule.field,
+        "document_roles": list(rule.document_roles),
+        "on_missing": rule.on_missing,
+        "severity": rule.severity,
+        "threshold": rule.threshold,
+        "uncertain_band": rule.uncertain_band,
+        "abs_tol": rule.abs_tol,
+        "rel_tol": rule.rel_tol,
+        "list_field": rule.list_field,
+        "item_field": rule.item_field,
+        "if_field_present": rule.if_field_present,
+        "required_field": rule.required_field,
+        "min_confidence": rule.min_confidence,
+        "require_all_docs": rule.require_all_docs,
+        "transfer_name_policy": rule.transfer_name_policy,
+        "transfer_old_roles": list(rule.transfer_old_roles),
+        "transfer_new_roles": list(rule.transfer_new_roles),
+        "waivable": rule.waivable,
+        "waiver_policy_id": rule.waiver_policy_id,
+        "waiver_policy_digest": rule.waiver_policy_digest,
+        "waiver_reasons": list(rule.waiver_reasons),
+        "waiver_scope": rule.waiver_scope,
+        "waiver_ttl_seconds": rule.waiver_ttl_seconds,
+    }
+
+
+def _rule_from_dict(data: dict[str, Any]) -> TargetRule:
+    return TargetRule(
+        rule_id=str(data["rule_id"]),
+        rule_type=str(data["rule_type"]),
+        field=data.get("field"),
+        document_roles=tuple(str(role) for role in data.get("document_roles", ())),
+        on_missing=str(data["on_missing"]),
+        severity=str(data["severity"]),
+        threshold=float(data["threshold"]),
+        uncertain_band=float(data["uncertain_band"]),
+        abs_tol=float(data["abs_tol"]),
+        rel_tol=float(data["rel_tol"]),
+        list_field=data.get("list_field"),
+        item_field=data.get("item_field"),
+        if_field_present=data.get("if_field_present"),
+        required_field=data.get("required_field"),
+        min_confidence=float(data["min_confidence"]),
+        require_all_docs=bool(data["require_all_docs"]),
+        transfer_name_policy=data.get("transfer_name_policy"),
+        transfer_old_roles=tuple(str(role) for role in data.get("transfer_old_roles", ())),
+        transfer_new_roles=tuple(str(role) for role in data.get("transfer_new_roles", ())),
+        waivable=bool(data.get("waivable", False)),
+        waiver_policy_id=data.get("waiver_policy_id"),
+        waiver_policy_digest=data.get("waiver_policy_digest"),
+        waiver_reasons=tuple(str(reason) for reason in data.get("waiver_reasons", ())),
+        waiver_scope=data.get("waiver_scope"),
+        waiver_ttl_seconds=int(data.get("waiver_ttl_seconds", 0)),
+    )
 
 
 @dataclass(frozen=True)
@@ -615,6 +913,69 @@ class TargetChecker:
             raise ValueError("RunSpec evidence snapshot digest does not match")
         if run_spec["evidence_snapshot_id"] != f"snapshot_sha256_{snapshot_digest}":
             raise ValueError("RunSpec evidence snapshot identity does not match")
+
+        if run_spec.get("policy_scope") is not None or run_spec.get(
+            "activation_event_id"
+        ) is not None:
+            self._validate_governed_pin(run_spec)
+
+    def _validate_governed_pin(self, run_spec: dict[str, Any]) -> None:
+        """A governed RunSpec must pin one complete Registry release."""
+        for key in (
+            "policy_scope",
+            "activation_event_id",
+            "active_generation",
+            "candidate_id",
+            "manifest_id",
+            "manifest_digest",
+            "validation_bundle_id",
+            "validation_bundle_digest",
+            "approval_binding_id",
+            "approval_binding_digest",
+            "components",
+        ):
+            if key not in run_spec:
+                raise ValueError(f"RunSpec governed pin is incomplete: {key}")
+        if run_spec["policy_scope"] != "C-DEMO/demo":
+            raise ValueError("RunSpec policy scope does not match the served scope")
+        if (
+            isinstance(run_spec["active_generation"], bool)
+            or not isinstance(run_spec["active_generation"], int)
+            or run_spec["active_generation"] < 1
+        ):
+            raise ValueError("RunSpec active generation is invalid")
+        for key in (
+            "activation_event_id",
+            "candidate_id",
+            "manifest_id",
+            "validation_bundle_id",
+            "approval_binding_id",
+        ):
+            if (
+                not isinstance(run_spec[key], str)
+                or not run_spec[key]
+                or run_spec[key].strip() != run_spec[key]
+            ):
+                raise ValueError(f"RunSpec governed pin {key} is invalid")
+        for key in ("manifest_digest", "validation_bundle_digest", "approval_binding_digest"):
+            if (
+                not isinstance(run_spec[key], str)
+                or len(run_spec[key]) != 64
+                or any(character not in "0123456789abcdef" for character in run_spec[key])
+            ):
+                raise ValueError(f"RunSpec governed pin {key} is invalid")
+        components = run_spec["components"]
+        if not isinstance(components, (list, tuple)) or not components:
+            raise ValueError("RunSpec governed components are incomplete")
+        types = [item.get("type") for item in components]
+        if len(set(types)) != len(types):
+            raise ValueError("RunSpec governed components are duplicated")
+        for item in components:
+            if not isinstance(item, dict) or not all(
+                isinstance(item.get(field), str) and item[field]
+                for field in ("type", "id", "digest")
+            ):
+                raise ValueError("RunSpec governed component is invalid")
 
     def _field_names(self, canonical: str) -> tuple[str, ...]:
         names = self._aliases.get(canonical)

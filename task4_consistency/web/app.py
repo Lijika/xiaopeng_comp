@@ -42,6 +42,16 @@ from task4_consistency.controlled.s01 import (
     S01CommandPrincipal,
     _ApplicationStateAuthorityUnavailable,
 )
+from task4_consistency.controlled.s08 import (
+    PolicyConflict,
+    PolicyGovernanceService,
+    PolicyInvalidTransition,
+    PolicyNotFound,
+    PolicyPrincipal,
+    PolicyUnavailable,
+    S08_SCOPE,
+    SOURCE_BUNDLE_ID,
+)
 from task4_consistency.controlled.s02 import (
     ControlledObject,
     RegisteredSource,
@@ -111,6 +121,53 @@ S05_EXCEPTION_APPROVER_SUBJECT = (
     os.environ.get("TASK4_S05_EXCEPTION_APPROVER_SUBJECT", "").strip()
     or "c-demo-exception-approver"
 )
+S08_ADMIN_CREDENTIAL = os.environ.get("TASK4_S08_ADMIN_CREDENTIAL", "").strip()
+S08_ADMIN_SUBJECT = os.environ.get("TASK4_S08_ADMIN_SUBJECT", "").strip()
+S08_APPROVER_CREDENTIAL = os.environ.get("TASK4_S08_APPROVER_CREDENTIAL", "").strip()
+S08_APPROVER_SUBJECT = os.environ.get("TASK4_S08_APPROVER_SUBJECT", "").strip()
+S08_OPERATOR_CREDENTIAL = os.environ.get("TASK4_S08_OPERATOR_CREDENTIAL", "").strip()
+S08_OPERATOR_SUBJECT = os.environ.get("TASK4_S08_OPERATOR_SUBJECT", "").strip()
+S08_MIGRATION_ADMIN_SUBJECT = (
+    os.environ.get("TASK4_S08_MIGRATION_ADMIN_SUBJECT", "").strip()
+    or "c-demo-migration-admin"
+)
+S08_CONFIGURED = bool(
+    S08_ADMIN_CREDENTIAL
+    and S08_ADMIN_SUBJECT
+    and S08_APPROVER_CREDENTIAL
+    and S08_APPROVER_SUBJECT
+    and S08_OPERATOR_CREDENTIAL
+    and S08_OPERATOR_SUBJECT
+)
+S08_SERVICE: PolicyGovernanceService | None = None
+S08_DEFAULT_KB_PATH = ROOT / "configs" / "kb" / "entity_kb.json"
+
+
+def _s08_policy_service(
+    *,
+    state_path: Path,
+    rules_path: Path,
+    audit_available: bool,
+    storage_available: bool,
+    clock: Callable[[], int],
+    corpus_root: Path | None = None,
+) -> PolicyGovernanceService | None:
+    try:
+        return PolicyGovernanceService(
+            state_path=state_path,
+            audit_available=audit_available,
+            storage_available=storage_available,
+            migration_admin_subject=S08_MIGRATION_ADMIN_SUBJECT,
+            admin_subject=S08_ADMIN_SUBJECT or "c-demo-policy-admin",
+            approver_subject=S08_APPROVER_SUBJECT or "c-demo-policy-approver",
+            operator_subject=S08_OPERATOR_SUBJECT or "c-demo-policy-operator",
+            source_rules_path=rules_path,
+            source_kb_path=S08_DEFAULT_KB_PATH,
+            corpus_root=corpus_root,
+            clock=clock,
+        )
+    except Exception:
+        return None
 try:
     _s01_state_value = os.environ.get("TASK4_S01_STATE_PATH", "").strip()
     if not _s01_state_value:
@@ -118,6 +175,14 @@ try:
     _s01_state_path = Path(_s01_state_value)
     if not _s01_state_path.is_absolute():
         raise ValueError("TASK4_S01_STATE_PATH must be absolute")
+    S08_SERVICE = _s08_policy_service(
+        state_path=_s01_state_path,
+        rules_path=DEFAULT_RULES,
+        audit_available=_s01_demo_flag("TASK4_S01_AUDIT_AVAILABLE", default=True),
+        storage_available=_s01_demo_flag("TASK4_S01_STORAGE_AVAILABLE", default=True),
+        clock=lambda: int(time.time()),
+        corpus_root=FIXTURES,
+    )
     S01_SERVICE: ControlledScenarioService | None = ControlledScenarioService(
         fixture_root=FIXTURES,
         rules_path=DEFAULT_RULES,
@@ -127,7 +192,10 @@ try:
         registered_sources=S02_REGISTERED_SOURCES,
         controlled_objects=S02_CONTROLLED_OBJECTS,
         exception_approver_subject=S05_EXCEPTION_APPROVER_SUBJECT,
+        policy_governance=S08_SERVICE,
     )
+    if S08_SERVICE is not None:
+        S08_SERVICE.bootstrap_once()
 except Exception as error:
     S01_SERVICE = None
     S01_CONFIGURATION_ERROR = str(error)
@@ -233,6 +301,11 @@ class S01BackgroundRuntime:
                         raise RuntimeError("supplement deadline sweep failed")
                 worker_result = self._service.process_next_job()
                 projection_result = self._service.refresh_projection()
+                policy_process = getattr(
+                    self._service, "process_next_policy_job", None
+                )
+                if policy_process is not None:
+                    policy_process()
             except Exception:
                 reason_code = "S01_BACKGROUND_RUNTIME_EXCEPTION"
                 self._mark_unhealthy(reason_code)
@@ -1119,6 +1192,14 @@ class S01HistoryAttachmentVersion(BaseModel):
     current: bool
 
 
+class S01HistoryRunComponent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: str
+    id: str
+    digest: str
+
+
 class S01HistoryRun(BaseModel):
     run_id: str
     status: str
@@ -1133,6 +1214,17 @@ class S01HistoryRun(BaseModel):
     release_id: str | None = None
     release_digest: str | None = None
     checker_build: str | None = None
+    policy_scope: str | None = None
+    activation_event_id: str | None = None
+    active_generation: int | None = None
+    candidate_id: str | None = None
+    manifest_id: str | None = None
+    manifest_digest: str | None = None
+    validation_bundle_id: str | None = None
+    validation_bundle_digest: str | None = None
+    approval_binding_id: str | None = None
+    approval_binding_digest: str | None = None
+    components: list[S01HistoryRunComponent] = Field(default_factory=list)
     finding_ids: list[str]
     cas_mismatches: list[str]
     selected_observation_ids: list[str]
@@ -1973,6 +2065,68 @@ def _s01_worker_json(result: Any) -> dict[str, Any]:
 def _s01_disable_cache(response: Response) -> None:
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
+
+
+def _s08_service() -> PolicyGovernanceService:
+    if S08_SERVICE is None:
+        raise HTTPException(
+            503,
+            detail={
+                "error": "S08_UNAVAILABLE",
+                "message": "Controlled S08 policy governance is unavailable",
+            },
+        )
+    return S08_SERVICE
+
+
+def _s08_require_role(request: Request, expected: str) -> PolicyPrincipal:
+    credentials = {
+        "admin": (S08_ADMIN_CREDENTIAL, S08_ADMIN_SUBJECT),
+        "approver": (S08_APPROVER_CREDENTIAL, S08_APPROVER_SUBJECT),
+        "operator": (S08_OPERATOR_CREDENTIAL, S08_OPERATOR_SUBJECT),
+    }
+    credential, subject = credentials.get(expected, ("", ""))
+    if not subject or not _s01_has_credential(request, credential):
+        raise HTTPException(
+            403,
+            detail={
+                "error": "S08_FORBIDDEN",
+                "message": "Registered S08 identity required",
+            },
+        )
+    return PolicyPrincipal(
+        subject=subject,
+        role=expected,
+        scope=S08_SCOPE,
+        source_id="s08-web-bearer",
+    )
+
+
+def _s08_not_found(error: Exception) -> HTTPException:
+    return HTTPException(
+        404,
+        detail={"error": "S08_NOT_FOUND", "message": "Governance object is unavailable"},
+    )
+
+
+def _s08_rejected(error: Exception) -> HTTPException:
+    if isinstance(error, PolicyUnavailable):
+        return HTTPException(
+            503,
+            detail={
+                "error": "S08_UNAVAILABLE",
+                "message": "Governance authority is unavailable",
+            },
+        )
+    if isinstance(error, PolicyNotFound):
+        return _s08_not_found(error)
+    return HTTPException(
+        409,
+        detail={
+            "error": "S08_CONFLICT",
+            "message": "Governance command conflicts with current state",
+        },
+    )
 
 
 def _s02_service() -> ControlledScenarioService:
@@ -4723,10 +4877,412 @@ def kb_reload() -> dict[str, Any]:
     return {"ok": True, "kb": kb.to_dict()}
 
 
+# --- S08 governed policy release surface ----------------------------------
+
+class S08CommandBody(BaseModel):
+    """Common command envelope: semantic payload plus expected governance
+    revision and idempotency key.  Bodies never carry paths, URLs, code,
+    I/O or credentials."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: str
+    expected_governance_revision: int | None = None
+
+
+class S08ImportLegacyBody(S08CommandBody):
+    source_bundle_id: str
+
+
+class S08ReviseDraftBody(S08CommandBody):
+    draft_id: str
+    metadata: dict[str, Any]
+
+
+class S08FreezeCandidateBody(S08CommandBody):
+    draft_id: str
+
+
+class S08CandidateCommandBody(S08CommandBody):
+    candidate_id: str
+
+
+class S08ApproveBody(S08CandidateCommandBody):
+    activation_time: int
+    recovery_release_id: str
+
+
+class S08RejectBody(S08CandidateCommandBody):
+    reason_code: str
+
+
+class S08ScheduleBody(S08CommandBody):
+    approval_binding_id: str
+    activation_at: int
+
+
+class S08StopActivationsBody(S08CommandBody):
+    reason_code: str
+
+
+class S08ComponentRef(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: str
+    id: str
+    digest: str
+
+
+class S08StatusResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    track: str
+    capability_gate: str
+    scope: str
+    governance_revision: int
+    active_generation: int | None = None
+    bootstrap: bool
+    activation_hold: dict[str, Any] | None = None
+    watermark: int
+
+
+class S08ActiveResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: str
+    track: str
+    capability_gate: str
+    scope: str
+    active_generation: int | None = None
+    activation_event_id: str | None = None
+    candidate_id: str | None = None
+    manifest_id: str | None = None
+    manifest_digest: str | None = None
+    approval_binding_id: str | None = None
+    approval_binding_digest: str | None = None
+    validation_bundle_id: str | None = None
+    validation_bundle_digest: str | None = None
+    recovery_release_id: str | None = None
+    activated_at: int | None = None
+    bootstrap: bool = False
+    activation_hold: dict[str, Any] | None = None
+    components: list[S08ComponentRef] = Field(default_factory=list)
+
+
+class S08CandidateSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_id: str
+    status: str
+    manifest_id: str | None = None
+    manifest_digest: str | None = None
+    validation_bundle_id: str | None = None
+    approval_binding_id: str | None = None
+    active_generation: int | None = None
+    author_subject: str | None = None
+
+
+class S08CandidatesResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    track: str
+    capability_gate: str
+    scope: str
+    candidates: list[S08CandidateSummary]
+
+
+class S08DraftSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    draft_id: str
+    status: str
+    revision: int
+    source_bundle_id: str
+    source_sha256: str
+    mapping_ledger_id: str
+    mapping_ledger_digest: str
+    candidate_id: str | None = None
+    bootstrap: bool = False
+
+
+class S08DraftsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    track: str
+    capability_gate: str
+    scope: str
+    drafts: list[S08DraftSummary]
+
+
+class S08EventRef(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str
+    revision: int
+    kind: str
+    actor: dict[str, Any]
+    trusted_time: int
+    reason_code: str | None = None
+    candidate_id: str | None = None
+    draft_id: str | None = None
+    manifest_id: str | None = None
+    approval_binding_id: str | None = None
+    activation_event_id: str | None = None
+    active_generation: int | None = None
+
+
+class S08EventsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    track: str
+    capability_gate: str
+    scope: str
+    governance_revision: int
+    events: list[S08EventRef]
+
+
+def _s08_command(
+    request: Request,
+    response: Response,
+    role: str,
+    command: Callable[[PolicyPrincipal], dict[str, Any]],
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s08_require_role(request, role)
+    try:
+        return command(principal)
+    except (PolicyInvalidTransition, PolicyConflict, PolicyNotFound, PolicyUnavailable) as error:
+        raise _s08_rejected(error) from error
+
+
+def _s08_query(
+    request: Request,
+    response: Response,
+    role: str,
+    query: Callable[[PolicyPrincipal], dict[str, Any]],
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s08_require_role(request, role)
+    try:
+        return query(principal)
+    except (PolicyInvalidTransition, PolicyConflict, PolicyNotFound, PolicyUnavailable) as error:
+        raise _s08_rejected(error) from error
+
+
+@app.post("/controlled/s08/api/commands/import_legacy")
+def s08_import_legacy(
+    body: S08ImportLegacyBody, request: Request, response: Response
+) -> dict[str, Any]:
+    return _s08_command(
+        request, response, "admin",
+        lambda principal: _s08_service().import_legacy(
+            principal=principal,
+            source_bundle_id=body.source_bundle_id,
+            idempotency_key=body.idempotency_key,
+            expected_governance_revision=body.expected_governance_revision,
+        ),
+    )
+
+
+@app.post("/controlled/s08/api/commands/revise_draft")
+def s08_revise_draft(
+    body: S08ReviseDraftBody, request: Request, response: Response
+) -> dict[str, Any]:
+    return _s08_command(
+        request, response, "admin",
+        lambda principal: _s08_service().revise_draft(
+            principal=principal,
+            draft_id=body.draft_id,
+            metadata=body.metadata,
+            idempotency_key=body.idempotency_key,
+            expected_governance_revision=body.expected_governance_revision,
+        ),
+    )
+
+
+@app.post("/controlled/s08/api/commands/freeze_candidate")
+def s08_freeze_candidate(
+    body: S08FreezeCandidateBody, request: Request, response: Response
+) -> dict[str, Any]:
+    return _s08_command(
+        request, response, "admin",
+        lambda principal: _s08_service().freeze_candidate(
+            principal=principal,
+            draft_id=body.draft_id,
+            idempotency_key=body.idempotency_key,
+            expected_governance_revision=body.expected_governance_revision,
+        ),
+    )
+
+
+@app.post("/controlled/s08/api/commands/request_validation")
+def s08_request_validation(
+    body: S08CandidateCommandBody, request: Request, response: Response
+) -> dict[str, Any]:
+    return _s08_command(
+        request, response, "admin",
+        lambda principal: _s08_service().request_validation(
+            principal=principal,
+            candidate_id=body.candidate_id,
+            idempotency_key=body.idempotency_key,
+            expected_governance_revision=body.expected_governance_revision,
+        ),
+    )
+
+
+@app.post("/controlled/s08/api/commands/submit_review")
+def s08_submit_review(
+    body: S08CandidateCommandBody, request: Request, response: Response
+) -> dict[str, Any]:
+    return _s08_command(
+        request, response, "admin",
+        lambda principal: _s08_service().submit_review(
+            principal=principal,
+            candidate_id=body.candidate_id,
+            idempotency_key=body.idempotency_key,
+            expected_governance_revision=body.expected_governance_revision,
+        ),
+    )
+
+
+@app.post("/controlled/s08/api/commands/approve")
+def s08_approve(
+    body: S08ApproveBody, request: Request, response: Response
+) -> dict[str, Any]:
+    return _s08_command(
+        request, response, "approver",
+        lambda principal: _s08_service().approve(
+            principal=principal,
+            candidate_id=body.candidate_id,
+            activation_time=body.activation_time,
+            recovery_release_id=body.recovery_release_id,
+            idempotency_key=body.idempotency_key,
+            expected_governance_revision=body.expected_governance_revision,
+        ),
+    )
+
+
+@app.post("/controlled/s08/api/commands/reject")
+def s08_reject(
+    body: S08RejectBody, request: Request, response: Response
+) -> dict[str, Any]:
+    return _s08_command(
+        request, response, "approver",
+        lambda principal: _s08_service().reject(
+            principal=principal,
+            candidate_id=body.candidate_id,
+            reason_code=body.reason_code,
+            idempotency_key=body.idempotency_key,
+            expected_governance_revision=body.expected_governance_revision,
+        ),
+    )
+
+
+@app.post("/controlled/s08/api/commands/schedule")
+def s08_schedule(
+    body: S08ScheduleBody, request: Request, response: Response
+) -> dict[str, Any]:
+    return _s08_command(
+        request, response, "admin",
+        lambda principal: _s08_service().schedule(
+            principal=principal,
+            approval_binding_id=body.approval_binding_id,
+            activation_at=body.activation_at,
+            idempotency_key=body.idempotency_key,
+            expected_governance_revision=body.expected_governance_revision,
+        ),
+    )
+
+
+@app.post("/controlled/s08/api/commands/stop_activations")
+def s08_stop_activations(
+    body: S08StopActivationsBody, request: Request, response: Response
+) -> dict[str, Any]:
+    return _s08_command(
+        request, response, "operator",
+        lambda principal: _s08_service().stop_activations(
+            principal=principal,
+            reason_code=body.reason_code,
+            idempotency_key=body.idempotency_key,
+            expected_governance_revision=body.expected_governance_revision,
+        ),
+    )
+
+
+@app.post("/controlled/s08/api/commands/cancel")
+def s08_cancel(
+    body: S08RejectBody, request: Request, response: Response
+) -> dict[str, Any]:
+    return _s08_command(
+        request, response, "admin",
+        lambda principal: _s08_service().cancel(
+            principal=principal,
+            candidate_id=body.candidate_id,
+            reason_code=body.reason_code,
+            idempotency_key=body.idempotency_key,
+            expected_governance_revision=body.expected_governance_revision,
+        ),
+    )
+
+
+@app.get(
+    "/controlled/s08/api/queries/status",
+    response_model=S08StatusResponse,
+    response_model_exclude_none=True,
+)
+def s08_query_status(request: Request, response: Response) -> dict[str, Any]:
+    return _s08_query(request, response, "admin", _s08_service().query_status)
+
+
+@app.get(
+    "/controlled/s08/api/queries/active",
+    response_model=S08ActiveResponse,
+    response_model_exclude_none=True,
+)
+def s08_query_active(request: Request, response: Response) -> dict[str, Any]:
+    return _s08_query(request, response, "admin", _s08_service().query_active)
+
+
+@app.get(
+    "/controlled/s08/api/queries/candidates",
+    response_model=S08CandidatesResponse,
+)
+def s08_query_candidates(request: Request, response: Response) -> dict[str, Any]:
+    return _s08_query(request, response, "admin", _s08_service().query_candidates)
+
+
+@app.get(
+    "/controlled/s08/api/queries/drafts",
+    response_model=S08DraftsResponse,
+)
+def s08_query_drafts(request: Request, response: Response) -> dict[str, Any]:
+    return _s08_query(request, response, "admin", _s08_service().query_drafts)
+
+
+@app.get(
+    "/controlled/s08/api/queries/events",
+    response_model=S08EventsResponse,
+)
+def s08_query_events(request: Request, response: Response) -> dict[str, Any]:
+    return _s08_query(request, response, "admin", _s08_service().query_events)
+
+
+@app.get("/controlled/s08/api/queries/candidate/{candidate_id}")
+def s08_query_candidate(
+    candidate_id: str, request: Request, response: Response
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s08_require_role(request, "admin")
+    try:
+        return _s08_service().query_candidate(principal, candidate_id)
+    except (PolicyInvalidTransition, PolicyConflict, PolicyNotFound, PolicyUnavailable) as error:
+        raise _s08_rejected(error) from error
+
+
 def create_s01_test_app() -> FastAPI:
     """Build explicit S01 test wiring without changing the trusted default app."""
     global S01_BACKGROUND_ENABLED, S01_REQUIRE_CONFIGURED_STARTUP
-    global S01_SERVICE, S01_TEST_DRIVER
+    global S01_SERVICE, S01_TEST_DRIVER, S08_SERVICE
 
     fixture_value = os.environ.get("TASK4_S01_TEST_FIXTURE_ROOT", "").strip()
     rules_value = os.environ.get("TASK4_S01_TEST_RULES_PATH", "").strip()
@@ -4737,15 +5293,29 @@ def create_s01_test_app() -> FastAPI:
     )
     S01_REQUIRE_CONFIGURED_STARTUP = False
     try:
+        state_path = (
+            Path(state_value).resolve()
+            if state_value
+            else Path(tempfile.mkdtemp(prefix="xiaopeng-s01-test-"))
+            / "target.sqlite3"
+        )
+        rules_path = Path(rules_value).resolve() if rules_value else DEFAULT_RULES
+        S08_SERVICE = _s08_policy_service(
+            state_path=state_path,
+            rules_path=rules_path,
+            audit_available=_s01_demo_flag(
+                "TASK4_S01_TEST_AUDIT_AVAILABLE", default=True
+            ),
+            storage_available=_s01_demo_flag(
+                "TASK4_S01_TEST_STORAGE_AVAILABLE", default=True
+            ),
+            clock=lambda: int(S01_SESSION_CLOCK()),
+            corpus_root=FIXTURES,
+        )
         S01_SERVICE = ControlledScenarioService(
             fixture_root=Path(fixture_value).resolve() if fixture_value else FIXTURES,
-            rules_path=Path(rules_value).resolve() if rules_value else DEFAULT_RULES,
-            state_path=(
-                Path(state_value).resolve()
-                if state_value
-                else Path(tempfile.mkdtemp(prefix="xiaopeng-s01-test-"))
-                / "target.sqlite3"
-            ),
+            rules_path=rules_path,
+            state_path=state_path,
             audit_available=_s01_demo_flag(
                 "TASK4_S01_TEST_AUDIT_AVAILABLE", default=True
             ),
@@ -4758,7 +5328,10 @@ def create_s01_test_app() -> FastAPI:
             controlled_objects=S02_CONTROLLED_OBJECTS,
             scenario_id=scenario_value or "app_r53_bad_engine.json",
             exception_approver_subject=S05_EXCEPTION_APPROVER_SUBJECT,
+            policy_governance=S08_SERVICE,
         )
+        if S08_SERVICE is not None:
+            S08_SERVICE.bootstrap_once()
         S01_TEST_DRIVER = ControlledScenarioTestDriver(S01_SERVICE)
     except Exception:
         S01_SERVICE = None

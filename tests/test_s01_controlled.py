@@ -30,7 +30,7 @@ from task4_consistency.controlled.s01 import (
 )
 from task4_consistency.controlled.s01_store import SQLiteTargetStore
 from task4_consistency.controlled.s01_checker import TargetChecker, TargetRelease
-from task4_consistency.kb.store import get_kb, reload_kb
+from task4_consistency.kb.store import EntityKB, get_kb, reload_kb
 from task4_consistency.models import Verdict
 from task4_consistency.normalize.base import normalize_model, register_normalizer
 from task4_consistency.rules.engine import RuleEngine
@@ -1990,31 +1990,26 @@ def test_terminal_checker_recovery_requires_a_live_projection_boundary(
     assert restarted.fact_counts() == before
 
 
-def test_terminal_checker_recovery_rejects_a_drifted_admission_release(
+def test_terminal_checker_recovery_ignores_drifted_legacy_rules(
     tmp_path: Path,
 ) -> None:
-    rules_source = ROOT / "configs" / "rules_auto_lease.yaml"
-    deployed_rules = tmp_path / "rules.yaml"
-    original_rules = rules_source.read_bytes()
-    deployed_rules.write_bytes(original_rules)
-    state_path = tmp_path / "checker-recovery-release.sqlite3"
-    failed = ControlledScenarioService(
-        fixture_root=ROOT / "fixtures" / "applications",
-        rules_path=deployed_rules,
-        checker_runner=AlwaysFailChecker(),
-        state_path=state_path,
+    """A terminal checker failure recovers only through the pinned Registry
+    release; drifting the legacy rules file changes nothing."""
+    service, policy, rules_path = _governed_release_service(
+        tmp_path, checker_runner=AlwaysFailChecker()
     )
-    failed.submit_demo(
+    original_rules = rules_path.read_bytes()
+    service.submit_demo(
         principal=TEST_INTEGRATOR,
         scenario_id="app_r53_bad_engine.json",
         idempotency_key="s01-checker-recovery-release",
     )
-    driver = worker_test_driver(failed)
+    driver = worker_test_driver(service)
     assert driver.process_next_job(now=0).status == "failed"
     assert driver.process_next_job(now=1).status == "failed"
     assert driver.process_next_job(now=3).status == "stopped"
 
-    deployed_rules.write_bytes(
+    rules_path.write_bytes(
         original_rules.replace(
             b"low_confidence_threshold: 0.6",
             b"low_confidence_threshold: 1.0",
@@ -2022,8 +2017,10 @@ def test_terminal_checker_recovery_rejects_a_drifted_admission_release(
     )
     drifted = ControlledScenarioService(
         fixture_root=ROOT / "fixtures" / "applications",
-        rules_path=deployed_rules,
-        state_path=state_path,
+        rules_path=rules_path,
+        state_path=service._store.state_path,
+        policy_governance=policy,
+        checker_runner=AlwaysFailChecker(),
     )
     runtime_stop = drifted.cohort_status()
     before = drifted.fact_counts()
@@ -2851,7 +2848,11 @@ def test_frozen_checker_is_unchanged_after_process_global_kb_mutation(
         mutable_kb = reload_kb(mutable_kb_path)
         rules_path = ROOT / "configs" / "rules_auto_lease.yaml"
         rules_digest = hashlib.sha256(rules_path.read_bytes()).hexdigest()
-        release = TargetRelease.compile(load_rules(rules_path), rules_digest)
+        release = TargetRelease.compile(
+            load_rules(rules_path),
+            rules_digest,
+            knowledge=get_kb().to_dict(),
+        )
         checker = TargetChecker(release)
         run_spec = _complete_run_spec(
             release,
@@ -2926,7 +2927,9 @@ def test_target_checker_rejects_incomplete_or_mismatched_frozen_context(
 ) -> None:
     rules_path = ROOT / "configs" / "rules_auto_lease.yaml"
     release = TargetRelease.compile(
-        load_rules(rules_path), hashlib.sha256(rules_path.read_bytes()).hexdigest()
+        load_rules(rules_path),
+        hashlib.sha256(rules_path.read_bytes()).hexdigest(),
+        knowledge=get_kb().to_dict(),
     )
     checker = TargetChecker(release)
     run_spec = _complete_run_spec(
@@ -2964,7 +2967,9 @@ def test_target_checker_rejects_incomplete_or_mismatched_frozen_context(
 def test_frozen_checker_ignores_process_global_normalizer_registration() -> None:
     rules_path = ROOT / "configs" / "rules_auto_lease.yaml"
     release = TargetRelease.compile(
-        load_rules(rules_path), hashlib.sha256(rules_path.read_bytes()).hexdigest()
+        load_rules(rules_path),
+        hashlib.sha256(rules_path.read_bytes()).hexdigest(),
+        knowledge=get_kb().to_dict(),
     )
     checker = TargetChecker(release)
     run_spec = _complete_run_spec(
@@ -3014,13 +3019,13 @@ def test_target_release_identity_is_bound_to_loaded_normalizer_artifact(
     rules_path = ROOT / "configs" / "rules_auto_lease.yaml"
     config = load_rules(rules_path)
     rules_digest = hashlib.sha256(rules_path.read_bytes()).hexdigest()
-    baseline = TargetRelease.compile(config, rules_digest)
+    baseline = TargetRelease.compile(config, rules_digest, knowledge=get_kb().to_dict())
 
     def replacement_normalize_model(raw: object) -> str:
         return normalize_model(raw)
 
     monkeypatch.setattr(s01_checker, "normalize_model", replacement_normalize_model)
-    changed = TargetRelease.compile(config, rules_digest)
+    changed = TargetRelease.compile(config, rules_digest, knowledge=get_kb().to_dict())
 
     assert changed.normalizer_digest != baseline.normalizer_digest
     assert changed.release_digest != baseline.release_digest
@@ -3029,8 +3034,10 @@ def test_target_release_identity_is_bound_to_loaded_normalizer_artifact(
 def test_target_checker_keeps_vin_ocr_repair_uncertain() -> None:
     rules_path = ROOT / "configs" / "rules_auto_lease.yaml"
     release = TargetRelease.compile(
-        load_rules(rules_path), hashlib.sha256(rules_path.read_bytes()).hexdigest()
-    )
+        load_rules(rules_path),
+        hashlib.sha256(rules_path.read_bytes()).hexdigest(),
+        knowledge=get_kb().to_dict(),
+        )
     roles_and_values = (
         ("机动车登记证书", "LSVAA4I82N5000054"),
         ("交强险保单", "LSVAA4182N5000054"),
@@ -3069,8 +3076,10 @@ def test_target_checker_keeps_vin_ocr_repair_uncertain() -> None:
 def test_low_confidence_gate_applies_to_conditional_and_list_checks() -> None:
     rules_path = ROOT / "configs" / "rules_auto_lease.yaml"
     release = TargetRelease.compile(
-        load_rules(rules_path), hashlib.sha256(rules_path.read_bytes()).hexdigest()
-    )
+        load_rules(rules_path),
+        hashlib.sha256(rules_path.read_bytes()).hexdigest(),
+        knowledge=get_kb().to_dict(),
+        )
     low_condition = _eligible_field(
         "182000",
         observation_id="obs-lease-financed-amount",
@@ -3134,8 +3143,10 @@ def test_low_confidence_gate_applies_to_conditional_and_list_checks() -> None:
 def test_critical_exact_check_preserves_governed_low_confidence_comparison() -> None:
     rules_path = ROOT / "configs" / "rules_auto_lease.yaml"
     release = TargetRelease.compile(
-        load_rules(rules_path), hashlib.sha256(rules_path.read_bytes()).hexdigest()
-    )
+        load_rules(rules_path),
+        hashlib.sha256(rules_path.read_bytes()).hexdigest(),
+        knowledge=get_kb().to_dict(),
+        )
     roles = ("机动车登记证书", "交强险保单", "融资租赁合同", "发票")
     evidence = []
     for index, role in enumerate(roles):
@@ -3171,8 +3182,10 @@ def test_critical_exact_check_preserves_governed_low_confidence_comparison() -> 
 def test_numeric_check_preserves_approximate_money_uncertainty() -> None:
     rules_path = ROOT / "configs" / "rules_auto_lease.yaml"
     release = TargetRelease.compile(
-        load_rules(rules_path), hashlib.sha256(rules_path.read_bytes()).hexdigest()
-    )
+        load_rules(rules_path),
+        hashlib.sha256(rules_path.read_bytes()).hexdigest(),
+        knowledge=get_kb().to_dict(),
+        )
     run_spec = _complete_run_spec(
         release,
         [
@@ -3214,8 +3227,10 @@ def test_numeric_check_preserves_approximate_money_uncertainty() -> None:
 def test_run_result_preserves_normalization_and_selection_outcomes() -> None:
     rules_path = ROOT / "configs" / "rules_auto_lease.yaml"
     release = TargetRelease.compile(
-        load_rules(rules_path), hashlib.sha256(rules_path.read_bytes()).hexdigest()
-    )
+        load_rules(rules_path),
+        hashlib.sha256(rules_path.read_bytes()).hexdigest(),
+        knowledge=get_kb().to_dict(),
+        )
     run_spec = _complete_run_spec(
         release,
         [
@@ -3308,8 +3323,10 @@ def test_completed_run_persists_normalization_and_selection_outcomes(
 def test_name_check_preserves_governed_used_car_transfer_policy() -> None:
     rules_path = ROOT / "configs" / "rules_auto_lease.yaml"
     release = TargetRelease.compile(
-        load_rules(rules_path), hashlib.sha256(rules_path.read_bytes()).hexdigest()
-    )
+        load_rules(rules_path),
+        hashlib.sha256(rules_path.read_bytes()).hexdigest(),
+        knowledge=get_kb().to_dict(),
+        )
     role_field_values = (
         ("机动车登记证书", "owner_name", "旧车主甲"),
         ("交强险保单", "insured_name", "新承租乙"),
@@ -3349,8 +3366,10 @@ def test_name_check_preserves_governed_used_car_transfer_policy() -> None:
 def test_conflicting_alias_candidates_are_preserved_as_evidence_conflict() -> None:
     rules_path = ROOT / "configs" / "rules_auto_lease.yaml"
     release = TargetRelease.compile(
-        load_rules(rules_path), hashlib.sha256(rules_path.read_bytes()).hexdigest()
-    )
+        load_rules(rules_path),
+        hashlib.sha256(rules_path.read_bytes()).hexdigest(),
+        knowledge=get_kb().to_dict(),
+        )
     roles = ("机动车登记证书", "交强险保单", "融资租赁合同", "发票")
     evidence = []
     for index, role in enumerate(roles):
@@ -3396,8 +3415,10 @@ def test_conflicting_alias_candidates_are_preserved_as_evidence_conflict() -> No
 def test_list_check_keeps_present_normalization_failure_uncertain() -> None:
     rules_path = ROOT / "configs" / "rules_auto_lease.yaml"
     release = TargetRelease.compile(
-        load_rules(rules_path), hashlib.sha256(rules_path.read_bytes()).hexdigest()
-    )
+        load_rules(rules_path),
+        hashlib.sha256(rules_path.read_bytes()).hexdigest(),
+        knowledge=get_kb().to_dict(),
+        )
     run_spec = _complete_run_spec(
         release,
         [
@@ -3439,8 +3460,10 @@ def test_list_check_keeps_present_normalization_failure_uncertain() -> None:
 def test_list_check_keeps_container_normalization_failure_uncertain() -> None:
     rules_path = ROOT / "configs" / "rules_auto_lease.yaml"
     release = TargetRelease.compile(
-        load_rules(rules_path), hashlib.sha256(rules_path.read_bytes()).hexdigest()
-    )
+        load_rules(rules_path),
+        hashlib.sha256(rules_path.read_bytes()).hexdigest(),
+        knowledge=get_kb().to_dict(),
+        )
     run_spec = _complete_run_spec(
         release,
         [
@@ -3482,8 +3505,10 @@ def test_list_check_keeps_container_normalization_failure_uncertain() -> None:
 def test_conditional_check_ignores_required_evidence_when_trigger_is_absent() -> None:
     rules_path = ROOT / "configs" / "rules_auto_lease.yaml"
     release = TargetRelease.compile(
-        load_rules(rules_path), hashlib.sha256(rules_path.read_bytes()).hexdigest()
-    )
+        load_rules(rules_path),
+        hashlib.sha256(rules_path.read_bytes()).hexdigest(),
+        knowledge=get_kb().to_dict(),
+        )
     id_number = _eligible_field(
         "320102199001012016",
         observation_id="obs-lease-id-without-trigger",
@@ -4071,7 +4096,9 @@ def test_legacy_checker_report_cannot_route_ineligible_provenance(
 def test_checker_marks_provenance_free_observations_ineligible() -> None:
     rules_path = ROOT / "configs" / "rules_auto_lease.yaml"
     release = TargetRelease.compile(
-        load_rules(rules_path), hashlib.sha256(rules_path.read_bytes()).hexdigest()
+        load_rules(rules_path),
+        hashlib.sha256(rules_path.read_bytes()).hexdigest(),
+        knowledge=get_kb().to_dict(),
     )
     checker = TargetChecker(release)
     result = checker.run(
@@ -4157,49 +4184,98 @@ def test_worker_pins_snapshot_release_and_routes_mandatory_blocker() -> None:
 def test_worker_executes_frozen_release_after_rules_path_changes(
     tmp_path, rules_path_change: str
 ) -> None:
-    rules_source = ROOT / "configs" / "rules_auto_lease.yaml"
-    frozen_rules = tmp_path / "rules.yaml"
-    original_rules = rules_source.read_bytes()
-    frozen_rules.write_bytes(original_rules)
-    service = ControlledScenarioService(
-        fixture_root=ROOT / "fixtures" / "applications",
-        rules_path=frozen_rules,
-        state_path=tmp_path / "frozen-release.sqlite3",
-    )
-    if rules_path_change == "modified":
-        frozen_rules.write_bytes(
-            original_rules.replace(b"id: R_ENGINE_CROSS", b"id: R_ENGINE_MUTATED")
-        )
-    else:
-        frozen_rules.unlink()
+    """After replacement acceptance the worker executes only the pinned
+    Registry release: removing or modifying the legacy rules file has zero
+    effect on the run (Registry-only restart)."""
+    service, policy, rules_path = _governed_release_service(tmp_path)
+    pinned_digest = _pinned_release_digest(policy)
+    original_rules = rules_path.read_bytes()
 
     admission = service.submit_demo(
         principal=TEST_INTEGRATOR,
         scenario_id="app_r53_bad_engine.json",
         idempotency_key="s01-frozen-release",
     )
-    result = service.process_next_job()
+    if rules_path_change == "modified":
+        rules_path.write_bytes(
+            original_rules.replace(b"id: R_ENGINE_CROSS", b"id: R_ENGINE_MUTATED")
+        )
+    else:
+        rules_path.unlink()
+    restarted = ControlledScenarioService(
+        fixture_root=ROOT / "fixtures" / "applications",
+        rules_path=rules_path,
+        state_path=service._store.state_path,
+        policy_governance=policy,
+    )
+    result = restarted.process_next_job()
 
     assert admission.disposition is AdmissionDisposition.ACCEPTED
     assert result.status == "complete"
     assert result.release_id == "auto_lease@1.9.0"
-    assert result.release_digest == (
-            "a463ddb219bc90b9c444711c0921f61fb3fb9c7895b1ccb3b86cddf59938e122"
-    )
+    assert result.release_digest == pinned_digest
     assert result.checker_build == "s01-target-checker/6"
     assert result.fence == 1
-    assert service.queue_view(role="reviewer", scope="C-DEMO", subject=TEST_INTEGRATOR.subject) == {
+    assert restarted.queue_view(
+        role="reviewer", scope="C-DEMO", subject=TEST_INTEGRATOR.subject
+    ) == {
         "items": [],
         "recovery_items": [],
         "projection_watermark": 0,
     }
-    assert service.refresh_projection() == {
+    assert restarted.refresh_projection() == {
         "updated": 1,
         "projection_watermark": 1,
     }
-    assert service.queue_view(role="reviewer", scope="C-DEMO", subject=TEST_INTEGRATOR.subject)["items"][0][
-        "mandatory_blockers"
-    ][0]["rule_id"] == "R_ENGINE_CROSS"
+    assert restarted.queue_view(
+        role="reviewer", scope="C-DEMO", subject=TEST_INTEGRATOR.subject
+    )["items"][0]["mandatory_blockers"][0]["rule_id"] == "R_ENGINE_CROSS"
+
+
+
+def _governed_release_service(
+    tmp_path: Path,
+    *,
+    state_path: Path | None = None,
+    checker_runner: Callable[[object], object] | None = None,
+):
+    """ControlledScenarioService wired to a bootstrapped S08 governance
+    service on the same store; the Registry is the only release authority."""
+    from task4_consistency.controlled.s08 import (
+        PolicyGovernanceService,
+        S08_SCOPE,
+    )
+
+    state = state_path or (tmp_path / "governed-release.sqlite3")
+    bundle = tmp_path / "governed-bundle"
+    bundle.mkdir(parents=True, exist_ok=True)
+    rules_path = bundle / "rules.yaml"
+    kb_path = bundle / "entity_kb.json"
+    rules_path.write_bytes((ROOT / "configs" / "rules_auto_lease.yaml").read_bytes())
+    kb_path.write_bytes((ROOT / "configs" / "kb" / "entity_kb.json").read_bytes())
+    policy = PolicyGovernanceService(
+        state_path=state,
+        source_rules_path=rules_path,
+        source_kb_path=kb_path,
+        corpus_root=ROOT / "fixtures" / "applications",
+    )
+    assert policy.bootstrap_once()["status"] == "activated"
+    service = ControlledScenarioService(
+        fixture_root=ROOT / "fixtures" / "applications",
+        rules_path=rules_path,
+        state_path=state,
+        checker_runner=checker_runner,
+        policy_governance=policy,
+    )
+    return service, policy, rules_path
+
+
+def _pinned_release_digest(policy) -> str:
+    from task4_consistency.controlled.s08 import S08_SCOPE
+
+    pin = policy.resolve_run_pin(S08_SCOPE, 0)
+    assert pin is not None
+    return pin["release"]["digest"]
 
 
 def test_startup_binds_release_identity_and_policy_to_one_rules_snapshot(
@@ -4241,31 +4317,32 @@ def test_startup_binds_release_identity_and_policy_to_one_rules_snapshot(
     assert admission.disposition is AdmissionDisposition.ACCEPTED
     assert result.status == "complete"
     assert result.release_id == "auto_lease@1.9.0"
-    assert result.release_digest == (
-            "a463ddb219bc90b9c444711c0921f61fb3fb9c7895b1ccb3b86cddf59938e122"
+    # The build digest is source-sensitive by design (the checker artifact
+    # hashes its module sources); compute the expected value from the same
+    # frozen inputs instead of pinning a stale literal.
+    expected_release = TargetRelease.compile(
+        load_rules(rules_source),
+        hashlib.sha256(original_rules).hexdigest(),
+        knowledge=EntityKB().to_dict(),
     )
+    assert result.release_digest == expected_release.release_digest
 
 
-def test_restart_fails_closed_until_the_admitted_release_is_available(
+def test_restart_is_registry_only_and_ignores_legacy_rules_drift(
     tmp_path: Path,
 ) -> None:
-    rules_source = ROOT / "configs" / "rules_auto_lease.yaml"
-    deployed_rules = tmp_path / "rules.yaml"
-    original_rules = rules_source.read_bytes()
-    deployed_rules.write_bytes(original_rules)
-    state_path = tmp_path / "release-binding.sqlite3"
-    service = ControlledScenarioService(
-        fixture_root=ROOT / "fixtures" / "applications",
-        rules_path=deployed_rules,
-        state_path=state_path,
-    )
+    """The pre-cutover 'rules drift stops the restart' behavior is replaced
+    by Registry-only restart: a drifted legacy rules file never changes the
+    pinned release the worker executes."""
+    service, policy, rules_path = _governed_release_service(tmp_path)
+    pinned_digest = _pinned_release_digest(policy)
+    original_rules = rules_path.read_bytes()
     admission = service.submit_demo(
         principal=TEST_INTEGRATOR,
         scenario_id="app_r53_bad_engine.json",
         idempotency_key="s01-release-binding-restart",
     )
-
-    deployed_rules.write_bytes(
+    rules_path.write_bytes(
         original_rules.replace(
             b"low_confidence_threshold: 0.6",
             b"low_confidence_threshold: 1.0",
@@ -4273,63 +4350,29 @@ def test_restart_fails_closed_until_the_admitted_release_is_available(
     )
     drifted = ControlledScenarioService(
         fixture_root=ROOT / "fixtures" / "applications",
-        rules_path=deployed_rules,
-        state_path=state_path,
+        rules_path=rules_path,
+        state_path=service._store.state_path,
+        policy_governance=policy,
     )
-    before = drifted.fact_counts()
-
-    stopped = drifted.process_next_job()
+    result = drifted.process_next_job()
 
     assert admission.disposition is AdmissionDisposition.ACCEPTED
-    assert stopped.status == "stopped"
-    assert stopped.reason_code == "PINNED_RELEASE_UNAVAILABLE"
-    assert drifted.fact_counts() == {
-        **before,
-        "audit_events": before["audit_events"] + 1,
-    }
-    assert drifted._store.audit_events[-1]["action"] == "controlled_cohort_stop"
-    assert drifted._store.audit_events[-1]["failure_reason_code"] == (
-        "PINNED_RELEASE_UNAVAILABLE"
-    )
-    assert drifted.cohort_status() == {
-        "track": "C-DEMO",
-        "admission": "stopped",
-        "reason_code": "S01_RUNTIME_UNHEALTHY",
-        "failure_reason_code": "PINNED_RELEASE_UNAVAILABLE",
-    }
-
-    deployed_rules.write_bytes(original_rules)
-    restored = ControlledScenarioService(
-        fixture_root=ROOT / "fixtures" / "applications",
-        rules_path=deployed_rules,
-        state_path=state_path,
-    )
-    recovery = restored.recover_runtime(
-        principal=TEST_OPERATOR,
-        expected_failure_reason_code="PINNED_RELEASE_UNAVAILABLE"
-    )
-    completed = restored.process_next_job()
-
-    assert recovery["recovery"] == "scheduled"
-    assert completed.status == "complete"
-    assert completed.release_digest == (
-            "a463ddb219bc90b9c444711c0921f61fb3fb9c7895b1ccb3b86cddf59938e122"
-    )
+    assert result.status == "complete"
+    assert result.release_digest == pinned_digest
+    drifted_release = TargetRelease.compile(
+        load_rules(rules_path),
+        hashlib.sha256(rules_path.read_bytes()).hexdigest(),
+        knowledge=EntityKB().to_dict(),
+    ).public_manifest()
+    assert result.release_digest != drifted_release["digest"]
 
 
-def test_mutable_application_manifest_cannot_rebind_the_admitted_release(
+def test_mutable_application_manifest_cannot_rebind_the_admitted_provenance(
     tmp_path: Path,
 ) -> None:
-    rules_source = ROOT / "configs" / "rules_auto_lease.yaml"
-    deployed_rules = tmp_path / "rules.yaml"
-    original_rules = rules_source.read_bytes()
-    deployed_rules.write_bytes(original_rules)
-    state_path = tmp_path / "release-owner.sqlite3"
-    service = ControlledScenarioService(
-        fixture_root=ROOT / "fixtures" / "applications",
-        rules_path=deployed_rules,
-        state_path=state_path,
-    )
+    """The admission manifest binds adapter/input provenance; rebinding its
+    digest fails the pinned-release authority check and stops the cohort."""
+    service, policy, rules_path = _governed_release_service(tmp_path)
     admission = service.submit_demo(
         principal=TEST_INTEGRATOR,
         scenario_id="app_r53_bad_engine.json",
@@ -4337,26 +4380,14 @@ def test_mutable_application_manifest_cannot_rebind_the_admitted_release(
     )
     assert admission.application_id is not None
 
-    deployed_rules.write_bytes(
-        original_rules.replace(
-            b"low_confidence_threshold: 0.6",
-            b"low_confidence_threshold: 1.0",
-        )
-    )
-    drifted_release = TargetRelease.compile(
-        load_rules(deployed_rules),
-        hashlib.sha256(deployed_rules.read_bytes()).hexdigest(),
-    ).public_manifest()
-    with sqlite3.connect(state_path) as connection:
+    with sqlite3.connect(service._store.state_path) as connection:
         encoded = connection.execute(
             "SELECT payload FROM applications WHERE item_id = ?",
             (admission.application_id,),
         ).fetchone()[0]
         application = json.loads(encoded)
         application["artifact_manifest"] = {
-            "release_id": drifted_release["release_id"],
-            "release_digest": drifted_release["digest"],
-            "checker_build": drifted_release["checker_build"],
+            "digest": "0" * 64,
         }
         connection.execute(
             "UPDATE applications SET payload = ? WHERE item_id = ?",
@@ -4374,8 +4405,9 @@ def test_mutable_application_manifest_cannot_rebind_the_admitted_release(
 
     drifted = ControlledScenarioService(
         fixture_root=ROOT / "fixtures" / "applications",
-        rules_path=deployed_rules,
-        state_path=state_path,
+        rules_path=rules_path,
+        state_path=service._store.state_path,
+        policy_governance=policy,
     )
     before = drifted.fact_counts()
 
@@ -4427,7 +4459,7 @@ def test_adapter_public_evidence_preserves_source_and_excludes_evaluation_labels
         "8f3bf94619690887fbbb3a5c4fa3bfdb815f178874e0b0dda2469b69454b2a58"
     )
     assert admitted.envelope_fingerprint == (
-            "bd8aa392f4f88874de2f1fd6afd73909c9668a9fd80498c25f5b3e9d9bfb1fab"
+            "c6ff1d187ef71f9fab9086a4a17b558ba2a4064d885b319277eda8b1a3d88cf0"
     )
     assert replay.replayed is True
     assert stale.status == "stale"

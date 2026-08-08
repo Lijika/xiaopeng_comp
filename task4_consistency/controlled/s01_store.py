@@ -38,6 +38,14 @@ _TABLES = (
     "sessions",
     "demo_sessions",
     "deletion_receipts",
+    "policy_artifacts",
+    "policy_manifests",
+    "policy_governance_events",
+    "policy_attempts",
+    "policy_drafts",
+    "policy_jobs",
+    "policy_active_projections",
+    "policy_schedule_reservations",
 )
 
 _INTEGRITY_SCHEMA = "s01-immutable-row/v1"
@@ -55,14 +63,28 @@ _IMMUTABLE_LIST_IDS = {
     "inbox": "message_id",
     "demo_sessions": "demo_session_id",
     "deletion_receipts": "deletion_receipt_id",
+    "policy_artifacts": "artifact_id",
+    "policy_manifests": "manifest_id",
+    "policy_governance_events": "event_id",
+    "policy_attempts": "attempt_id",
 }
 _IMMUTABLE_TABLES = frozenset(
     {*_IMMUTABLE_MAP_TABLES, *_IMMUTABLE_LIST_IDS, "idempotency", "outbox"}
 )
-_MUTABLE_MAP_TABLES = frozenset({"applications", "projections", "sessions"})
+_MUTABLE_MAP_TABLES = frozenset(
+    {
+        "applications",
+        "projections",
+        "sessions",
+        "policy_drafts",
+        "policy_active_projections",
+        "policy_schedule_reservations",
+    }
+)
 _MUTABLE_LIST_IDS = {
     "jobs": "job_id",
     "outbox": "event_id",
+    "policy_jobs": "policy_job_id",
 }
 _GOVERNED_DELETION_IDS = {
     "applications": "item_id",
@@ -122,6 +144,10 @@ class StaleStoreRevision(RuntimeError):
     """A command attempted to publish state loaded before another commit."""
 
 
+class ScheduleReservationConflict(RuntimeError):
+    """One scope may hold only one pending schedule reservation."""
+
+
 class SQLiteTargetStore:
     """Copyable S01 state backed by immutable facts and mutable owners."""
 
@@ -146,6 +172,14 @@ class SQLiteTargetStore:
         self.sessions: dict[str, dict[str, Any]] = {}
         self.demo_sessions: list[dict[str, Any]] = []
         self.deletion_receipts: list[dict[str, Any]] = []
+        self.policy_artifacts: list[dict[str, Any]] = []
+        self.policy_manifests: list[dict[str, Any]] = []
+        self.policy_governance_events: list[dict[str, Any]] = []
+        self.policy_attempts: list[dict[str, Any]] = []
+        self.policy_drafts: dict[str, dict[str, Any]] = {}
+        self.policy_jobs: list[dict[str, Any]] = []
+        self.policy_active_projections: dict[str, dict[str, Any]] = {}
+        self.policy_schedule_reservations: dict[str, dict[str, Any]] = {}
         self.projection_watermark = 0
         self.cohort_stop: dict[str, Any] | None = None
         self._store_revision = 0
@@ -176,6 +210,14 @@ class SQLiteTargetStore:
             "sessions",
             "demo_sessions",
             "deletion_receipts",
+            "policy_artifacts",
+            "policy_manifests",
+            "policy_governance_events",
+            "policy_attempts",
+            "policy_drafts",
+            "policy_jobs",
+            "policy_active_projections",
+            "policy_schedule_reservations",
             "cohort_stop",
         ):
             setattr(cloned, name, copy.deepcopy(getattr(self, name)))
@@ -253,6 +295,16 @@ class SQLiteTargetStore:
                 "CREATE TABLE IF NOT EXISTS s01_immutable_catalog ("
                 "table_name TEXT NOT NULL, item_id TEXT NOT NULL, "
                 "integrity_sha256 TEXT NOT NULL, PRIMARY KEY(table_name, item_id))"
+            )
+            self._ensure_column(
+                connection, "policy_schedule_reservations", "scope_key", "TEXT"
+            )
+            self._ensure_column(
+                connection, "policy_schedule_reservations", "status", "TEXT"
+            )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS policy_schedule_reservations_one_pending "
+                "ON policy_schedule_reservations(scope_key) WHERE status = 'pending'"
             )
 
     @staticmethod
@@ -409,6 +461,28 @@ class SQLiteTargetStore:
                     self.demo_sessions = [payload for _, payload in values]
                 elif table == "deletion_receipts":
                     self.deletion_receipts = [payload for _, payload in values]
+                elif table == "policy_artifacts":
+                    self.policy_artifacts = [payload for _, payload in values]
+                elif table == "policy_manifests":
+                    self.policy_manifests = [payload for _, payload in values]
+                elif table == "policy_governance_events":
+                    self.policy_governance_events = [payload for _, payload in values]
+                elif table == "policy_attempts":
+                    self.policy_attempts = [payload for _, payload in values]
+                elif table == "policy_drafts":
+                    self.policy_drafts = {
+                        key: json.loads(payload) for key, payload in values
+                    }
+                elif table == "policy_jobs":
+                    self.policy_jobs = [json.loads(payload) for _, payload in values]
+                elif table == "policy_active_projections":
+                    self.policy_active_projections = {
+                        key: json.loads(payload) for key, payload in values
+                    }
+                elif table == "policy_schedule_reservations":
+                    self.policy_schedule_reservations = {
+                        key: json.loads(payload) for key, payload in values
+                    }
 
     def persist(self) -> None:
         """Append facts and publish mutable owners in one transaction."""
@@ -472,6 +546,26 @@ class SQLiteTargetStore:
                 self._sync_immutable_list(
                     connection, "deletion_receipts", self.deletion_receipts
                 )
+                self._sync_immutable_list(
+                    connection, "policy_artifacts", self.policy_artifacts
+                )
+                self._sync_immutable_list(
+                    connection, "policy_manifests", self.policy_manifests
+                )
+                self._sync_immutable_list(
+                    connection, "policy_governance_events",
+                    self.policy_governance_events,
+                )
+                self._sync_immutable_list(
+                    connection, "policy_attempts", self.policy_attempts
+                )
+                self._sync_mutable_map(connection, "policy_drafts", self.policy_drafts)
+                self._upsert_list(connection, "policy_jobs", self.policy_jobs, "policy_job_id")
+                self._sync_mutable_map(
+                    connection, "policy_active_projections",
+                    self.policy_active_projections,
+                )
+                self._sync_policy_schedule_reservations(connection)
                 connection.commit()
                 self._store_revision = next_revision
             except Exception:
@@ -838,6 +932,46 @@ class SQLiteTargetStore:
         expected = _delivery_digest(item_id, status, revision)
         if not isinstance(digest, str) or not hmac.compare_digest(digest, expected):
             raise _integrity_error("outbox", item_id, "delivery seal mismatch")
+
+    def _sync_policy_schedule_reservations(
+        self, connection: sqlite3.Connection
+    ) -> None:
+        """Publish policy schedule reservations with the one-pending unique
+        scope constraint enforced mechanically by a partial unique index."""
+        staged: dict[str, tuple[str, str, str]] = {}
+        for reservation_id, value in self.policy_schedule_reservations.items():
+            scope_key = str(value.get("scope") or "")
+            status = str(value.get("status") or "")
+            if not scope_key or status not in {"pending", "completed", "cancelled"}:
+                raise ValueError(
+                    "policy schedule reservation requires scope and valid status"
+                )
+            staged[str(reservation_id)] = (scope_key, status, _encode(value))
+        persisted_ids = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT item_id FROM policy_schedule_reservations"
+            )
+        }
+        removed_ids = persisted_ids.difference(staged)
+        connection.executemany(
+            "DELETE FROM policy_schedule_reservations WHERE item_id = ?",
+            ((item_id,) for item_id in sorted(removed_ids)),
+        )
+        for reservation_id, (scope_key, status, payload) in staged.items():
+            try:
+                connection.execute(
+                    "INSERT INTO policy_schedule_reservations("
+                    "item_id, scope_key, status, payload) VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(item_id) DO UPDATE SET "
+                    "scope_key = excluded.scope_key, status = excluded.status, "
+                    "payload = excluded.payload",
+                    (reservation_id, scope_key, status, payload),
+                )
+            except sqlite3.IntegrityError as error:
+                raise ScheduleReservationConflict(
+                    f"overlapping pending schedule reservation for {scope_key}"
+                ) from error
 
     @staticmethod
     def _decode_idempotency(

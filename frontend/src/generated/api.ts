@@ -1364,6 +1364,278 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/controlled/s08/api/commands/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** S08 Approve */
+        post: operations["s08_approve_controlled_s08_api_commands_approve_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s08/api/commands/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** S08 Cancel */
+        post: operations["s08_cancel_controlled_s08_api_commands_cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s08/api/commands/freeze_candidate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** S08 Freeze Candidate */
+        post: operations["s08_freeze_candidate_controlled_s08_api_commands_freeze_candidate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s08/api/commands/import_legacy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** S08 Import Legacy */
+        post: operations["s08_import_legacy_controlled_s08_api_commands_import_legacy_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s08/api/commands/reject": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** S08 Reject */
+        post: operations["s08_reject_controlled_s08_api_commands_reject_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s08/api/commands/request_validation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** S08 Request Validation */
+        post: operations["s08_request_validation_controlled_s08_api_commands_request_validation_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s08/api/commands/revise_draft": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** S08 Revise Draft */
+        post: operations["s08_revise_draft_controlled_s08_api_commands_revise_draft_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s08/api/commands/schedule": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** S08 Schedule */
+        post: operations["s08_schedule_controlled_s08_api_commands_schedule_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s08/api/commands/stop_activations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** S08 Stop Activations */
+        post: operations["s08_stop_activations_controlled_s08_api_commands_stop_activations_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s08/api/commands/submit_review": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** S08 Submit Review */
+        post: operations["s08_submit_review_controlled_s08_api_commands_submit_review_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s08/api/queries/active": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** S08 Query Active */
+        get: operations["s08_query_active_controlled_s08_api_queries_active_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s08/api/queries/candidate/{candidate_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** S08 Query Candidate */
+        get: operations["s08_query_candidate_controlled_s08_api_queries_candidate__candidate_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s08/api/queries/candidates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** S08 Query Candidates */
+        get: operations["s08_query_candidates_controlled_s08_api_queries_candidates_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s08/api/queries/drafts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** S08 Query Drafts */
+        get: operations["s08_query_drafts_controlled_s08_api_queries_drafts_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s08/api/queries/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** S08 Query Events */
+        get: operations["s08_query_events_controlled_s08_api_queries_events_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s08/api/queries/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** S08 Query Status */
+        get: operations["s08_query_status_controlled_s08_api_queries_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/demo/react": {
         parameters: {
             query?: never;
@@ -2192,16 +2464,28 @@ export interface components {
         };
         /** S01HistoryRun */
         S01HistoryRun: {
+            /** Activation Event Id */
+            activation_event_id?: string | null;
+            /** Active Generation */
+            active_generation?: number | null;
             /** Applicable Decision Ids */
             applicable_decision_ids: string[];
             /** Applicable Exception Ids */
             applicable_exception_ids: string[];
+            /** Approval Binding Digest */
+            approval_binding_digest?: string | null;
+            /** Approval Binding Id */
+            approval_binding_id?: string | null;
             /** Authority Digest */
             authority_digest: string;
+            /** Candidate Id */
+            candidate_id?: string | null;
             /** Cas Mismatches */
             cas_mismatches: string[];
             /** Checker Build */
             checker_build?: string | null;
+            /** Components */
+            components?: components["schemas"]["S01HistoryRunComponent"][];
             /** Current */
             current: boolean;
             /** Currentness Reason */
@@ -2226,6 +2510,12 @@ export interface components {
             invalidated_exception_ids: string[];
             /** Lifecycle Revision */
             lifecycle_revision: number;
+            /** Manifest Digest */
+            manifest_digest?: string | null;
+            /** Manifest Id */
+            manifest_id?: string | null;
+            /** Policy Scope */
+            policy_scope?: string | null;
             reconciliation?: components["schemas"]["S01HistoryReconciliation"] | null;
             /** Release Digest */
             release_digest?: string | null;
@@ -2237,6 +2527,19 @@ export interface components {
             selected_observation_ids: string[];
             /** Status */
             status: string;
+            /** Validation Bundle Digest */
+            validation_bundle_digest?: string | null;
+            /** Validation Bundle Id */
+            validation_bundle_id?: string | null;
+        };
+        /** S01HistoryRunComponent */
+        S01HistoryRunComponent: {
+            /** Digest */
+            digest: string;
+            /** Id */
+            id: string;
+            /** Type */
+            type: string;
         };
         /** S01HistorySourceLocation */
         S01HistorySourceLocation: {
@@ -3060,6 +3363,271 @@ export interface components {
             track: string;
             /** Work Item Id */
             work_item_id: string;
+        };
+        /** S08ActiveResponse */
+        S08ActiveResponse: {
+            /** Activated At */
+            activated_at?: number | null;
+            /** Activation Event Id */
+            activation_event_id?: string | null;
+            /** Activation Hold */
+            activation_hold?: {
+                [key: string]: unknown;
+            } | null;
+            /** Active Generation */
+            active_generation?: number | null;
+            /** Approval Binding Digest */
+            approval_binding_digest?: string | null;
+            /** Approval Binding Id */
+            approval_binding_id?: string | null;
+            /**
+             * Bootstrap
+             * @default false
+             */
+            bootstrap: boolean;
+            /** Candidate Id */
+            candidate_id?: string | null;
+            /** Capability Gate */
+            capability_gate: string;
+            /** Components */
+            components?: components["schemas"]["S08ComponentRef"][];
+            /** Manifest Digest */
+            manifest_digest?: string | null;
+            /** Manifest Id */
+            manifest_id?: string | null;
+            /** Recovery Release Id */
+            recovery_release_id?: string | null;
+            /** Scope */
+            scope: string;
+            /** Status */
+            status: string;
+            /** Track */
+            track: string;
+            /** Validation Bundle Digest */
+            validation_bundle_digest?: string | null;
+            /** Validation Bundle Id */
+            validation_bundle_id?: string | null;
+        };
+        /** S08ApproveBody */
+        S08ApproveBody: {
+            /** Activation Time */
+            activation_time: number;
+            /** Candidate Id */
+            candidate_id: string;
+            /** Expected Governance Revision */
+            expected_governance_revision?: number | null;
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Recovery Release Id */
+            recovery_release_id: string;
+        };
+        /** S08CandidateCommandBody */
+        S08CandidateCommandBody: {
+            /** Candidate Id */
+            candidate_id: string;
+            /** Expected Governance Revision */
+            expected_governance_revision?: number | null;
+            /** Idempotency Key */
+            idempotency_key: string;
+        };
+        /** S08CandidateSummary */
+        S08CandidateSummary: {
+            /** Active Generation */
+            active_generation?: number | null;
+            /** Approval Binding Id */
+            approval_binding_id?: string | null;
+            /** Author Subject */
+            author_subject?: string | null;
+            /** Candidate Id */
+            candidate_id: string;
+            /** Manifest Digest */
+            manifest_digest?: string | null;
+            /** Manifest Id */
+            manifest_id?: string | null;
+            /** Status */
+            status: string;
+            /** Validation Bundle Id */
+            validation_bundle_id?: string | null;
+        };
+        /** S08CandidatesResponse */
+        S08CandidatesResponse: {
+            /** Candidates */
+            candidates: components["schemas"]["S08CandidateSummary"][];
+            /** Capability Gate */
+            capability_gate: string;
+            /** Scope */
+            scope: string;
+            /** Track */
+            track: string;
+        };
+        /** S08ComponentRef */
+        S08ComponentRef: {
+            /** Digest */
+            digest: string;
+            /** Id */
+            id: string;
+            /** Type */
+            type: string;
+        };
+        /** S08DraftSummary */
+        S08DraftSummary: {
+            /**
+             * Bootstrap
+             * @default false
+             */
+            bootstrap: boolean;
+            /** Candidate Id */
+            candidate_id?: string | null;
+            /** Draft Id */
+            draft_id: string;
+            /** Mapping Ledger Digest */
+            mapping_ledger_digest: string;
+            /** Mapping Ledger Id */
+            mapping_ledger_id: string;
+            /** Revision */
+            revision: number;
+            /** Source Bundle Id */
+            source_bundle_id: string;
+            /** Source Sha256 */
+            source_sha256: string;
+            /** Status */
+            status: string;
+        };
+        /** S08DraftsResponse */
+        S08DraftsResponse: {
+            /** Capability Gate */
+            capability_gate: string;
+            /** Drafts */
+            drafts: components["schemas"]["S08DraftSummary"][];
+            /** Scope */
+            scope: string;
+            /** Track */
+            track: string;
+        };
+        /** S08EventRef */
+        S08EventRef: {
+            /** Activation Event Id */
+            activation_event_id?: string | null;
+            /** Active Generation */
+            active_generation?: number | null;
+            /** Actor */
+            actor: {
+                [key: string]: unknown;
+            };
+            /** Approval Binding Id */
+            approval_binding_id?: string | null;
+            /** Candidate Id */
+            candidate_id?: string | null;
+            /** Draft Id */
+            draft_id?: string | null;
+            /** Event Id */
+            event_id: string;
+            /** Kind */
+            kind: string;
+            /** Manifest Id */
+            manifest_id?: string | null;
+            /** Reason Code */
+            reason_code?: string | null;
+            /** Revision */
+            revision: number;
+            /** Trusted Time */
+            trusted_time: number;
+        };
+        /** S08EventsResponse */
+        S08EventsResponse: {
+            /** Capability Gate */
+            capability_gate: string;
+            /** Events */
+            events: components["schemas"]["S08EventRef"][];
+            /** Governance Revision */
+            governance_revision: number;
+            /** Scope */
+            scope: string;
+            /** Track */
+            track: string;
+        };
+        /** S08FreezeCandidateBody */
+        S08FreezeCandidateBody: {
+            /** Draft Id */
+            draft_id: string;
+            /** Expected Governance Revision */
+            expected_governance_revision?: number | null;
+            /** Idempotency Key */
+            idempotency_key: string;
+        };
+        /** S08ImportLegacyBody */
+        S08ImportLegacyBody: {
+            /** Expected Governance Revision */
+            expected_governance_revision?: number | null;
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Source Bundle Id */
+            source_bundle_id: string;
+        };
+        /** S08RejectBody */
+        S08RejectBody: {
+            /** Candidate Id */
+            candidate_id: string;
+            /** Expected Governance Revision */
+            expected_governance_revision?: number | null;
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Reason Code */
+            reason_code: string;
+        };
+        /** S08ReviseDraftBody */
+        S08ReviseDraftBody: {
+            /** Draft Id */
+            draft_id: string;
+            /** Expected Governance Revision */
+            expected_governance_revision?: number | null;
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Metadata */
+            metadata: {
+                [key: string]: unknown;
+            };
+        };
+        /** S08ScheduleBody */
+        S08ScheduleBody: {
+            /** Activation At */
+            activation_at: number;
+            /** Approval Binding Id */
+            approval_binding_id: string;
+            /** Expected Governance Revision */
+            expected_governance_revision?: number | null;
+            /** Idempotency Key */
+            idempotency_key: string;
+        };
+        /** S08StatusResponse */
+        S08StatusResponse: {
+            /** Activation Hold */
+            activation_hold?: {
+                [key: string]: unknown;
+            } | null;
+            /** Active Generation */
+            active_generation?: number | null;
+            /** Bootstrap */
+            bootstrap: boolean;
+            /** Capability Gate */
+            capability_gate: string;
+            /** Governance Revision */
+            governance_revision: number;
+            /** Scope */
+            scope: string;
+            /** Track */
+            track: string;
+            /** Watermark */
+            watermark: number;
+        };
+        /** S08StopActivationsBody */
+        S08StopActivationsBody: {
+            /** Expected Governance Revision */
+            expected_governance_revision?: number | null;
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Reason Code */
+            reason_code: string;
         };
         /** T05BusinessExceptionOperationsResult */
         T05BusinessExceptionOperationsResult: {
@@ -6876,6 +7444,489 @@ export interface operations {
                 };
                 content: {
                     "text/html": string;
+                };
+            };
+        };
+    };
+    s08_approve_controlled_s08_api_commands_approve_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["S08ApproveBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    s08_cancel_controlled_s08_api_commands_cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["S08RejectBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    s08_freeze_candidate_controlled_s08_api_commands_freeze_candidate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["S08FreezeCandidateBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    s08_import_legacy_controlled_s08_api_commands_import_legacy_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["S08ImportLegacyBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    s08_reject_controlled_s08_api_commands_reject_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["S08RejectBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    s08_request_validation_controlled_s08_api_commands_request_validation_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["S08CandidateCommandBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    s08_revise_draft_controlled_s08_api_commands_revise_draft_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["S08ReviseDraftBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    s08_schedule_controlled_s08_api_commands_schedule_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["S08ScheduleBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    s08_stop_activations_controlled_s08_api_commands_stop_activations_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["S08StopActivationsBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    s08_submit_review_controlled_s08_api_commands_submit_review_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["S08CandidateCommandBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    s08_query_active_controlled_s08_api_queries_active_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ActiveResponse"];
+                };
+            };
+        };
+    };
+    s08_query_candidate_controlled_s08_api_queries_candidate__candidate_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                candidate_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    s08_query_candidates_controlled_s08_api_queries_candidates_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08CandidatesResponse"];
+                };
+            };
+        };
+    };
+    s08_query_drafts_controlled_s08_api_queries_drafts_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08DraftsResponse"];
+                };
+            };
+        };
+    };
+    s08_query_events_controlled_s08_api_queries_events_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08EventsResponse"];
+                };
+            };
+        };
+    };
+    s08_query_status_controlled_s08_api_queries_status_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08StatusResponse"];
                 };
             };
         };
