@@ -718,6 +718,21 @@ def test_approver_can_read_exact_candidate_diff_but_cannot_mutate(
             item["type"]: item["digest"] for item in freeze["components"]
         }
         assert "approval_binding" not in body
+        # The prospective review material is readable before approval: the
+        # exact diff the binding will fix, the full mapping ledger and the
+        # unsupported report.
+        review = body["review_material"]
+        assert review["schema_version"] == "s08-review-material/1"
+        assert review["candidate_id"] == candidate_id
+        assert review["candidate_digest"] == freeze["manifest_digest"]
+        assert review["anchor_candidate_id"] == bootstrap["candidate_id"]
+        assert review["mapping_ledger_id"]
+        assert review["mapping_ledger"]["schema_version"] == "s08-mapping-ledger/1"
+        assert review["mapping_ledger"]["items"]
+        assert review["unsupported_report"]["count"] == 0
+        assert review["unsupported_report"]["items"] == []
+        assert review["behavior_delta"]["equal"] is True
+        assert review["validation_bundle_id"] == body["validation_bundle_id"]
 
         # 2. The approver cannot mutate governance: every admin/operator
         #    command fails with the stable S08_FORBIDDEN error.
@@ -800,15 +815,23 @@ def test_approver_can_read_exact_candidate_diff_but_cannot_mutate(
         assert binding["recovery_release_id"] == bootstrap["candidate_id"]
         assert binding["approved_by"] == "c-demo-policy-approver"
         diff = binding["diff"]
-        assert diff["schema_version"] == "s08-machine-diff/1"
+        assert diff["schema_version"] == "s08-review-material/1"
         assert diff["anchor_candidate_id"] == bootstrap["candidate_id"]
         assert diff["anchor_components"] == {
-            item["type"]: item["digest"] for item in bootstrap["components"]
+            item["type"]: {"id": item["id"], "digest": item["digest"]}
+            for item in bootstrap["components"]
         }
         assert diff["candidate_components"] == {
-            item["type"]: item["digest"] for item in freeze["components"]
+            item["type"]: {"id": item["id"], "digest": item["digest"]}
+            for item in freeze["components"]
         }
+        # Behavior-equivalent sources produce no component changes and an
+        # equivalent behavior verdict bound into the diff.
         assert diff["changes"] == []
+        assert diff["behavior_delta"]["equal"] is True
+        assert diff["applicable_check_delta"]["added"] == []
+        assert diff["applicable_check_delta"]["removed"] == []
+        assert diff["unsupported_report"]["count"] == 0
 
 
 @pytest.mark.parametrize("missing", ("admin", "approver", "operator"))
@@ -880,3 +903,195 @@ def test_missing_s08_identities_disable_scope_without_default_subjects(
             ).fetchone()[0],
         }
     assert counts == {"events": 0, "artifacts": 0, "projections": 0}
+
+
+@pytest.mark.parametrize(
+    "overlap",
+    ("admin_approver_credential", "admin_approver_subject", "operator_subject_dup"),
+)
+def test_overlapping_s08_credentials_or_subjects_disable_scope(
+    tmp_path: Path, overlap: str
+) -> None:
+    """Any shared credential or duplicate subject across Admin/Approver/
+    Operator closes the whole S08 scope: a single bearer can never be
+    relabeled into two subjects, and no bootstrap/governance effect is
+    written."""
+    state_path = tmp_path / "target.sqlite3"
+    env = {
+        "TASK4_S01_TEST_FIXTURE_ROOT": str(ROOT / "fixtures" / "applications"),
+        "TASK4_S01_TEST_STATE_PATH": str(state_path),
+    }
+    if overlap == "admin_approver_credential":
+        env["TASK4_S08_APPROVER_CREDENTIAL"] = ADMIN_CREDENTIAL
+    elif overlap == "admin_approver_subject":
+        env["TASK4_S08_APPROVER_SUBJECT"] = "c-demo-policy-admin"
+    else:
+        env["TASK4_S08_OPERATOR_SUBJECT"] = "c-demo-policy-admin"
+    with s08_test_loopback(env) as server:
+        # The legacy S01 surface stays live.
+        health = server.request("GET", "/api/health")
+        assert health.status == 200
+        # S08 fails closed with no default subject leak.
+        for path, request_headers in [
+            (f"/controlled/s08/api/queries/status?scope={S08_SCOPE}", admin_headers()),
+            (f"/controlled/s08/api/queries/candidates?scope={S08_SCOPE}", admin_headers()),
+            (f"/controlled/s08/api/queries/active?scope={S08_SCOPE}", admin_headers()),
+        ]:
+            response = server.request("GET", path, headers=request_headers)
+            assert response.status in (403, 503)
+            error = response.json()["detail"]["error"]
+            assert error in ("S08_FORBIDDEN", "S08_UNAVAILABLE")
+            assert "c-demo-policy" not in response.text
+        denied = server.request(
+            "POST",
+            "/controlled/s08/api/commands/import_legacy",
+            body={
+                "source_bundle_id": SOURCE_BUNDLE_ID,
+                "idempotency_key": "overlap-import-1",
+                "expected_governance_revision": 0,
+            },
+            headers=admin_headers(),
+        )
+        assert denied.status in (403, 503)
+        assert denied.json()["detail"]["error"] in ("S08_FORBIDDEN", "S08_UNAVAILABLE")
+
+    # No bootstrap/governance side effect.
+    with sqlite3.connect(state_path) as connection:
+        events = connection.execute(
+            "SELECT COUNT(*) FROM policy_governance_events"
+        ).fetchone()[0]
+        artifacts = connection.execute(
+            "SELECT COUNT(*) FROM policy_artifacts"
+        ).fetchone()[0]
+    assert (events, artifacts) == (0, 0)
+
+
+def test_review_material_lists_component_changes_for_behavior_equivalent_version(
+    tmp_path: Path,
+) -> None:
+    """A behavior-equivalent version bump changes exactly the check-policy
+    and checker component digests; the pre-approval review material and the
+    bound diff list those changes while the behavior verdict stays
+    equivalent."""
+    state_path = tmp_path / "target.sqlite3"
+    rules_file = tmp_path / "rules.yaml"
+    rules_file.write_bytes((ROOT / "configs" / "rules_auto_lease.yaml").read_bytes())
+    env = {
+        "TASK4_S01_TEST_FIXTURE_ROOT": str(ROOT / "fixtures" / "applications"),
+        "TASK4_S01_TEST_STATE_PATH": str(state_path),
+        "TASK4_S01_TEST_RULES_PATH": str(rules_file),
+    }
+    with s08_test_loopback(env) as server:
+        bootstrap = _active_query(server)
+        # After the bootstrap anchored on the original bytes, drift the
+        # server-owned rules to a behavior-equivalent version.
+        rules_file.write_bytes(
+            rules_file.read_bytes().replace(
+                b'version: "1.9.0"', b'version: "9.9.9"'
+            )
+        )
+        import_result = _post_command(
+            server,
+            "import_legacy",
+            {
+                "source_bundle_id": SOURCE_BUNDLE_ID,
+                "idempotency_key": "g3-version-import",
+                "expected_governance_revision": _governance_revision(server),
+            },
+            admin_headers(),
+        )
+        draft_id = import_result["draft_id"]
+        _post_command(
+            server,
+            "revise_draft",
+            {
+                "draft_id": draft_id,
+                "metadata": {
+                    "scope": S08_SCOPE,
+                    "validity": {"valid_from": "2000-01-01T00:00:00Z"},
+                    "source": SOURCE_BUNDLE_ID,
+                    "reason": "behavior-equivalent version bump",
+                },
+                "idempotency_key": "g3-version-revise",
+                "expected_governance_revision": _governance_revision(server),
+            },
+            admin_headers(),
+        )
+        freeze = _post_command(
+            server,
+            "freeze_candidate",
+            {
+                "draft_id": draft_id,
+                "idempotency_key": "g3-version-freeze",
+                "expected_governance_revision": _governance_revision(server),
+            },
+            admin_headers(),
+        )
+        candidate_id = freeze["candidate_id"]
+        _post_command(
+            server,
+            "request_validation",
+            {
+                "candidate_id": candidate_id,
+                "idempotency_key": "g3-version-validate",
+                "expected_governance_revision": _governance_revision(server),
+            },
+            admin_headers(),
+        )
+        _wait_for_candidate_status(server, candidate_id, "validated")
+        _post_command(
+            server,
+            "submit_review",
+            {
+                "candidate_id": candidate_id,
+                "idempotency_key": "g3-version-review",
+                "expected_governance_revision": _governance_revision(server),
+            },
+            admin_headers(),
+        )
+        _wait_for_candidate_status(server, candidate_id, "in_review")
+
+        workspace = server.request(
+            "GET",
+            f"/controlled/s08/api/queries/candidate/{candidate_id}",
+            headers=approver_headers(),
+        )
+        assert workspace.status == 200
+        body = workspace.json()
+        review = body["review_material"]
+        # The version bump changes exactly the raw check-policy bytes and
+        # the compiled checker artifact.
+        change_map = {item["component"]: item for item in review["changes"]}
+        assert set(change_map) == {"check_policy", "checker"}
+        assert change_map["check_policy"]["change"] == "modified"
+        assert change_map["checker"]["change"] == "modified"
+        assert review["behavior_delta"]["equal"] is True
+        assert review["applicable_check_delta"]["added"] == []
+        assert review["applicable_check_delta"]["removed"] == []
+        # The bound diff fixes exactly the same review material.
+        activation_time = int(time.time())
+        approval = _post_command(
+            server,
+            "approve",
+            {
+                "candidate_id": candidate_id,
+                "activation_time": activation_time,
+                "recovery_release_id": bootstrap["candidate_id"],
+                "idempotency_key": "g3-version-approve",
+                "expected_governance_revision": _governance_revision(server),
+            },
+            approver_headers(),
+        )
+        assert approval["status"] == "accepted"
+        workspace = server.request(
+            "GET",
+            f"/controlled/s08/api/queries/candidate/{candidate_id}",
+            headers=approver_headers(),
+        )
+        bound_diff = workspace.json()["approval_binding"]["diff"]
+        assert bound_diff["changes"] == review["changes"]
+        assert bound_diff["behavior_delta"] == review["behavior_delta"]
+        assert (
+            bound_diff["applicable_check_delta"]
+            == review["applicable_check_delta"]
+        )

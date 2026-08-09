@@ -69,6 +69,12 @@ _NORMALIZERS_SCHEMA = "s08-normalizers/1"
 _INPUT_CONTRACT_SCHEMA = "s08-input-contract/1"
 _LIMITS_SCHEMA = "s08-limits/1"
 
+
+class ProtectedInvariantError(ValueError):
+    """A protected-baseline invariant is violated across the checker and
+    its comparison/waiver policy components.  Materialization fails closed;
+    the validation suite classifies this as a protected failure."""
+
 # Deterministic operators the pure checker may execute.  The governed
 # manifest binds this registry so validation can refuse unknown operators.
 _TARGET_OPERATORS = frozenset(
@@ -559,7 +565,7 @@ class TargetRelease:
             )
         ):
             raise ValueError("governed checker artifact is structurally invalid")
-        return cls(
+        release = cls(
             release_id=str(artifact["release_id"]),
             release_digest=release_digest,
             checker_build=checker_build,
@@ -588,6 +594,8 @@ class TargetRelease:
             expand_id15_to_18=bool(artifact["expand_id15_to_18"]),
             limits=tuple((str(key), int(value)) for key, value in limits_data),
         )
+        _verify_protected_invariants(release)
+        return release
 
     def component_artifacts(self) -> list[dict[str, Any]]:
         """Canonical non-source components of this release, excluding the raw
@@ -687,6 +695,50 @@ def _rule_from_dict(data: dict[str, Any]) -> TargetRule:
         waiver_scope=data.get("waiver_scope"),
         waiver_ttl_seconds=int(data.get("waiver_ttl_seconds", 0)),
     )
+
+
+def _verify_protected_invariants(release: "TargetRelease") -> None:
+    """Protected-baseline invariants across the checker rules and the
+    comparison/waiver policy: every critical fingerprint rule must exist
+    with its exact field/type/severity/require_all_docs/on_missing/docs
+    semantics and must never be waivable."""
+    from task4_consistency.rules.critical_guard import CRITICAL_FINGERPRINTS
+
+    rules_by_id = {rule.rule_id: rule for rule in release.rules}
+    for fingerprint in CRITICAL_FINGERPRINTS:
+        rule = rules_by_id.get(fingerprint.rule_id)
+        if rule is None:
+            raise ProtectedInvariantError(
+                f"protected rule {fingerprint.rule_id} is missing"
+            )
+        if rule.waivable:
+            raise ProtectedInvariantError(
+                f"protected rule {fingerprint.rule_id} must not be waivable"
+            )
+        if (
+            rule.rule_type != fingerprint.type
+            or rule.field != fingerprint.field
+            or rule.severity != fingerprint.severity
+        ):
+            raise ProtectedInvariantError(
+                f"{fingerprint.rule_id}: field/type/severity must be "
+                f"{fingerprint.field!r}/{fingerprint.type!r}/"
+                f"{fingerprint.severity!r}"
+            )
+        if rule.require_all_docs is not True:
+            raise ProtectedInvariantError(
+                f"{fingerprint.rule_id}: require_all_docs must be true"
+            )
+        if rule.on_missing not in fingerprint.on_missing_allowed:
+            raise ProtectedInvariantError(
+                f"{fingerprint.rule_id}: on_missing={rule.on_missing!r} not in "
+                f"{sorted(fingerprint.on_missing_allowed)}"
+            )
+        if not fingerprint.docs_min.issubset(set(rule.document_roles)):
+            raise ProtectedInvariantError(
+                f"{fingerprint.rule_id}: docs must include "
+                f"{sorted(fingerprint.docs_min)}"
+            )
 
 
 @dataclass(frozen=True)

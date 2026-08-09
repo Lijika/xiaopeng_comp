@@ -3590,11 +3590,12 @@ class ControlledScenarioService:
                     return None
                 stopped_run_spec = attempts[-1]["run_spec"]
                 probe_run_spec = copy.deepcopy(stopped_run_spec)
-                probe_release = (
-                    self._legacy_run_release()
-                    if not stopped_run_spec.get("activation_event_id")
-                    else self._pinned_release_for(stopped_run_spec)
-                )
+                # Governed recovery always resolves the stopped RunSpec
+                # through the Registry/Ledger: an activation-pinned RunSpec
+                # loads its exact pinned release, a pre-cutover RunSpec is
+                # exact-mapped to the Registry compat checker, and the
+                # legacy singleton is never a governed target fallback.
+                probe_release = self._pinned_release_for(stopped_run_spec)
                 probe_run_spec.update(
                     {
                         "run_id": self._stable_id(
@@ -12756,7 +12757,7 @@ class ControlledScenarioService:
         oracle_outcomes: tuple[tuple[str, str, tuple[str, ...]], ...] = ()
         governed_active = (
             self._policy_governance is not None
-            and "C-DEMO/demo" in self._store.policy_active_projections
+            and self._policy_governance.has_governed_activation("C-DEMO/demo")
         )
         if not governed_active:
             # Legacy mode keeps the offline differential oracle for its

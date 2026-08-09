@@ -11,19 +11,38 @@ from __future__ import annotations
 
 import hashlib
 import json
+import resource
 import sys
+import time
 from typing import Any
 
 from task4_consistency.controlled.s01_checker import TargetChecker, TargetRelease
 
 # G4 resource boundary: the fresh-process worker reads at most one bounded
 # stdin payload, accepts a bounded corpus, verifies per-outcome cardinality
-# against the release's declared limits and emits one canonical small
-# outcome digest.  Anything outside these bounds is a rejected validation.
+# and declared runtime limits, and emits one canonical small outcome
+# digest.  A finite memory/process boundary is enforced up front so a
+# malformed child cannot grow without limit.
 _MAX_STDIN_BYTES = 64 * 1024 * 1024
 _MAX_CORPUS_ITEMS = 5000
 _MAX_OUTPUT_BYTES = 32 * 1024 * 1024
 _MAX_REASON_LENGTH = 512
+_MEMORY_LIMIT_BYTES = 512 * 1024 * 1024
+_CPU_LIMIT_SECONDS = 60
+
+
+def _apply_process_boundaries() -> None:
+    try:
+        resource.setrlimit(
+            resource.RLIMIT_AS,
+            (_MEMORY_LIMIT_BYTES, _MEMORY_LIMIT_BYTES),
+        )
+        resource.setrlimit(
+            resource.RLIMIT_CPU,
+            (_CPU_LIMIT_SECONDS, _CPU_LIMIT_SECONDS + 1),
+        )
+    except (ValueError, OSError):
+        pass
 
 
 def _fail(message: str) -> int:
@@ -158,6 +177,7 @@ def _outcome_for(
 
 
 def main() -> int:
+    _apply_process_boundaries()
     stdin_bytes = sys.stdin.buffer.read(_MAX_STDIN_BYTES + 1)
     if len(stdin_bytes) > _MAX_STDIN_BYTES:
         return _fail("validation payload exceeds the input byte limit")
@@ -175,12 +195,26 @@ def main() -> int:
     if not isinstance(corpus, list) or len(corpus) > _MAX_CORPUS_ITEMS:
         return _fail("corpus is missing or exceeds the item limit")
     declared = dict(release.limits)
+    max_runtime_ms = int(declared.get("max_runtime_ms", 0))
     outcomes: list[dict[str, Any]] = []
     for fixture in corpus:
         if not isinstance(fixture, dict):
             return _fail("corpus fixture is not an object")
-        outcome = _outcome_for(release, fixture)
+        started_at = time.monotonic()
+        try:
+            outcome = _outcome_for(release, fixture)
+        except (TypeError, ValueError, KeyError):
+            return _fail("corpus fixture produced a malformed checker run")
+        elapsed_ms = (time.monotonic() - started_at) * 1000.0
+        if max_runtime_ms > 0 and elapsed_ms > max_runtime_ms:
+            return _fail(
+                f"checker run exceeded the declared max_runtime_ms limit "
+                f"({elapsed_ms:.0f}ms > {max_runtime_ms}ms)"
+            )
+        # Skipped corpus entries stay in the raw outcomes so the parent's
+        # corpus comparison counts them instead of comparing empty sets.
         if "skipped" in outcome:
+            outcomes.append(outcome)
             continue
         if len(outcome["applicable"]) > int(declared.get("max_findings", 0)):
             return _fail("outcome exceeds the declared finding limit")

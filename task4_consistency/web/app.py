@@ -138,6 +138,22 @@ S08_CONFIGURED = bool(
     and S08_APPROVER_SUBJECT
     and S08_OPERATOR_CREDENTIAL
     and S08_OPERATOR_SUBJECT
+    and len(
+        {
+            S08_ADMIN_CREDENTIAL,
+            S08_APPROVER_CREDENTIAL,
+            S08_OPERATOR_CREDENTIAL,
+        }
+    )
+    == 3
+    and len(
+        {
+            S08_ADMIN_SUBJECT,
+            S08_APPROVER_SUBJECT,
+            S08_OPERATOR_SUBJECT,
+        }
+    )
+    == 3
 )
 S08_SERVICE: PolicyGovernanceService | None = None
 S08_DEFAULT_KB_PATH = ROOT / "configs" / "kb" / "entity_kb.json"

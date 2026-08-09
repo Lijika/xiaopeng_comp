@@ -11,7 +11,6 @@ import ast
 import copy
 import hashlib
 import json
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -191,11 +190,26 @@ def test_import_and_validation_bundle_cover_every_source_item_with_zero_behavior
     rules_data = yaml.safe_load(rules_path.read_bytes())
     rule_ids = {str(rule["id"]) for rule in rules_data["rules"]}
     ledger_rule_targets = {
-        item["target_ref"].split("/")[-1]
+        item["target_ref"].rsplit("/", 1)[-1].split(".", 1)[0]
         for item in ledger["items"]
         if item["target_ref"] and item["target_ref"].startswith("checker.rules/")
     }
     assert ledger_rule_targets == rule_ids
+    # Every rule field is traversed at its JSON pointer and bound to its
+    # compiled target value.
+    field_targets = {
+        item["target_ref"].rsplit("/", 1)[-1]
+        for item in ledger["items"]
+        if item["target_ref"]
+        and item["target_ref"].startswith("checker.rules/")
+        and "." in item["target_ref"].rsplit("/", 1)[-1]
+    }
+    for index, rule in enumerate(rules_data["rules"]):
+        for field in rule:
+            assert f"{rule['id']}.{field}" in field_targets, (
+                index,
+                field,
+            )
     for canonical in rules_data["field_aliases"]:
         assert any(
             item["target_ref"] == f"checker.aliases/{canonical}"
@@ -311,6 +325,59 @@ def test_import_and_validation_bundle_cover_every_source_item_with_zero_behavior
     bundle2 = validation_bundle(service2, worker2["validation_bundle_id"])
     assert check_outcomes(bundle2)["mapping_ledger"] == "fail"
     assert service2.query_active(ADMIN)["active_generation"] == 1
+
+    # 6b. Unknown nested rule fields are never silently dropped: a mystery
+    #     field inside rules[0] is an explicit unsupported ledger entry at
+    #     its exact JSON pointer, and the candidate is rejected.
+    service2b, rules_path2b, _ = make_policy_service(tmp_path / "unknown-rule-field")
+    rules2b = yaml.safe_load(rules_path2b.read_bytes())
+    rules2b["rules"][0]["mystery_runtime_field"] = {"affects": "unknown"}
+    rules_path2b.write_bytes(
+        yaml.safe_dump(rules2b, sort_keys=False).encode("utf-8")
+    )
+    draft2b = import_draft(service2b)
+    drafts2b = service2b.query_drafts(ADMIN)["drafts"]
+    draft2b_record = next(
+        item for item in drafts2b if item["draft_id"] == draft2b
+    )
+    ledger2b = ledger_content(service2b, draft2b_record["mapping_ledger_id"])
+    mystery_entries = [
+        item
+        for item in ledger2b["items"]
+        if item["source_pointer"] == "/rules/0/mystery_runtime_field"
+    ]
+    assert len(mystery_entries) == 1
+    mystery = mystery_entries[0]
+    assert mystery["classification"] == "unsupported"
+    assert mystery["target_ref"] is None
+    assert mystery["result_digest"] == content_digest(
+        (
+            "rule_field_unknown",
+            str(rules2b["rules"][0]["id"]),
+            "mystery_runtime_field",
+            rules2b["rules"][0]["mystery_runtime_field"],
+        )
+    )
+    # Accepted rule fields bind their compiled target values.
+    compiled_entry = next(
+        item
+        for item in ledger2b["items"]
+        if item["source_pointer"] == f"/rules/0/severity"
+    )
+    assert compiled_entry["classification"] == "exact"
+    assert compiled_entry["result_digest"] == content_digest(
+        (
+            "rule_field_compiled",
+            str(rules2b["rules"][0]["id"]),
+            "severity",
+            str(rules2b["rules"][0].get("severity") or "major").lower(),
+        )
+    )
+    candidate2b, worker2b = freeze_and_validate(service2b, draft2b)
+    assert worker2b["outcome"] == "rejected"
+    bundle2b = validation_bundle(service2b, worker2b["validation_bundle_id"])
+    assert check_outcomes(bundle2b)["mapping_ledger"] == "fail"
+    assert service2b.query_active(ADMIN)["active_generation"] == 1
 
     # 7. Source-byte mutation never replays the previous result under the
     #    same key: the import fingerprint binds the raw bytes.
@@ -507,6 +574,38 @@ def test_validation_rejects_protected_io_alias_and_nondeterminism_without_overri
         expected_failed="input_contract",
         crafted=True,
         case="input-mutation",
+    )
+
+    # (h) Protected-baseline waivability: a crafted checker that makes
+    #     R_VIN_CROSS waivable (with all content IDs recomputed) is a
+    #     protected failure; approval is impossible and the active
+    #     generation stays untouched.
+    service, _, _ = make_policy_service(tmp_path / "protected-waivable")
+    crafted = _craft_mutated_candidate(
+        service,
+        mutate_checker=lambda checker: checker.__setitem__(
+            "rules",
+            [
+                {
+                    **rule,
+                    "waivable": True,
+                    "waiver_policy_id": "c-demo-brand-exception/1",
+                    "waiver_reasons": ["DOCUMENTED_BRAND_VARIANCE"],
+                    "waiver_scope": "one_application_cycle_run_finding",
+                    "waiver_ttl_seconds": 900,
+                }
+                if rule["rule_id"] == "R_VIN_CROSS"
+                else rule
+                for rule in checker["rules"]
+            ],
+        ),
+    )
+    assert_rejected_without_override(
+        service,
+        crafted,
+        expected_failed="protected_baseline",
+        crafted=True,
+        case="protected-waivable",
     )
 
     # (g) Missing/empty/invalid frozen corpus fails closed: bootstrap cannot
@@ -1131,6 +1230,29 @@ def test_governance_commands_are_revisioned_idempotent_and_role_separated(
     with pytest.raises(PolicyUnavailable):
         service.query_active(ADMIN)
 
+    # 10. The configured operator subject owns ordinary worker facts: every
+    #     validation/activation governance event carries the configured
+    #     operator subject with the stable worker source id, and no
+    #     hard-coded activator identity appears anywhere.
+    worker_events = [
+        event
+        for event in service._store.policy_governance_events
+        if event.get("actor", {}).get("source_id") == "s08-policy-worker"
+    ]
+    assert worker_events
+    assert {event["actor"]["subject"] for event in worker_events} == {
+        "c-demo-policy-operator"
+    }
+    assert all(event["actor"]["role"] == "operator" for event in worker_events)
+    assert not any(
+        event.get("actor", {}).get("subject") == "s08-activator"
+        for event in service._store.policy_governance_events
+    )
+    assert not any(
+        record.get("subject") == "s08-activator"
+        for record in service._store.audit_events
+    )
+
 
 def test_concurrent_overlapping_activation_has_one_winner_and_no_mixed_projection(
     tmp_path: Path,
@@ -1224,12 +1346,6 @@ def test_concurrent_overlapping_activation_has_one_winner_and_no_mixed_projectio
 
     def worker(service: PolicyGovernanceService) -> None:
         try:
-            results.append(service.process_next_policy_job())
-        except Exception as error:  # pragma: no cover - defensive
-            errors.append(error)
-
-    def worker(service: PolicyGovernanceService) -> None:
-        try:
             results.append(
                 service.process_next_policy_job(now=int(time.time()) + 301)
             )
@@ -1243,7 +1359,8 @@ def test_concurrent_overlapping_activation_has_one_winner_and_no_mixed_projectio
     for thread in threads:
         thread.start()
     for thread in threads:
-        thread.join()
+        thread.join(timeout=30)
+        assert not thread.is_alive()
 
     assert not errors
     completions = [
@@ -1456,7 +1573,51 @@ def test_audit_or_partial_commit_failure_preserves_prior_active(
     assert len(service._store.idempotency) == before["idempotency"]
     assert service.query_active(ADMIN)["active_generation"] == before["generation"]
 
-    # (3) Injected partial commit during validation: no bundle, no event,
+    # (3) Recovery release evidence loss after schedule: activation must
+    #     fail closed with exact zero protected-effect delta.
+    service = make(None, "fault-recovery-evidence")
+    service.bootstrap_once()
+    _, candidate_id, _, activation_at = _full_flow(service)
+    recovery_id = service.query_active(ADMIN)["candidate_id"]
+    recovery_state = service._candidate_state(
+        service._store.policy_governance_events, recovery_id
+    )
+    before = {
+        "revision": governance_revision(service),
+        "events": len(service._store.policy_governance_events),
+        "audit": len(service._store.audit_events),
+        "outbox": len(service._store.outbox),
+        "idempotency": len(service._store.idempotency),
+        "generation": service.query_active(ADMIN)["active_generation"],
+    }
+    import sqlite3 as sqlite3_module
+
+    with sqlite3_module.connect(service._store.state_path) as connection:
+        connection.execute(
+            "DELETE FROM policy_artifacts WHERE item_id = ?",
+            (recovery_state["validation_bundle_id"],),
+        )
+        connection.execute(
+            "DELETE FROM s01_immutable_catalog "
+            "WHERE table_name = 'policy_artifacts' AND item_id = ?",
+            (recovery_state["validation_bundle_id"],),
+        )
+        connection.commit()
+    result = service.process_next_policy_job(now=activation_at)
+    assert result["status"] == "failed", result
+    assert "PolicyUnavailable" in result["error"]
+    assert governance_revision(service) == before["revision"]
+    assert len(service._store.policy_governance_events) == before["events"]
+    assert len(service._store.audit_events) == before["audit"]
+    assert len(service._store.outbox) == before["outbox"]
+    assert len(service._store.idempotency) == before["idempotency"]
+    assert service.query_active(ADMIN)["active_generation"] == before["generation"]
+    assert not any(
+        event.get("kind") == "activated" and not event.get("bootstrap")
+        for event in service._store.policy_governance_events
+    )
+
+    # (4) Injected partial commit during validation: no bundle, no event,
     #     no state change for the candidate.
     service = make(None, "fault-validation")
     service.bootstrap_once()
@@ -1846,6 +2007,7 @@ def _runtime_methods(path: Path) -> dict[str, list[str]]:
 
 
 def test_target_runtime_legacy_caller_inventory_is_zero(
+    tmp_path: Path,
     restore_global_kb: Any,
 ) -> None:
     """The governed target runtime chain never calls the legacy rule/KB
@@ -1920,9 +2082,9 @@ def test_target_runtime_legacy_caller_inventory_is_zero(
     # poison the global KB and mutate the source bundle, then restart.
     from task4_consistency.kb.store import reload_kb
 
-    service, policy, rules_path, _ = _governed_s01(Path(tempfile.mkdtemp()))
+    service, policy, rules_path, _ = _governed_s01(tmp_path)
     pinned = policy.resolve_run_pin(S08_SCOPE, int(time.time()))
-    poisoned = Path(tempfile.mkdtemp()) / "poisoned.json"
+    poisoned = tmp_path / "poisoned.json"
     poisoned.write_text(
         json.dumps(
             {
@@ -1986,7 +2148,7 @@ def test_active_projection_rebuilds_from_ledger_after_restart(
     """The active projection is a rebuildable cache: tampering with the
     mutable projection must never change what the resolver returns, and a
     restart folds the same active generation from the append-only Ledger."""
-    service, policy, _, _ = _governed_s01(tmp_path)
+    service, policy, rules_path, _ = _governed_s01(tmp_path)
     before = policy.query_active(ADMIN)
     assert before["status"] == "active"
     assert before["active_generation"] == 1
@@ -2019,6 +2181,51 @@ def test_active_projection_rebuilds_from_ledger_after_restart(
     assert restarted_pin["manifest_digest"] == pin["manifest_digest"]
     assert restarted_pin["activation_event_id"] == pin["activation_event_id"]
     assert restarted_pin["components"] == pin["components"]
+
+    # Deleting the projection row outright must not flip a governed runtime
+    # back to the legacy oracle at public S01 admission: the Ledger keeps
+    # resolution stable and the legacy-oracle spy stays untouched.
+    import sqlite3 as sqlite3_module
+
+    from types import SimpleNamespace
+
+    from task4_consistency.controlled.s01 import (
+        ControlledScenarioService as S01Service,
+    )
+
+    with sqlite3_module.connect(policy._store.state_path) as connection:
+        connection.execute("DELETE FROM policy_active_projections")
+        connection.commit()
+    ledger_pin = policy.resolve_run_pin(S08_SCOPE, int(time.time()))
+    assert ledger_pin is not None
+    assert ledger_pin["active_generation"] == pin["active_generation"]
+    assert ledger_pin["manifest_digest"] == pin["manifest_digest"]
+
+    oracle_calls: list[Any] = []
+
+    def spy_oracle(application: Any) -> Any:
+        oracle_calls.append(application)
+        return SimpleNamespace(checks=[])
+
+    admitted_service = S01Service(
+        fixture_root=service.fixture_root,
+        rules_path=rules_path,
+        state_path=policy._store.state_path,
+        policy_governance=policy,
+        legacy_oracle_runner=spy_oracle,
+    )
+    admitted_app = _s01_admit(admitted_service, "s08-projection-deleted-admit")
+    assert oracle_calls == []
+    completed = admitted_service.process_next_job()
+    assert completed.status == "complete", completed
+    assert oracle_calls == []
+    admitted_run = next(
+        item
+        for item in admitted_service._store.runs
+        if item.get("run_id") == completed.run_id
+    )
+    assert admitted_run["spec"]["active_generation"] == pin["active_generation"]
+    assert admitted_run["spec"]["manifest_digest"] == pin["manifest_digest"]
 
 
 def test_warmed_pinned_checker_revalidates_registry(
@@ -2102,3 +2309,409 @@ def test_s08_never_appends_audit_or_outbox_collections_directly() -> None:
             }:
                 violations.append((value.attr, node.lineno))
     assert violations == [], violations
+
+
+_COMPONENT_TYPES = [
+    "check_policy",
+    "semantic_catalog",
+    "entity_knowledge",
+    "normalization_policy",
+    "comparison_policy",
+    "readiness_policy",
+    "operators",
+    "normalizers",
+    "checker",
+    "input_contract",
+    "limits",
+]
+
+
+@pytest.mark.parametrize("target", [*_COMPONENT_TYPES, "validation_bundle", "approval_binding"])
+@pytest.mark.parametrize("mode", ["deleted", "drifted"])
+def test_pinned_artifact_loss_or_drift_fails_closed_fresh_and_warm(
+    tmp_path: Path, target: str, mode: str
+) -> None:
+    """Deleting or content-drifting any manifest component or the bound
+    validation/approval artifact fails closed for both fresh and warmed
+    services: resolver and pinned-release loader reject, and a new worker
+    run stops with the machine-verifiable pinned-release contract without
+    publishing findings."""
+    import sqlite3 as sqlite3_module
+
+    from task4_consistency.controlled.s01_store import _encode, _integrity_digest
+
+    service, policy, _, _ = _governed_s01(tmp_path)
+    _, candidate_id, _, activation_at = _full_flow(policy, activation_delay=0)
+    policy.process_next_policy_job(now=activation_at)
+    active = policy.query_active(ADMIN)
+    assert active["active_generation"] == 2
+    spec = {
+        "manifest_id": active["manifest_id"],
+        "manifest_digest": active["manifest_digest"],
+        "candidate_id": active["candidate_id"],
+        "validation_bundle_id": active["validation_bundle_id"],
+        "validation_bundle_digest": active["validation_bundle_digest"],
+        "approval_binding_id": active["approval_binding_id"],
+        "approval_binding_digest": active["approval_binding_digest"],
+    }
+    # Warm the loader before the tamper.
+    policy.load_pinned_release(spec)
+    # One public admission queues a worker job but nothing runs yet.
+    app_id = _s01_admit(service, f"pin-loss-{target}-{mode}")
+
+    policy._store.reload()
+    manifest = next(
+        item
+        for item in policy._store.policy_manifests
+        if item["manifest_id"] == spec["manifest_id"]
+    )
+    if target == "validation_bundle":
+        artifact_id = spec["validation_bundle_id"]
+    elif target == "approval_binding":
+        artifact_id = spec["approval_binding_id"]
+    else:
+        artifact_id = next(
+            item["id"]
+            for item in manifest["components"]
+            if item["type"] == target
+        )
+    with sqlite3_module.connect(policy._store.state_path) as connection:
+        row = connection.execute(
+            "SELECT payload FROM policy_artifacts WHERE item_id = ?",
+            (artifact_id,),
+        ).fetchone()
+        assert row is not None, artifact_id
+        if mode == "deleted":
+            connection.execute(
+                "DELETE FROM policy_artifacts WHERE item_id = ?", (artifact_id,)
+            )
+            connection.execute(
+                "DELETE FROM s01_immutable_catalog "
+                "WHERE table_name = 'policy_artifacts' AND item_id = ?",
+                (artifact_id,),
+            )
+        else:
+            original = json.loads(row[0])
+            # Keep the item shape intact (S01 persists the shared store);
+            # mutate only the canonical content so the artifact digest no
+            # longer verifies against its pinned component digest.
+            if original.get("canonical_json"):
+                mutated_content = json.loads(original["canonical_json"])
+                mutated_content["tampered"] = True
+                original = {
+                    **original,
+                    "canonical_json": json.dumps(
+                        mutated_content,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                }
+            else:
+                original = {
+                    **original,
+                    "raw_hex": "00" + original.get("raw_hex", "00")[2:],
+                }
+            mutated = _encode(original)
+            integrity = _integrity_digest("policy_artifacts", artifact_id, mutated)
+            connection.execute(
+                "UPDATE policy_artifacts SET payload = ?, integrity_sha256 = ? "
+                "WHERE item_id = ?",
+                (mutated, integrity, artifact_id),
+            )
+            connection.execute(
+                "UPDATE s01_immutable_catalog SET integrity_sha256 = ? "
+                "WHERE table_name = 'policy_artifacts' AND item_id = ?",
+                (integrity, artifact_id),
+            )
+        connection.commit()
+
+    # Fresh resolver and loader fail closed.
+    with pytest.raises(PolicyUnavailable):
+        policy.resolve_run_pin(S08_SCOPE, int(time.time()))
+    with pytest.raises(PolicyUnavailable):
+        policy.load_pinned_release(spec)
+    # The warmed loader revalidates the registry and still fails closed.
+    with pytest.raises(PolicyUnavailable):
+        policy.load_pinned_release(spec)
+    # A fresh service fails identically.
+    fresh = PolicyGovernanceService(
+        state_path=policy._store.state_path,
+        source_rules_path=policy._source_rules_path,
+        source_kb_path=policy._source_kb_path,
+        corpus_root=CORPUS,
+    )
+    with pytest.raises(PolicyUnavailable):
+        fresh.resolve_run_pin(S08_SCOPE, int(time.time()))
+    with pytest.raises(PolicyUnavailable):
+        fresh.load_pinned_release(spec)
+    # The queued worker run stops with the pinned-release contract; no
+    # findings and no current/partial run are published.
+    stopped = service.process_next_job()
+    assert stopped.status == "stopped", stopped
+    assert stopped.reason_code == "PINNED_RELEASE_UNAVAILABLE"
+    assert not any(
+        finding.get("application_id") == app_id
+        for finding in service._store.findings
+    )
+    assert not any(
+        run.get("application_id") == app_id and run.get("status") == "complete"
+        for run in service._store.runs
+    )
+
+
+def test_required_dependency_loss_blocks_new_run_resolution(tmp_path: Path) -> None:
+    """Restarting an active store with audit or storage unavailable must
+    fail closed for new pin resolution and pinned release loads, with no
+    fallback to bootstrap/prior and no ledger mutation."""
+    service, policy, _, _ = _governed_s01(tmp_path)
+    assert policy.resolve_run_pin(S08_SCOPE, int(time.time())) is not None
+    ledger_before = len(policy._store.policy_governance_events)
+
+    restarted = PolicyGovernanceService(
+        state_path=policy._store.state_path,
+        source_rules_path=policy._source_rules_path,
+        source_kb_path=policy._source_kb_path,
+        corpus_root=CORPUS,
+        audit_available=False,
+        storage_available=False,
+    )
+    with pytest.raises(PolicyUnavailable):
+        restarted.resolve_run_pin(S08_SCOPE, int(time.time()))
+    # No fallback, no ledger mutation.
+    assert len(restarted._store.policy_governance_events) == ledger_before
+
+    audit_only = PolicyGovernanceService(
+        state_path=policy._store.state_path,
+        source_rules_path=policy._source_rules_path,
+        source_kb_path=policy._source_kb_path,
+        corpus_root=CORPUS,
+        audit_available=False,
+    )
+    with pytest.raises(PolicyUnavailable):
+        audit_only.resolve_run_pin(S08_SCOPE, int(time.time()))
+
+    storage_only = PolicyGovernanceService(
+        state_path=policy._store.state_path,
+        source_rules_path=policy._source_rules_path,
+        source_kb_path=policy._source_kb_path,
+        corpus_root=CORPUS,
+        storage_available=False,
+    )
+    with pytest.raises(PolicyUnavailable):
+        storage_only.resolve_run_pin(S08_SCOPE, int(time.time()))
+    assert len(storage_only._store.policy_governance_events) == ledger_before
+
+
+def test_validator_build_change_invalidates_prior_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Evidence produced by an outdated validator build cannot be reviewed,
+    approved or activated: approve rejects it, the loader rejects the
+    pinned bundle, and re-validation on the current build creates a
+    distinct bundle."""
+    import task4_consistency.controlled.s08 as s08_module
+
+    service, rules_path, _ = make_policy_service(tmp_path / "validator-build")
+    draft_id = import_draft(service)
+    candidate_id, worker = freeze_and_validate(service, draft_id)
+    assert worker["outcome"] == "validated"
+    candidates = service.query_candidates(ADMIN)["candidates"]
+    candidate = next(
+        item for item in candidates if item["candidate_id"] == candidate_id
+    )
+    bundle_before_id = candidate["validation_bundle_id"]
+    bundle_before = validation_bundle(service, bundle_before_id)
+    assert bundle_before["validator_build"] == s08_module.VALIDATOR_BUILD
+    assert bundle_before["validator"]["code_sha256"]
+    assert bundle_before["results"]["raw_outcomes"] is not None
+    assert bundle_before["results"]["raw_outcomes"]["anchor"]
+
+    service.submit_review(
+        principal=ADMIN,
+        candidate_id=candidate_id,
+        idempotency_key=f"vb-review-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+
+    # The validator build changes; the old evidence is invalid.
+    monkeypatch.setattr(s08_module, "VALIDATOR_BUILD", "s08-validator/99")
+    state = service._candidate_state(
+        service._store.policy_governance_events, candidate_id
+    )
+    with pytest.raises(PolicyUnavailable):
+        service._review_material(service._store, state, S08_SCOPE)
+    with pytest.raises(PolicyUnavailable):
+        service.approve(
+            principal=APPROVER,
+            candidate_id=candidate_id,
+            activation_time=int(time.time()) + 60,
+            recovery_release_id=service.query_active(ADMIN)["candidate_id"],
+            idempotency_key=f"vb-approve-{time.time_ns()}",
+            expected_governance_revision=governance_revision(service),
+        )
+    assert service.query_active(ADMIN)["active_generation"] == 1
+
+    # A fresh candidate (behavior-equivalent version drift) validated
+    # under the changed build carries the new build identity in a distinct
+    # bundle.
+    rules_path.write_bytes(
+        rules_path.read_bytes().replace(
+            b'version: "1.9.0"', b'version: "9.9.9"'
+        )
+    )
+    second_draft = import_draft(service)
+    second_candidate, second_worker = freeze_and_validate(service, second_draft)
+    assert second_worker["outcome"] == "validated"
+    bundle_second = validation_bundle(
+        service, second_worker["validation_bundle_id"]
+    )
+    assert bundle_second["validator_build"] == "s08-validator/99"
+    assert second_worker["validation_bundle_id"] != bundle_before_id
+
+    # After the current build returns, the build-99 evidence is rejected by
+    # the loader and cannot be approved or activated.
+    monkeypatch.setattr(s08_module, "VALIDATOR_BUILD", "s08-validator/2")
+    state_second = service._candidate_state(
+        service._store.policy_governance_events, second_candidate
+    )
+    with pytest.raises(PolicyUnavailable):
+        service._review_material(service._store, state_second, S08_SCOPE)
+    spec = {
+        "manifest_id": state_second["manifest_id"],
+        "manifest_digest": state_second["manifest_digest"],
+        "candidate_id": second_candidate,
+        "validation_bundle_id": state_second["validation_bundle_id"],
+        "validation_bundle_digest": state_second["validation_bundle_digest"],
+        "approval_binding_id": "approval_sha256_" + "0" * 64,
+        "approval_binding_digest": "0" * 64,
+    }
+    with pytest.raises(PolicyUnavailable):
+        service.load_pinned_release(spec)
+    assert service.query_active(ADMIN)["active_generation"] == 1
+
+
+def test_fresh_process_bounds_reject_without_terminating(tmp_path: Path) -> None:
+    """Bounded child probes: cardinality breach, runtime breach, output
+    flood and a skipped corpus entry all terminate promptly and reject;
+    the memory/process boundary is enforced inside the child process."""
+    import subprocess as subprocess_module
+    import sys as sys_module
+
+    from dataclasses import replace
+
+    service, rules_path, kb_path = make_policy_service(tmp_path / "bounds")
+    release = service.resolve_run_pin(S08_SCOPE, int(time.time()))["release"][
+        "target_release"
+    ]
+    assert release is not None
+
+    # (a) Cardinality breach: a corpus beyond the item cap is rejected by
+    #     the child; tiny skipped fixtures keep the probe fast.
+    tiny = {"application_id": "APP-TINY", "documents": []}
+    started = time.monotonic()
+    outcome = service._run_fresh_process(
+        release, [{"fixture": tiny}] * 5001
+    )
+    assert outcome is None
+    assert time.monotonic() - started < 30.0
+
+    # (b) Runtime breach: a single oversized fixture cannot finish within
+    #     the declared max_runtime_ms; the child rejects and the parent
+    #     reports failure promptly.
+    heavy_fixture = {
+        "application_id": "APP-HEAVY",
+        "documents": [
+            {
+                "doc_id": f"doc-{i}",
+                "doc_type": "机动车登记证书",
+                "fields": {
+                    f"field-{j}": f"value-{j}"
+                    for j in range(300)
+                },
+            }
+            for i in range(60)
+        ],
+    }
+    slow_release = replace(
+        release,
+        limits=(("max_documents", 20), ("max_findings", 100), ("max_runtime_ms", 1)),
+    )
+    started = time.monotonic()
+    outcome = service._run_fresh_process(
+        slow_release, [{"fixture": heavy_fixture}]
+    )
+    assert outcome is None
+    assert time.monotonic() - started < 60.0
+
+    # (c) Output flood: a payload under the input cap whose canonical output
+    #     exceeds the parent's stdout cap; the child is killed while the
+    #     parent streams and the run rejects promptly.
+    rules_data = yaml.safe_load(DEFAULT_RULES.read_bytes())
+    rule_fields = sorted(
+        {
+            str(rule.get("field"))
+            for rule in rules_data["rules"]
+            if rule.get("field")
+        }
+    )
+    flood_fixture = {
+        "application_id": "APP-FLOOD",
+        "documents": [
+            {
+                "doc_id": f"doc-{i}",
+                "doc_type": "机动车登记证书",
+                "fields": {
+                    field: f"value-{i}-{j}"
+                    for j, field in enumerate(rule_fields)
+                },
+            }
+            for i in range(120)
+        ],
+    }
+    flood_corpus = [{"fixture": flood_fixture}] * 700
+    started = time.monotonic()
+    outcome = service._run_fresh_process(release, flood_corpus)
+    assert outcome is None
+    assert time.monotonic() - started < 60.0
+
+    # (d) The child enforces a finite memory/process boundary: verified in a
+    #     throwaway subprocess so the test process is never constrained.
+    boundary_probe = subprocess_module.run(
+        [
+            sys_module.executable,
+            "-c",
+            "import resource;"
+            "from task4_consistency.controlled.s08_validate import "
+            "_apply_process_boundaries;"
+            "_apply_process_boundaries();"
+            "print(resource.getrlimit(resource.RLIMIT_AS)[0])",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+        cwd=str(ROOT),
+    )
+    assert int(boundary_probe.stdout.strip()) <= 512 * 1024 * 1024
+
+    # (e) A skipped corpus entry produces rejected evidence at validation
+    #     time with the active generation unchanged.  The bootstrap anchors
+    #    on the healthy corpus; the served corpus then switches to the
+    #     skipped entry.
+    skipped_root = tmp_path / "skipped-corpus"
+    skipped_root.mkdir()
+    (skipped_root / "skip.json").write_text(
+        json.dumps({"application_id": "APP-SKIP", "documents": []}),
+        encoding="utf-8",
+    )
+    service2, _, _ = make_policy_service(tmp_path / "skipped")
+    service2._corpus_root = skipped_root
+    draft2 = import_draft(service2)
+    candidate2, worker2 = freeze_and_validate(service2, draft2)
+    assert worker2["outcome"] == "rejected"
+    bundle2 = validation_bundle(service2, worker2["validation_bundle_id"])
+    outcomes2 = check_outcomes(bundle2)
+    assert outcomes2["corpus_zero_diff"] == "fail"
+    assert bundle2["results"]["corpus_diff"]["applications_skipped"] >= 1
+    assert service2.query_active(ADMIN)["active_generation"] == 1

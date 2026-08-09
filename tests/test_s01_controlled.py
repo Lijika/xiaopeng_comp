@@ -6021,3 +6021,104 @@ def test_reviewer_query_changes_only_after_independent_projection_consumes_outbo
     assert after_projection["items"][0]["lifecycle_revision"] == (
         processed.lifecycle_revision
     )
+
+
+@pytest.mark.parametrize("sources_change", ("modified", "removed"))
+def test_governed_pre_cutover_recovery_uses_registry_compat_release(
+    tmp_path: Path, sources_change: str
+) -> None:
+    """A genuine pre-cutover RunSpec (no activation pin) recovered under
+    governance resolves through the Registry compat mapping: modifying or
+    removing the legacy YAML/KB has zero effect, and the legacy singleton is
+    never read by the governed recovery path."""
+    from task4_consistency.controlled.s08 import (
+        S08_SCOPE,
+        PolicyGovernanceService,
+    )
+
+    state = tmp_path / "precutover.sqlite3"
+    bundle = tmp_path / "precutover-bundle"
+    bundle.mkdir()
+    rules_path = bundle / "rules.yaml"
+    kb_path = bundle / "entity_kb.json"
+    rules_path.write_bytes((ROOT / "configs" / "rules_auto_lease.yaml").read_bytes())
+    kb_path.write_bytes((ROOT / "configs" / "kb" / "entity_kb.json").read_bytes())
+
+    # 1. Pre-cutover (no governance yet): a terminal checker failure leaves
+    #    a legacy-format stopped RunSpec on the store.
+    legacy = ControlledScenarioService(
+        fixture_root=ROOT / "fixtures" / "applications",
+        rules_path=rules_path,
+        state_path=state,
+        checker_runner=FailThriceChecker(),
+    )
+    legacy.submit_demo(
+        principal=TEST_INTEGRATOR,
+        scenario_id="app_r53_bad_engine.json",
+        idempotency_key="s01-precutover-compat",
+    )
+    driver = worker_test_driver(legacy)
+    assert driver.process_next_job(now=0).status == "failed"
+    assert driver.process_next_job(now=1).status == "failed"
+    assert driver.process_next_job(now=3).status == "stopped"
+    stopped_spec = next(
+        attempt["run_spec"]
+        for attempt in reversed(legacy._store.attempts)
+        if isinstance(attempt.get("run_spec"), dict)
+        and attempt["run_spec"].get("release_digest")
+    )
+    assert not stopped_spec.get("activation_event_id")
+    assert stopped_spec.get("release_digest")
+    assert stopped_spec.get("release_id")
+    assert stopped_spec.get("checker_build")
+
+    # 2. Governance bootstraps on the same sources: the Registry checker
+    #    carries the identical release identity as the legacy RunSpec.
+    policy = PolicyGovernanceService(
+        state_path=state,
+        source_rules_path=rules_path,
+        source_kb_path=kb_path,
+        corpus_root=ROOT / "fixtures" / "applications",
+    )
+    assert policy.bootstrap_once()["status"] == "activated"
+    compat_pin = policy.resolve_run_pin(S08_SCOPE, 0)
+    assert compat_pin is not None
+    assert compat_pin["release"]["digest"] == stopped_spec["release_digest"]
+    assert compat_pin["release"]["checker_build"] == stopped_spec["checker_build"]
+    # The exact compat mapping exists.
+    compat = policy.load_compat_release(stopped_spec)
+    assert compat.release_digest == stopped_spec["release_digest"]
+
+    # 3. Legacy sources drift or disappear; governed recovery must succeed
+    #    purely through the Registry compat mapping.
+    if sources_change == "modified":
+        rules_path.write_bytes(
+            rules_path.read_bytes().replace(
+                b"low_confidence_threshold: 0.6",
+                b"low_confidence_threshold: 1.0",
+            )
+        )
+        kb_path.write_bytes(
+            json.dumps(
+                {"version": 2, "address_aliases": {"上海市": "evil-city"}},
+                ensure_ascii=False,
+            ).encode("utf-8")
+        )
+    else:
+        rules_path.unlink()
+        kb_path.unlink()
+    restarted = ControlledScenarioService(
+        fixture_root=ROOT / "fixtures" / "applications",
+        rules_path=rules_path,
+        state_path=state,
+        policy_governance=policy,
+    )
+    recovery = restarted.recover_runtime(
+        principal=TEST_OPERATOR,
+        expected_failure_reason_code="CHECKER_EXCEPTION_RETRY_EXHAUSTED",
+    )
+    assert recovery["recovery"] == "scheduled", recovery
+    assert recovery["requeued_jobs"] == 1
+    recovered = restarted.process_next_job()
+    assert recovered.status == "complete", recovered
+    assert recovered.release_digest == stopped_spec["release_digest"]
