@@ -704,6 +704,44 @@ def _verify_protected_invariants(release: "TargetRelease") -> None:
     semantics and must never be waivable."""
     from task4_consistency.rules.critical_guard import CRITICAL_FINGERPRINTS
 
+    def semantic_digest(value: Any) -> str:
+        return hashlib.sha256(
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+    knowledge = {
+        "schema_version": "s01-target-knowledge/1",
+        "sections": release.knowledge,
+    }
+    if semantic_digest(knowledge) != release.knowledge_digest:
+        raise ProtectedInvariantError(
+            "embedded knowledge does not match its declared digest"
+        )
+    if semantic_digest(release.normalizer_manifest()) != release.normalizer_digest:
+        raise ProtectedInvariantError(
+            "normalizer semantics do not match their declared digest"
+        )
+    if semantic_digest(release.waiver_policy()) != release.waiver_policy_digest:
+        raise ProtectedInvariantError(
+            "waiver semantics do not match their declared digest"
+        )
+    if any(
+        rule.waiver_policy_id != release.waiver_policy_id
+        or rule.waiver_policy_digest != release.waiver_policy_digest
+        for rule in release.rules
+    ):
+        raise ProtectedInvariantError(
+            "checker rules do not bind the declared waiver policy"
+        )
+
+    rule_ids = [rule.rule_id for rule in release.rules]
+    if len(rule_ids) != len(set(rule_ids)):
+        raise ProtectedInvariantError("checker rule identities must be unique")
     rules_by_id = {rule.rule_id: rule for rule in release.rules}
     for fingerprint in CRITICAL_FINGERPRINTS:
         rule = rules_by_id.get(fingerprint.rule_id)

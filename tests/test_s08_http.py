@@ -44,6 +44,10 @@ def s08_test_loopback(
         "TASK4_S08_APPROVER_SUBJECT": "c-demo-policy-approver",
         "TASK4_S08_OPERATOR_CREDENTIAL": OPERATOR_CREDENTIAL,
         "TASK4_S08_OPERATOR_SUBJECT": "c-demo-policy-operator",
+        # Uvicorn imports the module before invoking the test factory.  Keep
+        # that unused default wiring fail-closed so only the explicit test
+        # authority performs the governed bootstrap.
+        "TASK4_S01_AUDIT_AVAILABLE": "0",
     }
     values.update(extra_env or {})
     return UvicornLoopback(
@@ -51,6 +55,35 @@ def s08_test_loopback(
         app_target="task4_consistency.web.app:create_s01_test_app",
         app_factory=True,
     )
+
+
+@pytest.mark.parametrize(
+    "availability_flag",
+    ("TASK4_S01_TEST_AUDIT_AVAILABLE", "TASK4_S01_TEST_STORAGE_AVAILABLE"),
+)
+def test_required_governance_authority_loss_is_http_503(
+    tmp_path: Path, availability_flag: str
+) -> None:
+    state_path = tmp_path / f"{availability_flag.lower()}.sqlite3"
+    with s08_test_loopback(
+        {
+            "TASK4_S01_TEST_STATE_PATH": str(state_path),
+            availability_flag: "0",
+        }
+    ) as server:
+        response = server.request(
+            "POST",
+            "/controlled/s08/api/commands/import_legacy",
+            body={
+                "source_bundle_id": SOURCE_BUNDLE_ID,
+                "idempotency_key": f"authority-loss-{availability_flag}",
+                "expected_governance_revision": 0,
+            },
+            headers=admin_headers(),
+            use_session=False,
+        )
+    assert response.status == 503
+    assert response.json()["detail"]["error"] == "S08_UNAVAILABLE"
 
 
 def admin_headers() -> dict[str, str]:
@@ -262,7 +295,9 @@ def test_first_governed_release_activates_and_new_run_pins_complete_manifest(
         assert review_result["status"] == "accepted"
 
         # 7. The independent Policy Approver binds the exact digest.
-        activation_time = int(time.time())
+        # Leave enough room for approval/status requests before the
+        # non-retroactive schedule check, while staying inside the poll window.
+        activation_time = int(time.time()) + 5
         approval_result = _post_command(
             server,
             "approve",

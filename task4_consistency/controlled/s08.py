@@ -61,7 +61,7 @@ APPROVAL_BINDING_SCHEMA = "s08-approval-binding/1"
 RESERVATION_SCHEMA = "s08-schedule-reservation/1"
 IMPORTER_VERSION = "s08-importer/1"
 VALIDATOR_SUITE = "s08-validation-suite/1"
-VALIDATOR_BUILD = "s08-validator/2"
+VALIDATOR_BUILD = "s08-validator/3"
 _READINESS_POLICY_ID = "c-demo-readiness/1"
 _PROTECTED_CHECK_IDS = frozenset({"R_VIN_CROSS", "R_ENGINE_CROSS", "R_ID_EXACT"})
 _BOOTSTRAP_REASON = "S08 one-time bootstrap migration release"
@@ -178,11 +178,16 @@ def raw_digest(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-# Reproducible validator identity: the suite/build plus a digest of the
-# validator module itself, so evidence produced by changed validator code
-# cannot silently survive an upgrade.  Computed once at import time.
-_VALIDATOR_CODE_DIGEST = raw_digest(
-    (Path(__file__).resolve().parent / "s08_validate.py").read_bytes()
+# Reproducible identity for every module that decides validation status or
+# executes the fresh-process checker.  Computed once at import time.
+_VALIDATOR_CODE_DIGEST = content_digest(
+    [
+        (path.name, raw_digest(path.read_bytes()))
+        for path in sorted(
+            Path(__file__).resolve().parent / name
+            for name in ("s01_checker.py", "s08.py", "s08_validate.py")
+        )
+    ]
 )
 
 
@@ -477,6 +482,21 @@ class PolicyGovernanceService:
             raise PolicyUnavailable("candidate manifest digest does not match")
         return manifest
 
+    @staticmethod
+    def _verify_validator_identity(validation: dict[str, Any]) -> None:
+        validator = validation.get("validator")
+        if (
+            validation.get("validation_suite") != VALIDATOR_SUITE
+            or validation.get("validator_build") != VALIDATOR_BUILD
+            or not isinstance(validator, dict)
+            or validator.get("suite") != VALIDATOR_SUITE
+            or validator.get("build") != VALIDATOR_BUILD
+            or validator.get("code_sha256") != _VALIDATOR_CODE_DIGEST
+        ):
+            raise PolicyUnavailable(
+                "validation bundle was produced by a different validator identity"
+            )
+
     # ------------------------------------------------------------- folding
 
     @classmethod
@@ -596,6 +616,10 @@ class PolicyGovernanceService:
             or len(idempotency_key) > 200
         ):
             raise PolicyInvalidTransition("idempotency key is invalid")
+        if not self.audit_available or not self.storage_available:
+            raise PolicyUnavailable(
+                "required audit or storage authority is unavailable"
+            )
         with self._lock:
             for _ in range(3):
                 self._store.reload()
@@ -603,8 +627,6 @@ class PolicyGovernanceService:
                 replay = self._replay_or_conflict(self._store, key, fingerprint)
                 if replay is not None:
                     return self._result(replay[1], replayed=True)
-                if not self.audit_available:
-                    raise PolicyInvalidTransition("audit is unavailable")
                 staged = copy.deepcopy(self._store)
                 result = mutate(staged, key)
                 try:
@@ -1215,10 +1237,8 @@ class PolicyGovernanceService:
             if state.get("validation_bundle_id")
             else None
         )
-        if validation is not None and validation.get("validator_build") != VALIDATOR_BUILD:
-            raise PolicyUnavailable(
-                "validation bundle was produced by an outdated validator build"
-            )
+        if validation is not None:
+            self._verify_validator_identity(validation)
         corpus_diff = (
             validation.get("results", {}).get("corpus_diff")
             if validation is not None
@@ -1233,8 +1253,9 @@ class PolicyGovernanceService:
         ]
         frozen = frozen_events[-1] if len(frozen_events) == 1 else None
         ledger_id = frozen.get("mapping_ledger_id") if frozen else None
-        if ledger_id:
-            ledger = self._find_mapping_ledger(owner, ledger_id)
+        ledger_digest = frozen.get("mapping_ledger_digest") if frozen else None
+        if ledger_id and ledger_digest:
+            ledger = self._find_mapping_ledger(owner, ledger_id, ledger_digest)
         unsupported = [
             item
             for item in (ledger or {}).get("items", [])
@@ -1748,6 +1769,11 @@ class PolicyGovernanceService:
     ) -> dict[str, Any]:
         """Claim and execute one durable policy job (validation or activation)."""
         with self._lock:
+            if not self.audit_available or not self.storage_available:
+                return {
+                    "status": "failed",
+                    "reason_code": "POLICY_AUTHORITY_UNAVAILABLE",
+                }
             self._store.reload()
             observed_now = int(self._clock() if now is None else now)
             for _ in range(2):
@@ -1949,6 +1975,21 @@ class PolicyGovernanceService:
                 raise PolicyConflict(
                     "candidate schedule revision changed since scheduling"
                 )
+            candidate_manifest = self._verify_pinned_manifest(
+                owner,
+                state["manifest_id"],
+                state["manifest_digest"],
+            )
+            self._verify_bound_evidence(
+                owner,
+                candidate_manifest,
+                candidate_id=candidate_id,
+                validation_bundle_id=state["validation_bundle_id"],
+                validation_bundle_digest=state["validation_bundle_digest"],
+                approval_binding_id=state["approval_binding_id"],
+                approval_binding_digest=state["approval_binding_digest"],
+                require_current_validator=True,
+            )
             # Fully re-verify the recovery release from append-only facts
             # before any protected write: its manifest, every component,
             # validation bundle and approval binding must verify against the
@@ -1992,8 +2033,10 @@ class PolicyGovernanceService:
                     "approval_binding_digest"
                 ],
             )
-            if not self.audit_available:
-                raise PolicyUnavailable("required audit is unavailable")
+            if not self.audit_available or not self.storage_available:
+                raise PolicyUnavailable(
+                    "required audit or storage authority is unavailable"
+                )
             self._before_write("s08.activation")
             staged = copy.deepcopy(self._store)
             staged_job = next(
@@ -2073,7 +2116,7 @@ class PolicyGovernanceService:
                         "active_generation": generation,
                     },
                 )
-            manifest = self._manifest(staged, state["manifest_id"])
+            manifest = candidate_manifest
             staged.policy_active_projections[scope] = {
                 "schema_version": "s08-active-projection/1",
                 "scope": scope,
@@ -2208,6 +2251,16 @@ class PolicyGovernanceService:
         Once a bootstrap activation exists, restart only reads the Registry
         and Ledger; the source files are never a runtime fallback."""
         with self._lock:
+            if not self.audit_available:
+                return {
+                    "status": "blocked",
+                    "reason_code": "AUDIT_UNAVAILABLE",
+                }
+            if not self.storage_available:
+                return {
+                    "status": "blocked",
+                    "reason_code": "STORAGE_UNAVAILABLE",
+                }
             self._store.reload()
             if any(
                 event.get("kind") == "activated"
@@ -2222,11 +2275,6 @@ class PolicyGovernanceService:
                     "active_generation": (
                         folded["active_generation"] if folded is not None else 1
                     ),
-                }
-            if not self.audit_available:
-                return {
-                    "status": "blocked",
-                    "reason_code": "AUDIT_UNAVAILABLE",
                 }
             rules_path = self._source_rules_path
             kb_path = self._source_kb_path
@@ -2640,7 +2688,7 @@ class PolicyGovernanceService:
             # unknown nested fields become explicit unsupported entries that
             # block validation instead of being silently dropped.
             rule_def = RuleDef.from_dict(rule, index=index)
-            for field in _RULE_KNOWN_FIELDS:
+            for field in sorted(_RULE_KNOWN_FIELDS):
                 if field not in rule:
                     continue
                 raw_value = rule[field]
@@ -2862,6 +2910,13 @@ class PolicyGovernanceService:
 
     # ------------------------------------------------------------ validation
 
+    @staticmethod
+    def _runtime_behavior_digest(release: TargetRelease) -> str:
+        material = release.to_artifact()
+        material.pop("release_id", None)
+        material.pop("rules_digest", None)
+        return content_digest(material)
+
     def _validate_candidate(
         self, owner: SQLiteTargetStore, state: dict[str, Any]
     ) -> tuple[dict[str, Any], str]:
@@ -3015,6 +3070,43 @@ class PolicyGovernanceService:
                     "detail": protected_problem,
                 }
             )
+        if release is None:
+            behavior_identity = False
+            behavior_detail = "checker artifact is not materializable"
+        else:
+            try:
+                active = self._fold_active_projection(
+                    owner.policy_governance_events, S08_SCOPE
+                )
+                anchor_release = release
+                if active is not None:
+                    anchor_manifest = self._verify_pinned_manifest(
+                        owner, active["manifest_id"], active["manifest_digest"]
+                    )
+                    anchor_release = TargetRelease.from_artifact(
+                        self._artifact(
+                            owner,
+                            self._component_id(anchor_manifest, "checker"),
+                        )
+                    )
+                behavior_identity = self._runtime_behavior_digest(
+                    release
+                ) == self._runtime_behavior_digest(anchor_release)
+                behavior_detail = (
+                    "runtime material matches the active anchor"
+                    if behavior_identity
+                    else "runtime material differs from the active anchor"
+                )
+            except (PolicyUnavailable, ValueError) as error:
+                behavior_identity = False
+                behavior_detail = str(error)
+        checks.append(
+            {
+                "check_id": "runtime_behavior_identity",
+                "outcome": "pass" if behavior_identity else "fail",
+                "detail": behavior_detail,
+            }
+        )
         # Validation reads only the immutable candidate snapshot pinned at
         # freeze time; later draft edits can never influence it.
         frozen_events = [
@@ -3025,10 +3117,15 @@ class PolicyGovernanceService:
         ]
         frozen = frozen_events[-1] if len(frozen_events) == 1 else None
         mapping_ledger_id = frozen.get("mapping_ledger_id") if frozen else None
+        mapping_ledger_digest = (
+            frozen.get("mapping_ledger_digest") if frozen else None
+        )
         draft_metadata = frozen.get("metadata") if frozen else None
         ledger = (
-            self._find_mapping_ledger(owner, mapping_ledger_id)
-            if mapping_ledger_id
+            self._find_mapping_ledger(
+                owner, mapping_ledger_id, mapping_ledger_digest
+            )
+            if mapping_ledger_id and mapping_ledger_digest
             else None
         )
         unsupported = (
@@ -3186,6 +3283,7 @@ class PolicyGovernanceService:
             "inputs": {
                 "component_digests": component_digests,
                 "mapping_ledger_id": mapping_ledger_id,
+                "mapping_ledger_digest": mapping_ledger_digest,
                 "corpus": corpus_manifest,
             },
             "results": {
@@ -3472,6 +3570,11 @@ class PolicyGovernanceService:
             anchor_outcomes is None
             or candidate_outcomes is None
             or candidate_again is None
+            or not isinstance(candidate_outcomes.get("outcome_schema"), dict)
+            or anchor_outcomes.get("outcome_schema")
+            != candidate_outcomes.get("outcome_schema")
+            or candidate_again.get("outcome_schema")
+            != candidate_outcomes.get("outcome_schema")
         ):
             reason = "fresh-process checker run failed"
             return (
@@ -3547,10 +3650,20 @@ class PolicyGovernanceService:
                 else "corpus behavior differs or fixtures are uncovered"
             ),
         }
+        outcome_sets: dict[str, list[dict[str, Any]]] = {}
+        runs: dict[str, dict[str, str]] = {}
+        for name, result in (
+            ("anchor", anchor_outcomes),
+            ("candidate", candidate_outcomes),
+            ("again", candidate_again),
+        ):
+            digest = result["digest"]
+            outcome_sets.setdefault(digest, result["outcomes"])
+            runs[name] = {"outcome_set_digest": digest}
         raw_outcomes = {
-            "anchor": anchor_outcomes["outcomes"],
-            "candidate": candidate_outcomes["outcomes"],
-            "again": candidate_again["outcomes"],
+            "schema": candidate_outcomes["outcome_schema"],
+            "runs": runs,
+            "outcome_sets": outcome_sets,
         }
         return determinism, corpus_diff, corpus_manifest, raw_outcomes
 
@@ -3613,8 +3726,11 @@ class PolicyGovernanceService:
         payload = {
             "checker_artifact": release.to_artifact(),
             "corpus": [
-                item["fixture"]
-                for item in corpus
+                {
+                    "item_id": str(item.get("name") or f"corpus-item-{index}"),
+                    "fixture": item["fixture"],
+                }
+                for index, item in enumerate(corpus)
                 if isinstance(item["fixture"], dict)
             ],
         }
@@ -3702,6 +3818,12 @@ class PolicyGovernanceService:
             return None
         stdout_thread.join(timeout=10)
         stderr_thread.join(timeout=10)
+        if stdout_thread.is_alive() or stderr_thread.is_alive():
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            return None
         with stream_lock:
             stdout_overflow = (
                 counters["stdout"] > _MAX_SUBPROCESS_STDOUT_BYTES
@@ -3720,26 +3842,31 @@ class PolicyGovernanceService:
     def _compare_corpus(
         anchor: list[dict[str, Any]], candidate: list[dict[str, Any]]
     ) -> dict[str, Any]:
-        anchor_by_id = {item["application_id"]: item for item in anchor}
-        candidate_by_id = {item["application_id"]: item for item in candidate}
         compared = 0
         skipped = 0
-        checks_equal = True
+        checks_equal = len(anchor) == len(candidate)
         selection_equal = True
         normalization_equal = True
         verdicts_equal = True
         route_equal = True
-        for application_id in sorted(set(anchor_by_id) | set(candidate_by_id)):
-            left = anchor_by_id.get(application_id)
-            right = candidate_by_id.get(application_id)
+        for index in range(max(len(anchor), len(candidate))):
+            left = anchor[index] if index < len(anchor) else None
+            right = candidate[index] if index < len(candidate) else None
             if left is None or right is None:
+                checks_equal = False
+                continue
+            if left.get("corpus_item_id") != right.get("corpus_item_id"):
                 checks_equal = False
                 continue
             if "skipped" in left or "skipped" in right:
                 skipped += 1
                 continue
             compared += 1
-            checks_equal = checks_equal and left["applicable"] == right["applicable"]
+            checks_equal = (
+                checks_equal
+                and left["applicable"] == right["applicable"]
+                and left["checks"] == right["checks"]
+            )
             selection_equal = (
                 selection_equal and left["selection"] == right["selection"]
             )
@@ -3771,23 +3898,21 @@ class PolicyGovernanceService:
             )
         return str(matches[0]["id"])
 
-    @staticmethod
     def _find_mapping_ledger(
-        owner: SQLiteTargetStore, ledger_id: str
-    ) -> dict[str, Any] | None:
-        for artifact in owner.policy_artifacts:
-            if artifact.get("artifact_id") != ledger_id:
-                continue
-            if not artifact.get("canonical_json"):
-                return None
-            try:
-                content = json.loads(artifact["canonical_json"])
-            except (TypeError, json.JSONDecodeError):
-                return None
-            if content.get("schema_version") != MAPPING_LEDGER_SCHEMA:
-                return None
-            return content
-        return None
+        self,
+        owner: SQLiteTargetStore,
+        ledger_id: str,
+        ledger_digest: str,
+    ) -> dict[str, Any]:
+        if ledger_id != f"artifact_sha256_{ledger_digest}":
+            raise PolicyUnavailable("mapping ledger identity does not verify")
+        content = self._artifact(owner, ledger_id)
+        if (
+            content.get("schema_version") != MAPPING_LEDGER_SCHEMA
+            or content_digest(content) != ledger_digest
+        ):
+            raise PolicyUnavailable("mapping ledger content does not verify")
+        return content
 
     # ------------------------------------------------------------ resolver
 
@@ -3942,14 +4067,20 @@ class PolicyGovernanceService:
             )
         manifest_id = run_spec.get("manifest_id")
         manifest_digest = run_spec.get("manifest_digest")
+        policy_scope = run_spec.get("policy_scope")
+        activation_event_id = run_spec.get("activation_event_id")
+        active_generation = run_spec.get("active_generation")
         candidate_id = run_spec.get("candidate_id")
         validation_bundle_id = run_spec.get("validation_bundle_id")
         validation_bundle_digest = run_spec.get("validation_bundle_digest")
         approval_binding_id = run_spec.get("approval_binding_id")
         approval_binding_digest = run_spec.get("approval_binding_digest")
+        components = run_spec.get("components")
         if not all(
             isinstance(value, str) and value
             for value in (
+                policy_scope,
+                activation_event_id,
                 manifest_id,
                 manifest_digest,
                 candidate_id,
@@ -3958,12 +4089,53 @@ class PolicyGovernanceService:
                 approval_binding_id,
                 approval_binding_digest,
             )
+        ) or (
+            isinstance(active_generation, bool)
+            or not isinstance(active_generation, int)
+            or active_generation < 1
+            or not isinstance(components, (list, tuple))
+            or not components
         ):
             raise PolicyUnavailable("RunSpec policy pin is incomplete")
         self._store.reload()
+        activations = [
+            event
+            for event in self._store.policy_governance_events
+            if event.get("kind") == "activated"
+            and event.get("event_id") == activation_event_id
+            and event.get("activation_event_id") == activation_event_id
+        ]
+        if len(activations) != 1:
+            raise PolicyUnavailable(
+                "RunSpec activation pin does not match the governance ledger"
+            )
+        activation = activations[0]
+        expected_activation = {
+            "scope": policy_scope,
+            "active_generation": active_generation,
+            "candidate_id": candidate_id,
+            "manifest_id": manifest_id,
+            "manifest_digest": manifest_digest,
+            "validation_bundle_id": validation_bundle_id,
+            "validation_bundle_digest": validation_bundle_digest,
+            "approval_binding_id": approval_binding_id,
+        }
+        if any(
+            activation.get(key) != value
+            for key, value in expected_activation.items()
+        ) or approval_binding_digest != str(approval_binding_id).removeprefix(
+            "approval_sha256_"
+        ):
+            raise PolicyUnavailable(
+                "RunSpec release pin does not match its activation fact"
+            )
         manifest = self._verify_pinned_manifest(
             self._store, manifest_id, manifest_digest
         )
+        if canonical_bytes(components) != canonical_bytes(manifest["components"]):
+            raise PolicyUnavailable(
+                "RunSpec components do not match the activated manifest"
+            )
         self._verify_bound_evidence(
             self._store,
             manifest,
@@ -4041,16 +4213,33 @@ class PolicyGovernanceService:
         validation_bundle_digest: str,
         approval_binding_id: str,
         approval_binding_digest: str,
+        require_current_validator: bool = False,
     ) -> None:
-        """Verify the validation bundle and approval binding pinned to a
-        candidate: both artifacts must verify under their IDs/digests and
-        reference the exact candidate manifest."""
+        """Verify the validation and approval facts bound to one candidate."""
+        state = self._require_candidate_state(owner, candidate_id)
+        expected_state = {
+            "manifest_id": manifest["manifest_id"],
+            "manifest_digest": manifest["digest"],
+            "validation_bundle_id": validation_bundle_id,
+            "validation_bundle_digest": validation_bundle_digest,
+            "approval_binding_id": approval_binding_id,
+            "approval_binding_digest": approval_binding_digest,
+        }
+        if any(
+            state.get(key) != value for key, value in expected_state.items()
+        ) or canonical_bytes(state.get("components")) != canonical_bytes(
+            manifest["components"]
+        ):
+            raise PolicyUnavailable(
+                "pinned evidence does not match the governance ledger"
+            )
         validation = self._artifact(owner, validation_bundle_id)
+        if require_current_validator:
+            self._verify_validator_identity(validation)
         if (
             validation_bundle_id
             != f"validation_sha256_{validation_bundle_digest}"
             or validation.get("status") != "validated"
-            or validation.get("validator_build") != VALIDATOR_BUILD
             or validation.get("candidate_id") != candidate_id
             or validation.get("manifest_id") != manifest["manifest_id"]
             or validation.get("manifest_digest") != manifest["digest"]
@@ -4065,6 +4254,13 @@ class PolicyGovernanceService:
             or binding.get("schema_version") != APPROVAL_BINDING_SCHEMA
             or binding.get("candidate_id") != candidate_id
             or binding.get("candidate_digest") != manifest["digest"]
+            or binding.get("validation_bundle_id") != validation_bundle_id
+            or binding.get("validation_bundle_digest")
+            != validation_bundle_digest
+            or binding.get("scope") != S08_SCOPE
+            or binding.get("activation_time") != state.get("activation_time")
+            or binding.get("recovery_release_id")
+            != state.get("recovery_release_id")
         ):
             raise PolicyUnavailable(
                 "pinned approval binding does not match the candidate manifest"
@@ -4089,6 +4285,10 @@ class PolicyGovernanceService:
         that carries the same release identity (the bootstrap migration
         release).  Never reads legacy YAML/JSON files; a RunSpec with no
         matching Registry artifact fails closed."""
+        if not self.audit_available or not self.storage_available:
+            raise PolicyUnavailable(
+                "required audit or storage trust is unavailable for resolution"
+            )
         release_digest = run_spec.get("release_digest")
         release_id = run_spec.get("release_id")
         checker_build = run_spec.get("checker_build")
@@ -4098,8 +4298,40 @@ class PolicyGovernanceService:
         ):
             raise PolicyUnavailable("RunSpec compatibility pin is incomplete")
         self._store.reload()
-        for manifest in self._store.policy_manifests:
+        activations = sorted(
+            (
+                event
+                for event in self._store.policy_governance_events
+                if event.get("kind") == "activated" and event.get("bootstrap")
+            ),
+            key=lambda event: int(event.get("revision", 0)),
+            reverse=True,
+        )
+        for activation in activations:
             try:
+                manifest = self._verify_pinned_manifest(
+                    self._store,
+                    str(activation.get("manifest_id") or ""),
+                    str(activation.get("manifest_digest") or ""),
+                )
+                approval_binding_id = str(
+                    activation.get("approval_binding_id") or ""
+                )
+                self._verify_bound_evidence(
+                    self._store,
+                    manifest,
+                    candidate_id=str(activation.get("candidate_id") or ""),
+                    validation_bundle_id=str(
+                        activation.get("validation_bundle_id") or ""
+                    ),
+                    validation_bundle_digest=str(
+                        activation.get("validation_bundle_digest") or ""
+                    ),
+                    approval_binding_id=approval_binding_id,
+                    approval_binding_digest=approval_binding_id.removeprefix(
+                        "approval_sha256_"
+                    ),
+                )
                 checker = self._artifact(
                     self._store, self._component_id(manifest, "checker")
                 )

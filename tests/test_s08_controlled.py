@@ -210,6 +210,12 @@ def test_import_and_validation_bundle_cover_every_source_item_with_zero_behavior
                 index,
                 field,
             )
+        field_pointers = [
+            item["source_pointer"]
+            for item in ledger["items"]
+            if item["source_pointer"].startswith(f"/rules/{index}/")
+        ]
+        assert field_pointers == sorted(field_pointers)
     for canonical in rules_data["field_aliases"]:
         assert any(
             item["target_ref"] == f"checker.aliases/{canonical}"
@@ -257,6 +263,7 @@ def test_import_and_validation_bundle_cover_every_source_item_with_zero_behavior
     assert outcomes["protected_baseline"] == "pass"
     assert outcomes["mapping_ledger"] == "pass"
     assert outcomes["semantic_entity_safety"] == "pass"
+    assert outcomes["runtime_behavior_identity"] == "pass"
     assert outcomes["determinism"] == "pass"
     assert outcomes["corpus_zero_diff"] == "pass"
 
@@ -287,6 +294,89 @@ def test_import_and_validation_bundle_cover_every_source_item_with_zero_behavior
     assert len(corpus_manifest["digest"]) == 64
     assert corpus_manifest["digest"] == corpus_diff["corpus_digest"]
     assert corpus_manifest["count"] == len(corpus_manifest["items"])
+    raw_outcomes = bundle["results"]["raw_outcomes"]
+    schema = raw_outcomes["schema"]
+    assert schema == {
+        "check": [
+            "rule_id",
+            "verdict",
+            "severity",
+            "reason_codes",
+            "evidence_links",
+        ],
+        "evidence_link": [
+            "document_id",
+            "document_role",
+            "field",
+            "value_state",
+            "raw_masked",
+            "observation_id",
+            "source_object_ref",
+            "source_sha256",
+            "provenance_manifest_digest",
+            "source_page",
+            "source_region",
+            "evidence_eligible",
+            "eligibility_reason",
+        ],
+        "selection": [
+            "rule_id",
+            "observation_id",
+            "document_id",
+            "document_role",
+            "field",
+            "selected",
+            "reason_code",
+        ],
+        "normalization": [
+            "rule_id",
+            "observation_id",
+            "document_id",
+            "document_role",
+            "field",
+            "normalized",
+            "notes",
+            "ocr_fix",
+            "pre_ocr",
+        ],
+    }
+    candidate_digest = raw_outcomes["runs"]["candidate"]["outcome_set_digest"]
+    candidate_outcomes = raw_outcomes["outcome_sets"][candidate_digest]
+    assert set(raw_outcomes["runs"]) == {"anchor", "candidate", "again"}
+    assert all(
+        run["outcome_set_digest"] in raw_outcomes["outcome_sets"]
+        for run in raw_outcomes["runs"].values()
+    )
+    complete_outcomes = [
+        outcome for outcome in candidate_outcomes if "skipped" not in outcome
+    ]
+    assert complete_outcomes
+    assert complete_outcomes[0]["checks"]
+    assert len(complete_outcomes[0]["checks"][0]) == len(schema["check"])
+    selections = [
+        selection
+        for outcome in candidate_outcomes
+        for selection in outcome.get("selection", [])
+    ]
+    normalizations = [
+        normalization
+        for outcome in candidate_outcomes
+        for normalization in outcome.get("normalization", [])
+    ]
+    selected_index = schema["selection"].index("selected")
+    selection_reason_index = schema["selection"].index("reason_code")
+    normalized_index = schema["normalization"].index("normalized")
+    assert selections and any(
+        selection[selected_index] is True for selection in selections
+    )
+    assert all(
+        selection[selection_reason_index] != "PROVENANCE_INELIGIBLE"
+        for selection in selections
+    )
+    assert normalizations and any(
+        normalization[normalized_index] is not None
+        for normalization in normalizations
+    )
 
     # 5. The bundle and its candidate are immutable; a second validation run
     #    of the same candidate produces the identical bundle.
@@ -411,6 +501,201 @@ def test_import_and_validation_bundle_cover_every_source_item_with_zero_behavior
         expected_governance_revision=governance_revision(service3),
     )
     assert fresh_import["draft_id"] != first_import["draft_id"]
+
+
+def test_corpus_comparison_preserves_duplicate_application_items() -> None:
+    def outcome(item_id: str, applicable: list[str]) -> dict[str, Any]:
+        return {
+            "corpus_item_id": item_id,
+            "application_id": "APP-DUPLICATE",
+            "checks": [{"rule_id": rule_id} for rule_id in applicable],
+            "applicable": applicable,
+            "selection": [],
+            "normalization": [],
+            "verdicts": [],
+            "route": "auto_complete",
+        }
+
+    anchor = [outcome("fixture-a.json", ["R_A"]), outcome("fixture-b.json", ["R_B"])]
+    candidate = [
+        outcome("fixture-a.json", ["R_CHANGED"]),
+        outcome("fixture-b.json", ["R_B"]),
+    ]
+    compared = PolicyGovernanceService._compare_corpus(anchor, candidate)
+    assert compared["compared"] == 2
+    assert compared["checks_equal"] is False
+
+
+def test_mapping_ledger_content_address_is_rechecked_before_validation(
+    tmp_path: Path,
+) -> None:
+    import sqlite3 as sqlite3_module
+
+    from task4_consistency.controlled.s01_store import _encode, _integrity_digest
+
+    service, rules_path, _ = make_policy_service(tmp_path)
+    rules = yaml.safe_load(rules_path.read_bytes())
+    rules["rules"][0]["mystery_runtime_field"] = "must-not-disappear"
+    rules_path.write_bytes(yaml.safe_dump(rules, sort_keys=False).encode("utf-8"))
+    draft_id = import_draft(service)
+    draft = next(
+        item
+        for item in service.query_drafts(ADMIN)["drafts"]
+        if item["draft_id"] == draft_id
+    )
+    freeze = service.freeze_candidate(
+        principal=ADMIN,
+        draft_id=draft_id,
+        idempotency_key=f"ledger-freeze-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    service.request_validation(
+        principal=ADMIN,
+        candidate_id=freeze["candidate_id"],
+        idempotency_key=f"ledger-validate-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+
+    ledger_id = draft["mapping_ledger_id"]
+    with sqlite3_module.connect(service._store.state_path) as connection:
+        payload = connection.execute(
+            "SELECT payload FROM policy_artifacts WHERE item_id = ?",
+            (ledger_id,),
+        ).fetchone()[0]
+        artifact = json.loads(payload)
+        ledger = json.loads(artifact["canonical_json"])
+        unsupported = [
+            item
+            for item in ledger["items"]
+            if item.get("classification") == "unsupported"
+        ]
+        assert unsupported
+        ledger["items"] = [
+            item
+            for item in ledger["items"]
+            if item.get("classification") != "unsupported"
+        ]
+        artifact["canonical_json"] = canonical_bytes(ledger).decode("utf-8")
+        encoded = _encode(artifact)
+        integrity = _integrity_digest("policy_artifacts", ledger_id, encoded)
+        connection.execute(
+            "UPDATE policy_artifacts SET payload = ?, integrity_sha256 = ? "
+            "WHERE item_id = ?",
+            (encoded, integrity, ledger_id),
+        )
+        connection.execute(
+            "UPDATE s01_immutable_catalog SET integrity_sha256 = ? "
+            "WHERE table_name = 'policy_artifacts' AND item_id = ?",
+            (integrity, ledger_id),
+        )
+        connection.commit()
+
+    result = service.process_next_policy_job()
+    assert result["status"] == "failed"
+    state = service._candidate_state(
+        service._store.policy_governance_events, freeze["candidate_id"]
+    )
+    assert state["status"] == "candidate"
+    assert state.get("validation_bundle_id") is None
+    assert service.query_active(ADMIN)["active_generation"] == 1
+
+
+def test_checker_artifact_recomputes_declared_semantic_digests(
+    tmp_path: Path,
+) -> None:
+    from task4_consistency.controlled.s01_checker import (
+        ProtectedInvariantError,
+        TargetRelease,
+    )
+
+    service, _, _ = make_policy_service(tmp_path)
+    release = service.resolve_run_pin(S08_SCOPE, int(time.time()))["release"][
+        "target_release"
+    ]
+    artifact = release.to_artifact()
+
+    waiver_drift = copy.deepcopy(artifact)
+    waiver_drift["rules"] = [
+        {
+            **rule,
+            "waivable": True,
+            "waiver_reasons": ["DOCUMENTED_BRAND_VARIANCE"],
+            "waiver_scope": "one_application_cycle_run_finding",
+            "waiver_ttl_seconds": 900,
+        }
+        if rule["rule_id"] == "R_NAME_FUZZY"
+        else rule
+        for rule in waiver_drift["rules"]
+    ]
+    normalizer_drift = {**artifact, "vin_fix_ioq": not artifact["vin_fix_ioq"]}
+    knowledge_drift = copy.deepcopy(artifact)
+    knowledge_drift["knowledge"] = [
+        [section, [list(pair) for pair in values]]
+        for section, values in artifact["knowledge"]
+    ]
+    knowledge_drift["knowledge"][0][1][0][1] = "drifted-canonical-value"
+
+    duplicate_rule = copy.deepcopy(artifact)
+    critical = next(
+        rule for rule in duplicate_rule["rules"] if rule["rule_id"] == "R_VIN_CROSS"
+    )
+    duplicate_rule["rules"] = [
+        {**critical, "severity": "minor"},
+        *duplicate_rule["rules"],
+    ]
+    waiver_material = {
+        "schema_version": "c-demo-waiver-policy/1",
+        "policy_id": duplicate_rule["waiver_policy_id"],
+        "checks": [
+            {
+                "rule_id": rule["rule_id"],
+                "waivable": rule["waivable"],
+                "allowed_reasons": (
+                    list(rule["waiver_reasons"]) if rule["waivable"] else []
+                ),
+                "scope": rule["waiver_scope"] if rule["waivable"] else None,
+                "maximum_ttl_seconds": (
+                    rule["waiver_ttl_seconds"] if rule["waivable"] else 0
+                ),
+            }
+            for rule in duplicate_rule["rules"]
+        ],
+    }
+    duplicate_rule["waiver_policy_digest"] = content_digest(waiver_material)
+    for rule in duplicate_rule["rules"]:
+        rule["waiver_policy_digest"] = duplicate_rule["waiver_policy_digest"]
+
+    for drifted in (
+        waiver_drift,
+        normalizer_drift,
+        knowledge_drift,
+        duplicate_rule,
+    ):
+        with pytest.raises(ProtectedInvariantError):
+            TargetRelease.from_artifact(drifted)
+
+
+def test_validation_rejects_runtime_behavior_identity_change(
+    tmp_path: Path,
+) -> None:
+    service, rules_path, _ = make_policy_service(tmp_path)
+    rules = yaml.safe_load(rules_path.read_bytes())
+    name_rule = next(rule for rule in rules["rules"] if rule["id"] == "R_NAME_FUZZY")
+    name_rule["threshold"] = 0.99
+    rules_path.write_bytes(yaml.safe_dump(rules, sort_keys=False).encode("utf-8"))
+
+    candidate_id, worker = freeze_and_validate(service, import_draft(service))
+    assert worker["outcome"] == "rejected"
+    candidate = next(
+        item
+        for item in service.query_candidates(ADMIN)["candidates"]
+        if item["candidate_id"] == candidate_id
+    )
+    outcomes = check_outcomes(
+        validation_bundle(service, candidate["validation_bundle_id"])
+    )
+    assert outcomes["runtime_behavior_identity"] == "fail"
+    assert service.query_active(ADMIN)["active_generation"] == 1
 
 
 def test_validation_rejects_protected_io_alias_and_nondeterminism_without_override(
@@ -839,7 +1124,7 @@ def _full_flow(
         idempotency_key=f"rv-{time.time_ns()}",
         expected_governance_revision=governance_revision(service),
     )
-    activation_at = int(time.time()) + max(activation_delay, 1)
+    activation_at = int(time.time()) + max(activation_delay, 60)
     approved = service.approve(
         principal=approver,
         candidate_id=candidate_id,
@@ -1166,7 +1451,9 @@ def test_governance_commands_are_revisioned_idempotent_and_role_separated(
         idempotency_key=f"fork-v-{time.time_ns()}",
         expected_governance_revision=governance_revision(service),
     )
-    service.process_next_policy_job()
+    fork_validation = service.process_next_policy_job(now=activation_at - 1)
+    assert fork_validation["candidate_id"] == forked["candidate_id"]
+    assert fork_validation["outcome"] == "validated"
     service.submit_review(
         principal=ADMIN,
         candidate_id=forked["candidate_id"],
@@ -1617,6 +1904,71 @@ def test_audit_or_partial_commit_failure_preserves_prior_active(
         for event in service._store.policy_governance_events
     )
 
+    # (3b) Candidate release evidence is revalidated just as completely as
+    #       recovery evidence. Losing one candidate-only component after
+    #       schedule leaves the prior generation and all protected facts
+    #       unchanged.
+    service = make(None, "fault-candidate-evidence")
+    service.bootstrap_once()
+    service._source_rules_path.write_bytes(
+        service._source_rules_path.read_bytes().replace(
+            b'version: "1.9.0"', b'version: "9.9.9"'
+        )
+    )
+    _, candidate_id, _, activation_at = _full_flow(service)
+    candidate_state = service._candidate_state(
+        service._store.policy_governance_events, candidate_id
+    )
+    candidate_manifest = service._manifest(
+        service._store, candidate_state["manifest_id"]
+    )
+    candidate_checker_id = next(
+        item["id"]
+        for item in candidate_manifest["components"]
+        if item["type"] == "checker"
+    )
+    recovery_state = service._candidate_state(
+        service._store.policy_governance_events,
+        service.query_active(ADMIN)["candidate_id"],
+    )
+    recovery_manifest = service._manifest(
+        service._store, recovery_state["manifest_id"]
+    )
+    recovery_checker_id = next(
+        item["id"]
+        for item in recovery_manifest["components"]
+        if item["type"] == "checker"
+    )
+    assert candidate_checker_id != recovery_checker_id
+    before = {
+        "revision": governance_revision(service),
+        "events": len(service._store.policy_governance_events),
+        "audit": len(service._store.audit_events),
+        "outbox": len(service._store.outbox),
+        "idempotency": len(service._store.idempotency),
+        "generation": service.query_active(ADMIN)["active_generation"],
+    }
+    with sqlite3_module.connect(service._store.state_path) as connection:
+        connection.execute(
+            "DELETE FROM policy_artifacts WHERE item_id = ?",
+            (candidate_checker_id,),
+        )
+        connection.execute(
+            "DELETE FROM s01_immutable_catalog "
+            "WHERE table_name = 'policy_artifacts' AND item_id = ?",
+            (candidate_checker_id,),
+        )
+        connection.commit()
+    result = service.process_next_policy_job(now=activation_at)
+    assert result["status"] == "failed", result
+    assert "PolicyUnavailable" in result["error"]
+    assert governance_revision(service) == before["revision"]
+    assert len(service._store.policy_governance_events) == before["events"]
+    assert len(service._store.audit_events) == before["audit"]
+    assert len(service._store.outbox) == before["outbox"]
+    assert len(service._store.idempotency) == before["idempotency"]
+    assert service.query_active(ADMIN)["active_generation"] == before["generation"]
+
     # (4) Injected partial commit during validation: no bundle, no event,
     #     no state change for the candidate.
     service = make(None, "fault-validation")
@@ -1837,6 +2189,27 @@ def test_run_spec_resolves_one_generation_and_worker_uses_only_pinned_registry_a
         bundle["inputs"]["component_digests"]["checker"]
         == checker_component["digest"]
     )
+
+    # Every governed field is a Ledger/Registry pin, not caller metadata.
+    # Changing an activation fact, generation, or component list must be
+    # rejected before the checker can materialize.
+    forged_specs: list[dict[str, Any]] = []
+    forged = copy.deepcopy(spec)
+    forged["activation_event_id"] = "governance_forged"
+    forged_specs.append(forged)
+    forged = copy.deepcopy(spec)
+    forged["active_generation"] = 999
+    forged_specs.append(forged)
+    forged = copy.deepcopy(spec)
+    forged["components"][0] = {
+        **forged["components"][0],
+        "id": "artifact_sha256_" + "0" * 64,
+        "digest": "0" * 64,
+    }
+    forged_specs.append(forged)
+    for forged_spec in forged_specs:
+        with pytest.raises(PolicyUnavailable):
+            policy.load_pinned_release(forged_spec)
 
 
 def test_restart_ignores_deleted_legacy_files_and_poisoned_global_kb(
@@ -2345,15 +2718,8 @@ def test_pinned_artifact_loss_or_drift_fails_closed_fresh_and_warm(
     policy.process_next_policy_job(now=activation_at)
     active = policy.query_active(ADMIN)
     assert active["active_generation"] == 2
-    spec = {
-        "manifest_id": active["manifest_id"],
-        "manifest_digest": active["manifest_digest"],
-        "candidate_id": active["candidate_id"],
-        "validation_bundle_id": active["validation_bundle_id"],
-        "validation_bundle_digest": active["validation_bundle_digest"],
-        "approval_binding_id": active["approval_binding_id"],
-        "approval_binding_digest": active["approval_binding_digest"],
-    }
+    spec = policy.resolve_run_pin(S08_SCOPE, int(time.time()))
+    assert spec is not None
     # Warm the loader before the tamper.
     policy.load_pinned_release(spec)
     # One public admission queues a worker job but nothing runs yet.
@@ -2502,17 +2868,119 @@ def test_required_dependency_loss_blocks_new_run_resolution(tmp_path: Path) -> N
         storage_only.resolve_run_pin(S08_SCOPE, int(time.time()))
     assert len(storage_only._store.policy_governance_events) == ledger_before
 
+    # Storage loss fences commands before idempotency replay or mutation.
+    revision_before = len(storage_only._store.policy_governance_events)
+    with pytest.raises(PolicyUnavailable):
+        storage_only.import_legacy(
+            principal=ADMIN,
+            source_bundle_id=SOURCE_BUNDLE_ID,
+            idempotency_key=f"storage-loss-{time.time_ns()}",
+            expected_governance_revision=revision_before,
+        )
+    assert len(storage_only._store.policy_governance_events) == revision_before
+
+    # Compatibility loads independently require each authority boundary.
+    active = policy.query_active(ADMIN)
+    release = policy.resolve_run_pin(S08_SCOPE, int(time.time()))["release"]
+    compat_spec = {
+        "release_id": release["release_id"],
+        "release_digest": release["digest"],
+        "checker_build": release["checker_build"],
+    }
+    assert active["bootstrap"] is True
+    for unavailable in (
+        {"audit_available": False},
+        {"storage_available": False},
+    ):
+        compat_service = PolicyGovernanceService(
+            state_path=policy._store.state_path,
+            source_rules_path=policy._source_rules_path,
+            source_kb_path=policy._source_kb_path,
+            corpus_root=CORPUS,
+            **unavailable,
+        )
+        with pytest.raises(PolicyUnavailable):
+            compat_service.load_compat_release(compat_spec)
+
+    # A queued activation is not claimed when storage trust is lost; all
+    # protected effects remain at delta zero.
+    activation_service, _, _ = make_policy_service(tmp_path / "storage-job")
+    _, _, _, activation_at = _full_flow(activation_service, activation_delay=60)
+    protected_before = {
+        "revision": governance_revision(activation_service),
+        "audit": len(activation_service._store.audit_events),
+        "outbox": len(activation_service._store.outbox),
+        "idempotency": len(activation_service._store.idempotency),
+        "generation": activation_service.query_active(ADMIN)["active_generation"],
+    }
+    activation_service.storage_available = False
+    blocked = activation_service.process_next_policy_job(now=activation_at)
+    assert blocked["status"] == "failed", blocked
+    activation_service.storage_available = True
+    assert governance_revision(activation_service) == protected_before["revision"]
+    assert len(activation_service._store.audit_events) == protected_before["audit"]
+    assert len(activation_service._store.outbox) == protected_before["outbox"]
+    assert len(activation_service._store.idempotency) == protected_before["idempotency"]
+    assert (
+        activation_service.query_active(ADMIN)["active_generation"]
+        == protected_before["generation"]
+    )
+
+    # Bootstrap is a protected governance write and cannot run on an
+    # untrusted storage boundary.
+    blocked_bootstrap = PolicyGovernanceService(
+        state_path=tmp_path / "blocked-bootstrap.sqlite3",
+        source_rules_path=policy._source_rules_path,
+        source_kb_path=policy._source_kb_path,
+        corpus_root=CORPUS,
+        storage_available=False,
+    )
+    bootstrap_result = blocked_bootstrap.bootstrap_once()
+    assert bootstrap_result == {
+        "status": "blocked",
+        "reason_code": "STORAGE_UNAVAILABLE",
+    }
+    assert blocked_bootstrap._store.policy_governance_events == []
+    assert blocked_bootstrap._store.audit_events == []
+
 
 def test_validator_build_change_invalidates_prior_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Evidence produced by an outdated validator build cannot be reviewed,
-    approved or activated: approve rejects it, the loader rejects the
-    pinned bundle, and re-validation on the current build creates a
-    distinct bundle."""
+    """Outdated candidate evidence cannot be reviewed, approved or activated;
+    already-activated releases remain resolvable by their historical pins."""
     import task4_consistency.controlled.s08 as s08_module
 
+    current_build = s08_module.VALIDATOR_BUILD
     service, rules_path, _ = make_policy_service(tmp_path / "validator-build")
+    module_root = Path(s08_module.__file__).resolve().parent
+    validator_sources = sorted(
+        module_root / name
+        for name in ("s01_checker.py", "s08.py", "s08_validate.py")
+    )
+    expected_code_digest = content_digest(
+        [
+            (path.name, hashlib.sha256(path.read_bytes()).hexdigest())
+            for path in validator_sources
+        ]
+    )
+    assert s08_module._VALIDATOR_CODE_DIGEST == expected_code_digest
+
+    historical_spec = service.resolve_run_pin(S08_SCOPE, int(time.time()))
+    assert historical_spec is not None
+    current_code_digest = s08_module._VALIDATOR_CODE_DIGEST
+    monkeypatch.setattr(s08_module, "VALIDATOR_BUILD", "s08-validator/next")
+    monkeypatch.setattr(s08_module, "_VALIDATOR_CODE_DIGEST", "a" * 64)
+    assert service.resolve_run_pin(S08_SCOPE, int(time.time())) is not None
+    assert (
+        service.load_pinned_release(historical_spec).release_id
+        == historical_spec["release"]["release_id"]
+    )
+    monkeypatch.setattr(s08_module, "VALIDATOR_BUILD", current_build)
+    monkeypatch.setattr(
+        s08_module, "_VALIDATOR_CODE_DIGEST", current_code_digest
+    )
+
     draft_id = import_draft(service)
     candidate_id, worker = freeze_and_validate(service, draft_id)
     assert worker["outcome"] == "validated"
@@ -2525,7 +2993,9 @@ def test_validator_build_change_invalidates_prior_evidence(
     assert bundle_before["validator_build"] == s08_module.VALIDATOR_BUILD
     assert bundle_before["validator"]["code_sha256"]
     assert bundle_before["results"]["raw_outcomes"] is not None
-    assert bundle_before["results"]["raw_outcomes"]["anchor"]
+    raw_before = bundle_before["results"]["raw_outcomes"]
+    anchor_digest = raw_before["runs"]["anchor"]["outcome_set_digest"]
+    assert raw_before["outcome_sets"][anchor_digest]
 
     service.submit_review(
         principal=ADMIN,
@@ -2533,12 +3003,31 @@ def test_validator_build_change_invalidates_prior_evidence(
         idempotency_key=f"vb-review-{time.time_ns()}",
         expected_governance_revision=governance_revision(service),
     )
-
-    # The validator build changes; the old evidence is invalid.
-    monkeypatch.setattr(s08_module, "VALIDATOR_BUILD", "s08-validator/99")
     state = service._candidate_state(
         service._store.policy_governance_events, candidate_id
     )
+
+    # The recorded validator code digest is an enforced identity, not
+    # metadata: review and approval both reject evidence from different code
+    # even when the suite/build labels stay unchanged.
+    monkeypatch.setattr(s08_module, "_VALIDATOR_CODE_DIGEST", "f" * 64)
+    with pytest.raises(PolicyUnavailable):
+        service._review_material(service._store, state, S08_SCOPE)
+    with pytest.raises(PolicyUnavailable):
+        service.approve(
+            principal=APPROVER,
+            candidate_id=candidate_id,
+            activation_time=int(time.time()) + 60,
+            recovery_release_id=service.query_active(ADMIN)["candidate_id"],
+            idempotency_key=f"code-approve-{time.time_ns()}",
+            expected_governance_revision=governance_revision(service),
+        )
+    monkeypatch.setattr(
+        s08_module, "_VALIDATOR_CODE_DIGEST", current_code_digest
+    )
+
+    # The validator build changes; the old evidence is invalid.
+    monkeypatch.setattr(s08_module, "VALIDATOR_BUILD", "s08-validator/99")
     with pytest.raises(PolicyUnavailable):
         service._review_material(service._store, state, S08_SCOPE)
     with pytest.raises(PolicyUnavailable):
@@ -2569,29 +3058,33 @@ def test_validator_build_change_invalidates_prior_evidence(
     assert bundle_second["validator_build"] == "s08-validator/99"
     assert second_worker["validation_bundle_id"] != bundle_before_id
 
-    # After the current build returns, the build-99 evidence is rejected by
-    # the loader and cannot be approved or activated.
-    monkeypatch.setattr(s08_module, "VALIDATOR_BUILD", "s08-validator/2")
+    # After the current build returns, the build-99 evidence remains
+    # ineligible for review.
+    monkeypatch.setattr(s08_module, "VALIDATOR_BUILD", current_build)
     state_second = service._candidate_state(
         service._store.policy_governance_events, second_candidate
     )
     with pytest.raises(PolicyUnavailable):
         service._review_material(service._store, state_second, S08_SCOPE)
-    spec = {
-        "manifest_id": state_second["manifest_id"],
-        "manifest_digest": state_second["manifest_digest"],
-        "candidate_id": second_candidate,
-        "validation_bundle_id": state_second["validation_bundle_id"],
-        "validation_bundle_digest": state_second["validation_bundle_digest"],
-        "approval_binding_id": "approval_sha256_" + "0" * 64,
-        "approval_binding_digest": "0" * 64,
-    }
-    with pytest.raises(PolicyUnavailable):
-        service.load_pinned_release(spec)
     assert service.query_active(ADMIN)["active_generation"] == 1
 
+    # Code identity is rechecked again at the activation linearization point.
+    activation_service, _, _ = make_policy_service(tmp_path / "validator-code")
+    _, _, _, activation_at = _full_flow(
+        activation_service, activation_delay=60
+    )
+    monkeypatch.setattr(s08_module, "_VALIDATOR_CODE_DIGEST", "e" * 64)
+    activation = activation_service.process_next_policy_job(now=activation_at)
+    assert activation["status"] == "failed", activation
+    monkeypatch.setattr(
+        s08_module, "_VALIDATOR_CODE_DIGEST", current_code_digest
+    )
+    assert activation_service.query_active(ADMIN)["active_generation"] == 1
 
-def test_fresh_process_bounds_reject_without_terminating(tmp_path: Path) -> None:
+
+def test_fresh_process_bounds_reject_without_terminating(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Bounded child probes: cardinality breach, runtime breach, output
     flood and a skipped corpus entry all terminate promptly and reject;
     the memory/process boundary is enforced inside the child process."""
@@ -2599,6 +3092,7 @@ def test_fresh_process_bounds_reject_without_terminating(tmp_path: Path) -> None
     import sys as sys_module
 
     from dataclasses import replace
+    from task4_consistency.controlled import s08 as s08_module
 
     service, rules_path, kb_path = make_policy_service(tmp_path / "bounds")
     release = service.resolve_run_pin(S08_SCOPE, int(time.time()))["release"][
@@ -2616,64 +3110,56 @@ def test_fresh_process_bounds_reject_without_terminating(tmp_path: Path) -> None
     assert outcome is None
     assert time.monotonic() - started < 30.0
 
-    # (b) Runtime breach: a single oversized fixture cannot finish within
-    #     the declared max_runtime_ms; the child rejects and the parent
-    #     reports failure promptly.
+    # (b) Runtime breach: a valid two-document fuzzy comparison has finite
+    #     but deliberately expensive material. The 10ms release deadline
+    #     interrupts it during execution, rather than timing it after return.
     heavy_fixture = {
         "application_id": "APP-HEAVY",
         "documents": [
             {
-                "doc_id": f"doc-{i}",
+                "doc_id": "heavy-registration",
                 "doc_type": "机动车登记证书",
-                "fields": {
-                    f"field-{j}": f"value-{j}"
-                    for j in range(300)
-                },
-            }
-            for i in range(60)
+                "fields": {"owner_name": "ab" * 2_000_000 + "x"},
+            },
+            {
+                "doc_id": "heavy-policy",
+                "doc_type": "交强险保单",
+                "fields": {"owner_name": "ba" * 2_000_000 + "y"},
+            },
         ],
     }
     slow_release = replace(
         release,
-        limits=(("max_documents", 20), ("max_findings", 100), ("max_runtime_ms", 1)),
+        limits=(("max_documents", 20), ("max_findings", 100), ("max_runtime_ms", 10)),
     )
     started = time.monotonic()
     outcome = service._run_fresh_process(
         slow_release, [{"fixture": heavy_fixture}]
     )
     assert outcome is None
-    assert time.monotonic() - started < 60.0
+    assert time.monotonic() - started < 1.0
 
-    # (c) Output flood: a payload under the input cap whose canonical output
-    #     exceeds the parent's stdout cap; the child is killed while the
-    #     parent streams and the run rejects promptly.
-    rules_data = yaml.safe_load(DEFAULT_RULES.read_bytes())
-    rule_fields = sorted(
-        {
-            str(rule.get("field"))
-            for rule in rules_data["rules"]
-            if rule.get("field")
-        }
-    )
+    # (c) Output flood: lower only the parent transport cap, then run a valid
+    #     one-document fixture. It reaches stdout streaming without crossing
+    #     document, finding or input cardinality first.
     flood_fixture = {
         "application_id": "APP-FLOOD",
         "documents": [
             {
-                "doc_id": f"doc-{i}",
+                "doc_id": "flood-registration",
                 "doc_type": "机动车登记证书",
-                "fields": {
-                    field: f"value-{i}-{j}"
-                    for j, field in enumerate(rule_fields)
-                },
+                "fields": {"vin": "LSVAA4182N2444555"},
             }
-            for i in range(120)
         ],
     }
-    flood_corpus = [{"fixture": flood_fixture}] * 700
     started = time.monotonic()
-    outcome = service._run_fresh_process(release, flood_corpus)
+    with monkeypatch.context() as bounded:
+        bounded.setattr(s08_module, "_MAX_SUBPROCESS_STDOUT_BYTES", 1)
+        outcome = service._run_fresh_process(
+            release, [{"fixture": flood_fixture}]
+        )
     assert outcome is None
-    assert time.monotonic() - started < 60.0
+    assert time.monotonic() - started < 30.0
 
     # (d) The child enforces a finite memory/process boundary: verified in a
     #     throwaway subprocess so the test process is never constrained.
