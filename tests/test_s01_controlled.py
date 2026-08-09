@@ -4287,7 +4287,7 @@ def _governed_release_service(
 def _pinned_release_digest(policy) -> str:
     from task4_consistency.controlled.s08 import S08_SCOPE
 
-    pin = policy.resolve_run_pin(S08_SCOPE, 0)
+    pin = policy.resolve_run_pin(S08_SCOPE, int(time.time()))
     assert pin is not None
     return pin["release"]["digest"]
 
@@ -6081,7 +6081,7 @@ def test_governed_pre_cutover_recovery_uses_registry_compat_release(
         corpus_root=ROOT / "fixtures" / "applications",
     )
     assert policy.bootstrap_once()["status"] == "activated"
-    compat_pin = policy.resolve_run_pin(S08_SCOPE, 0)
+    compat_pin = policy.resolve_run_pin(S08_SCOPE, int(time.time()))
     assert compat_pin is not None
     assert compat_pin["release"]["digest"] == stopped_spec["release_digest"]
     assert compat_pin["release"]["checker_build"] == stopped_spec["checker_build"]

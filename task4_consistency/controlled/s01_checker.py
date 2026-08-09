@@ -14,6 +14,7 @@ from task4_consistency.match.exact import all_equal
 from task4_consistency.match.fuzzy import multi_fuzzy_all
 from task4_consistency.match.list_ops import list_contains
 from task4_consistency.match.numeric import multi_numeric_all
+from task4_consistency.kb.store import project_graph_to_aliases
 from task4_consistency.normalize.base import (
     basic_clean,
     infer_field_type,
@@ -249,10 +250,17 @@ class TargetRelease:
             )
         from task4_consistency.normalize.address import _ALIAS_MAP
 
+        graph_projection = project_graph_to_aliases(knowledge.get("graph"))
+        address_aliases = dict(knowledge.get("address_aliases") or {})
+        org_aliases = dict(knowledge.get("org_aliases") or {})
+        for key, value in graph_projection["address_aliases"].items():
+            address_aliases.setdefault(key, value)
+        for key, value in graph_projection["org_aliases"].items():
+            org_aliases.setdefault(key, value)
         sections = {
-            "address_aliases": dict(knowledge.get("address_aliases") or {}),
+            "address_aliases": address_aliases,
             "builtin_address_aliases": dict(_ALIAS_MAP),
-            "org_aliases": dict(knowledge.get("org_aliases") or {}),
+            "org_aliases": org_aliases,
             "plate_prefixes": dict(knowledge.get("plate_prefixes") or {}),
         }
         frozen_knowledge = tuple(

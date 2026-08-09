@@ -817,7 +817,7 @@ def test_approver_can_read_exact_candidate_diff_but_cannot_mutate(
 
         # 4. The approver approves; the fixed binding is readable and pins
         #    the exact machine diff, digests, scope and activation time.
-        activation_time = int(time.time())
+        activation_time = int(time.time()) + 60
         approval = _post_command(
             server,
             "approve",
@@ -1104,7 +1104,7 @@ def test_review_material_lists_component_changes_for_behavior_equivalent_version
         assert review["applicable_check_delta"]["added"] == []
         assert review["applicable_check_delta"]["removed"] == []
         # The bound diff fixes exactly the same review material.
-        activation_time = int(time.time())
+        activation_time = int(time.time()) + 60
         approval = _post_command(
             server,
             "approve",

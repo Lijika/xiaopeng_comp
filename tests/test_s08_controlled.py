@@ -156,6 +156,87 @@ def check_outcomes(bundle: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def test_graph_same_as_projection_is_frozen_with_explicit_alias_priority() -> None:
+    """S08 imports graph same_as edges into the executable release, while
+    explicit alias tables remain the authoritative override."""
+    from task4_consistency.controlled.s01_checker import TargetRelease
+
+    graph = {
+        "nodes": [
+            {"id": "addr:explicit", "label": "显式全称"},
+            {"id": "addr:explicit-target", "label": "图目标"},
+            {"id": "addr:graph-only", "label": "图别名"},
+            {"id": "addr:graph-target", "label": "图标准名"},
+        ],
+        "edges": [
+            {"src": "addr:explicit", "rel": "same_as", "dst": "addr:explicit-target"},
+            {"src": "addr:graph-only", "rel": "same_as", "dst": "addr:graph-target"},
+        ],
+    }
+    knowledge = {
+        "address_aliases": {"显式全称": "显式标准名"},
+        "org_aliases": {},
+        "plate_prefixes": {},
+        "graph": graph,
+    }
+    release = TargetRelease.compile(
+        load_rules(DEFAULT_RULES), "f" * 64, knowledge=knowledge
+    )
+    sections = dict(release.knowledge)
+    aliases = dict(sections["address_aliases"])
+    assert aliases["图别名"] == "图标准名"
+    assert aliases["显式全称"] == "显式标准名"
+
+
+def test_unsupported_graph_semantics_are_recorded_and_block_validation(
+    tmp_path: Path,
+) -> None:
+    """Unknown nested fields, conflicting aliases and unrecognized graph
+    relations are never hidden by projection or a passing corpus differential."""
+    service, _, kb_path = make_policy_service(tmp_path)
+    knowledge = json.loads(kb_path.read_bytes())
+    knowledge["graph"]["nodes"][0]["runtime_magic"] = "hidden"
+    knowledge["graph"]["edges"][0]["runtime_magic"] = "hidden"
+    conflict_index = len(knowledge["graph"]["edges"])
+    knowledge["graph"]["edges"].append(
+        {
+            "src": "addr:gxq_full",
+            "rel": "same_as",
+            "dst": "addr:nanjing",
+        }
+    )
+    unknown_index = len(knowledge["graph"]["edges"])
+    knowledge["graph"]["edges"].append(
+        {
+            "src": "addr:gaoxin",
+            "rel": "runtime_magic",
+            "dst": "addr:nanjing",
+        }
+    )
+    kb_path.write_text(json.dumps(knowledge, ensure_ascii=False), encoding="utf-8")
+
+    draft_id = import_draft(service)
+    draft = next(
+        item
+        for item in service.query_drafts(ADMIN)["drafts"]
+        if item["draft_id"] == draft_id
+    )
+    ledger = ledger_content(service, draft["mapping_ledger_id"])
+    by_pointer = {item["source_pointer"]: item for item in ledger["items"]}
+    for pointer in (
+        "/graph/nodes/0",
+        "/graph/edges/0",
+        f"/graph/edges/{conflict_index}",
+        f"/graph/edges/{unknown_index}",
+    ):
+        assert by_pointer[pointer]["classification"] == "unsupported"
+        assert by_pointer[pointer]["target_ref"] is None
+
+    _, worker = freeze_and_validate(service, draft_id)
+    assert worker["outcome"] == "rejected"
+    assert service.query_active(ADMIN)["active_generation"] == 1
+
+
 def test_import_and_validation_bundle_cover_every_source_item_with_zero_behavior_diff(
     tmp_path: Path,
 ) -> None:
@@ -182,6 +263,14 @@ def test_import_and_validation_bundle_cover_every_source_item_with_zero_behavior
     assert sum(
         item["classification"] == "unsupported" for item in ledger["items"]
     ) == 0
+    source_locations = [
+        (item["source_ref"], item["source_pointer"]) for item in ledger["items"]
+    ]
+    assert {source_ref for source_ref, _ in source_locations} == {
+        "rules",
+        "knowledge",
+    }
+    assert len(source_locations) == len(set(source_locations))
     for item in ledger["items"]:
         assert item["source_pointer"]
         assert item["importer_version"] == "s08-importer/1"
@@ -228,6 +317,25 @@ def test_import_and_validation_bundle_cover_every_source_item_with_zero_behavior
                 item["target_ref"] == f"checker.knowledge/{section}/{key}"
                 for item in ledger["items"]
             )
+    from task4_consistency.kb.store import project_graph_to_aliases
+
+    graph_edges = [
+        item
+        for item in ledger["items"]
+        if item["source_pointer"].startswith("/graph/edges/")
+    ]
+    assert [item["classification"] for item in graph_edges] == [
+        "explicit_transform",
+        "non_runtime_excluded",
+        "explicit_transform",
+        "non_runtime_excluded",
+        "non_runtime_excluded",
+    ]
+    assert all(item["classification"] != "unsupported" for item in graph_edges)
+    assert project_graph_to_aliases(kb_data["graph"]) == {
+        "address_aliases": {"高新技术产业开发区": "高新区"},
+        "org_aliases": {"中国人民财产保险股份有限公司": "人保财险"},
+    }
     # 1b. Digests bind the resolved values, never the pointer text: mutating
     #     a rule's content or an option's value changes the ledger digest.
     first_rule_item = next(
@@ -240,11 +348,14 @@ def test_import_and_validation_bundle_cover_every_source_item_with_zero_behavior
         ("rule_compiled", str(rules_data["rules"][0]["id"]), rules_data["rules"][0])
     )
     version_item = next(
-        item for item in ledger["items"] if item["source_pointer"] == "/version"
+        item
+        for item in ledger["items"]
+        if item["source_ref"] == "rules" and item["source_pointer"] == "/version"
     )
     assert version_item["source_digest"] == content_digest(
         ("option", "/version", rules_data["version"])
     )
+
 
     # 2. The durable validation worker produces a complete immutable bundle.
     candidate_id, worker = freeze_and_validate(service, draft_id)
@@ -503,6 +614,58 @@ def test_import_and_validation_bundle_cover_every_source_item_with_zero_behavior
     assert fresh_import["draft_id"] != first_import["draft_id"]
 
 
+@pytest.mark.parametrize("duplicate_source", ["rules", "knowledge"])
+def test_duplicate_nested_source_keys_fail_closed_before_state_mutation(
+    tmp_path: Path, duplicate_source: str
+) -> None:
+    rules_bytes = DEFAULT_RULES.read_bytes()
+    kb_bytes = DEFAULT_KB.read_bytes()
+    if duplicate_source == "rules":
+        rules_bytes = rules_bytes.replace(
+            b"  - id: R_VIN_CROSS\n",
+            b"  - id: R_VIN_CROSS\n    id: R_VIN_CROSS\n",
+            1,
+        )
+    else:
+        kb_bytes = kb_bytes.replace(
+            '    "南京市": "南京",\n'.encode(),
+            ('    "南京市": "南京",\n' * 2).encode(),
+            1,
+        )
+
+    def state_counts(service: PolicyGovernanceService) -> tuple[int, ...]:
+        store = service._store
+        return (
+            len(store.policy_governance_events),
+            len(store.policy_artifacts),
+            len(store.audit_events),
+            len(store.outbox),
+            len(store.idempotency),
+        )
+
+    bootstrap, _, _ = make_policy_service(
+        tmp_path / "bootstrap",
+        rules_bytes=rules_bytes,
+        kb_bytes=kb_bytes,
+        expect_bootstrap=False,
+    )
+    assert bootstrap.bootstrap_once()["status"] == "blocked"
+    assert state_counts(bootstrap) == (0, 0, 0, 0, 0)
+
+    service, rules_path, kb_path = make_policy_service(tmp_path / "import")
+    before = state_counts(service)
+    rules_path.write_bytes(rules_bytes)
+    kb_path.write_bytes(kb_bytes)
+    with pytest.raises(PolicyInvalidTransition, match="cannot be parsed"):
+        service.import_legacy(
+            principal=ADMIN,
+            source_bundle_id=SOURCE_BUNDLE_ID,
+            idempotency_key=f"duplicate-{duplicate_source}",
+            expected_governance_revision=governance_revision(service),
+        )
+    assert state_counts(service) == before
+
+
 def test_corpus_comparison_preserves_duplicate_application_items() -> None:
     def outcome(item_id: str, applicable: list[str]) -> dict[str, Any]:
         return {
@@ -696,6 +859,162 @@ def test_validation_rejects_runtime_behavior_identity_change(
     )
     assert outcomes["runtime_behavior_identity"] == "fail"
     assert service.query_active(ADMIN)["active_generation"] == 1
+
+
+def test_cross_city_alias_blocks_bootstrap_and_import_validation(
+    tmp_path: Path,
+) -> None:
+    """The legacy cross-city prohibition is part of governed semantic safety,
+    including the bootstrap where no prior behavior anchor exists."""
+    knowledge = json.loads(DEFAULT_KB.read_bytes())
+    knowledge["address_aliases"]["江苏苏州工业园"] = "江苏南京新区"
+    poisoned = json.dumps(knowledge, ensure_ascii=False).encode("utf-8")
+
+    bootstrap, _, _ = make_policy_service(
+        tmp_path / "bootstrap",
+        kb_bytes=poisoned,
+        expect_bootstrap=False,
+    )
+    assert bootstrap.query_active(ADMIN)["status"] == "none"
+    assert bootstrap._store.policy_governance_events == []
+
+    service, _, kb_path = make_policy_service(tmp_path / "import")
+    kb_path.write_bytes(poisoned)
+    candidate_id, worker = freeze_and_validate(service, import_draft(service))
+    assert worker["outcome"] == "rejected"
+    candidate = next(
+        item
+        for item in service.query_candidates(ADMIN)["candidates"]
+        if item["candidate_id"] == candidate_id
+    )
+    outcomes = check_outcomes(
+        validation_bundle(service, candidate["validation_bundle_id"])
+    )
+    assert outcomes["semantic_entity_safety"] == "protected_fail"
+    assert service.query_active(ADMIN)["active_generation"] == 1
+
+
+def test_candidate_scope_covers_bound_and_actual_activation_time(
+    tmp_path: Path,
+) -> None:
+    """Validation-time validity is insufficient: the frozen scope must cover
+    both the approved activation time and the actual activation linearization."""
+    from datetime import datetime, timezone
+
+    now = int(time.time())
+
+    def iso(timestamp: int) -> str:
+        return datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+
+    def reviewed_candidate(
+        service: PolicyGovernanceService, valid_to: int, label: str
+    ) -> str:
+        draft_id = import_draft(service)
+        service.revise_draft(
+            principal=ADMIN,
+            draft_id=draft_id,
+            metadata={
+                "scope": S08_SCOPE,
+                "validity": {
+                    "valid_from": iso(now - 60),
+                    "valid_to": iso(valid_to),
+                },
+                "source": SOURCE_BUNDLE_ID,
+                "reason": label,
+            },
+            idempotency_key=f"revise-{label}",
+            expected_governance_revision=governance_revision(service),
+        )
+        candidate_id, worker = freeze_and_validate(service, draft_id)
+        assert worker["outcome"] == "validated"
+        service.submit_review(
+            principal=ADMIN,
+            candidate_id=candidate_id,
+            idempotency_key=f"review-{label}",
+            expected_governance_revision=governance_revision(service),
+        )
+        return candidate_id
+
+    service, _, _ = make_policy_service(tmp_path / "bound")
+    candidate = reviewed_candidate(service, now + 30, "bound-expiry")
+    revision_before = governance_revision(service)
+    with pytest.raises(PolicyInvalidTransition):
+        service.approve(
+            principal=APPROVER,
+            candidate_id=candidate,
+            activation_time=now + 60,
+            recovery_release_id=service.query_active(ADMIN)["candidate_id"],
+            idempotency_key="approve-after-expiry",
+            expected_governance_revision=revision_before,
+        )
+    assert governance_revision(service) == revision_before
+    assert service.query_active(ADMIN)["active_generation"] == 1
+
+    delayed, _, _ = make_policy_service(tmp_path / "delayed")
+    delayed_candidate = reviewed_candidate(delayed, now + 120, "delayed-expiry")
+    approval = delayed.approve(
+        principal=APPROVER,
+        candidate_id=delayed_candidate,
+        activation_time=now + 60,
+        recovery_release_id=delayed.query_active(ADMIN)["candidate_id"],
+        idempotency_key="approve-before-expiry",
+        expected_governance_revision=governance_revision(delayed),
+    )
+    delayed.schedule(
+        principal=ADMIN,
+        approval_binding_id=approval["approval_binding_id"],
+        activation_at=now + 60,
+        idempotency_key="schedule-before-expiry",
+        expected_governance_revision=governance_revision(delayed),
+    )
+    protected_before = {
+        "generation": delayed.query_active(ADMIN)["active_generation"],
+        "events": governance_revision(delayed),
+        "audit": len(delayed._store.audit_events),
+        "outbox": len(delayed._store.outbox),
+        "idempotency": len(delayed._store.idempotency),
+    }
+    result = delayed.process_next_policy_job(now=now + 180)
+    assert result["status"] == "failed", result
+    assert delayed.query_active(ADMIN)["active_generation"] == protected_before[
+        "generation"
+    ]
+    assert governance_revision(delayed) == protected_before["events"]
+    assert len(delayed._store.audit_events) == protected_before["audit"]
+    assert len(delayed._store.outbox) == protected_before["outbox"]
+    assert len(delayed._store.idempotency) == protected_before["idempotency"]
+
+    expiring, _, _ = make_policy_service(tmp_path / "resolution")
+    expiring_candidate = reviewed_candidate(
+        expiring, now + 120, "resolution-expiry"
+    )
+    approval = expiring.approve(
+        principal=APPROVER,
+        candidate_id=expiring_candidate,
+        activation_time=now + 60,
+        recovery_release_id=expiring.query_active(ADMIN)["candidate_id"],
+        idempotency_key="approve-expiring-resolution",
+        expected_governance_revision=governance_revision(expiring),
+    )
+    expiring.schedule(
+        principal=ADMIN,
+        approval_binding_id=approval["approval_binding_id"],
+        activation_at=now + 60,
+        idempotency_key="schedule-expiring-resolution",
+        expected_governance_revision=governance_revision(expiring),
+    )
+    activated = expiring.process_next_policy_job(now=now + 60)
+    assert activated["status"] == "complete", activated
+    historical_pin = expiring.resolve_run_pin(S08_SCOPE, now + 90)
+    assert historical_pin is not None
+    revision_before = governance_revision(expiring)
+    with pytest.raises(PolicyUnavailable):
+        expiring.resolve_run_pin(S08_SCOPE, now + 180)
+    assert governance_revision(expiring) == revision_before
+    assert (
+        expiring.load_pinned_release(historical_pin).release_digest
+        == historical_pin["release_digest"]
+    )
 
 
 def test_validation_rejects_protected_io_alias_and_nondeterminism_without_override(
@@ -1141,6 +1460,126 @@ def _full_flow(
         expected_governance_revision=governance_revision(service),
     )
     return draft_id, candidate_id, scheduled["reservation_id"], activation_at
+
+
+def test_stale_approval_diff_cannot_schedule_after_anchor_activation(
+    tmp_path: Path,
+) -> None:
+    """An approval reviews one exact active anchor.  If another candidate
+    becomes active first, the stale approval cannot be scheduled against the
+    new generation without a new review and approval."""
+    service, rules_path, _ = make_policy_service(tmp_path)
+    bootstrap_id = service.query_active(ADMIN)["candidate_id"]
+    now = int(time.time())
+
+    def approve_candidate(activation_time: int) -> tuple[str, dict[str, Any]]:
+        draft_id = import_draft(service)
+        candidate_id, worker = freeze_and_validate(service, draft_id)
+        assert worker["outcome"] == "validated"
+        service.submit_review(
+            principal=ADMIN,
+            candidate_id=candidate_id,
+            idempotency_key=f"review-{time.time_ns()}",
+            expected_governance_revision=governance_revision(service),
+        )
+        approved = service.approve(
+            principal=APPROVER,
+            candidate_id=candidate_id,
+            activation_time=activation_time,
+            recovery_release_id=bootstrap_id,
+            idempotency_key=f"approve-{time.time_ns()}",
+            expected_governance_revision=governance_revision(service),
+        )
+        return candidate_id, approved
+
+    rules_path.write_bytes(
+        rules_path.read_bytes().replace(b'version: "1.9.0"', b'version: "2.0.0"')
+    )
+    candidate_a, approval_a = approve_candidate(now + 300)
+    service.schedule(
+        principal=ADMIN,
+        approval_binding_id=approval_a["approval_binding_id"],
+        activation_at=now + 300,
+        idempotency_key="schedule-a",
+        expected_governance_revision=governance_revision(service),
+    )
+
+    rules_path.write_bytes(
+        rules_path.read_bytes().replace(b'version: "2.0.0"', b'version: "3.0.0"')
+    )
+    candidate_b, approval_b = approve_candidate(now + 400)
+    binding_b = service._artifact(service._store, approval_b["approval_binding_id"])
+    assert binding_b["diff"]["anchor_candidate_id"] == bootstrap_id
+
+    activated = service.process_next_policy_job(now=now + 300)
+    assert activated["status"] == "complete", activated
+    assert activated["candidate_id"] == candidate_a
+    assert service.query_active(ADMIN)["active_generation"] == 2
+
+    protected_before = {
+        "revision": governance_revision(service),
+        "audit": len(service._store.audit_events),
+        "outbox": len(service._store.outbox),
+        "idempotency": len(service._store.idempotency),
+    }
+    with pytest.raises(PolicyConflict):
+        service.schedule(
+            principal=ADMIN,
+            approval_binding_id=approval_b["approval_binding_id"],
+            activation_at=now + 400,
+            idempotency_key="schedule-b-stale-anchor",
+            expected_governance_revision=governance_revision(service),
+        )
+    assert service.query_active(ADMIN)["candidate_id"] == candidate_a
+    assert governance_revision(service) == protected_before["revision"]
+    assert len(service._store.audit_events) == protected_before["audit"]
+    assert len(service._store.outbox) == protected_before["outbox"]
+    assert len(service._store.idempotency) == protected_before["idempotency"]
+    assert service.query_candidate(ADMIN, candidate_b)["status"] == "approved"
+
+
+def test_frozen_draft_revisions_have_distinct_content_bound_fork_ids(
+    tmp_path: Path,
+) -> None:
+    """Two revisions of one frozen draft in the same trusted second retain
+    distinct immutable forks instead of overwriting by timestamp collision."""
+    service, _, _ = make_policy_service(tmp_path)
+    draft_id = import_draft(service)
+    service.freeze_candidate(
+        principal=ADMIN,
+        draft_id=draft_id,
+        idempotency_key="freeze-for-forks",
+        expected_governance_revision=governance_revision(service),
+    )
+    fixed_time = int(time.time())
+    service._clock = lambda: fixed_time
+
+    fork_ids: list[str] = []
+    for reason in ("first same-second fork", "second same-second fork"):
+        result = service.revise_draft(
+            principal=ADMIN,
+            draft_id=draft_id,
+            metadata={
+                "scope": S08_SCOPE,
+                "validity": {"valid_from": "2000-01-01T00:00:00Z"},
+                "source": SOURCE_BUNDLE_ID,
+                "reason": reason,
+            },
+            idempotency_key=f"fork-{reason}",
+            expected_governance_revision=governance_revision(service),
+        )
+        fork_ids.append(result["draft_id"])
+
+    assert len(set(fork_ids)) == 2
+    service._store.reload()
+    assert {
+        service._store.policy_drafts[fork_id]["metadata"]["reason"]
+        for fork_id in fork_ids
+    } == {"first same-second fork", "second same-second fork"}
+    assert all(
+        service._store.policy_drafts[fork_id]["forked_from"] == draft_id
+        for fork_id in fork_ids
+    )
 
 
 def test_governance_commands_are_revisioned_idempotent_and_role_separated(
@@ -2206,6 +2645,26 @@ def test_run_spec_resolves_one_generation_and_worker_uses_only_pinned_registry_a
         "id": "artifact_sha256_" + "0" * 64,
         "digest": "0" * 64,
     }
+    forged_specs.append(forged)
+    for field, value in (
+        ("release_id", "forged-release"),
+        ("release_digest", "0" * 64),
+        ("checker_build", "forged-checker"),
+    ):
+        forged = copy.deepcopy(spec)
+        forged[field] = value
+        forged_specs.append(forged)
+    forged = copy.deepcopy(spec)
+    forged["baseline_release"] = {
+        **forged["baseline_release"],
+        "knowledge_digest": "0" * 64,
+    }
+    forged_specs.append(forged)
+    forged = copy.deepcopy(spec)
+    forged["limits"] = {**forged["limits"], "max_findings": 1}
+    forged_specs.append(forged)
+    forged = copy.deepcopy(spec)
+    forged["applicable_check_ids"] = list(reversed(forged["applicable_check_ids"]))
     forged_specs.append(forged)
     for forged_spec in forged_specs:
         with pytest.raises(PolicyUnavailable):

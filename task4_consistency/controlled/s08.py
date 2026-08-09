@@ -35,6 +35,10 @@ from typing import Any, Callable
 
 import yaml
 
+from task4_consistency.kb.store import (
+    _validate_address_alias,
+    project_graph_to_aliases,
+)
 from task4_consistency.rules.loader import RuleDef
 
 from task4_consistency.controlled.s01_checker import (
@@ -176,6 +180,300 @@ def content_digest(value: Any) -> str:
 
 def raw_digest(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
+
+
+class _UniqueKeySafeLoader(yaml.SafeLoader):
+    def construct_mapping(
+        self, node: yaml.MappingNode, deep: bool = False
+    ) -> dict[Any, Any]:
+        self.flatten_mapping(node)
+        seen: set[Any] = set()
+        for key_node, _ in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            try:
+                duplicate = key in seen
+            except TypeError as error:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping",
+                    node.start_mark,
+                    "found unhashable mapping key",
+                    key_node.start_mark,
+                ) from error
+            if duplicate:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping",
+                    node.start_mark,
+                    f"found duplicate key ({key!r})",
+                    key_node.start_mark,
+                )
+            seen.add(key)
+        return super().construct_mapping(node, deep=deep)
+
+
+def _load_yaml_source(raw: bytes) -> Any:
+    return yaml.load(raw.decode("utf-8"), Loader=_UniqueKeySafeLoader)
+
+
+def _load_json_source(raw: bytes) -> Any:
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON key: {key}")
+            result[key] = value
+        return result
+
+    return json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object)
+
+
+def _graph_mapping_items(
+    graph: Any, release: TargetRelease
+) -> list[dict[str, Any]]:
+    def item(
+        pointer: str,
+        value: Any,
+        classification: str,
+        target_ref: str | None,
+        reason: str,
+        result: Any,
+    ) -> dict[str, Any]:
+        return {
+            "source_ref": "knowledge",
+            "source_pointer": pointer,
+            "source_digest": content_digest(("kb_graph_source", pointer, value)),
+            "classification": classification,
+            "target_ref": target_ref,
+            "importer_version": IMPORTER_VERSION,
+            "reason": reason,
+            "result_digest": content_digest(result),
+        }
+
+    if not isinstance(graph, dict):
+        return [
+            item(
+                "/graph",
+                graph,
+                "unsupported",
+                None,
+                "entity graph is not an object",
+                ("kb_graph_invalid", graph),
+            )
+        ]
+
+    entries: list[dict[str, Any]] = []
+    for key in ("version", "description"):
+        if key in graph:
+            entries.append(
+                item(
+                    f"/graph/{key}",
+                    graph[key],
+                    "non_runtime_excluded",
+                    None,
+                    "graph metadata cannot affect runtime",
+                    ("kb_graph_metadata", key),
+                )
+            )
+
+    release_knowledge = {
+        section: dict(values) for section, values in release.knowledge
+    }
+    nodes = graph.get("nodes")
+    if not isinstance(nodes, list):
+        entries.append(
+            item(
+                "/graph/nodes",
+                nodes,
+                "unsupported",
+                None,
+                "graph nodes must be a list",
+                ("kb_graph_nodes_invalid", nodes),
+            )
+        )
+        nodes_for_projection: list[Any] = []
+    else:
+        nodes_for_projection = nodes
+
+    edges = graph.get("edges")
+    if not isinstance(edges, list):
+        entries.append(
+            item(
+                "/graph/edges",
+                edges,
+                "unsupported",
+                None,
+                "graph edges must be a list",
+                ("kb_graph_edges_invalid", edges),
+            )
+        )
+    else:
+        same_as_targets: dict[str, set[str]] = {}
+        for edge in edges:
+            if isinstance(edge, dict) and edge.get("rel") == "same_as":
+                source_id = str(edge.get("src") or "")
+                target_id = str(edge.get("dst") or "")
+                if source_id and target_id:
+                    same_as_targets.setdefault(source_id, set()).add(target_id)
+        conflicting_sources = {
+            source_id
+            for source_id, targets in same_as_targets.items()
+            if len(targets) > 1
+        }
+        for index, edge in enumerate(edges):
+            pointer = f"/graph/edges/{index}"
+            relation = edge.get("rel") if isinstance(edge, dict) else None
+            if not isinstance(edge, dict) or set(edge) - {"src", "rel", "dst"}:
+                entries.append(
+                    item(
+                        pointer,
+                        edge,
+                        "unsupported",
+                        None,
+                        "graph edge contains unknown or malformed fields",
+                        ("kb_graph_edge_unsupported", edge),
+                    )
+                )
+                continue
+            if relation in {"part_of", "type", "not_same_as"}:
+                entries.append(
+                    item(
+                        pointer,
+                        edge,
+                        "non_runtime_excluded",
+                        None,
+                        f"{relation} is recorded but is not a runtime alias relation",
+                        ("kb_graph_edge_excluded", relation),
+                    )
+                )
+                continue
+            if relation == "same_as":
+                source_id = str(edge.get("src") or "")
+                if source_id in conflicting_sources:
+                    entries.append(
+                        item(
+                            pointer,
+                            edge,
+                            "unsupported",
+                            None,
+                            "same_as source maps to conflicting targets",
+                            ("kb_graph_same_as_conflict", source_id),
+                        )
+                    )
+                    continue
+                edge_projection = project_graph_to_aliases(
+                    {"nodes": nodes_for_projection, "edges": [edge]}
+                )
+                mapped = [
+                    (section, key)
+                    for section, values in edge_projection.items()
+                    for key in values
+                ]
+                if len(mapped) == 1:
+                    section, key = mapped[0]
+                    resolved = release_knowledge.get(section, {}).get(key)
+                    entries.append(
+                        item(
+                            pointer,
+                            edge,
+                            "explicit_transform",
+                            f"checker.knowledge/{section}/{key}",
+                            "same_as edge projected with explicit alias priority",
+                            ("kb_graph_alias", section, key, resolved),
+                        )
+                    )
+                    continue
+                if source_id.startswith("brand:"):
+                    entries.append(
+                        item(
+                            pointer,
+                            edge,
+                            "non_runtime_excluded",
+                            None,
+                            "brand same_as is intentionally not collapsed into aliases",
+                            ("kb_graph_brand_same_as_excluded", edge),
+                        )
+                    )
+                    continue
+            entries.append(
+                item(
+                    pointer,
+                    edge,
+                    "unsupported",
+                    None,
+                    "graph relation has no registered runtime mapping",
+                    ("kb_graph_edge_unsupported", edge),
+                )
+            )
+
+    if isinstance(nodes, list):
+        node_ids = [
+            str(node.get("id") or "") if isinstance(node, dict) else ""
+            for node in nodes
+        ]
+        node_id_counts = {
+            node_id: node_ids.count(node_id) for node_id in set(node_ids) if node_id
+        }
+        mapped_node_ids = {
+            str(edge.get(endpoint) or "")
+            for edge in (edges if isinstance(edges, list) else [])
+            if isinstance(edge, dict)
+            and edge.get("rel") == "same_as"
+            and str(edge.get("src") or "").startswith(("addr:", "org:"))
+            and str(edge.get("src") or "") not in (
+                conflicting_sources if isinstance(edges, list) else set()
+            )
+            and not (set(edge) - {"src", "rel", "dst"})
+            for endpoint in ("src", "dst")
+        }
+        for index, node in enumerate(nodes):
+            pointer = f"/graph/nodes/{index}"
+            node_id = node_ids[index]
+            valid = (
+                isinstance(node, dict)
+                and not (set(node) - {"id", "type", "label"})
+                and bool(node_id)
+                and node_id_counts.get(node_id) == 1
+                and isinstance(node.get("label"), str)
+                and bool(node["label"].strip())
+                and (
+                    "type" not in node
+                    or isinstance(node.get("type"), str)
+                    and bool(node["type"].strip())
+                )
+            )
+            mapped = valid and node_id in mapped_node_ids
+            entries.append(
+                item(
+                    pointer,
+                    node,
+                    (
+                        "explicit_transform"
+                        if mapped
+                        else "non_runtime_excluded" if valid else "unsupported"
+                    ),
+                    "checker.knowledge.aliases" if mapped else None,
+                    (
+                        "node identity and label resolve a supported same_as mapping"
+                        if mapped
+                        else "node does not feed a supported runtime alias"
+                        if valid
+                        else "graph node fields, identity, type and label are invalid"
+                    ),
+                    ("kb_graph_node", node_id, node),
+                )
+            )
+
+    for key in sorted(set(graph) - {"version", "description", "nodes", "edges"}):
+        entries.append(
+            item(
+                f"/graph/{key}",
+                graph[key],
+                "unsupported",
+                None,
+                "unrecognized graph property may not be silently dropped",
+                ("kb_graph_property_unsupported", key, graph[key]),
+            )
+        )
+    return entries
 
 
 # Reproducible identity for every module that decides validation status or
@@ -850,7 +1148,8 @@ class PolicyGovernanceService:
                 # identity so the frozen candidate snapshot never changes.
                 new_draft_id = self._stable_id(
                     "draft",
-                    f"{draft_id}:fork:{self._trusted_time()}",
+                    f"{draft_id}:fork:{len(staged.policy_governance_events) + 1}:"
+                    f"{fingerprint}",
                 )
                 draft = {
                     **copy.deepcopy(draft),
@@ -1301,6 +1600,21 @@ class PolicyGovernanceService:
             },
         }
 
+    def _require_current_approval_review(
+        self,
+        owner: SQLiteTargetStore,
+        state: dict[str, Any],
+        scope: str,
+        binding: dict[str, Any],
+    ) -> None:
+        bound = binding.get("diff")
+        if not isinstance(bound, dict) or canonical_bytes(
+            bound
+        ) != canonical_bytes(self._review_material(owner, state, scope)):
+            raise PolicyConflict(
+                "approval review no longer matches the active release anchor"
+            )
+
     def approve(
         self,
         *,
@@ -1348,6 +1662,9 @@ class PolicyGovernanceService:
                 raise PolicyInvalidTransition(
                     "recovery release is not a known governed release"
                 )
+            self._require_candidate_scope_valid_at(
+                staged, candidate_id, activation_time
+            )
             # Re-verify the manifest and validation bundle remain
             # registry-bound, then bind exactly the recomputed review
             # material: component changes, applicable-check delta, behavior
@@ -1537,6 +1854,12 @@ class PolicyGovernanceService:
                 raise PolicyInvalidTransition(
                     "scheduled time differs from the bound trusted activation time"
                 )
+            self._require_candidate_scope_valid_at(
+                staged, candidate_id, activation_at
+            )
+            self._require_current_approval_review(
+                staged, state, principal.scope, binding
+            )
             reservation_id = self._stable_id(
                 "reservation", f"{approval_binding_id}:{activation_at}"
             )
@@ -1953,6 +2276,8 @@ class PolicyGovernanceService:
                 or binding.get("recovery_release_id") != state.get("recovery_release_id")
             ):
                 raise PolicyUnavailable("approval binding no longer matches the schedule")
+            self._require_candidate_scope_valid_at(owner, candidate_id, now)
+            self._require_current_approval_review(owner, state, scope, binding)
             validation = self._artifact(owner, state["validation_bundle_id"])
             if validation.get("status") != "validated":
                 raise PolicyUnavailable("validation bundle is not validated")
@@ -2622,9 +2947,8 @@ class PolicyGovernanceService:
         Unknown or unmapped runtime items are recorded as ``unsupported``
         and therefore block validation: nothing is silently dropped.
         """
-        rules_text = rules_bytes.decode("utf-8")
-        rules_data = yaml.safe_load(rules_text)
-        kb_data = json.loads(kb_bytes.decode("utf-8"))
+        rules_data = _load_yaml_source(rules_bytes)
+        kb_data = _load_json_source(kb_bytes)
         items: list[dict[str, Any]] = []
         if not isinstance(rules_data, dict):
             raise ValueError("rules source must be an object")
@@ -2637,6 +2961,7 @@ class PolicyGovernanceService:
             value = rules_data[key]
             items.append(
                 {
+                    "source_ref": "rules",
                     "source_pointer": pointer,
                     "source_digest": content_digest(("option", pointer, value)),
                     "classification": "exact",
@@ -2652,6 +2977,7 @@ class PolicyGovernanceService:
                 names_tuple = tuple(names)
                 items.append(
                     {
+                        "source_ref": "rules",
                         "source_pointer": f"/field_aliases/{canonical}",
                         "source_digest": content_digest(
                             ("aliases", canonical, names_tuple)
@@ -2674,6 +3000,7 @@ class PolicyGovernanceService:
             rule_id = str(rule["id"])
             items.append(
                 {
+                    "source_ref": "rules",
                     "source_pointer": f"/rules/{index}",
                     "source_digest": content_digest(("rule_source", index, rule)),
                     "classification": "exact",
@@ -2695,6 +3022,7 @@ class PolicyGovernanceService:
                 compiled_value = getattr(rule_def, field)
                 items.append(
                     {
+                        "source_ref": "rules",
                         "source_pointer": f"/rules/{index}/{field}",
                         "source_digest": content_digest(
                             ("rule_field_source", index, field, raw_value)
@@ -2714,6 +3042,7 @@ class PolicyGovernanceService:
                 raw_value = rule[field]
                 items.append(
                     {
+                        "source_ref": "rules",
                         "source_pointer": f"/rules/{index}/{field}",
                         "source_digest": content_digest(
                             ("rule_field_source", index, field, raw_value)
@@ -2731,6 +3060,7 @@ class PolicyGovernanceService:
                 )
         items.append(
             {
+                "source_ref": "rules",
                 "source_pointer": "/changelog",
                 "source_digest": content_digest(("changelog", rules_data.get("changelog"))),
                 "classification": "non_runtime_excluded",
@@ -2740,31 +3070,24 @@ class PolicyGovernanceService:
                 "result_digest": content_digest(("changelog",)),
             }
         )
-        for section in ("version", "description", "graph"):
+        for section in ("version", "description"):
             if section not in kb_data:
                 continue
             value = kb_data[section]
             items.append(
                 {
+                    "source_ref": "knowledge",
                     "source_pointer": f"/{section}",
                     "source_digest": content_digest(("kb", section, value)),
-                    "classification": (
-                        "non_runtime_excluded"
-                        if section != "graph"
-                        else "explicit_transform"
-                    ),
-                    "target_ref": (
-                        None if section != "graph" else "checker.knowledge.aliases"
-                    ),
+                    "classification": "non_runtime_excluded",
+                    "target_ref": None,
                     "importer_version": IMPORTER_VERSION,
-                    "reason": (
-                        "metadata only; cannot affect runtime"
-                        if section != "graph"
-                        else "same_as graph projected into alias sections"
-                    ),
+                    "reason": "metadata only; cannot affect runtime",
                     "result_digest": content_digest(("kb", section, value)),
                 }
             )
+        if "graph" in kb_data:
+            items.extend(_graph_mapping_items(kb_data["graph"], release))
         for section in ("address_aliases", "org_aliases", "plate_prefixes"):
             values = kb_data.get(section)
             if not isinstance(values, dict):
@@ -2773,6 +3096,7 @@ class PolicyGovernanceService:
                 value = values[key]
                 items.append(
                     {
+                        "source_ref": "knowledge",
                         "source_pointer": f"/{section}/{key}",
                         "source_digest": content_digest(("kb_alias", section, key, value)),
                         "classification": "exact",
@@ -2789,6 +3113,7 @@ class PolicyGovernanceService:
             value = rules_data[key]
             items.append(
                 {
+                    "source_ref": "rules",
                     "source_pointer": f"/{key}",
                     "source_digest": content_digest(("unknown_rules_item", key, value)),
                     "classification": "unsupported",
@@ -2802,6 +3127,7 @@ class PolicyGovernanceService:
             value = kb_data[key]
             items.append(
                 {
+                    "source_ref": "knowledge",
                     "source_pointer": f"/{key}",
                     "source_digest": content_digest(("unknown_kb_item", key, value)),
                     "classification": "unsupported",
@@ -3314,8 +3640,26 @@ class PolicyGovernanceService:
             outcome,
         )
 
+    def _require_candidate_scope_valid_at(
+        self,
+        owner: SQLiteTargetStore,
+        candidate_id: str,
+        at: int,
+    ) -> None:
+        frozen = [
+            event
+            for event in owner.policy_governance_events
+            if event.get("kind") == "candidate_frozen"
+            and event.get("candidate_id") == candidate_id
+        ]
+        if len(frozen) != 1:
+            raise PolicyUnavailable("candidate frozen scope is unavailable")
+        outcome = self._scope_validity_check(frozen[0].get("metadata"), at=at)
+        if outcome["outcome"] != "pass":
+            raise PolicyInvalidTransition(str(outcome["detail"]))
+
     def _scope_validity_check(
-        self, metadata: dict[str, Any] | None
+        self, metadata: dict[str, Any] | None, *, at: int | None = None
     ) -> dict[str, Any]:
         if not isinstance(metadata, dict):
             return {
@@ -3330,7 +3674,7 @@ class PolicyGovernanceService:
                 "outcome": "fail",
                 "detail": "governance validity window is missing",
             }
-        now = self._trusted_time()
+        now = self._trusted_time() if at is None else at
 
         def parse_iso(value: Any) -> int | None:
             if not isinstance(value, str) or not value:
@@ -3374,6 +3718,14 @@ class PolicyGovernanceService:
         fuzzy prohibition, and no executable/I-O/path/URL/credential
         content anywhere in the declarative release."""
         problems: list[str] = []
+        knowledge_sections = {
+            section: dict(values) for section, values in release.knowledge
+        }
+        for key, value in knowledge_sections.get("address_aliases", {}).items():
+            try:
+                _validate_address_alias(key, value)
+            except ValueError as error:
+                problems.append(str(error))
         alias_names: dict[str, str] = {}
         for canonical, names in release.aliases:
             for name in names:
@@ -3979,6 +4331,19 @@ class PolicyGovernanceService:
             "components": None,
         }
 
+    @staticmethod
+    def _release_run_spec_pin(release: TargetRelease) -> dict[str, Any]:
+        public = release.public_manifest()
+        return {
+            "baseline_release": copy.deepcopy(public),
+            "release_id": public["release_id"],
+            "release_digest": public["digest"],
+            "checker_build": public["checker_build"],
+            "limits": copy.deepcopy(public["limits"]),
+            "applicable_check_ids": public["applicable_check_ids"],
+            "applicable_check_count": public["applicable_check_count"],
+        }
+
     def resolve_run_pin(
         self,
         scope: str,
@@ -3999,6 +4364,8 @@ class PolicyGovernanceService:
             raise PolicyUnavailable(
                 "required audit or storage trust is unavailable for resolution"
             )
+        if isinstance(now, bool) or not isinstance(now, int) or now < 1:
+            raise PolicyUnavailable("trusted resolution time is invalid")
         owner = store if store is not None else self._store
         if store is None:
             owner.reload()
@@ -4007,6 +4374,14 @@ class PolicyGovernanceService:
         )
         if active is None:
             return None
+        try:
+            self._require_candidate_scope_valid_at(
+                owner, active["candidate_id"], now
+            )
+        except PolicyInvalidTransition as error:
+            raise PolicyUnavailable(
+                "active release scope is not valid at the requested time"
+            ) from error
         manifest = self._verify_pinned_manifest(
             owner, active["manifest_id"], active["manifest_digest"]
         )
@@ -4023,6 +4398,7 @@ class PolicyGovernanceService:
         checker = self._artifact(owner, checker_artifact_id)
         release = TargetRelease.from_artifact(checker)
         public = release.public_manifest()
+        release_run_spec_pin = self._release_run_spec_pin(release)
         return {
             "policy_scope": scope,
             "activation_event_id": active["activation_event_id"],
@@ -4035,6 +4411,7 @@ class PolicyGovernanceService:
             "approval_binding_id": active["approval_binding_id"],
             "approval_binding_digest": active["approval_binding_digest"],
             "components": manifest["components"],
+            **release_run_spec_pin,
             "release": {
                 "release_id": public["release_id"],
                 "digest": public["digest"],
@@ -4148,7 +4525,22 @@ class PolicyGovernanceService:
         checker = self._artifact(
             self._store, self._component_id(manifest, "checker")
         )
-        return TargetRelease.from_artifact(checker)
+        try:
+            release = TargetRelease.from_artifact(checker)
+            expected_release_pin = self._release_run_spec_pin(release)
+            mismatch = any(
+                canonical_bytes(run_spec.get(key)) != canonical_bytes(expected)
+                for key, expected in expected_release_pin.items()
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise PolicyUnavailable(
+                "RunSpec release material is not verifiable"
+            ) from error
+        if mismatch:
+            raise PolicyUnavailable(
+                "RunSpec release material does not match the activated checker"
+            )
+        return release
 
     def _verify_pinned_manifest(
         self, owner: SQLiteTargetStore, manifest_id: str, manifest_digest: str
@@ -4600,6 +4992,7 @@ def _load_rules_bytes(rules_bytes: bytes) -> Any:
 
     import tempfile
 
+    _load_yaml_source(rules_bytes)
     with tempfile.TemporaryDirectory(prefix="s08-source-") as snapshot_dir:
         snapshot_path = Path(snapshot_dir) / "rules.yaml"
         snapshot_path.write_bytes(rules_bytes)
@@ -4612,6 +5005,7 @@ def _load_knowledge_bytes(kb_bytes: bytes) -> dict[str, Any]:
 
     import tempfile
 
+    _load_json_source(kb_bytes)
     with tempfile.TemporaryDirectory(prefix="s08-source-") as snapshot_dir:
         snapshot_path = Path(snapshot_dir) / "entity_kb.json"
         snapshot_path.write_bytes(kb_bytes)
