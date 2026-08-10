@@ -15,7 +15,8 @@
     "test:e2e:t01": "playwright test tests/test_t01_react.spec.js",
     "test:e2e:t06": "playwright test tests/test_t06_react.spec.js",
     "test:e2e:t07": "playwright test tests/test_t07_react.spec.js",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:e2e:t08": "playwright test tests/test_t08_react.spec.js"
   },
   "dependencies": {
     "@radix-ui/react-slot": "1.2.3",

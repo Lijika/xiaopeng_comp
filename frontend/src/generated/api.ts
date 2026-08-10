@@ -1558,7 +1558,17 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** S08 Query Candidate */
+        /**
+         * S08 Query Candidate
+         * @description The closed T08 candidate workspace.
+         *
+         *     The service builds the whole snapshot atomically under one lock: the
+         *     authoritative governance revision (from the governance ledger), the
+         *     authenticated actor role, the server-owned action list (candidate status
+         *     + role only), the current recovery/active anchor, the candidate's event
+         *     timeline and the validation/activation job outcomes.  This adapter only
+         *     maps that snapshot into the closed DTO and owns no transition rules.
+         */
         get: operations["s08_query_candidate_controlled_s08_api_queries_candidate__candidate_id__get"];
         put?: never;
         post?: never;
@@ -1628,6 +1638,30 @@ export interface paths {
         };
         /** S08 Query Status */
         get: operations["s08_query_status_controlled_s08_api_queries_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s08/react": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Controlled S08 React Page
+         * @description The Rule Administrator / Policy Approver React shell: the same built
+         *     artifact as the other controlled shells, served only to a registered S08
+         *     identity (admin or approver) with no-store and no session.  A missing or
+         *     incomplete build is an explicit closed 503; the S08 API remains the sole
+         *     authority.
+         */
+        get: operations["controlled_s08_react_page_controlled_s08_react_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -3364,16 +3398,61 @@ export interface components {
             /** Work Item Id */
             work_item_id: string;
         };
+        /**
+         * S08ActivationHold
+         * @description The closed activation-hold model: event identity, registered reason
+         *     code, trusted stop time and stopping subject.
+         */
+        S08ActivationHold: {
+            /** Event Id */
+            event_id: string;
+            /** Reason Code */
+            reason_code: string;
+            /** Stopped At */
+            stopped_at: number;
+            /** Stopped By */
+            stopped_by: string;
+        };
+        /**
+         * S08ActivationOutcome
+         * @description The closed, server-owned terminal/in-flight state of the candidate's
+         *     activation: pending while the job is queued/leased, active only when the
+         *     ledger records an activated event (with its event id and generation),
+         *     failed when the worker ended diagnostic (with only the registered stable
+         *     reason code; internal exception and write-point text never leaves the
+         *     service).
+         */
+        S08ActivationOutcome: {
+            /** Activation Event Id */
+            activation_event_id?: string | null;
+            /** Active Generation */
+            active_generation?: number | null;
+            /** Reason Code */
+            reason_code?: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "pending" | "active" | "failed";
+        };
+        /**
+         * S08ActiveAnchor
+         * @description The current recovery/active anchor: the prior active release the
+         *     Approver would bind as the recovery release.
+         */
+        S08ActiveAnchor: {
+            /** Candidate Id */
+            candidate_id: string;
+            /** Manifest Digest */
+            manifest_digest: string;
+        };
         /** S08ActiveResponse */
         S08ActiveResponse: {
             /** Activated At */
             activated_at?: number | null;
             /** Activation Event Id */
             activation_event_id?: string | null;
-            /** Activation Hold */
-            activation_hold?: {
-                [key: string]: unknown;
-            } | null;
+            activation_hold?: components["schemas"]["S08ActivationHold"] | null;
             /** Active Generation */
             active_generation?: number | null;
             /** Approval Binding Digest */
@@ -3408,6 +3487,43 @@ export interface components {
             /** Validation Bundle Id */
             validation_bundle_id?: string | null;
         };
+        /** S08ApplicableCheckDelta */
+        S08ApplicableCheckDelta: {
+            /** Added */
+            added: string[];
+            /** Anchor */
+            anchor: string[];
+            /** Candidate */
+            candidate: string[];
+            /** Removed */
+            removed: string[];
+        };
+        /**
+         * S08ApprovalBinding
+         * @description The fixed approver binding: the exact candidate/validation digests,
+         *     the bound diff, scope, activation time and recovery release.
+         */
+        S08ApprovalBinding: {
+            /** Activation Time */
+            activation_time: number;
+            /** Approved By */
+            approved_by: string;
+            /** Candidate Digest */
+            candidate_digest: string;
+            /** Candidate Id */
+            candidate_id: string;
+            diff: components["schemas"]["S08ReviewMaterial"];
+            /** Recovery Release Id */
+            recovery_release_id: string;
+            /** Schema Version */
+            schema_version: string;
+            /** Scope */
+            scope: string;
+            /** Validation Bundle Digest */
+            validation_bundle_digest: string;
+            /** Validation Bundle Id */
+            validation_bundle_id: string;
+        };
         /** S08ApproveBody */
         S08ApproveBody: {
             /** Activation Time */
@@ -3421,6 +3537,65 @@ export interface components {
             /** Recovery Release Id */
             recovery_release_id: string;
         };
+        /** S08ApproveResponse */
+        S08ApproveResponse: {
+            /** Activation Time */
+            activation_time: number;
+            /** Approval Binding Digest */
+            approval_binding_digest: string;
+            /** Approval Binding Id */
+            approval_binding_id: string;
+            /** Approver Subject */
+            approver_subject: string;
+            /** Author Subject */
+            author_subject: string;
+            /** Candidate Id */
+            candidate_id: string;
+            /** Governance Revision */
+            governance_revision: number;
+            /** Recovery Release Id */
+            recovery_release_id: string;
+            /**
+             * Replayed
+             * @default false
+             */
+            replayed: boolean;
+            /**
+             * Status
+             * @constant
+             */
+            status: "accepted";
+            /** Validation Bundle Digest */
+            validation_bundle_digest: string;
+            /** Validation Bundle Id */
+            validation_bundle_id: string;
+        };
+        /** S08BehaviorDelta */
+        S08BehaviorDelta: {
+            /** Equal */
+            equal: boolean;
+            /** Reason */
+            reason: string;
+        };
+        /** S08CancelResponse */
+        S08CancelResponse: {
+            /** Candidate Id */
+            candidate_id: string;
+            /** Governance Revision */
+            governance_revision: number;
+            /** Reason Code */
+            reason_code: string;
+            /**
+             * Replayed
+             * @default false
+             */
+            replayed: boolean;
+            /**
+             * Status
+             * @constant
+             */
+            status: "accepted";
+        };
         /** S08CandidateCommandBody */
         S08CandidateCommandBody: {
             /** Candidate Id */
@@ -3429,6 +3604,25 @@ export interface components {
             expected_governance_revision: number;
             /** Idempotency Key */
             idempotency_key: string;
+        };
+        /**
+         * S08CandidateManifest
+         * @description The immutable candidate manifest: digest, scope and the exact
+         *     registry-bound components, typed so generated clients never see a
+         *     wildcard dict.
+         */
+        S08CandidateManifest: {
+            compatibility: components["schemas"]["S08ManifestCompatibility"];
+            /** Components */
+            components: components["schemas"]["S08ComponentRef"][];
+            /** Digest */
+            digest: string;
+            /** Manifest Id */
+            manifest_id: string;
+            /** Schema Version */
+            schema_version: string;
+            /** Scope */
+            scope: string;
         };
         /** S08CandidateSummary */
         S08CandidateSummary: {
@@ -3449,6 +3643,73 @@ export interface components {
             /** Validation Bundle Id */
             validation_bundle_id?: string | null;
         };
+        /**
+         * S08CandidateWorkspaceResponse
+         * @description The closed T08 candidate workspace.  Besides the candidate/validation/
+         *     approval wire facts it carries the authoritative governance revision
+         *     (so an Approver can act without a separate status call), the
+         *     authenticated actor role, the server-owned action list and the current
+         *     recovery/active anchor.
+         */
+        S08CandidateWorkspaceResponse: {
+            /** Actions */
+            actions: string[];
+            /** Activation Event Id */
+            activation_event_id?: string | null;
+            activation_outcome?: components["schemas"]["S08ActivationOutcome"] | null;
+            /** Activation Time */
+            activation_time?: number | null;
+            active_anchor?: components["schemas"]["S08ActiveAnchor"] | null;
+            /** Active Generation */
+            active_generation?: number | null;
+            /**
+             * Actor Role
+             * @enum {string}
+             */
+            actor_role: "admin" | "approver";
+            approval_binding?: components["schemas"]["S08ApprovalBinding"] | null;
+            /** Approval Binding Digest */
+            approval_binding_digest?: string | null;
+            /** Approval Binding Id */
+            approval_binding_id?: string | null;
+            /** Author Subject */
+            author_subject?: string | null;
+            /** Candidate Id */
+            candidate_id: string;
+            /**
+             * Capability Gate
+             * @constant
+             */
+            capability_gate: "G3";
+            /** Events */
+            events: components["schemas"]["S08EventRef"][];
+            /** Governance Revision */
+            governance_revision: number;
+            manifest?: components["schemas"]["S08CandidateManifest"] | null;
+            /** Manifest Digest */
+            manifest_digest?: string | null;
+            /** Manifest Id */
+            manifest_id?: string | null;
+            /** Recovery Release Id */
+            recovery_release_id?: string | null;
+            review_material?: components["schemas"]["S08ReviewMaterial"] | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "candidate" | "validated" | "in_review" | "approved" | "scheduled" | "active" | "superseded" | "rejected" | "cancelled";
+            /**
+             * Track
+             * @constant
+             */
+            track: "C-DEMO";
+            validation_bundle?: components["schemas"]["S08ValidationBundle"] | null;
+            /** Validation Bundle Digest */
+            validation_bundle_digest?: string | null;
+            /** Validation Bundle Id */
+            validation_bundle_id?: string | null;
+            validation_outcome?: components["schemas"]["S08ValidationOutcome"] | null;
+        };
         /** S08CandidatesResponse */
         S08CandidatesResponse: {
             /** Candidates */
@@ -3460,6 +3721,13 @@ export interface components {
             /** Track */
             track: string;
         };
+        /** S08ComponentDigestRef */
+        S08ComponentDigestRef: {
+            /** Digest */
+            digest: string;
+            /** Id */
+            id: string;
+        };
         /** S08ComponentRef */
         S08ComponentRef: {
             /** Digest */
@@ -3468,6 +3736,67 @@ export interface components {
             id: string;
             /** Type */
             type: string;
+        };
+        /** S08CorpusDiff */
+        S08CorpusDiff: {
+            /** Anchor */
+            anchor?: string | null;
+            /** Applications Compared */
+            applications_compared: number;
+            /** Applications Skipped */
+            applications_skipped: number;
+            /** Checks Equal */
+            checks_equal: boolean;
+            /** Corpus Digest */
+            corpus_digest?: string | null;
+            /** Equal */
+            equal: boolean;
+            /** Normalization Equal */
+            normalization_equal: boolean;
+            /** Reason */
+            reason: string;
+            /** Route Equal */
+            route_equal: boolean;
+            /** Selection Equal */
+            selection_equal: boolean;
+            /** Verdicts Equal */
+            verdicts_equal: boolean;
+        };
+        /** S08CorpusItemRef */
+        S08CorpusItemRef: {
+            /** Name */
+            name: string;
+            /** Sha256 */
+            sha256: string;
+        };
+        /** S08CorpusManifest */
+        S08CorpusManifest: {
+            /** Count */
+            count: number;
+            /** Digest */
+            digest: string;
+            /** Items */
+            items: components["schemas"]["S08CorpusItemRef"][];
+            /**
+             * Track
+             * @constant
+             */
+            track: "C-DEV-REG";
+        };
+        /**
+         * S08DraftMetadata
+         * @description The closed, non-runtime draft metadata the Admin may revise: exactly
+         *     scope, validity window, source and reason.  No wildcard dict is exposed
+         *     to the generated client.
+         */
+        S08DraftMetadata: {
+            /** Reason */
+            reason: string;
+            /** Scope */
+            scope: string;
+            /** Source */
+            source: string;
+            validity: components["schemas"]["S08DraftValidity"];
         };
         /** S08DraftSummary */
         S08DraftSummary: {
@@ -3493,6 +3822,11 @@ export interface components {
             /** Status */
             status: string;
         };
+        /** S08DraftValidity */
+        S08DraftValidity: {
+            /** Valid From */
+            valid_from: string;
+        };
         /** S08DraftsResponse */
         S08DraftsResponse: {
             /** Capability Gate */
@@ -3504,16 +3838,42 @@ export interface components {
             /** Track */
             track: string;
         };
+        /**
+         * S08ErrorDetail
+         * @description The closed error envelope shared by every S08 HTTP error: the stable
+         *     registered code plus its fixed generic message, with no caller or
+         *     internal detail.
+         */
+        S08ErrorDetail: {
+            /** Error */
+            error: string;
+            /** Message */
+            message: string;
+        };
+        /** S08ErrorResponse */
+        S08ErrorResponse: {
+            detail: components["schemas"]["S08ErrorDetail"];
+        };
+        /**
+         * S08EventActor
+         * @description The closed identity recorded on every governance event by the single
+         *     ledger writer: subject, role and source id, with no wildcard payload.
+         */
+        S08EventActor: {
+            /** Role */
+            role: string;
+            /** Source Id */
+            source_id: string;
+            /** Subject */
+            subject: string;
+        };
         /** S08EventRef */
         S08EventRef: {
             /** Activation Event Id */
             activation_event_id?: string | null;
             /** Active Generation */
             active_generation?: number | null;
-            /** Actor */
-            actor: {
-                [key: string]: unknown;
-            };
+            actor: components["schemas"]["S08EventActor"];
             /** Approval Binding Id */
             approval_binding_id?: string | null;
             /** Candidate Id */
@@ -3555,6 +3915,29 @@ export interface components {
             /** Idempotency Key */
             idempotency_key: string;
         };
+        /** S08FreezeCandidateResponse */
+        S08FreezeCandidateResponse: {
+            /** Candidate Id */
+            candidate_id: string;
+            /** Components */
+            components: components["schemas"]["S08ComponentRef"][];
+            /** Governance Revision */
+            governance_revision: number;
+            /** Manifest Digest */
+            manifest_digest: string;
+            /** Manifest Id */
+            manifest_id: string;
+            /**
+             * Replayed
+             * @default false
+             */
+            replayed: boolean;
+            /**
+             * Status
+             * @constant
+             */
+            status: "accepted";
+        };
         /** S08ImportLegacyBody */
         S08ImportLegacyBody: {
             /** Expected Governance Revision */
@@ -3563,6 +3946,81 @@ export interface components {
             idempotency_key: string;
             /** Source Bundle Id */
             source_bundle_id: string;
+        };
+        /** S08ImportLegacyResponse */
+        S08ImportLegacyResponse: {
+            /** Draft Id */
+            draft_id: string;
+            /** Governance Revision */
+            governance_revision: number;
+            /** Knowledge Sha256 */
+            knowledge_sha256: string;
+            /** Mapping Ledger Digest */
+            mapping_ledger_digest: string;
+            /** Mapping Ledger Id */
+            mapping_ledger_id: string;
+            /**
+             * Replayed
+             * @default false
+             */
+            replayed: boolean;
+            /** Source Sha256 */
+            source_sha256: string;
+            /**
+             * Status
+             * @constant
+             */
+            status: "accepted";
+        };
+        /** S08ManifestCompatibility */
+        S08ManifestCompatibility: {
+            /** Checker Build */
+            checker_build: string;
+            /** Evidence Readiness Policy */
+            evidence_readiness_policy: string;
+            /** Input Contract Schema */
+            input_contract_schema: string;
+        };
+        /** S08MappingLedger */
+        S08MappingLedger: {
+            /** Importer Version */
+            importer_version: string;
+            /** Items */
+            items: components["schemas"]["S08MappingLedgerItem"][];
+            /** Schema Version */
+            schema_version: string;
+            source_refs: components["schemas"]["S08MappingLedgerSourceRefs"];
+        };
+        /** S08MappingLedgerItem */
+        S08MappingLedgerItem: {
+            /**
+             * Classification
+             * @enum {string}
+             */
+            classification: "exact" | "unsupported" | "non_runtime_excluded" | "explicit_transform";
+            /** Importer Version */
+            importer_version: string;
+            /** Reason */
+            reason: string;
+            /** Result Digest */
+            result_digest: string;
+            /** Source Digest */
+            source_digest: string;
+            /** Source Pointer */
+            source_pointer: string;
+            /** Source Ref */
+            source_ref: string;
+            /** Target Ref */
+            target_ref?: string | null;
+        };
+        /** S08MappingLedgerSourceRefs */
+        S08MappingLedgerSourceRefs: {
+            /** Knowledge Sha256 */
+            knowledge_sha256: string;
+            /** Rules Bundle Id */
+            rules_bundle_id: string;
+            /** Rules Sha256 */
+            rules_sha256: string;
         };
         /** S08RejectBody */
         S08RejectBody: {
@@ -3575,6 +4033,98 @@ export interface components {
             /** Reason Code */
             reason_code: string;
         };
+        /** S08RejectResponse */
+        S08RejectResponse: {
+            /** Candidate Id */
+            candidate_id: string;
+            /** Governance Revision */
+            governance_revision: number;
+            /** Reason Code */
+            reason_code: string;
+            /**
+             * Replayed
+             * @default false
+             */
+            replayed: boolean;
+            /**
+             * Status
+             * @constant
+             */
+            status: "accepted";
+        };
+        /** S08RequestValidationResponse */
+        S08RequestValidationResponse: {
+            /** Candidate Id */
+            candidate_id: string;
+            /** Governance Revision */
+            governance_revision: number;
+            /** Policy Job Id */
+            policy_job_id: string;
+            /**
+             * Replayed
+             * @default false
+             */
+            replayed: boolean;
+            /**
+             * Status
+             * @constant
+             */
+            status: "accepted";
+        };
+        /** S08ReviewChange */
+        S08ReviewChange: {
+            /** Anchor Digest */
+            anchor_digest?: string | null;
+            /** Anchor Id */
+            anchor_id?: string | null;
+            /** Candidate Digest */
+            candidate_digest?: string | null;
+            /** Candidate Id */
+            candidate_id?: string | null;
+            /**
+             * Change
+             * @enum {string}
+             */
+            change: "added" | "modified" | "removed";
+            /** Component */
+            component: string;
+        };
+        /**
+         * S08ReviewMaterial
+         * @description The deterministic review diff shared by the pre-approval workspace
+         *     and the approval binding: component changes, applicable-check delta,
+         *     behavior result, mapping ledger and unsupported report.
+         */
+        S08ReviewMaterial: {
+            /** Anchor Candidate Id */
+            anchor_candidate_id?: string | null;
+            /** Anchor Components */
+            anchor_components: {
+                [key: string]: components["schemas"]["S08ComponentDigestRef"];
+            };
+            applicable_check_delta: components["schemas"]["S08ApplicableCheckDelta"];
+            behavior_delta: components["schemas"]["S08BehaviorDelta"];
+            /** Candidate Components */
+            candidate_components: {
+                [key: string]: components["schemas"]["S08ComponentDigestRef"];
+            };
+            /** Candidate Digest */
+            candidate_digest: string;
+            /** Candidate Id */
+            candidate_id: string;
+            /** Changes */
+            changes: components["schemas"]["S08ReviewChange"][];
+            mapping_ledger?: components["schemas"]["S08MappingLedger"] | null;
+            /** Mapping Ledger Id */
+            mapping_ledger_id?: string | null;
+            /** Schema Version */
+            schema_version: string;
+            unsupported_report: components["schemas"]["S08UnsupportedReport"];
+            /** Validation Bundle Digest */
+            validation_bundle_digest?: string | null;
+            /** Validation Bundle Id */
+            validation_bundle_id?: string | null;
+        };
         /** S08ReviseDraftBody */
         S08ReviseDraftBody: {
             /** Draft Id */
@@ -3583,10 +4133,26 @@ export interface components {
             expected_governance_revision: number;
             /** Idempotency Key */
             idempotency_key: string;
-            /** Metadata */
-            metadata: {
-                [key: string]: unknown;
-            };
+            metadata: components["schemas"]["S08DraftMetadata"];
+        };
+        /** S08ReviseDraftResponse */
+        S08ReviseDraftResponse: {
+            /** Draft Id */
+            draft_id: string;
+            /** Draft Revision */
+            draft_revision: number;
+            /** Governance Revision */
+            governance_revision: number;
+            /**
+             * Replayed
+             * @default false
+             */
+            replayed: boolean;
+            /**
+             * Status
+             * @constant
+             */
+            status: "accepted";
         };
         /** S08ScheduleBody */
         S08ScheduleBody: {
@@ -3599,12 +4165,32 @@ export interface components {
             /** Idempotency Key */
             idempotency_key: string;
         };
+        /** S08ScheduleResponse */
+        S08ScheduleResponse: {
+            /** Activation At */
+            activation_at: number;
+            /** Candidate Id */
+            candidate_id: string;
+            /** Governance Revision */
+            governance_revision: number;
+            /** Policy Job Id */
+            policy_job_id: string;
+            /**
+             * Replayed
+             * @default false
+             */
+            replayed: boolean;
+            /** Reservation Id */
+            reservation_id: string;
+            /**
+             * Status
+             * @constant
+             */
+            status: "accepted";
+        };
         /** S08StatusResponse */
         S08StatusResponse: {
-            /** Activation Hold */
-            activation_hold?: {
-                [key: string]: unknown;
-            } | null;
+            activation_hold?: components["schemas"]["S08ActivationHold"] | null;
             /** Active Generation */
             active_generation?: number | null;
             /** Bootstrap */
@@ -3628,6 +4214,177 @@ export interface components {
             idempotency_key: string;
             /** Reason Code */
             reason_code: string;
+        };
+        /**
+         * S08StopActivationsResponse
+         * @description The closed operator response for an activation hold: scope, the
+         *     registered hold reason, the governance event identity and revision.
+         */
+        S08StopActivationsResponse: {
+            /** Governance Event Id */
+            governance_event_id: string;
+            /** Governance Revision */
+            governance_revision: number;
+            /** Reason Code */
+            reason_code: string;
+            /**
+             * Replayed
+             * @default false
+             */
+            replayed: boolean;
+            /** Scope */
+            scope: string;
+            /**
+             * Status
+             * @constant
+             */
+            status: "accepted";
+        };
+        /** S08SubmitReviewResponse */
+        S08SubmitReviewResponse: {
+            /** Candidate Id */
+            candidate_id: string;
+            /** Governance Revision */
+            governance_revision: number;
+            /**
+             * Replayed
+             * @default false
+             */
+            replayed: boolean;
+            /**
+             * Status
+             * @constant
+             */
+            status: "accepted";
+            /** Validation Bundle Id */
+            validation_bundle_id: string;
+        };
+        /** S08UnsupportedReport */
+        S08UnsupportedReport: {
+            /** Count */
+            count: number;
+            /** Items */
+            items: components["schemas"]["S08MappingLedgerItem"][];
+        };
+        /**
+         * S08ValidationBundle
+         * @description The immutable validation evidence: validator identity, pinned inputs
+         *     and the typed checks/outcome, so the approval never floats to modified
+         *     content.
+         */
+        S08ValidationBundle: {
+            /** Candidate Id */
+            candidate_id: string;
+            inputs: components["schemas"]["S08ValidationInputs"];
+            /** Manifest Digest */
+            manifest_digest: string;
+            /** Manifest Id */
+            manifest_id: string;
+            results: components["schemas"]["S08ValidationResults"];
+            /** Schema Version */
+            schema_version: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "validated" | "rejected";
+            /** Validation Suite */
+            validation_suite: string;
+            validator: components["schemas"]["S08ValidatorIdentity"];
+            /** Validator Build */
+            validator_build: string;
+        };
+        /** S08ValidationCheck */
+        S08ValidationCheck: {
+            /** Check Id */
+            check_id: string;
+            /** Detail */
+            detail: string;
+            /**
+             * Outcome
+             * @enum {string}
+             */
+            outcome: "pass" | "fail" | "protected_fail";
+        };
+        /** S08ValidationDeterminism */
+        S08ValidationDeterminism: {
+            /** Digest */
+            digest?: string | null;
+            /** Equal */
+            equal: boolean;
+            /** Reason */
+            reason: string;
+            /** Runs */
+            runs: number;
+        };
+        /**
+         * S08ValidationErrorItem
+         * @description One sanitized 422 item: the request-validation handler never reflects
+         *     rejected input, context, credentials or oversized payload content.
+         */
+        S08ValidationErrorItem: {
+            /** Loc */
+            loc: (string | number)[];
+            /** Msg */
+            msg: string;
+            /** Type */
+            type: string;
+        };
+        /** S08ValidationErrorResponse */
+        S08ValidationErrorResponse: {
+            /** Detail */
+            detail: components["schemas"]["S08ValidationErrorItem"][];
+        };
+        /** S08ValidationInputs */
+        S08ValidationInputs: {
+            /** Component Digests */
+            component_digests: {
+                [key: string]: string;
+            };
+            corpus?: components["schemas"]["S08CorpusManifest"] | null;
+            /** Mapping Ledger Digest */
+            mapping_ledger_digest?: string | null;
+            /** Mapping Ledger Id */
+            mapping_ledger_id?: string | null;
+        };
+        /**
+         * S08ValidationOutcome
+         * @description The closed, server-owned terminal/in-flight state of the candidate's
+         *     validation job: pending while the worker runs, validated/rejected once
+         *     the ledger records the verdict (rejected carries the registered reason),
+         *     failed when the worker itself ended diagnostic.  Never inferred by the
+         *     browser.
+         */
+        S08ValidationOutcome: {
+            /** Reason Code */
+            reason_code?: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "pending" | "validated" | "rejected" | "failed";
+        };
+        /** S08ValidationResults */
+        S08ValidationResults: {
+            /** Checks */
+            checks: components["schemas"]["S08ValidationCheck"][];
+            corpus_diff: components["schemas"]["S08CorpusDiff"];
+            determinism: components["schemas"]["S08ValidationDeterminism"];
+            /** Failed Count */
+            failed_count: number;
+        };
+        /** S08ValidatorIdentity */
+        S08ValidatorIdentity: {
+            /** Build */
+            build: string;
+            /** Code Sha256 */
+            code_sha256: string;
+            /** Machine */
+            machine: string;
+            /** Python */
+            python: string;
+            /** Suite */
+            suite: string;
         };
         /** T05BusinessExceptionOperationsResult */
         T05BusinessExceptionOperationsResult: {
@@ -7467,18 +8224,52 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["S08ApproveResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["S08ValidationErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
                 };
             };
         };
@@ -7502,18 +8293,52 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["S08CancelResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["S08ValidationErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
                 };
             };
         };
@@ -7537,18 +8362,52 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["S08FreezeCandidateResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["S08ValidationErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
                 };
             };
         };
@@ -7572,18 +8431,52 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["S08ImportLegacyResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["S08ValidationErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
                 };
             };
         };
@@ -7607,18 +8500,52 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["S08RejectResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["S08ValidationErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
                 };
             };
         };
@@ -7642,18 +8569,52 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["S08RequestValidationResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["S08ValidationErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
                 };
             };
         };
@@ -7677,18 +8638,52 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["S08ReviseDraftResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["S08ValidationErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
                 };
             };
         };
@@ -7712,18 +8707,52 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["S08ScheduleResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["S08ValidationErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
                 };
             };
         };
@@ -7747,18 +8776,52 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["S08StopActivationsResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["S08ValidationErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
                 };
             };
         };
@@ -7782,18 +8845,52 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["S08SubmitReviewResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["S08ValidationErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
                 };
             };
         };
@@ -7816,6 +8913,51 @@ export interface operations {
                     "application/json": components["schemas"]["S08ActiveResponse"];
                 };
             };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ValidationErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
         };
     };
     s08_query_candidate_controlled_s08_api_queries_candidate__candidate_id__get: {
@@ -7835,18 +8977,52 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["S08CandidateWorkspaceResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["S08ValidationErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
                 };
             };
         };
@@ -7869,6 +9045,51 @@ export interface operations {
                     "application/json": components["schemas"]["S08CandidatesResponse"];
                 };
             };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ValidationErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
         };
     };
     s08_query_drafts_controlled_s08_api_queries_drafts_get: {
@@ -7887,6 +9108,51 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["S08DraftsResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ValidationErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
                 };
             };
         };
@@ -7909,6 +9175,51 @@ export interface operations {
                     "application/json": components["schemas"]["S08EventsResponse"];
                 };
             };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ValidationErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
         };
     };
     s08_query_status_controlled_s08_api_queries_status_get: {
@@ -7927,6 +9238,71 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["S08StatusResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ValidationErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+        };
+    };
+    controlled_s08_react_page_controlled_s08_react_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
                 };
             };
         };

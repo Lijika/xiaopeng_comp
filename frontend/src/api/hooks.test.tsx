@@ -10,6 +10,8 @@ import {
   correctionConverged,
   evidenceRevisionConverged,
   useApplicationHistory,
+  useApproveCandidate,
+  useCandidateWorkspace,
   useClaimWorkItem,
   useCorrectFieldObservation,
   useCorrectionConvergence,
@@ -19,6 +21,8 @@ import {
   useRecoveryWork,
   useRequestSupplement,
   useRevealFieldObservation,
+  useS08Status,
+  useS08StatusPoll,
   useSubmitAttachmentVersion,
   useSubmitVerification,
   useSupplementRequest,
@@ -26,6 +30,8 @@ import {
   type CorrectionCommand,
   type FencedCommand,
   type RevealCommand,
+  type S08ApproveCommand,
+  type S08ImportCommand,
   type SubmitCommand,
   type VerifyRecoveryCommand,
 } from "./hooks";
@@ -1365,5 +1371,266 @@ describe("shared evidence-revision convergence predicate (T04)", () => {
       false,
     );
     expect(correctionConverged(routePayload(), historyPayload(), 2)).toBe(true);
+  });
+});
+
+describe("S08 governed policy hooks (T08)", () => {
+  const CANDIDATE = "candidate_t08hooks000000000000000000";
+  const WORKSPACE_PATH = `/controlled/s08/api/queries/candidate/${CANDIDATE}`;
+  const APPROVE_PATH = "/controlled/s08/api/commands/approve";
+
+  function workspacePayload(status: string, actions: string[] = []) {
+    return {
+      track: "C-DEMO",
+      capability_gate: "G3",
+      candidate_id: CANDIDATE,
+      status,
+      governance_revision: 3,
+      actor_role: "approver",
+      actions,
+      events: [],
+    };
+  }
+
+  it("fetches the candidate workspace through the thin adapter", async () => {
+    let requests = 0;
+    fetchRouter({
+      [`GET ${WORKSPACE_PATH}`]: () => {
+        requests += 1;
+        return new Response(
+          JSON.stringify(workspacePayload("in_review", ["approve", "reject"])),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    });
+    const { result } = renderHook(() => useCandidateWorkspace(CANDIDATE), {
+      wrapper: wrap(createQueryClient()),
+    });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data?.status).toBe("in_review");
+    expect(result.current.data?.actions).toEqual(["approve", "reject"]);
+    expect(requests).toBe(1);
+  });
+
+  it("never retries a rejected approve POST (retry: false)", async () => {
+    vi.useFakeTimers();
+    try {
+      let approvePosts = 0;
+      fetchRouter({
+        [`POST ${APPROVE_PATH}`]: () => {
+          approvePosts += 1;
+          return new Response(
+            JSON.stringify({
+              detail: { error: "S08_CONFLICT", message: "stale" },
+            }),
+            { status: 409, headers: { "Content-Type": "application/json" } },
+          );
+        },
+      });
+      const { result } = renderHook(() => useApproveCandidate(), {
+        wrapper: wrap(createQueryClient()),
+      });
+      result.current.mutate({
+        candidate_id: CANDIDATE,
+        activation_time: 1786000000,
+        recovery_release_id: "candidate_prev",
+        idempotency_key: "t08-approve",
+        expected_governance_revision: 3,
+      });
+      await settleWithTimers(() => result.current.isError);
+      expect(approvePosts).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("acceptance invalidates the server-owned S08 candidate workspace query", async () => {
+    let workspaceRequests = 0;
+    const router = fetchRouter({
+      [`POST ${APPROVE_PATH}`]: () =>
+        new Response(
+          JSON.stringify({
+            status: "accepted",
+            candidate_id: CANDIDATE,
+            approval_binding_id: "approval_sha256_x",
+            approval_binding_digest: "digest",
+            validation_bundle_id: "bundle",
+            validation_bundle_digest: "bundle-digest",
+            author_subject: "c-demo-policy-admin",
+            approver_subject: "c-demo-policy-approver",
+            activation_time: 1786000000,
+            recovery_release_id: "candidate_prev",
+            governance_revision: 4,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      [`GET ${WORKSPACE_PATH}`]: () => {
+        workspaceRequests += 1;
+        return new Response(
+          JSON.stringify(workspacePayload("approved", ["schedule", "cancel"])),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    });
+    const client = createQueryClient();
+    const { result } = renderHook(
+      () => ({
+        approve: useApproveCandidate(),
+        workspace: useCandidateWorkspace(CANDIDATE),
+      }),
+      { wrapper: wrap(client) },
+    );
+    await waitFor(() => expect(result.current.workspace.isSuccess).toBe(true));
+    const before = workspaceRequests;
+    result.current.approve.mutate({
+      candidate_id: CANDIDATE,
+      activation_time: 1786000000,
+      recovery_release_id: "candidate_prev",
+      idempotency_key: "t08-approve-2",
+      expected_governance_revision: 3,
+    });
+    await waitFor(() => expect(result.current.approve.isSuccess).toBe(true));
+    await waitFor(() => expect(workspaceRequests).toBeGreaterThan(before));
+    expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(1);
+  });
+
+  it("bounded status poll converges once the server status enters the terminal set", async () => {
+    vi.useFakeTimers();
+    try {
+      let status = "candidate";
+      fetchRouter({
+        [`GET ${WORKSPACE_PATH}`]: () => {
+          const payload = status;
+          if (payload === "candidate") status = "validated";
+          return new Response(JSON.stringify(workspacePayload(payload, [])), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        },
+      });
+      const client = createQueryClient();
+      const { result } = renderHook(
+        () => ({
+          workspace: useCandidateWorkspace(CANDIDATE),
+          poll: useS08StatusPoll(CANDIDATE, true, ["validated"], {
+            intervalMs: 500,
+            maxAttempts: 10,
+          }),
+        }),
+        { wrapper: wrap(client) },
+      );
+      await settleWithTimers(() => result.current.workspace.isSuccess);
+      expect(result.current.poll).toBe("waiting");
+      for (let index = 0; index < 20 && result.current.poll !== "converged"; index += 1) {
+        await vi.advanceTimersByTimeAsync(500);
+      }
+      expect(result.current.poll).toBe("converged");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounded status poll ends timed_out at the attempt ceiling", async () => {
+    vi.useFakeTimers();
+    try {
+      fetchRouter({
+        [`GET ${WORKSPACE_PATH}`]: () =>
+          new Response(JSON.stringify(workspacePayload("candidate", [])), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+      });
+      const client = createQueryClient();
+      const { result } = renderHook(
+        () => ({
+          workspace: useCandidateWorkspace(CANDIDATE),
+          poll: useS08StatusPoll(CANDIDATE, true, ["validated"], {
+            intervalMs: 500,
+            maxAttempts: 3,
+          }),
+        }),
+        { wrapper: wrap(client) },
+      );
+      await settleWithTimers(() => result.current.workspace.isSuccess);
+      for (let index = 0; index < 20 && result.current.poll !== "timed_out"; index += 1) {
+        await vi.advanceTimersByTimeAsync(500);
+      }
+      expect(result.current.poll).toBe("timed_out");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounded status poll turns terminal on a definitive workspace rejection", async () => {
+    vi.useFakeTimers();
+    try {
+      fetchRouter({
+        [`GET ${WORKSPACE_PATH}`]: () =>
+          new Response(
+            JSON.stringify({
+              detail: { error: "S08_NOT_FOUND", message: "hidden" },
+            }),
+            { status: 404, headers: { "Content-Type": "application/json" } },
+          ),
+      });
+      const client = createQueryClient();
+      const { result } = renderHook(
+        () => ({
+          workspace: useCandidateWorkspace(CANDIDATE),
+          poll: useS08StatusPoll(CANDIDATE, true, ["validated"], {
+            intervalMs: 500,
+            maxAttempts: 10,
+          }),
+        }),
+        { wrapper: wrap(client) },
+      );
+      await settleWithTimers(() => result.current.workspace.isError);
+      expect(result.current.poll).toBe("terminal");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("fetches the Admin governance status with the encoded scope", async () => {
+    let requests = 0;
+    fetchRouter({
+      "GET /controlled/s08/api/queries/status": () => {
+        requests += 1;
+        return new Response(
+          JSON.stringify({
+            track: "C-DEMO",
+            capability_gate: "G3",
+            bootstrap: true,
+            scope: "C-DEMO/demo",
+            governance_revision: 3,
+            active_generation: 1,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    });
+    const { result } = renderHook(() => useS08Status(), {
+      wrapper: wrap(createQueryClient()),
+    });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data?.governance_revision).toBe(3);
+    expect(requests).toBe(1);
+  });
+
+  it("binds every S08 command body to the generated OpenAPI request schemas", () => {
+    type ApproveBody = S08ApproveCommand;
+    expectTypeOf<ApproveBody>().toMatchTypeOf<{
+      candidate_id: string;
+      activation_time: number;
+      recovery_release_id: string;
+      idempotency_key: string;
+      expected_governance_revision: number;
+    }>();
+    type ImportBody = S08ImportCommand;
+    expectTypeOf<ImportBody>().toMatchTypeOf<{
+      source_bundle_id: string;
+      idempotency_key: string;
+      expected_governance_revision: number;
+    }>();
   });
 });

@@ -23,6 +23,7 @@ from task4_consistency.rules.loader import load_rules
 from task4_consistency.controlled.s01_store import SQLiteTargetStore
 from task4_consistency.controlled.s08 import (
     PolicyConflict,
+    PolicyNotFound,
     PolicyUnavailable,
     PolicyGovernanceService,
     PolicyInvalidTransition,
@@ -1945,7 +1946,7 @@ def test_governance_commands_are_revisioned_idempotent_and_role_separated(
         connection.commit()
     outcome = service.process_next_policy_job(now=activation_at + 31)
     assert outcome["status"] == "failed", outcome
-    assert "PolicyUnavailable" in outcome["error"]
+    assert outcome["reason_code"] == "S08_ACTIVATION_UNAVAILABLE"
     # The ledger is not polluted: the fold still shows generation 1, but the
     # corrupted Registry can no longer produce a verifiable active query.
     folded = service._fold_active_projection(
@@ -2331,7 +2332,7 @@ def test_audit_or_partial_commit_failure_preserves_prior_active(
         connection.commit()
     result = service.process_next_policy_job(now=activation_at)
     assert result["status"] == "failed", result
-    assert "PolicyUnavailable" in result["error"]
+    assert result["reason_code"] == "S08_ACTIVATION_UNAVAILABLE"
     assert governance_revision(service) == before["revision"]
     assert len(service._store.policy_governance_events) == before["events"]
     assert len(service._store.audit_events) == before["audit"]
@@ -2400,7 +2401,7 @@ def test_audit_or_partial_commit_failure_preserves_prior_active(
         connection.commit()
     result = service.process_next_policy_job(now=activation_at)
     assert result["status"] == "failed", result
-    assert "PolicyUnavailable" in result["error"]
+    assert result["reason_code"] == "S08_ACTIVATION_UNAVAILABLE"
     assert governance_revision(service) == before["revision"]
     assert len(service._store.policy_governance_events) == before["events"]
     assert len(service._store.audit_events) == before["audit"]
@@ -3660,3 +3661,1975 @@ def test_fresh_process_bounds_reject_without_terminating(
     assert outcomes2["corpus_zero_diff"] == "fail"
     assert bundle2["results"]["corpus_diff"]["applications_skipped"] >= 1
     assert service2.query_active(ADMIN)["active_generation"] == 1
+
+
+def test_workspace_projects_validation_rejected_and_keeps_prior_active(
+    tmp_path: Path,
+) -> None:
+    """A candidate whose validation the owner rejects is presented with the
+    authoritative terminal outcome: status rejected, no actions, the
+    registered rejection reason and the rejection evidence visible, and the
+    prior active anchor untouched."""
+    service, _, _ = make_policy_service(tmp_path)
+    draft_id = import_draft(service)
+    service._corpus_root = tmp_path / "missing-corpus"
+    candidate_id, worker = freeze_and_validate(service, draft_id)
+    assert worker["outcome"] == "rejected"
+    workspace = service.query_candidate_workspace(ADMIN, candidate_id)
+    assert workspace["status"] == "rejected"
+    assert workspace["actions"] == []
+    assert workspace["validation_outcome"] == {
+        "status": "rejected",
+        "reason_code": "S08_VALIDATION_REJECTED",
+    }
+    assert workspace["activation_outcome"] is None
+    assert workspace["validation_bundle"]["status"] == "rejected"
+    assert workspace["active_anchor"] is not None
+    assert workspace["active_anchor"]["candidate_id"] != candidate_id
+    assert service.query_active(ADMIN)["active_generation"] == 1
+
+
+def test_workspace_keeps_validation_verdict_after_approver_rejection(
+    tmp_path: Path,
+) -> None:
+    service, _, _ = make_policy_service(tmp_path)
+    candidate_id, worker = freeze_and_validate(service, import_draft(service))
+    assert worker["outcome"] == "validated"
+
+    service.reject(
+        principal=APPROVER,
+        candidate_id=candidate_id,
+        reason_code="S08_REVIEW_REJECTED",
+        idempotency_key="approver-reject-after-validation",
+        expected_governance_revision=governance_revision(service),
+    )
+
+    workspace = service.query_candidate_workspace(ADMIN, candidate_id)
+    assert workspace["status"] == "rejected"
+    assert workspace["validation_outcome"] == {
+        "status": "validated",
+        "reason_code": "S08_VALIDATION_PASSED",
+    }
+    assert workspace["events"][-1]["reason_code"] == "S08_REVIEW_REJECTED"
+
+
+def test_workspace_projects_activation_diagnostic_failure_and_prior_active(
+    tmp_path: Path,
+) -> None:
+    """An activation worker failure is presented as an authoritative terminal
+    activation outcome: the failed candidate never becomes active, the
+    prior-active anchor stays visible, and no new active generation exists."""
+    bundle = tmp_path / "server-bundle"
+    bundle.mkdir()
+    (bundle / "rules.yaml").write_bytes(DEFAULT_RULES.read_bytes())
+    (bundle / "entity_kb.json").write_bytes(DEFAULT_KB.read_bytes())
+
+    def inject(write_point: str) -> None:
+        if write_point == "s08.activation":
+            raise OSError("injected S08 fault")
+
+    service = PolicyGovernanceService(
+        state_path=tmp_path / "fault.sqlite3",
+        source_rules_path=bundle / "rules.yaml",
+        source_kb_path=bundle / "entity_kb.json",
+        corpus_root=CORPUS,
+        fault_injector=inject,
+    )
+    service.bootstrap_once()
+    _, candidate_id, _, activation_at = _full_flow(service)
+    prior = service.query_active(ADMIN)
+    result = service.process_next_policy_job(now=activation_at)
+    assert result["status"] == "failed"
+    workspace = service.query_candidate_workspace(ADMIN, candidate_id)
+    assert workspace["status"] == "scheduled"
+    assert workspace["actions"] == ["cancel"]
+    assert workspace["validation_outcome"] == {
+        "status": "validated",
+        "reason_code": "S08_VALIDATION_PASSED",
+    }
+    assert workspace["activation_outcome"]["status"] == "failed"
+    assert (
+        workspace["activation_outcome"]["reason_code"] == "S08_ACTIVATION_INTERNAL"
+    )
+    assert workspace["active_anchor"]["candidate_id"] == prior["candidate_id"]
+    assert workspace["active_anchor"]["manifest_digest"] == prior["manifest_digest"]
+    assert service.query_active(ADMIN)["active_generation"] == 1
+    assert workspace["activation_outcome"].get("activation_event_id") is None
+
+
+def test_workspace_query_is_one_atomic_snapshot_across_interleaved_commit(
+    tmp_path: Path,
+) -> None:
+    """A worker transition that commits to the store while the workspace is
+    being read can never split the projection: the response is the exact
+    snapshot taken under the single service lock, with status, actions,
+    revision, events and active anchor mutually consistent."""
+    state_path = tmp_path / "atomic.sqlite3"
+    service, rules_path, kb_path = make_policy_service(
+        tmp_path / "atomic", state_path=state_path
+    )
+    _, candidate_id, _, activation_at = _full_flow(service)
+    before = service.query_candidate_workspace(ADMIN, candidate_id)
+    assert before["status"] == "scheduled"
+    assert before["actions"] == ["cancel"]
+    assert before["activation_outcome"]["status"] == "pending"
+    assert before["active_anchor"] is not None
+    assert before["active_anchor"]["candidate_id"] != candidate_id
+
+    original_reload = service._store.reload
+    injected = {"done": False}
+    other = PolicyGovernanceService(
+        state_path=state_path,
+        source_rules_path=rules_path,
+        source_kb_path=kb_path,
+        corpus_root=CORPUS,
+    )
+
+    def reload_with_interleaved_commit() -> None:
+        original_reload()
+        if not injected["done"]:
+            injected["done"] = True
+            # The concurrent worker lands its activation commit between the
+            # query's reload and the projection construction.
+            other.process_next_policy_job(now=int(time.time()) + 120)
+
+    service._store.reload = reload_with_interleaved_commit  # type: ignore[method-assign]
+    snapshot = service.query_candidate_workspace(ADMIN, candidate_id)
+    # The response is the pre-commit frame: everything still self-consistent.
+    assert snapshot["status"] == "scheduled"
+    assert snapshot["actions"] == ["cancel"]
+    assert snapshot["governance_revision"] == before["governance_revision"]
+    assert len(snapshot["events"]) == len(before["events"])
+    assert snapshot["active_anchor"] == before["active_anchor"]
+    assert snapshot["activation_outcome"]["status"] == "pending"
+    # The next frame (a fresh reload) observes the interleaved commit.
+    service._store.reload = original_reload
+    after = service.query_candidate_workspace(ADMIN, candidate_id)
+    assert after["status"] == "active"
+    assert after["actions"] == []
+    assert after["activation_outcome"]["status"] == "active"
+    assert after["activation_outcome"]["active_generation"] == 2
+    assert after["active_anchor"]["candidate_id"] == candidate_id
+    assert after["governance_revision"] > snapshot["governance_revision"]
+
+
+def test_workspace_projects_terminal_outcomes_for_superseded_and_cancelled(
+    tmp_path: Path,
+) -> None:
+    """Append-only ledger verdicts keep the authoritative terminal outcome
+    honest after the candidate moves on: a superseded candidate still reports
+    the activation that happened, and a cancelled-but-validated candidate
+    still reports the validation verdict."""
+    service, _, _ = make_policy_service(tmp_path)
+    _, first_candidate, _, activation_at = _full_flow(service)
+    assert (
+        service.process_next_policy_job(now=activation_at)["status"]
+        == "complete"
+    )
+    # A successor activation supersedes the first release.  The frozen draft
+    # forks on revise, so the second candidate must be built from the
+    # revised draft identity exactly like the overlapping-schedule drill.
+    second_draft = import_draft(service)
+    second_revise = service.revise_draft(
+        principal=ADMIN,
+        draft_id=second_draft,
+        metadata={
+            "scope": S08_SCOPE,
+            "validity": {"valid_from": "2000-01-01T00:00:00Z"},
+            "source": SOURCE_BUNDLE_ID,
+            "reason": "supersede case",
+        },
+        idempotency_key=f"r-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    second_freeze = service.freeze_candidate(
+        principal=ADMIN,
+        draft_id=second_revise["draft_id"],
+        idempotency_key=f"f-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    second_candidate = second_freeze["candidate_id"]
+    service.request_validation(
+        principal=ADMIN,
+        candidate_id=second_candidate,
+        idempotency_key=f"v-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    service.process_next_policy_job()
+    service.submit_review(
+        principal=ADMIN,
+        candidate_id=second_candidate,
+        idempotency_key=f"rv-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    second_at = int(time.time()) + 30
+    second_approval = service.approve(
+        principal=APPROVER,
+        candidate_id=second_candidate,
+        activation_time=second_at,
+        recovery_release_id=service.query_active(ADMIN)["candidate_id"],
+        idempotency_key=f"a-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    service.schedule(
+        principal=ADMIN,
+        approval_binding_id=second_approval["approval_binding_id"],
+        activation_at=second_at,
+        idempotency_key=f"s-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    assert (
+        service.process_next_policy_job(now=second_at)["status"] == "complete"
+    )
+    first = service.query_candidate_workspace(ADMIN, first_candidate)
+    assert first["status"] == "superseded"
+    assert first["activation_outcome"]["status"] == "active"
+    assert first["activation_outcome"]["activation_event_id"]
+    assert first["activation_outcome"]["active_generation"] == 2
+    assert first["validation_outcome"]["status"] == "validated"
+    second = service.query_candidate_workspace(ADMIN, second_candidate)
+    assert second["activation_outcome"]["status"] == "active"
+    assert second["activation_outcome"]["active_generation"] == 3
+
+    # A candidate cancelled after validation keeps the validated verdict.
+    cancelled_service, _, _ = make_policy_service(tmp_path / "cancel")
+    draft_id = import_draft(cancelled_service)
+    candidate_id, worker = freeze_and_validate(cancelled_service, draft_id)
+    assert worker["outcome"] == "validated"
+    cancelled_service.cancel(
+        principal=ADMIN,
+        candidate_id=candidate_id,
+        reason_code="t08-cancel",
+        idempotency_key=f"c-{time.time_ns()}",
+        expected_governance_revision=governance_revision(cancelled_service),
+    )
+    workspace = cancelled_service.query_candidate_workspace(
+        ADMIN, candidate_id
+    )
+    assert workspace["status"] == "cancelled"
+    assert workspace["validation_outcome"]["status"] == "validated"
+    assert workspace["activation_outcome"] is None
+
+
+def test_query_candidates_not_blocked_by_validation_worker_lock(tmp_path):
+    """Regression guard for the shared governance lock: the validation
+    worker's long computation must not queue read queries behind it.  The
+    worker previously held the lock for the whole validation (claim +
+    ~1s of digest/check computation + result write), which pushed poll
+    requests past the 2s HTTP contract on a loaded host.  After the fix
+    only the claim and the result write hold the lock, so a query issued
+    mid-computation returns in well under a second."""
+    service, _, _ = make_policy_service(tmp_path)
+    draft_id = import_draft(service)
+    freeze = service.freeze_candidate(
+        principal=ADMIN,
+        draft_id=draft_id,
+        idempotency_key=f"lock-freeze-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    candidate_id = freeze["candidate_id"]
+    service.request_validation(
+        principal=ADMIN,
+        candidate_id=candidate_id,
+        idempotency_key=f"lock-validate-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+
+    results: list[dict[str, Any]] = []
+
+    def worker() -> None:
+        results.append(service.process_next_policy_job())
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    # Let the worker claim the job and enter the validation computation.
+    time.sleep(0.5)
+    start = time.monotonic()
+    service.query_candidates(ADMIN)
+    elapsed = time.monotonic() - start
+    thread.join(60)
+    assert results and results[0]["status"] == "complete"
+    assert elapsed < 1.0, (
+        f"query queued behind the validation worker lock for {elapsed:.2f}s"
+    )
+
+
+def test_cancel_during_validation_compute_does_not_report_failure(
+    tmp_path, monkeypatch
+):
+    """A candidate cancelled while the validation computation is running
+    must not surface a validation-failure terminal: the race previously
+    landed the job in diagnostic and projected the cancelled candidate as
+    ``validation_outcome.status == failed``."""
+    service, _, _ = make_policy_service(tmp_path)
+    draft_id = import_draft(service)
+    freeze = service.freeze_candidate(
+        principal=ADMIN,
+        draft_id=draft_id,
+        idempotency_key=f"race-freeze-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    candidate_id = freeze["candidate_id"]
+    service.request_validation(
+        principal=ADMIN,
+        candidate_id=candidate_id,
+        idempotency_key=f"race-validate-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+
+    original = service._validate_candidate
+
+    def slow_validate(owner, state):
+        time.sleep(0.8)
+        return original(owner, state)
+
+    monkeypatch.setattr(service, "_validate_candidate", slow_validate)
+    results: list[dict[str, Any]] = []
+
+    def worker() -> None:
+        results.append(service.process_next_policy_job())
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    time.sleep(0.2)  # worker claimed the job and is inside the computation
+    service.cancel(
+        principal=ADMIN,
+        candidate_id=candidate_id,
+        reason_code="t08-cancel-mid-validation",
+        idempotency_key=f"race-cancel-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    thread.join(60)
+    workspace = service.query_candidate_workspace(ADMIN, candidate_id)
+    assert workspace["status"] == "cancelled"
+    outcome = workspace["validation_outcome"]
+    assert outcome is None or outcome["status"] != "failed", outcome
+    jobs = [
+        job
+        for job in service._store.policy_jobs
+        if job.get("kind") == "validation"
+        and job.get("candidate_id") == candidate_id
+    ]
+    assert jobs and jobs[0]["status"] == "complete"
+
+
+# --- R2: exact worker ownership (lease/fence/attempt) at every write --------
+
+
+def _claim(
+    service: PolicyGovernanceService, worker_id: str, now: int
+) -> tuple[dict[str, Any], int, Any]:
+    claim = service._claim_policy_job(worker_id, now)
+    assert not isinstance(claim, dict), claim
+    return claim
+
+
+def _attempts_for(
+    service: PolicyGovernanceService, policy_job_id: str
+) -> list[dict[str, Any]]:
+    return [
+        record
+        for record in service._store.policy_attempts
+        if record.get("policy_job_id") == policy_job_id
+    ]
+
+
+class _FakeClock:
+    """Deterministic clock for lease-liveness tests: ``advance()`` moves
+    time forward, so a settlement that happens after the 30s lease expiry
+    is observable through the real worker write path."""
+
+    def __init__(self, start: int) -> None:
+        self.value = start
+
+    def __call__(self) -> int:
+        return self.value
+
+    def advance(self, seconds: int) -> None:
+        self.value += seconds
+
+
+def _scheduled_candidate(
+    service: PolicyGovernanceService, label: str
+) -> tuple[str, int]:
+    _, candidate_id, _, activation_at = _full_flow(service)
+    return candidate_id, activation_at
+
+
+def test_validation_lease_takeover_stale_success_is_discarded(tmp_path: Path) -> None:
+    """Lease expires, fence 2 reclaims and publishes; fence 1's late success
+    settles only as its own discarded attempt and cannot publish a second
+    verdict, artifact, event, audit, idempotency or outbox fact."""
+    service, _, _ = make_policy_service(tmp_path)
+    draft_id = import_draft(service)
+    freeze = service.freeze_candidate(
+        principal=ADMIN,
+        draft_id=draft_id,
+        idempotency_key=f"takeover-freeze-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    candidate_id = freeze["candidate_id"]
+    service.request_validation(
+        principal=ADMIN,
+        candidate_id=candidate_id,
+        idempotency_key=f"takeover-validate-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    now = int(time.time())
+    job_a, now_a, snapshot_a = _claim(service, "worker-a", now)
+    assert job_a["fence"] == 1 and job_a["attempt_no"] == 1
+    job_b, now_b, snapshot_b = _claim(service, "worker-b", now + 31)
+    assert job_b["fence"] == 2 and job_b["attempt_no"] == 2
+    done = service._run_validation_job(job_b, now_b, snapshot_b)
+    assert done["status"] == "complete", done
+    assert done["outcome"] == "validated"
+    audits_before = len(service._store.audit_events)
+    outbox_before = len(service._store.outbox)
+    artifacts_before = len(service._store.policy_artifacts)
+
+    late = service._run_validation_job(job_a, now_a, snapshot_a)
+    assert late["status"] == "discarded", late
+    assert late["reason_code"] == "S08_ATTEMPT_STALE"
+    verdicts = [
+        event
+        for event in service._store.policy_governance_events
+        if event.get("kind") in {"validated", "rejected"}
+        and event.get("candidate_id") == candidate_id
+    ]
+    assert len(verdicts) == 1  # only fence 2 published
+    assert len(service._store.audit_events) == audits_before
+    assert len(service._store.outbox) == outbox_before
+    assert len(service._store.policy_artifacts) == artifacts_before
+    current_job = next(
+        item
+        for item in service._store.policy_jobs
+        if item["policy_job_id"] == job_a["policy_job_id"]
+    )
+    assert current_job["status"] == "complete"
+    assert current_job["worker_id"] == "worker-b"
+    assert current_job.get("reason_code") is None
+    by_status = {
+        (attempt["attempt_no"], attempt["status"])
+        for attempt in _attempts_for(service, job_a["policy_job_id"])
+    }
+    assert (1, "running") in by_status and (1, "discarded") in by_status
+    assert (2, "running") in by_status and (2, "complete") in by_status
+    workspace = service.query_candidate_workspace(ADMIN, candidate_id)
+    assert workspace["validation_outcome"]["status"] == "validated"
+
+
+def test_validation_stale_worker_exception_cannot_mark_new_lease_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale fence-1 worker that throws after the fence-2 reclaim can only
+    settle its own discarded attempt: the newer lease is never marked
+    diagnostic and its verdict stays intact."""
+    service, _, _ = make_policy_service(tmp_path)
+    draft_id = import_draft(service)
+    freeze = service.freeze_candidate(
+        principal=ADMIN,
+        draft_id=draft_id,
+        idempotency_key=f"stale-exc-freeze-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    candidate_id = freeze["candidate_id"]
+    service.request_validation(
+        principal=ADMIN,
+        candidate_id=candidate_id,
+        idempotency_key=f"stale-exc-validate-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    now = int(time.time())
+    job_a, now_a, snapshot_a = _claim(service, "worker-a", now)
+    job_b, now_b, snapshot_b = _claim(service, "worker-b", now + 31)
+    done = service._run_validation_job(job_b, now_b, snapshot_b)
+    assert done["status"] == "complete", done
+
+    def explode(owner: Any, state: dict[str, Any]) -> Any:
+        raise PolicyUnavailable("injected stale worker failure")
+
+    monkeypatch.setattr(service, "_validate_candidate", explode)
+    late = service._run_validation_job(job_a, now_a, snapshot_a)
+    assert late["status"] == "discarded", late
+    current_job = next(
+        item
+        for item in service._store.policy_jobs
+        if item["policy_job_id"] == job_a["policy_job_id"]
+    )
+    assert current_job["status"] == "complete"  # never diagnostic
+    assert current_job["worker_id"] == "worker-b"
+    assert current_job.get("reason_code") is None
+    verdicts = [
+        event
+        for event in service._store.policy_governance_events
+        if event.get("kind") in {"validated", "rejected"}
+        and event.get("candidate_id") == candidate_id
+    ]
+    assert len(verdicts) == 1
+    workspace = service.query_candidate_workspace(ADMIN, candidate_id)
+    assert workspace["validation_outcome"]["status"] == "validated"
+
+
+def test_activation_lease_takeover_stale_success_is_discarded(tmp_path: Path) -> None:
+    """The activation twin of the validation takeover: fence 1's late success
+    after fence 2 activated publishes nothing and the prior/fresh active
+    generation is exactly the fence-2 one."""
+    service, _, _ = make_policy_service(tmp_path)
+    candidate_id, activation_at = _scheduled_candidate(service, "act-takeover")
+    job_a, now_a, snapshot_a = _claim(service, "worker-a", activation_at)
+    assert job_a["fence"] == 1
+    job_b, now_b, snapshot_b = _claim(service, "worker-b", activation_at + 31)
+    assert job_b["fence"] == 2
+    done = service._run_activation_job(job_b, now_b, snapshot_b)
+    assert done["status"] == "complete", done
+    activated = [
+        event
+        for event in service._store.policy_governance_events
+        if event.get("kind") == "activated" and not event.get("bootstrap")
+    ]
+    assert len(activated) == 1
+    before = (
+        len(service._store.audit_events),
+        len(service._store.outbox),
+        len(service._store.idempotency),
+    )
+    late = service._run_activation_job(job_a, now_a, snapshot_a)
+    assert late["status"] == "discarded", late
+    assert late["reason_code"] == "S08_ATTEMPT_STALE"
+    activated_after = [
+        event
+        for event in service._store.policy_governance_events
+        if event.get("kind") == "activated" and not event.get("bootstrap")
+    ]
+    assert len(activated_after) == 1
+    assert (
+        len(service._store.audit_events),
+        len(service._store.outbox),
+        len(service._store.idempotency),
+    ) == before
+    assert service.query_active(ADMIN)["active_generation"] == 2
+    current_job = next(
+        item
+        for item in service._store.policy_jobs
+        if item["policy_job_id"] == job_a["policy_job_id"]
+    )
+    assert current_job["status"] == "complete"
+    assert current_job["worker_id"] == "worker-b"
+    workspace = service.query_candidate_workspace(ADMIN, candidate_id)
+    assert workspace["activation_outcome"]["status"] == "active"
+    assert workspace["activation_outcome"]["active_generation"] == 2
+
+
+def test_activation_stale_worker_exception_cannot_mark_new_lease_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale fence-1 activation worker that throws after the reclaim cannot
+    mark the fence-2 lease diagnostic or add any second activation fact."""
+    service, _, _ = make_policy_service(tmp_path)
+    candidate_id, activation_at = _scheduled_candidate(service, "act-stale-exc")
+    job_a, now_a, snapshot_a = _claim(service, "worker-a", activation_at)
+    job_b, now_b, snapshot_b = _claim(service, "worker-b", activation_at + 31)
+    done = service._run_activation_job(job_b, now_b, snapshot_b)
+    assert done["status"] == "complete", done
+
+    def explode(owner: Any, manifest_id: str, manifest_digest: str) -> Any:
+        raise PolicyUnavailable("injected stale activation failure")
+
+    monkeypatch.setattr(service, "_verify_pinned_manifest", explode)
+    late = service._run_activation_job(job_a, now_a, snapshot_a)
+    assert late["status"] == "discarded", late
+    current_job = next(
+        item
+        for item in service._store.policy_jobs
+        if item["policy_job_id"] == job_a["policy_job_id"]
+    )
+    assert current_job["status"] == "complete"  # never diagnostic
+    assert current_job["worker_id"] == "worker-b"
+    assert current_job.get("reason_code") is None
+    activated = [
+        event
+        for event in service._store.policy_governance_events
+        if event.get("kind") == "activated" and not event.get("bootstrap")
+    ]
+    assert len(activated) == 1
+    assert service.query_active(ADMIN)["active_generation"] == 2
+
+
+def test_crash_after_claim_preserves_durable_attempt_and_restart_reclaims(
+    tmp_path: Path,
+) -> None:
+    """A crash after claim leaves the first durable attempt; a restart
+    reclaims the expired lease and allows exactly one business effect."""
+    service, rules_path, kb_path = make_policy_service(tmp_path)
+    draft_id = import_draft(service)
+    freeze = service.freeze_candidate(
+        principal=ADMIN,
+        draft_id=draft_id,
+        idempotency_key=f"crash-freeze-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    candidate_id = freeze["candidate_id"]
+    service.request_validation(
+        principal=ADMIN,
+        candidate_id=candidate_id,
+        idempotency_key=f"crash-validate-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    now = int(time.time())
+    job_a, now_a, snapshot_a = _claim(service, "worker-a", now)
+    assert job_a["fence"] == 1
+    policy_job_id = job_a["policy_job_id"]
+    attempts = _attempts_for(service, policy_job_id)
+    assert len(attempts) == 1 and attempts[0]["status"] == "running"
+    # Crash: the claimed tuple is dropped without any terminal write.
+    del job_a, now_a, snapshot_a
+    restarted = PolicyGovernanceService(
+        state_path=service._store.state_path,
+        source_rules_path=rules_path,
+        source_kb_path=kb_path,
+        corpus_root=CORPUS,
+    )
+    result = restarted.process_next_policy_job(now=now + 31)
+    assert result["status"] == "complete", result
+    assert result["outcome"] == "validated"
+    verdicts = [
+        event
+        for event in restarted._store.policy_governance_events
+        if event.get("kind") in {"validated", "rejected"}
+        and event.get("candidate_id") == candidate_id
+    ]
+    assert len(verdicts) == 1  # exactly one business effect
+    by_status = {
+        (attempt["attempt_no"], attempt["status"])
+        for attempt in _attempts_for(restarted, policy_job_id)
+    }
+    assert (1, "running") in by_status  # first durable attempt preserved
+    assert (2, "running") in by_status and (2, "complete") in by_status
+
+
+def test_cancel_between_claim_and_compute_settles_discarded(tmp_path: Path) -> None:
+    """A cancel landing between claim and the result write settles the job
+    as discarded (complete job + discarded attempt) with no stale verdict."""
+    service, _, _ = make_policy_service(tmp_path)
+    draft_id = import_draft(service)
+    freeze = service.freeze_candidate(
+        principal=ADMIN,
+        draft_id=draft_id,
+        idempotency_key=f"claim-window-freeze-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    candidate_id = freeze["candidate_id"]
+    service.request_validation(
+        principal=ADMIN,
+        candidate_id=candidate_id,
+        idempotency_key=f"claim-window-validate-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    now = int(time.time())
+    job_a, now_a, snapshot_a = _claim(service, "worker-a", now)
+    service.cancel(
+        principal=ADMIN,
+        candidate_id=candidate_id,
+        reason_code="t08-cancel-claim-window",
+        idempotency_key=f"claim-window-cancel-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    result = service._run_validation_job(job_a, now_a, snapshot_a)
+    assert result["status"] == "discarded", result
+    current_job = next(
+        item
+        for item in service._store.policy_jobs
+        if item["policy_job_id"] == job_a["policy_job_id"]
+    )
+    assert current_job["status"] == "complete"
+    assert current_job.get("reason_code") is None
+    assert not any(
+        event.get("kind") in {"validated", "rejected"}
+        and event.get("candidate_id") == candidate_id
+        for event in service._store.policy_governance_events
+    )
+    by_status = {
+        (attempt["attempt_no"], attempt["status"])
+        for attempt in _attempts_for(service, job_a["policy_job_id"])
+    }
+    assert (1, "running") in by_status and (1, "discarded") in by_status
+
+
+def test_hold_between_claim_and_activation_compute_settles_discarded(
+    tmp_path: Path,
+) -> None:
+    """An activation hold landing between claim and the result write settles
+    the activation job as discarded; no activation fact is published."""
+    service, _, _ = make_policy_service(tmp_path)
+    candidate_id, activation_at = _scheduled_candidate(service, "hold-window")
+    job_a, now_a, snapshot_a = _claim(service, "worker-a", activation_at)
+    operator = PolicyPrincipal(
+        subject="c-demo-policy-operator",
+        role="operator",
+        scope=S08_SCOPE,
+        source_id="s08-test",
+    )
+    service.stop_activations(
+        principal=operator,
+        reason_code="S08_DRILL_HOLD",
+        idempotency_key=f"hold-window-stop-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    result = service._run_activation_job(job_a, now_a, snapshot_a)
+    assert result["status"] == "discarded", result
+    current_job = next(
+        item
+        for item in service._store.policy_jobs
+        if item["policy_job_id"] == job_a["policy_job_id"]
+    )
+    assert current_job["status"] == "complete"
+    assert current_job.get("reason_code") is None
+    assert not any(
+        event.get("kind") == "activated" and not event.get("bootstrap")
+        for event in service._store.policy_governance_events
+    )
+    assert service.query_active(ADMIN)["active_generation"] == 1
+
+
+def test_injected_persistence_failure_leaves_coherent_deltas(tmp_path: Path) -> None:
+    """An injected write-point failure keeps every business delta at zero and
+    settles the job diagnostic with a registered reason code plus durable
+    running/failed attempts: job, attempt, event, artifact, audit,
+    idempotency, outbox and reservation stay mutually consistent."""
+    bundle = tmp_path / "server-bundle"
+    bundle.mkdir()
+    (bundle / "rules.yaml").write_bytes(DEFAULT_RULES.read_bytes())
+    (bundle / "entity_kb.json").write_bytes(DEFAULT_KB.read_bytes())
+
+    def inject(write_point: str) -> None:
+        if write_point == "s08.validation":
+            raise OSError("injected S08 fault")
+
+    service = PolicyGovernanceService(
+        state_path=tmp_path / "coherent.sqlite3",
+        source_rules_path=bundle / "rules.yaml",
+        source_kb_path=bundle / "entity_kb.json",
+        corpus_root=CORPUS,
+        fault_injector=inject,
+    )
+    assert service.bootstrap_once()["status"] == "activated"
+    draft_id = import_draft(service)
+    freeze = service.freeze_candidate(
+        principal=ADMIN,
+        draft_id=draft_id,
+        idempotency_key=f"coherent-freeze-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    candidate_id = freeze["candidate_id"]
+    service.request_validation(
+        principal=ADMIN,
+        candidate_id=candidate_id,
+        idempotency_key=f"coherent-validate-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    before = {
+        "events": len(service._store.policy_governance_events),
+        "audit": len(service._store.audit_events),
+        "outbox": len(service._store.outbox),
+        "idempotency": len(service._store.idempotency),
+        "artifacts": len(service._store.policy_artifacts),
+        "reservations": len(service._store.policy_schedule_reservations),
+    }
+    result = service.process_next_policy_job()
+    assert result["status"] == "failed", result
+    assert result["reason_code"] == "S08_VALIDATION_INTERNAL"
+    job = next(
+        item
+        for item in service._store.policy_jobs
+        if item.get("kind") == "validation"
+        and item.get("candidate_id") == candidate_id
+    )
+    assert job["status"] == "diagnostic"
+    assert job["reason_code"] == "S08_VALIDATION_INTERNAL"
+    assert job.get("terminal_reason") is None  # no raw exception text stored
+    assert len(service._store.policy_governance_events) == before["events"]
+    assert len(service._store.audit_events) == before["audit"]
+    assert len(service._store.outbox) == before["outbox"]
+    assert len(service._store.idempotency) == before["idempotency"]
+    assert len(service._store.policy_artifacts) == before["artifacts"]
+    assert len(service._store.policy_schedule_reservations) == before["reservations"]
+    statuses = {
+        attempt["status"] for attempt in _attempts_for(service, job["policy_job_id"])
+    }
+    assert statuses == {"running", "failed"}
+
+
+def test_validation_diagnostic_retry_same_second_uses_new_job_and_latest_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _, _ = make_policy_service(tmp_path)
+    clock = _FakeClock(1_700_000_000)
+    service._clock = clock
+    draft_id = import_draft(service)
+    freeze = service.freeze_candidate(
+        principal=ADMIN,
+        draft_id=draft_id,
+        idempotency_key="diagnostic-retry-freeze",
+        expected_governance_revision=governance_revision(service),
+    )
+    candidate_id = freeze["candidate_id"]
+    first = service.request_validation(
+        principal=ADMIN,
+        candidate_id=candidate_id,
+        idempotency_key="diagnostic-retry-first",
+        expected_governance_revision=governance_revision(service),
+    )
+    original_validate = service._validate_candidate
+    monkeypatch.setattr(
+        service,
+        "_validate_candidate",
+        lambda owner, state: (_ for _ in ()).throw(RuntimeError("validation fault")),
+    )
+    failed = service.process_next_policy_job(now=clock.value)
+    assert failed["status"] == "failed"
+    monkeypatch.setattr(service, "_validate_candidate", original_validate)
+
+    second = service.request_validation(
+        principal=ADMIN,
+        candidate_id=candidate_id,
+        idempotency_key="diagnostic-retry-second",
+        expected_governance_revision=governance_revision(service),
+    )
+    assert second["policy_job_id"] != first["policy_job_id"]
+    assert service.query_candidate_workspace(ADMIN, candidate_id)[
+        "validation_outcome"
+    ] == {"status": "pending", "reason_code": None}
+
+    completed = service.process_next_policy_job(now=clock.value)
+    assert completed["status"] == "complete"
+    assert service.query_candidate_workspace(ADMIN, candidate_id)[
+        "validation_outcome"
+    ] == {"status": "validated", "reason_code": "S08_VALIDATION_PASSED"}
+
+
+# --- R3: fresh ownership at settlement, isolated claim snapshot, and a
+# --- truthful terminal activation attempt ----------------------------------
+
+
+def test_validation_expired_lease_without_takeover_discards(tmp_path: Path) -> None:
+    """A validation that finishes after its lease expired, with no successor
+    claim, is no longer a current owner: it settles only its own discarded
+    attempt and must not publish a verdict, artifact, audit, idempotency or
+    outbox fact, and must not touch the still-leased job row.  The lease is
+    checked against a fresh settlement-time clock read, not the claim time."""
+    clock = _FakeClock(1_700_000_000)
+    service, _, _ = make_policy_service(tmp_path)
+    service._clock = clock
+    draft_id = import_draft(service)
+    freeze = service.freeze_candidate(
+        principal=ADMIN,
+        draft_id=draft_id,
+        idempotency_key=f"expired-freeze-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    candidate_id = freeze["candidate_id"]
+    service.request_validation(
+        principal=ADMIN,
+        candidate_id=candidate_id,
+        idempotency_key=f"expired-validate-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    now = int(clock())
+    job, now_a, snapshot = _claim(service, "worker-a", now)
+    lease_until = int(job["lease_until"])
+    assert lease_until == now + 30
+    clock.advance(31)  # a long computation outlives the 30s lease
+    before = {
+        "events": len(service._store.policy_governance_events),
+        "audit": len(service._store.audit_events),
+        "outbox": len(service._store.outbox),
+        "artifacts": len(service._store.policy_artifacts),
+        "idempotency": len(service._store.idempotency),
+    }
+    result = service._run_validation_job(job, now_a, snapshot)
+    assert result["status"] == "discarded", result
+    assert result["reason_code"] == "S08_ATTEMPT_STALE"
+    assert not any(
+        event.get("kind") in {"validated", "rejected"}
+        and event.get("candidate_id") == candidate_id
+        for event in service._store.policy_governance_events
+    )
+    assert len(service._store.policy_governance_events) == before["events"]
+    assert len(service._store.audit_events) == before["audit"]
+    assert len(service._store.outbox) == before["outbox"]
+    assert len(service._store.policy_artifacts) == before["artifacts"]
+    assert len(service._store.idempotency) == before["idempotency"]
+    current_job = next(
+        item
+        for item in service._store.policy_jobs
+        if item["policy_job_id"] == job["policy_job_id"]
+    )
+    assert current_job["status"] == "leased"  # no successor owns or closes it
+    assert current_job["worker_id"] == "worker-a"
+    assert int(current_job["lease_until"]) == lease_until
+    by_status = {
+        (attempt["attempt_no"], attempt["status"])
+        for attempt in _attempts_for(service, job["policy_job_id"])
+    }
+    assert (1, "running") in by_status and (1, "discarded") in by_status
+
+
+def test_activation_expired_lease_without_takeover_discards(tmp_path: Path) -> None:
+    """The activation twin: finishing after lease expiry with no successor
+    publishes nothing -- no activated event, projection change, outbox,
+    idempotency or audit -- and the prior active stays untouched.  The lease
+    is checked against a fresh settlement-time clock read."""
+    clock = _FakeClock(1_700_000_000)
+    service, _, _ = make_policy_service(tmp_path)
+    candidate_id, activation_at = _scheduled_candidate(service, "act-expired")
+    # The scheduling flow stamps activation_at with the real clock; align
+    # the deterministic clock with it so lease liveness is observable.
+    clock.value = activation_at
+    service._clock = clock
+    active_before = service.query_active(ADMIN)["active_generation"]
+    job, now_a, snapshot = _claim(service, "worker-a", activation_at)
+    before = {
+        "audit": len(service._store.audit_events),
+        "outbox": len(service._store.outbox),
+        "idempotency": len(service._store.idempotency),
+    }
+    clock.advance(31)  # the activation compute outlives the 30s lease
+    result = service._run_activation_job(job, activation_at, snapshot)
+    assert result["status"] == "discarded", result
+    assert result["reason_code"] == "S08_ATTEMPT_STALE"
+    assert not any(
+        event.get("kind") == "activated" and not event.get("bootstrap")
+        for event in service._store.policy_governance_events
+    )
+    assert service.query_active(ADMIN)["active_generation"] == active_before
+    assert len(service._store.audit_events) == before["audit"]
+    assert len(service._store.outbox) == before["outbox"]
+    assert len(service._store.idempotency) == before["idempotency"]
+    current_job = next(
+        item
+        for item in service._store.policy_jobs
+        if item["policy_job_id"] == job["policy_job_id"]
+    )
+    assert current_job["status"] == "leased"
+    assert current_job["worker_id"] == "worker-a"
+    by_status = {
+        (attempt["attempt_no"], attempt["status"])
+        for attempt in _attempts_for(service, job["policy_job_id"])
+    }
+    assert (1, "running") in by_status and (1, "discarded") in by_status
+
+
+def test_public_pipeline_expired_lease_without_takeover_discards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The production entry point itself enforces lease liveness at
+    settlement: a validation whose compute outlives the 30s lease is
+    discarded by ``process_next_policy_job`` with no successor claim --
+    the check is a fresh settlement-time clock read, never the claim time."""
+    clock = _FakeClock(1_700_000_000)
+    service, _, _ = make_policy_service(tmp_path)
+    service._clock = clock
+    draft_id = import_draft(service)
+    freeze = service.freeze_candidate(
+        principal=ADMIN,
+        draft_id=draft_id,
+        idempotency_key=f"public-expired-freeze-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    candidate_id = freeze["candidate_id"]
+    service.request_validation(
+        principal=ADMIN,
+        candidate_id=candidate_id,
+        idempotency_key=f"public-expired-validate-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    now = int(clock())
+    original = service._validate_candidate
+
+    def slow_validate(owner: Any, state: dict[str, Any]) -> Any:
+        clock.advance(31)  # the compute runs past the 30s lease
+        return original(owner, state)
+
+    monkeypatch.setattr(service, "_validate_candidate", slow_validate)
+    result = service.process_next_policy_job(now=now)
+    assert result["status"] == "discarded", result
+    assert result["reason_code"] == "S08_ATTEMPT_STALE"
+    assert not any(
+        event.get("kind") in {"validated", "rejected"}
+        and event.get("candidate_id") == candidate_id
+        for event in service._store.policy_governance_events
+    )
+    current_job = next(
+        item
+        for item in service._store.policy_jobs
+        if item.get("kind") == "validation"
+        and item.get("candidate_id") == candidate_id
+    )
+    assert current_job["status"] == "leased"  # no successor closed it
+    assert current_job["worker_id"] == "s08-activator"
+    by_status = {
+        (attempt["attempt_no"], attempt["status"])
+        for attempt in _attempts_for(service, current_job["policy_job_id"])
+    }
+    assert (1, "running") in by_status and (1, "discarded") in by_status
+
+
+def test_cancel_during_validation_compute_exception_discards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancel landing during validation followed by a compute exception
+    settles the still-owned job as complete+discarded -- never diagnostic --
+    with the cancelled candidate state retained and no failed outcome."""
+    service, _, _ = make_policy_service(tmp_path)
+    draft_id = import_draft(service)
+    freeze = service.freeze_candidate(
+        principal=ADMIN,
+        draft_id=draft_id,
+        idempotency_key=f"exc-cancel-freeze-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    candidate_id = freeze["candidate_id"]
+    service.request_validation(
+        principal=ADMIN,
+        candidate_id=candidate_id,
+        idempotency_key=f"exc-cancel-validate-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    now = int(time.time())
+    job, now_a, snapshot = _claim(service, "worker-a", now)
+    service.cancel(
+        principal=ADMIN,
+        candidate_id=candidate_id,
+        reason_code="t08-r3-exc-cancel",
+        idempotency_key=f"exc-cancel-cancel-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+
+    def explode(owner: Any, state: dict[str, Any]) -> Any:
+        raise PolicyUnavailable("injected compute failure after cancel")
+
+    monkeypatch.setattr(service, "_validate_candidate", explode)
+    result = service._run_validation_job(job, now_a, snapshot)
+    assert result["status"] == "discarded", result
+    current_job = next(
+        item
+        for item in service._store.policy_jobs
+        if item["policy_job_id"] == job["policy_job_id"]
+    )
+    assert current_job["status"] == "complete"
+    assert current_job.get("reason_code") is None
+    assert not any(
+        event.get("kind") in {"validated", "rejected"}
+        and event.get("candidate_id") == candidate_id
+        for event in service._store.policy_governance_events
+    )
+    workspace = service.query_candidate_workspace(ADMIN, candidate_id)
+    assert workspace["status"] == "cancelled"
+    outcome = workspace["validation_outcome"]
+    assert outcome is None or outcome["status"] != "failed", outcome
+    by_status = {
+        (attempt["attempt_no"], attempt["status"])
+        for attempt in _attempts_for(service, job["policy_job_id"])
+    }
+    assert (1, "running") in by_status and (1, "discarded") in by_status
+
+
+def test_hold_during_activation_compute_exception_discards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hold installed during activation followed by a compute exception
+    settles the still-owned job as complete+discarded: prior active
+    unchanged, no activated event and no activation/diagnostic lie."""
+    service, _, _ = make_policy_service(tmp_path)
+    candidate_id, activation_at = _scheduled_candidate(service, "act-exc-hold")
+    active_before = service.query_active(ADMIN)["active_generation"]
+    job, now_a, snapshot = _claim(service, "worker-a", activation_at)
+    operator = PolicyPrincipal(
+        subject="c-demo-policy-operator",
+        role="operator",
+        scope=S08_SCOPE,
+        source_id="s08-test",
+    )
+    service.stop_activations(
+        principal=operator,
+        reason_code="S08_DRILL_HOLD",
+        idempotency_key=f"exc-hold-stop-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+
+    def explode(owner: Any, manifest_id: str, manifest_digest: str) -> Any:
+        raise PolicyUnavailable("injected compute failure after hold")
+
+    monkeypatch.setattr(service, "_verify_pinned_manifest", explode)
+    result = service._run_activation_job(job, now_a, snapshot)
+    assert result["status"] == "discarded", result
+    current_job = next(
+        item
+        for item in service._store.policy_jobs
+        if item["policy_job_id"] == job["policy_job_id"]
+    )
+    assert current_job["status"] == "complete"
+    assert current_job.get("reason_code") is None
+    assert not any(
+        event.get("kind") == "activated" and not event.get("bootstrap")
+        for event in service._store.policy_governance_events
+    )
+    assert service.query_active(ADMIN)["active_generation"] == active_before
+    by_status = {
+        (attempt["attempt_no"], attempt["status"])
+        for attempt in _attempts_for(service, job["policy_job_id"])
+    }
+    assert (1, "running") in by_status and (1, "discarded") in by_status
+
+
+def test_query_does_not_mutate_claim_snapshot(tmp_path: Path) -> None:
+    """A public query/reload between claim and compute cannot alter the
+    claim-time snapshot: the compute phase must keep seeing claim-time state,
+    and a concurrent cancel becomes visible only at the write-time recheck,
+    which settles the job as discarded -- never diagnostic."""
+    service, rules_path, kb_path = make_policy_service(tmp_path)
+    draft_id = import_draft(service)
+    freeze = service.freeze_candidate(
+        principal=ADMIN,
+        draft_id=draft_id,
+        idempotency_key=f"snapshot-freeze-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    candidate_id = freeze["candidate_id"]
+    service.request_validation(
+        principal=ADMIN,
+        candidate_id=candidate_id,
+        idempotency_key=f"snapshot-validate-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    now = int(time.time())
+    job, now_a, snapshot = _claim(service, "worker-a", now)
+    assert snapshot is not service._store  # independent claim-time snapshot
+    other = PolicyGovernanceService(
+        state_path=service._store.state_path,
+        source_rules_path=rules_path,
+        source_kb_path=kb_path,
+        corpus_root=CORPUS,
+    )
+    other.cancel(
+        principal=ADMIN,
+        candidate_id=candidate_id,
+        reason_code="t08-r3-snapshot-cancel",
+        idempotency_key=f"snapshot-cancel-{time.time_ns()}",
+        expected_governance_revision=governance_revision(other),
+    )
+    service.query_candidates(ADMIN)
+    claim_time = service._require_candidate_state(snapshot, candidate_id)
+    assert claim_time["status"] == "candidate"  # claim-time view preserved
+    result = service._run_validation_job(job, now_a, snapshot)
+    assert result["status"] == "discarded", result
+    current_job = next(
+        item
+        for item in service._store.policy_jobs
+        if item["policy_job_id"] == job["policy_job_id"]
+    )
+    assert current_job["status"] == "complete"
+    assert current_job.get("reason_code") is None
+    assert not any(
+        event.get("kind") in {"validated", "rejected"}
+        and event.get("candidate_id") == candidate_id
+        for event in service._store.policy_governance_events
+    )
+
+
+def test_terminal_attempt_matches_event(tmp_path: Path) -> None:
+    """After a successful activation and a fresh-store restart, the terminal
+    complete attempt carries the exact activation event identity and
+    generation that the activated event, active projection and outbox
+    publish -- no placeholder nulls survive restart."""
+    service, rules_path, kb_path = make_policy_service(tmp_path)
+    candidate_id, activation_at = _scheduled_candidate(service, "act-identity")
+    job, now_a, snapshot = _claim(service, "worker-a", activation_at)
+    result = service._run_activation_job(job, now_a, snapshot)
+    assert result["status"] == "complete", result
+    event_id = result["activation_event_id"]
+    generation = result["active_generation"]
+    assert event_id and generation
+    restarted = PolicyGovernanceService(
+        state_path=service._store.state_path,
+        source_rules_path=rules_path,
+        source_kb_path=kb_path,
+        corpus_root=CORPUS,
+    )
+    attempt = next(
+        record
+        for record in restarted._store.policy_attempts
+        if record["policy_job_id"] == job["policy_job_id"]
+        and record["status"] == "complete"
+    )
+    assert attempt["result"]["activation_event_id"] == event_id
+    assert attempt["result"]["active_generation"] == generation
+    activated = next(
+        event
+        for event in restarted._store.policy_governance_events
+        if event.get("kind") == "activated" and not event.get("bootstrap")
+    )
+    assert activated["event_id"] == event_id
+    assert activated["activation_event_id"] == event_id
+    assert activated["active_generation"] == generation
+    projection = restarted._store.policy_active_projections[S08_SCOPE]
+    assert projection["activation_event_id"] == event_id
+    assert projection["active_generation"] == generation
+    outbox = next(
+        item
+        for item in restarted._store.outbox
+        if item.get("kind") == "s08_activated"
+    )
+    assert outbox["activation_event_id"] == event_id
+    assert outbox["active_generation"] == generation
+
+
+def test_cross_service_cancel_reclaim_exception_discards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancel issued by a second service while worker A computes, followed
+    by A's stale CAS retry and worker B's post-expiry reclaim, must settle as
+    discarded -- never diagnostic: the cancelled candidate stays put, no
+    failed outcome or domain event is published, and the prior active
+    generation is untouched."""
+    service, rules_path, kb_path = make_policy_service(tmp_path)
+    draft_id = import_draft(service)
+    freeze = service.freeze_candidate(
+        principal=ADMIN,
+        draft_id=draft_id,
+        idempotency_key=f"cross-cancel-freeze-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    candidate_id = freeze["candidate_id"]
+    service.request_validation(
+        principal=ADMIN,
+        candidate_id=candidate_id,
+        idempotency_key=f"cross-cancel-validate-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    now = int(time.time())
+    job_a, now_a, snapshot_a = _claim(service, "worker-a", now)
+    other = PolicyGovernanceService(
+        state_path=service._store.state_path,
+        source_rules_path=rules_path,
+        source_kb_path=kb_path,
+        corpus_root=CORPUS,
+    )
+
+    def explode(owner: Any, state: dict[str, Any]) -> Any:
+        raise PolicyUnavailable("forced compute exception")
+
+    monkeypatch.setattr(service, "_validate_candidate", explode)
+    original_persist = service._persist_worker
+    injected = False
+
+    def persist_after_cross_service_cancel(staged: Any) -> bool:
+        # The second service cancels between A's authoritative reload and
+        # A's CAS persist, so A's terminal write loses the revision race.
+        nonlocal injected
+        if not injected:
+            injected = True
+            other.cancel(
+                principal=ADMIN,
+                candidate_id=candidate_id,
+                reason_code="t08-r4-cross-cancel",
+                idempotency_key=f"cross-cancel-cancel-{time.time_ns()}",
+                expected_governance_revision=governance_revision(other),
+            )
+        return original_persist(staged)
+
+    monkeypatch.setattr(service, "_persist_worker", persist_after_cross_service_cancel)
+    first = service._run_validation_job(job_a, now_a, snapshot_a)
+    assert first["status"] == "retry", first  # A loses the CAS to the cancel
+    second = service.process_next_policy_job(worker_id="worker-b", now=now + 31)
+    assert second["status"] == "discarded", second
+    service._store.reload()
+    current_job = next(
+        item
+        for item in service._store.policy_jobs
+        if item["policy_job_id"] == job_a["policy_job_id"]
+    )
+    assert current_job["status"] == "complete"
+    assert current_job.get("reason_code") is None
+    by_status = {
+        (attempt["attempt_no"], attempt["status"])
+        for attempt in _attempts_for(service, job_a["policy_job_id"])
+    }
+    assert (1, "running") in by_status
+    assert (2, "running") in by_status and (2, "discarded") in by_status
+    assert not any(status == "failed" for _, status in by_status)
+    assert not any(
+        event.get("kind") in {"validated", "rejected"}
+        and event.get("candidate_id") == candidate_id
+        for event in service._store.policy_governance_events
+    )
+    assert service.query_active(ADMIN)["active_generation"] == 1
+    workspace = service.query_candidate_workspace(ADMIN, candidate_id)
+    assert workspace["status"] == "cancelled"
+    outcome = workspace["validation_outcome"]
+    assert outcome is None or outcome["status"] != "failed", outcome
+
+
+def test_cross_service_hold_reclaim_exception_discards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hold installed by a second service while worker A activates,
+    followed by A's stale CAS retry and B's post-expiry reclaim, settles as
+    discarded: no activated event, no diagnostic, prior active unchanged."""
+    service, rules_path, kb_path = make_policy_service(tmp_path)
+    candidate_id, activation_at = _scheduled_candidate(service, "act-cross-hold")
+    active_before = service.query_active(ADMIN)["active_generation"]
+    job_a, now_a, snapshot_a = _claim(service, "worker-a", activation_at)
+    operator = PolicyPrincipal(
+        subject="c-demo-policy-operator",
+        role="operator",
+        scope=S08_SCOPE,
+        source_id="s08-test",
+    )
+    other = PolicyGovernanceService(
+        state_path=service._store.state_path,
+        source_rules_path=rules_path,
+        source_kb_path=kb_path,
+        corpus_root=CORPUS,
+    )
+
+    def explode(owner: Any, manifest_id: str, manifest_digest: str) -> Any:
+        raise PolicyUnavailable("forced compute exception")
+
+    monkeypatch.setattr(service, "_verify_pinned_manifest", explode)
+    original_persist = service._persist_worker
+    injected = False
+
+    def persist_after_cross_service_hold(staged: Any) -> bool:
+        # The second service installs the hold between A's authoritative
+        # reload and A's CAS persist, so A's terminal write loses the race.
+        nonlocal injected
+        if not injected:
+            injected = True
+            other.stop_activations(
+                principal=operator,
+                reason_code="S08_DRILL_HOLD",
+                idempotency_key=f"cross-hold-stop-{time.time_ns()}",
+                expected_governance_revision=governance_revision(other),
+            )
+        return original_persist(staged)
+
+    monkeypatch.setattr(service, "_persist_worker", persist_after_cross_service_hold)
+    first = service._run_activation_job(job_a, now_a, snapshot_a)
+    assert first["status"] == "retry", first  # A loses the CAS to the hold
+    second = service.process_next_policy_job(worker_id="worker-b", now=now_a + 31)
+    assert second["status"] == "discarded", second
+    service._store.reload()
+    current_job = next(
+        item
+        for item in service._store.policy_jobs
+        if item["policy_job_id"] == job_a["policy_job_id"]
+    )
+    assert current_job["status"] == "complete"
+    assert current_job.get("reason_code") is None
+    by_status = {
+        (attempt["attempt_no"], attempt["status"])
+        for attempt in _attempts_for(service, job_a["policy_job_id"])
+    }
+    assert (1, "running") in by_status
+    assert (2, "running") in by_status and (2, "discarded") in by_status
+    assert not any(status == "failed" for _, status in by_status)
+    assert not any(
+        event.get("kind") == "activated" and not event.get("bootstrap")
+        for event in service._store.policy_governance_events
+    )
+    assert service.query_active(ADMIN)["active_generation"] == active_before
+
+
+def test_scope_expiry_during_compute_settles_discarded(tmp_path: Path) -> None:
+    """The frozen validity window is rechecked at the trusted settlement
+    time, not only at claim time: when valid_to crosses during activation
+    compute while the 30s lease stays live, the job settles as discarded,
+    the prior active release/generation stays authoritative, and no
+    activated event or projection is written."""
+    from datetime import datetime, timezone
+
+    service, rules_path, kb_path = make_policy_service(tmp_path)
+    base = int(time.time())
+
+    def iso(timestamp: int) -> str:
+        return datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+
+    draft_id = import_draft(service)
+    service.revise_draft(
+        principal=ADMIN,
+        draft_id=draft_id,
+        metadata={
+            "scope": S08_SCOPE,
+            "validity": {"valid_from": iso(base - 60), "valid_to": iso(base + 20)},
+            "source": SOURCE_BUNDLE_ID,
+            "reason": "t08-r4-scope-expiry",
+        },
+        idempotency_key=f"scope-expiry-revise-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    candidate_id, worker = freeze_and_validate(service, draft_id)
+    assert worker["outcome"] == "validated"
+    service.submit_review(
+        principal=ADMIN,
+        candidate_id=candidate_id,
+        idempotency_key=f"scope-expiry-review-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    activation_at = base + 10
+    approval = service.approve(
+        principal=APPROVER,
+        candidate_id=candidate_id,
+        activation_time=activation_at,
+        recovery_release_id=service.query_active(ADMIN)["candidate_id"],
+        idempotency_key=f"scope-expiry-approve-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    service.schedule(
+        principal=ADMIN,
+        approval_binding_id=approval["approval_binding_id"],
+        activation_at=activation_at,
+        idempotency_key=f"scope-expiry-schedule-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    prior_active = service.query_active(ADMIN)
+    clock = _FakeClock(activation_at)
+    service._clock = clock
+    original_verify = service._verify_pinned_manifest
+    advanced = False
+
+    def verify_after_scope_check(
+        owner: Any, manifest_id: str, manifest_digest: str
+    ) -> Any:
+        nonlocal advanced
+        if not advanced:
+            advanced = True
+            clock.value = base + 21
+        return original_verify(owner, manifest_id, manifest_digest)
+
+    service._verify_pinned_manifest = verify_after_scope_check
+    result = service.process_next_policy_job()
+    assert result["status"] == "discarded", result
+    service._store.reload()
+    current_job = next(
+        item
+        for item in service._store.policy_jobs
+        if item.get("candidate_id") == candidate_id and item["kind"] == "activation"
+    )
+    assert current_job["status"] == "complete"
+    assert current_job.get("reason_code") is None
+    assert not any(
+        event.get("kind") == "activated" and not event.get("bootstrap")
+        for event in service._store.policy_governance_events
+    )
+    active = service.query_active(ADMIN)
+    assert active["candidate_id"] == prior_active["candidate_id"]
+    assert active["active_generation"] == prior_active["active_generation"]
+    projection = service._store.policy_active_projections[S08_SCOPE]
+    assert projection["candidate_id"] == prior_active["candidate_id"]
+    workspace = service.query_candidate_workspace(ADMIN, candidate_id)
+    outcome = workspace["activation_outcome"]
+    assert outcome is None or outcome["status"] == "pending", outcome
+    restarted = PolicyGovernanceService(
+        state_path=service._store.state_path,
+        source_rules_path=rules_path,
+        source_kb_path=kb_path,
+        corpus_root=CORPUS,
+    )
+    assert (
+        restarted.query_active(ADMIN)["active_generation"]
+        == prior_active["active_generation"]
+    )
+
+
+def test_activation_settlement_time_is_fresh_and_joined(tmp_path: Path) -> None:
+    """The activation projection's activated_at and the activated event's
+    trusted_time both come from the fresh settlement clock -- never the
+    claim-time now -- and survive a restart."""
+    service, rules_path, kb_path = make_policy_service(tmp_path)
+    candidate_id, activation_at = _scheduled_candidate(service, "act-settlement-time")
+    clock = _FakeClock(activation_at)
+    service._clock = clock
+    job, now_a, snapshot = _claim(service, "worker-a", activation_at)
+    original_verify = service._verify_pinned_manifest
+    advanced = False
+
+    def verify_after_scope_check(
+        owner: Any, manifest_id: str, manifest_digest: str
+    ) -> Any:
+        nonlocal advanced
+        if not advanced:
+            advanced = True
+            clock.advance(5)
+        return original_verify(owner, manifest_id, manifest_digest)
+
+    service._verify_pinned_manifest = verify_after_scope_check
+    result = service._run_activation_job(job, now_a, snapshot)
+    assert result["status"] == "complete", result
+    projection = service._store.policy_active_projections[S08_SCOPE]
+    activated = next(
+        event
+        for event in service._store.policy_governance_events
+        if event.get("kind") == "activated" and not event.get("bootstrap")
+    )
+    assert projection["activated_at"] == activated["trusted_time"]
+    assert projection["activated_at"] == clock.value
+    assert projection["activated_at"] != now_a  # never claim-time now
+    restarted = PolicyGovernanceService(
+        state_path=service._store.state_path,
+        source_rules_path=rules_path,
+        source_kb_path=kb_path,
+        corpus_root=CORPUS,
+    )
+    assert (
+        restarted._store.policy_active_projections[S08_SCOPE]["activated_at"]
+        == projection["activated_at"]
+    )
+
+
+def test_scope_expiry_during_compute_exception_discards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A compute exception landing after valid_to crossed -- while the 30s
+    lease is still live and the candidate state/hold are unchanged -- must
+    settle as discarded, never diagnostic: the activation cannot legally
+    land at the trusted settlement time, and prior active stays put."""
+    from datetime import datetime, timezone
+
+    service, rules_path, kb_path = make_policy_service(tmp_path)
+    base = int(time.time())
+
+    def iso(timestamp: int) -> str:
+        return datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+
+    draft_id = import_draft(service)
+    service.revise_draft(
+        principal=ADMIN,
+        draft_id=draft_id,
+        metadata={
+            "scope": S08_SCOPE,
+            "validity": {"valid_from": iso(base - 60), "valid_to": iso(base + 20)},
+            "source": SOURCE_BUNDLE_ID,
+            "reason": "t08-r4-scope-expiry-exception",
+        },
+        idempotency_key=f"scope-expiry-exc-revise-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    candidate_id, worker = freeze_and_validate(service, draft_id)
+    assert worker["outcome"] == "validated"
+    service.submit_review(
+        principal=ADMIN,
+        candidate_id=candidate_id,
+        idempotency_key=f"scope-expiry-exc-review-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    activation_at = base + 10
+    approval = service.approve(
+        principal=APPROVER,
+        candidate_id=candidate_id,
+        activation_time=activation_at,
+        recovery_release_id=service.query_active(ADMIN)["candidate_id"],
+        idempotency_key=f"scope-expiry-exc-approve-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    service.schedule(
+        principal=ADMIN,
+        approval_binding_id=approval["approval_binding_id"],
+        activation_at=activation_at,
+        idempotency_key=f"scope-expiry-exc-schedule-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    prior_active = service.query_active(ADMIN)
+    clock = _FakeClock(activation_at)
+    service._clock = clock
+    original_verify = service._verify_pinned_manifest
+    advanced = False
+
+    def verify_then_explode(
+        owner: Any, manifest_id: str, manifest_digest: str
+    ) -> Any:
+        nonlocal advanced
+        if not advanced:
+            advanced = True
+            clock.value = base + 21
+        raise PolicyUnavailable("forced compute exception after scope expiry")
+
+    monkeypatch.setattr(service, "_verify_pinned_manifest", verify_then_explode)
+    result = service.process_next_policy_job()
+    assert result["status"] == "discarded", result
+    monkeypatch.setattr(service, "_verify_pinned_manifest", original_verify)
+    service._store.reload()
+    current_job = next(
+        item
+        for item in service._store.policy_jobs
+        if item.get("candidate_id") == candidate_id and item["kind"] == "activation"
+    )
+    assert current_job["status"] == "complete"
+    assert current_job.get("reason_code") is None
+    assert not any(
+        event.get("kind") == "activated" and not event.get("bootstrap")
+        for event in service._store.policy_governance_events
+    )
+    active = service.query_active(ADMIN)
+    assert active["candidate_id"] == prior_active["candidate_id"]
+    assert active["active_generation"] == prior_active["active_generation"]
+    workspace = service.query_candidate_workspace(ADMIN, candidate_id)
+    outcome = workspace["activation_outcome"]
+    assert outcome is None or outcome["status"] == "pending", outcome
+    restarted = PolicyGovernanceService(
+        state_path=service._store.state_path,
+        source_rules_path=rules_path,
+        source_kb_path=kb_path,
+        corpus_root=CORPUS,
+    )
+    assert (
+        restarted.query_active(ADMIN)["active_generation"]
+        == prior_active["active_generation"]
+    )
+
+
+def test_activation_claim_time_state_loss_settles_discarded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the claim-time hold resolution itself fails before claim_hold is
+    bound (corrupt hold event), the exception handler must not crash on an
+    unbound claim_hold: it settles fail-closed as discarded with no domain
+    fact."""
+    service, rules_path, kb_path = make_policy_service(tmp_path)
+    candidate_id, activation_at = _scheduled_candidate(service, "act-claim-loss")
+    active_before = service.query_active(ADMIN)["active_generation"]
+    job, now_a, snapshot = _claim(service, "worker-a", activation_at)
+
+    def raise_corrupt_hold(owner: Any, scope: str) -> Any:
+        raise KeyError("corrupt activation hold event")
+
+    monkeypatch.setattr(service, "_activation_hold", raise_corrupt_hold)
+    result = service._run_activation_job(job, now_a, snapshot)
+    assert result["status"] == "discarded", result
+    service._store.reload()
+    current_job = next(
+        item
+        for item in service._store.policy_jobs
+        if item["policy_job_id"] == job["policy_job_id"]
+    )
+    assert current_job["status"] == "complete"
+    assert current_job.get("reason_code") is None
+    assert not any(
+        event.get("kind") == "activated" and not event.get("bootstrap")
+        for event in service._store.policy_governance_events
+    )
+    assert service.query_active(ADMIN)["active_generation"] == active_before
+
+
+def test_activation_uses_one_trusted_settlement_time_across_restart(
+    tmp_path: Path,
+) -> None:
+    """One activation transaction has one trusted settlement instant: the
+    ledger event, supersession event, and derived active projection must not
+    sample a moving clock independently; the attempt keeps claim-time start."""
+    service, rules_path, kb_path = make_policy_service(tmp_path)
+    _, activation_at = _scheduled_candidate(service, "act-one-settlement-time")
+    tick = activation_at
+
+    def ticking_clock() -> int:
+        nonlocal tick
+        tick += 1
+        return tick
+
+    service._clock = ticking_clock
+    result = service.process_next_policy_job(now=activation_at)
+    assert result["status"] == "complete", result
+    restarted = PolicyGovernanceService(
+        state_path=service._store.state_path,
+        source_rules_path=rules_path,
+        source_kb_path=kb_path,
+        corpus_root=CORPUS,
+    )
+    activated = next(
+        event
+        for event in restarted._store.policy_governance_events
+        if event.get("event_id") == result["activation_event_id"]
+    )
+    superseded = next(
+        event
+        for event in restarted._store.policy_governance_events
+        if event.get("kind") == "superseded"
+        and event.get("successor_activation_event_id")
+        == result["activation_event_id"]
+    )
+    projection = restarted._store.policy_active_projections[S08_SCOPE]
+    attempt = next(
+        record
+        for record in restarted._store.policy_attempts
+        if record.get("status") == "complete"
+        and record.get("result", {}).get("activation_event_id")
+        == result["activation_event_id"]
+    )
+    assert activated["trusted_time"] == projection["activated_at"]
+    assert superseded["trusted_time"] == activated["trusted_time"]
+    assert restarted.query_active(ADMIN)["activated_at"] == activated["trusted_time"]
+    assert attempt["started_at"] == activation_at
+
+
+def test_validation_missing_claim_state_settles_discarded_at_public_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unavailable claim-time candidate cannot escape the public worker:
+    the exact live job settles discarded with no validation domain fact."""
+    service, _, _ = make_policy_service(tmp_path)
+    draft_id = import_draft(service)
+    freeze = service.freeze_candidate(
+        principal=ADMIN,
+        draft_id=draft_id,
+        idempotency_key=f"missing-state-freeze-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    candidate_id = freeze["candidate_id"]
+    service.request_validation(
+        principal=ADMIN,
+        candidate_id=candidate_id,
+        idempotency_key=f"missing-state-validate-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    original = service._require_candidate_state
+    calls = 0
+
+    def missing_once(owner: Any, selected_candidate_id: str) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise PolicyNotFound(selected_candidate_id)
+        return original(owner, selected_candidate_id)
+
+    monkeypatch.setattr(service, "_require_candidate_state", missing_once)
+    result = service.process_next_policy_job()
+    assert result["status"] == "discarded", result
+    service._store.reload()
+    job = next(
+        item
+        for item in service._store.policy_jobs
+        if item.get("candidate_id") == candidate_id and item.get("kind") == "validation"
+    )
+    assert job["status"] == "complete"
+    assert job.get("reason_code") is None
+    attempts = _attempts_for(service, job["policy_job_id"])
+    assert {attempt["status"] for attempt in attempts} == {"running", "discarded"}
+    assert not any(
+        event.get("candidate_id") == candidate_id
+        and event.get("kind") in {"validated", "rejected"}
+        for event in service._store.policy_governance_events
+    )
+
+
+def test_activation_unavailable_scope_settles_stable_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unverifiable frozen scope is a durable fail-closed activation result,
+    not an exception escape; it never changes the prior active release."""
+    service, rules_path, kb_path = make_policy_service(tmp_path)
+    candidate_id, activation_at = _scheduled_candidate(service, "act-scope-unavailable")
+    prior_active = service.query_active(ADMIN)
+
+    def unavailable_scope(owner: Any, selected_candidate_id: str, at: int) -> None:
+        raise PolicyUnavailable("candidate frozen scope is unavailable")
+
+    monkeypatch.setattr(
+        service, "_require_candidate_scope_valid_at", unavailable_scope
+    )
+    result = service.process_next_policy_job(now=activation_at)
+    assert result == {
+        "status": "failed",
+        "kind": "activation",
+        "candidate_id": candidate_id,
+        "reason_code": "S08_ACTIVATION_UNAVAILABLE",
+    }
+    service._store.reload()
+    job = next(
+        item
+        for item in service._store.policy_jobs
+        if item.get("candidate_id") == candidate_id and item.get("kind") == "activation"
+    )
+    assert job["status"] == "diagnostic"
+    assert job["reason_code"] == "S08_ACTIVATION_UNAVAILABLE"
+    failed = next(
+        attempt
+        for attempt in _attempts_for(service, job["policy_job_id"])
+        if attempt["status"] == "failed"
+    )
+    assert failed["result"] == {"reason_code": "S08_ACTIVATION_UNAVAILABLE"}
+    assert not any(
+        event.get("kind") == "activated" and not event.get("bootstrap")
+        for event in service._store.policy_governance_events
+    )
+    restarted = PolicyGovernanceService(
+        state_path=service._store.state_path,
+        source_rules_path=rules_path,
+        source_kb_path=kb_path,
+        corpus_root=CORPUS,
+    )
+    active = restarted.query_active(ADMIN)
+    assert active["candidate_id"] == prior_active["candidate_id"]
+    assert active["active_generation"] == prior_active["active_generation"]
+
+
+def test_validation_settlement_clock_loss_retries_then_reclaims(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing trusted settlement time never escapes or invents a terminal
+    validation fact; the durable lease can be reclaimed after clock recovery."""
+    service, _, _ = make_policy_service(tmp_path)
+    draft_id = import_draft(service)
+    freeze = service.freeze_candidate(
+        principal=ADMIN,
+        draft_id=draft_id,
+        idempotency_key=f"clock-loss-freeze-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    candidate_id = freeze["candidate_id"]
+    service.request_validation(
+        principal=ADMIN,
+        candidate_id=candidate_id,
+        idempotency_key=f"clock-loss-validate-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    clock = _FakeClock(1_700_000_000)
+    service._clock = clock
+    service._clock = lambda: 0
+    result = service.process_next_policy_job(now=clock.value)
+    assert result == {
+        "status": "retry",
+        "kind": "validation",
+        "candidate_id": candidate_id,
+    }
+    service._store.reload()
+    job = next(
+        item
+        for item in service._store.policy_jobs
+        if item.get("candidate_id") == candidate_id and item.get("kind") == "validation"
+    )
+    assert job["status"] == "leased"
+    assert {item["status"] for item in _attempts_for(service, job["policy_job_id"])} == {
+        "running"
+    }
+    assert not any(
+        event.get("candidate_id") == candidate_id
+        and event.get("kind") in {"validated", "rejected"}
+        for event in service._store.policy_governance_events
+    )
+
+    service._clock = clock
+    clock.advance(31)
+    recovered = service.process_next_policy_job(worker_id="worker-b", now=clock.value)
+    assert recovered["status"] == "complete", recovered
+
+
+def test_activation_settlement_clock_loss_retries_then_reclaims(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Activation clock loss leaves the prior active authoritative until the
+    durable job is reclaimed with a fresh trusted settlement time."""
+    service, _, _ = make_policy_service(tmp_path)
+    candidate_id, activation_at = _scheduled_candidate(service, "act-clock-loss")
+    prior_active = service.query_active(ADMIN)
+    clock = _FakeClock(activation_at)
+    service._clock = clock
+    service._clock = lambda: 0
+    result = service.process_next_policy_job(now=activation_at)
+    assert result == {
+        "status": "retry",
+        "kind": "activation",
+        "candidate_id": candidate_id,
+    }
+    assert service.query_active(ADMIN)["candidate_id"] == prior_active["candidate_id"]
+    assert not any(
+        event.get("candidate_id") == candidate_id and event.get("kind") == "activated"
+        for event in service._store.policy_governance_events
+    )
+
+    service._clock = clock
+    clock.advance(31)
+    recovered = service.process_next_policy_job(worker_id="worker-b", now=clock.value)
+    assert recovered["status"] == "complete", recovered
+    assert service.query_active(ADMIN)["candidate_id"] == candidate_id
+
+
+def test_validation_persistent_claim_corruption_settles_discarded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Repeated corrupt candidate lookups stay inside the public worker and
+    discard the exact live attempt without publishing a diagnostic lie."""
+    service, _, _ = make_policy_service(tmp_path)
+    draft_id = import_draft(service)
+    freeze = service.freeze_candidate(
+        principal=ADMIN,
+        draft_id=draft_id,
+        idempotency_key=f"corrupt-state-freeze-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    candidate_id = freeze["candidate_id"]
+    service.request_validation(
+        principal=ADMIN,
+        candidate_id=candidate_id,
+        idempotency_key=f"corrupt-state-validate-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+
+    def corrupt_state(owner: Any, selected_candidate_id: str) -> dict[str, Any]:
+        raise KeyError(selected_candidate_id)
+
+    monkeypatch.setattr(service, "_require_candidate_state", corrupt_state)
+    result = service.process_next_policy_job()
+    assert result["status"] == "discarded", result
+    service._store.reload()
+    job = next(
+        item
+        for item in service._store.policy_jobs
+        if item.get("candidate_id") == candidate_id and item.get("kind") == "validation"
+    )
+    assert job["status"] == "complete"
+    assert job.get("reason_code") is None
+    assert {item["status"] for item in _attempts_for(service, job["policy_job_id"])} == {
+        "running",
+        "discarded",
+    }
+    assert not any(
+        event.get("candidate_id") == candidate_id
+        and event.get("kind") in {"validated", "rejected"}
+        for event in service._store.policy_governance_events
+    )
+
+
+def test_activation_persistent_claim_corruption_settles_discarded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Repeated corrupt activation-state lookups discard the live attempt and
+    preserve the prior active projection without a diagnostic or event lie."""
+    service, _, _ = make_policy_service(tmp_path)
+    candidate_id, activation_at = _scheduled_candidate(
+        service, "act-corrupt-state"
+    )
+    prior_active = service.query_active(ADMIN)
+
+    def corrupt_state(owner: Any, selected_candidate_id: str) -> dict[str, Any]:
+        raise KeyError(selected_candidate_id)
+
+    monkeypatch.setattr(service, "_require_candidate_state", corrupt_state)
+    result = service.process_next_policy_job(now=activation_at)
+    assert result["status"] == "discarded", result
+    service._store.reload()
+    job = next(
+        item
+        for item in service._store.policy_jobs
+        if item.get("candidate_id") == candidate_id and item.get("kind") == "activation"
+    )
+    assert job["status"] == "complete"
+    assert job.get("reason_code") is None
+    assert {item["status"] for item in _attempts_for(service, job["policy_job_id"])} == {
+        "running",
+        "discarded",
+    }
+    assert not any(
+        event.get("candidate_id") == candidate_id and event.get("kind") == "activated"
+        for event in service._store.policy_governance_events
+    )
+    assert service.query_active(ADMIN)["candidate_id"] == prior_active["candidate_id"]

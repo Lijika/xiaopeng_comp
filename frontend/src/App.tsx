@@ -5,6 +5,7 @@ import AttachmentVersionPanel from "./components/AttachmentVersionPanel";
 import BusinessExceptionApproverPanel from "./components/BusinessExceptionApproverPanel";
 import DemoBatchSummaryPanel from "./components/DemoBatchSummaryPanel";
 import DemoCheckPanel from "./components/DemoCheckPanel";
+import PolicyReleasePanel from "./components/PolicyReleasePanel";
 import QueuePanel from "./components/QueuePanel";
 import RecoveryWorkPanel from "./components/RecoveryWorkPanel";
 import ReviewWorkPanel from "./components/ReviewWorkPanel";
@@ -25,6 +26,9 @@ function isIntegratorShell(): boolean {
 }
 function isExceptionApproverShell(): boolean {
   return window.location.pathname.startsWith("/controlled/s05");
+}
+function isS08Shell(): boolean {
+  return window.location.pathname.startsWith("/controlled/s08");
 }
 
 /** The T06/T07 competition demo shell: only the closed synthetic facade
@@ -82,6 +86,41 @@ function ExceptionApproverShell() {
       </header>
       <main>
         <BusinessExceptionApproverPanel requestId={requestId} />
+      </main>
+    </div>
+  );
+}
+
+/** The governed policy-release shell mounted only for
+ * ``/controlled/s08/react``; the ``candidate`` query value is non-sensitive
+ * navigation state and the exact candidate query remains the sole
+ * authorization/existence authority.  The shell never mounts any S01/S02/S05
+ * read and no demo read can fire here. */
+function PolicyReleaseShell() {
+  const [candidateId, setCandidateId] = useState<string | null>(() =>
+    readParam("candidate"),
+  );
+  const selectCandidate = useCallback((id: string) => {
+    setCandidateId(id);
+    window.history.pushState(null, "", `?candidate=${encodeURIComponent(id)}`);
+  }, []);
+
+  return (
+    <div className="mx-auto max-w-4xl px-4 py-6">
+      <header className="app-header">
+        <h1>治理策略发布工作台</h1>
+        <span className="boundary track" data-testid="s08-boundary-track">
+          C-DEMO
+        </span>
+        <span className="boundary" data-testid="s08-boundary-gate">
+          S08
+        </span>
+      </header>
+      <main>
+        <PolicyReleasePanel
+          candidateId={candidateId}
+          onCandidateSelected={selectCandidate}
+        />
       </main>
     </div>
   );
@@ -154,6 +193,9 @@ export default function App() {
   }
   if (isExceptionApproverShell()) {
     return <ExceptionApproverShell />;
+  }
+  if (isS08Shell()) {
+    return <PolicyReleaseShell />;
   }
   return <ReviewerWorkbench />;
 }

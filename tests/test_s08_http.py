@@ -15,6 +15,7 @@ import sqlite3
 import time
 
 import pytest
+from fastapi.testclient import TestClient
 from pathlib import Path
 from typing import Any
 
@@ -770,10 +771,23 @@ def test_approver_can_read_exact_candidate_diff_but_cannot_mutate(
         assert review["validation_bundle_id"] == body["validation_bundle_id"]
 
         # 2. The approver cannot mutate governance: every admin/operator
-        #    command fails with the stable S08_FORBIDDEN error.
+        #    command fails with the stable S08_FORBIDDEN error.  The revise
+        #    payload carries the complete closed metadata so the role check
+        #    (not the closed-DTO validation) is what rejects it.
         for name, payload in [
             ("import_legacy", {"source_bundle_id": SOURCE_BUNDLE_ID}),
-            ("revise_draft", {"draft_id": draft_id, "metadata": {"scope": S08_SCOPE}}),
+            (
+                "revise_draft",
+                {
+                    "draft_id": draft_id,
+                    "metadata": {
+                        "scope": S08_SCOPE,
+                        "validity": {"valid_from": "2000-01-01T00:00:00Z"},
+                        "source": SOURCE_BUNDLE_ID,
+                        "reason": "g3 approver denied",
+                    },
+                },
+            ),
             ("freeze_candidate", {"draft_id": draft_id}),
             ("request_validation", {"candidate_id": candidate_id}),
             ("submit_review", {"candidate_id": candidate_id}),
@@ -1130,3 +1144,918 @@ def test_review_material_lists_component_changes_for_behavior_equivalent_version
             bound_diff["applicable_check_delta"]
             == review["applicable_check_delta"]
         )
+
+
+# ---------------------------------------------------------------------------
+# T08 / Issue #42 item A: closed typed candidate workspace + T08 DTO surface
+# ---------------------------------------------------------------------------
+
+T08_COMMAND_NAMES = (
+    "import_legacy",
+    "revise_draft",
+    "freeze_candidate",
+    "request_validation",
+    "submit_review",
+    "approve",
+    "reject",
+    "schedule",
+    "cancel",
+)
+UNKNOWN_CANDIDATE = "candidate_000000000000000000000000"
+CANDIDATE_QUERY_PATH = "/controlled/s08/api/queries/candidate/{candidate_id}"
+
+
+def _candidate_workspace(
+    server: UvicornLoopback, candidate_id: str, headers: dict[str, str]
+) -> dict[str, Any]:
+    response = server.request(
+        "GET",
+        f"/controlled/s08/api/queries/candidate/{candidate_id}",
+        headers=headers,
+        use_session=False,
+    )
+    assert response.status == 200, response.text
+    return response.json()
+
+
+def _s08_import_revise_freeze(
+    server: UvicornLoopback, key: str
+) -> tuple[str, dict[str, Any]]:
+    """Admin: import -> revise -> freeze, returning (candidate_id, freeze)."""
+    import_result = _post_command(
+        server,
+        "import_legacy",
+        {
+            "source_bundle_id": SOURCE_BUNDLE_ID,
+            "idempotency_key": f"{key}-import",
+            "expected_governance_revision": _governance_revision(server),
+        },
+        admin_headers(),
+    )
+    draft_id = import_result["draft_id"]
+    _post_command(
+        server,
+        "revise_draft",
+        {
+            "draft_id": draft_id,
+            "metadata": {
+                "scope": S08_SCOPE,
+                "validity": {"valid_from": "2000-01-01T00:00:00Z"},
+                "source": SOURCE_BUNDLE_ID,
+                "reason": f"S08 T08 workspace drill {key}",
+            },
+            "idempotency_key": f"{key}-revise",
+            "expected_governance_revision": _governance_revision(server),
+        },
+        admin_headers(),
+    )
+    freeze = _post_command(
+        server,
+        "freeze_candidate",
+        {
+            "draft_id": draft_id,
+            "idempotency_key": f"{key}-freeze",
+            "expected_governance_revision": _governance_revision(server),
+        },
+        admin_headers(),
+    )
+    return freeze["candidate_id"], freeze
+
+
+def test_candidate_workspace_is_closed_typed_and_self_sufficient(
+    tmp_path: Path,
+) -> None:
+    """(a)+(c) The candidate workspace alone carries the authoritative
+    governance revision, the authenticated actor role, the server-owned
+    action list (candidate status + role only) and the current
+    recovery/active anchor.  Admin/Approver actions follow the backend state
+    machine exactly at every status, and the author can never approve."""
+    state_path = tmp_path / "target.sqlite3"
+    env = {
+        "TASK4_S01_TEST_FIXTURE_ROOT": str(ROOT / "fixtures" / "applications"),
+        "TASK4_S01_TEST_STATE_PATH": str(state_path),
+    }
+    with s08_test_loopback(env) as server:
+        bootstrap = _active_query(server)
+        candidate_id, freeze = _s08_import_revise_freeze(server, "ws")
+
+        # Frozen candidate: only the author-admin may act; the workspace is
+        # already self-sufficient (revision, role, anchor) without a status
+        # call.
+        workspace = _candidate_workspace(server, candidate_id, admin_headers())
+        assert workspace["status"] == "candidate"
+        assert workspace["actor_role"] == "admin"
+        assert workspace["actions"] == ["request_validation", "cancel"]
+        assert workspace["governance_revision"] == _governance_revision(server)
+        assert workspace["active_anchor"] == {
+            "candidate_id": bootstrap["candidate_id"],
+            "manifest_digest": bootstrap["manifest_digest"],
+        }
+        assert workspace["manifest_id"] == freeze["manifest_id"]
+        assert workspace["manifest_digest"] == freeze["manifest_digest"]
+        # A freshly frozen candidate has no manifest/validation projection yet.
+        assert "manifest" not in workspace
+        assert "validation_bundle" not in workspace
+        # (f) The workspace carries the candidate's full governance timeline:
+        # the originating draft's events plus the candidate's own, in
+        # append-only ledger order with the closed actor identity.
+        assert [event["kind"] for event in workspace["events"]] == [
+            "imported",
+            "draft_revised",
+            "candidate_frozen",
+        ]
+        for event in workspace["events"]:
+            assert set(event["actor"]) == {"subject", "role", "source_id"}
+            assert event["actor"]["role"] == "admin"
+
+        # Validated: the manifest and the typed validation bundle appear.
+        _post_command(
+            server,
+            "request_validation",
+            {
+                "candidate_id": candidate_id,
+                "idempotency_key": "ws-validate",
+                "expected_governance_revision": _governance_revision(server),
+            },
+            admin_headers(),
+        )
+        _wait_for_candidate_status(server, candidate_id, "validated")
+        workspace = _candidate_workspace(server, candidate_id, admin_headers())
+        assert workspace["status"] == "validated"
+        assert workspace["actions"] == ["submit_review", "cancel"]
+        assert workspace["validation_outcome"] == {
+            "status": "validated",
+            "reason_code": "S08_VALIDATION_PASSED",
+        }
+        assert workspace.get("activation_outcome") is None
+        assert workspace["manifest"]["digest"] == freeze["manifest_digest"]
+        assert workspace["manifest"]["schema_version"] == "s08-candidate-manifest/1"
+        assert workspace["manifest"]["components"] == freeze["components"]
+        assert workspace["manifest"]["compatibility"]["checker_build"]
+        bundle = workspace["validation_bundle"]
+        assert bundle["schema_version"] == "s08-validation-bundle/1"
+        assert bundle["status"] == "validated"
+        assert set(bundle["validator"]) == {
+            "suite",
+            "build",
+            "code_sha256",
+            "python",
+            "machine",
+        }
+        assert bundle["inputs"]["component_digests"] == {
+            item["type"]: item["digest"] for item in freeze["components"]
+        }
+        assert bundle["results"]["failed_count"] == 0
+        assert set(bundle["results"]["checks"][0]) == {
+            "check_id",
+            "outcome",
+            "detail",
+        }
+        assert set(bundle["results"]["determinism"]) == {
+            "runs",
+            "equal",
+            "digest",
+            "reason",
+        }
+        assert set(bundle["results"]["corpus_diff"]) == {
+            "anchor",
+            "applications_compared",
+            "applications_skipped",
+            "checks_equal",
+            "selection_equal",
+            "normalization_equal",
+            "verdicts_equal",
+            "route_equal",
+            "corpus_digest",
+            "equal",
+            "reason",
+        }
+        assert "raw_outcomes" not in bundle["results"]
+        approver_workspace = _candidate_workspace(
+            server, candidate_id, approver_headers()
+        )
+        assert approver_workspace["actor_role"] == "approver"
+        assert approver_workspace["actions"] == ["reject"]
+        for response_workspace in (workspace, approver_workspace):
+            response_text = json.dumps(response_workspace, ensure_ascii=False)
+            assert "LSVAA4182N2333444" not in response_text
+            assert "330102199505055556" not in response_text
+
+        # In review: the independent approver gets the review diff and the
+        # exact approve/reject actions; the author-admin only cancels.
+        _post_command(
+            server,
+            "submit_review",
+            {
+                "candidate_id": candidate_id,
+                "idempotency_key": "ws-review",
+                "expected_governance_revision": _governance_revision(server),
+            },
+            admin_headers(),
+        )
+        _wait_for_candidate_status(server, candidate_id, "in_review")
+        workspace = _candidate_workspace(server, candidate_id, approver_headers())
+        assert workspace["status"] == "in_review"
+        assert workspace["actor_role"] == "approver"
+        assert workspace["actions"] == ["approve", "reject"]
+        assert workspace["governance_revision"] == _governance_revision(server)
+        assert workspace["active_anchor"] == {
+            "candidate_id": bootstrap["candidate_id"],
+            "manifest_digest": bootstrap["manifest_digest"],
+        }
+        review = workspace["review_material"]
+        assert review["schema_version"] == "s08-review-material/1"
+        assert review["candidate_digest"] == freeze["manifest_digest"]
+        assert review["anchor_candidate_id"] == bootstrap["candidate_id"]
+        assert review["mapping_ledger"]["schema_version"] == "s08-mapping-ledger/1"
+        assert review["mapping_ledger"]["items"]
+        assert set(review["applicable_check_delta"]) == {
+            "anchor",
+            "candidate",
+            "added",
+            "removed",
+        }
+        assert review["behavior_delta"]["equal"] is True
+        assert review["unsupported_report"] == {"count": 0, "items": []}
+        assert "approval_binding" not in workspace
+        admin_workspace = _candidate_workspace(server, candidate_id, admin_headers())
+        assert admin_workspace["actor_role"] == "admin"
+        # The author's own candidate never offers approve.
+        assert admin_workspace["actions"] == ["cancel"]
+
+        # (d) 409: a stale governance revision is rejected with the stable
+        # closed S08_CONFLICT envelope.
+        stale = server.request(
+            "POST",
+            "/controlled/s08/api/commands/approve",
+            body={
+                "candidate_id": candidate_id,
+                "activation_time": int(time.time()) + 3600,
+                "recovery_release_id": bootstrap["candidate_id"],
+                "idempotency_key": "ws-stale-approve",
+                "expected_governance_revision": workspace["governance_revision"] - 1,
+            },
+            headers=approver_headers(),
+        )
+        assert stale.status == 409
+        assert stale.json() == {
+            "detail": {
+                "error": "S08_CONFLICT",
+                "message": "Governance command conflicts with current state",
+            }
+        }
+        # (f) The prior active release stays authoritative across the stale
+        # conflict: the active query still resolves the bootstrap release.
+        assert (
+            _active_query(server)["candidate_id"] == bootstrap["candidate_id"]
+        )
+
+        # (c) SoD: the author (admin) cannot approve the candidate.
+        denied = server.request(
+            "POST",
+            "/controlled/s08/api/commands/approve",
+            body={
+                "candidate_id": candidate_id,
+                "activation_time": int(time.time()) + 3600,
+                "recovery_release_id": bootstrap["candidate_id"],
+                "idempotency_key": "ws-admin-approve",
+                "expected_governance_revision": _governance_revision(server),
+            },
+            headers=admin_headers(),
+        )
+        assert denied.status == 403
+        assert denied.json() == {
+            "detail": {
+                "error": "S08_FORBIDDEN",
+                "message": "Registered S08 identity required",
+            }
+        }
+
+        # Approved: the fixed approval binding is typed on the wire and the
+        # author-admin may schedule or cancel.
+        activation_time = int(time.time()) + 3600
+        approval = _post_command(
+            server,
+            "approve",
+            {
+                "candidate_id": candidate_id,
+                "activation_time": activation_time,
+                "recovery_release_id": bootstrap["candidate_id"],
+                "idempotency_key": "ws-approve",
+                "expected_governance_revision": _governance_revision(server),
+            },
+            approver_headers(),
+        )
+        _wait_for_candidate_status(server, candidate_id, "approved")
+        workspace = _candidate_workspace(server, candidate_id, admin_headers())
+        assert workspace["status"] == "approved"
+        assert workspace["actions"] == ["schedule", "cancel"]
+        assert workspace["approval_binding_id"] == approval["approval_binding_id"]
+        binding = workspace["approval_binding"]
+        assert binding["schema_version"] == "s08-approval-binding/1"
+        assert binding["candidate_digest"] == freeze["manifest_digest"]
+        assert binding["approved_by"] == "c-demo-policy-approver"
+        assert binding["activation_time"] == activation_time
+        assert binding["recovery_release_id"] == bootstrap["candidate_id"]
+        assert binding["diff"]["schema_version"] == "s08-review-material/1"
+        assert binding["diff"]["changes"] == review["changes"]
+        # (f) The governance timeline now runs to the approval binding, with
+        # the independent approver as the actor of the approval event.
+        assert [event["kind"] for event in workspace["events"]] == [
+            "imported",
+            "draft_revised",
+            "candidate_frozen",
+            "validated",
+            "in_review",
+            "approved",
+        ]
+        assert workspace["events"][-1]["actor"]["subject"] == "c-demo-policy-approver"
+        assert workspace["events"][-1]["actor"]["role"] == "approver"
+
+        # Scheduled: only cancel remains, for the author-admin only.
+        _post_command(
+            server,
+            "schedule",
+            {
+                "approval_binding_id": approval["approval_binding_id"],
+                "activation_at": activation_time,
+                "idempotency_key": "ws-schedule",
+                "expected_governance_revision": _governance_revision(server),
+            },
+            admin_headers(),
+        )
+        _wait_for_candidate_status(server, candidate_id, "scheduled")
+        workspace = _candidate_workspace(server, candidate_id, admin_headers())
+        assert workspace["status"] == "scheduled"
+        assert workspace["actions"] == ["cancel"]
+        assert workspace["activation_time"] == activation_time
+        assert workspace["validation_outcome"] == {
+            "status": "validated",
+            "reason_code": "S08_VALIDATION_PASSED",
+        }
+        assert workspace["activation_outcome"] == {"status": "pending"}
+        assert _candidate_workspace(
+            server, candidate_id, approver_headers()
+        )["actions"] == []
+
+
+def test_s08_active_workspace_projects_activation_outcome_and_prior_anchor(
+    tmp_path: Path,
+) -> None:
+    """Once the worker activates the scheduled candidate, the workspace
+    projects the authoritative activation outcome (event id + generation),
+    and the anchor switches to the activated candidate."""
+    state_path = tmp_path / "target.sqlite3"
+    env = {
+        "TASK4_S01_TEST_FIXTURE_ROOT": str(ROOT / "fixtures" / "applications"),
+        "TASK4_S01_TEST_STATE_PATH": str(state_path),
+    }
+    with s08_test_loopback(env) as server:
+        bootstrap = _active_query(server)
+        candidate_id, freeze = _s08_import_revise_freeze(server, "actout")
+        _post_command(
+            server,
+            "request_validation",
+            {
+                "candidate_id": candidate_id,
+                "idempotency_key": "actout-validate",
+                "expected_governance_revision": _governance_revision(server),
+            },
+            admin_headers(),
+        )
+        _wait_for_candidate_status(server, candidate_id, "validated")
+        _post_command(
+            server,
+            "submit_review",
+            {
+                "candidate_id": candidate_id,
+                "idempotency_key": "actout-review",
+                "expected_governance_revision": _governance_revision(server),
+            },
+            admin_headers(),
+        )
+        activation_time = int(time.time()) + 5
+        approval = _post_command(
+            server,
+            "approve",
+            {
+                "candidate_id": candidate_id,
+                "activation_time": activation_time,
+                "recovery_release_id": bootstrap["candidate_id"],
+                "idempotency_key": "actout-approve",
+                "expected_governance_revision": _governance_revision(server),
+            },
+            approver_headers(),
+        )
+        _post_command(
+            server,
+            "schedule",
+            {
+                "approval_binding_id": approval["approval_binding_id"],
+                "activation_at": activation_time,
+                "idempotency_key": "actout-schedule",
+                "expected_governance_revision": _governance_revision(server),
+            },
+            admin_headers(),
+        )
+        _wait_for_candidate_status(server, candidate_id, "active")
+        workspace = _candidate_workspace(server, candidate_id, admin_headers())
+        assert workspace["status"] == "active"
+        assert workspace["actions"] == []
+        outcome = workspace["activation_outcome"]
+        assert outcome["status"] == "active"
+        assert outcome["activation_event_id"]
+        assert outcome["active_generation"] == 2
+        assert workspace["active_anchor"] == {
+            "candidate_id": candidate_id,
+            "manifest_digest": freeze["manifest_digest"],
+        }
+        assert workspace["validation_outcome"]["status"] == "validated"
+
+
+def test_s08_workspace_error_contracts_are_closed_and_existence_hiding(
+    tmp_path: Path,
+) -> None:
+    """(d) 404 is existence-hiding with one stable closed envelope for both
+    roles; a missing identity is the stable 403; invalid commands are 422
+    with sanitized detail that never reflects caller input."""
+    state_path = tmp_path / "target.sqlite3"
+    env = {
+        "TASK4_S01_TEST_FIXTURE_ROOT": str(ROOT / "fixtures" / "applications"),
+        "TASK4_S01_TEST_STATE_PATH": str(state_path),
+    }
+    with s08_test_loopback(env) as server:
+        for headers in (admin_headers(), approver_headers()):
+            hidden = server.request(
+                "GET",
+                f"/controlled/s08/api/queries/candidate/{UNKNOWN_CANDIDATE}",
+                headers=headers,
+                use_session=False,
+            )
+            assert hidden.status == 404
+            assert hidden.json() == {
+                "detail": {
+                    "error": "S08_NOT_FOUND",
+                    "message": "Governance object is unavailable",
+                }
+            }
+            assert "c-demo-policy" not in hidden.text
+        denied = server.request(
+            "GET",
+            f"/controlled/s08/api/queries/candidate/{UNKNOWN_CANDIDATE}",
+            use_session=False,
+        )
+        assert denied.status == 403
+        assert denied.json() == {
+            "detail": {
+                "error": "S08_FORBIDDEN",
+                "message": "Registered S08 identity required",
+            }
+        }
+        invalid = server.request(
+            "POST",
+            "/controlled/s08/api/commands/import_legacy",
+            body={
+                "source_bundle_id": SOURCE_BUNDLE_ID,
+                "idempotency_key": "err-import-1",
+                "expected_governance_revision": 0,
+                "caller_path": "/etc/passwd",
+            },
+            headers=admin_headers(),
+        )
+        assert invalid.status == 422
+        detail = invalid.json()["detail"]
+        assert isinstance(detail, list) and detail
+        for item in detail:
+            assert set(item) == {"loc", "msg", "type"}
+        # The rejected value/context is never reflected; only the sanitized
+        # structural location survives.
+        assert "/etc/passwd" not in invalid.text
+
+
+def test_s08_authority_loss_503_is_a_closed_envelope(tmp_path: Path) -> None:
+    """(d) Lost governance authority is a closed 503: exactly the stable
+    S08_UNAVAILABLE envelope with no internal detail."""
+    state_path = tmp_path / "target.sqlite3"
+    with s08_test_loopback(
+        {
+            "TASK4_S01_TEST_STATE_PATH": str(state_path),
+            "TASK4_S01_TEST_AUDIT_AVAILABLE": "0",
+        }
+    ) as server:
+        response = server.request(
+            "POST",
+            "/controlled/s08/api/commands/import_legacy",
+            body={
+                "source_bundle_id": SOURCE_BUNDLE_ID,
+                "idempotency_key": "err-import-503",
+                "expected_governance_revision": 0,
+            },
+            headers=admin_headers(),
+        )
+        assert response.status == 503
+        assert response.json() == {
+            "detail": {
+                "error": "S08_UNAVAILABLE",
+                "message": "Governance authority is unavailable",
+            }
+        }
+        # (f) Fail closed from an unavailable authority: with no healthy
+        # bootstrap ever possible, the active query resolves to the exact
+        # no-release state and never invents a candidate or digest.
+        active = _active_query(server)
+        assert active["status"] == "none"
+        assert "candidate_id" not in active
+        assert "manifest_digest" not in active
+
+
+def test_s08_store_integrity_failure_is_a_closed_http_503(tmp_path: Path) -> None:
+    state_path = tmp_path / "target.sqlite3"
+    with s08_test_loopback(
+        {
+            "TASK4_S01_TEST_STATE_PATH": str(state_path),
+            "TASK4_S01_TEST_FIXTURE_ROOT": str(ROOT / "fixtures" / "applications"),
+        }
+    ) as server:
+        assert _governance_revision(server) > 0
+        with sqlite3.connect(state_path) as connection:
+            connection.execute(
+                "UPDATE policy_governance_events SET integrity_sha256 = ? "
+                "WHERE rowid = (SELECT MIN(rowid) FROM policy_governance_events)",
+                ("0" * 64,),
+            )
+            connection.commit()
+
+        response = server.request(
+            "GET",
+            f"/controlled/s08/api/queries/status?scope={S08_SCOPE}",
+            headers=admin_headers(),
+            use_session=False,
+        )
+
+    assert response.status == 503
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json() == {
+        "detail": {
+            "error": "S08_UNAVAILABLE",
+            "message": "Governance authority is unavailable",
+        }
+    }
+
+
+def test_prior_active_release_survives_lost_authority_503(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(f) After a healthy bootstrap and an active prior release, a
+    deterministic authority loss is a closed 503 and the prior active
+    release stays authoritative: the active query returns the exact same
+    candidate and manifest digest before and after the rejected command."""
+    state_path = tmp_path / "target.sqlite3"
+    from task4_consistency.web import app as webapp
+
+    monkeypatch.setenv("TASK4_S01_TEST_STATE_PATH", str(state_path))
+    monkeypatch.setenv(
+        "TASK4_S01_TEST_FIXTURE_ROOT", str(ROOT / "fixtures" / "applications")
+    )
+    monkeypatch.setenv("TASK4_S01_TEST_AUDIT_AVAILABLE", "1")
+    monkeypatch.setattr(webapp, "S08_CONFIGURED", True)
+    for name, value in (
+        ("S08_ADMIN_CREDENTIAL", ADMIN_CREDENTIAL),
+        ("S08_ADMIN_SUBJECT", "c-demo-policy-admin"),
+        ("S08_APPROVER_CREDENTIAL", APPROVER_CREDENTIAL),
+        ("S08_APPROVER_SUBJECT", "c-demo-policy-approver"),
+        ("S08_OPERATOR_CREDENTIAL", OPERATOR_CREDENTIAL),
+        ("S08_OPERATOR_SUBJECT", "c-demo-policy-operator"),
+    ):
+        monkeypatch.setattr(webapp, name, value)
+    app = webapp.create_s01_test_app()
+    assert webapp.S08_SERVICE is not None
+    client = TestClient(app)
+    headers = {"Authorization": f"Bearer {ADMIN_CREDENTIAL}"}
+    active_url = (
+        f"/controlled/s08/api/queries/active?scope={S08_SCOPE}"
+    )
+    prior = client.get(active_url, headers=headers).json()
+    assert prior["status"] == "active"
+    prior_candidate = prior["candidate_id"]
+    prior_digest = prior["manifest_digest"]
+    # Inject the authority loss on the running governed service; every
+    # subsequent governed write must fail closed.
+    monkeypatch.setattr(webapp.S08_SERVICE, "audit_available", False)
+    response = client.post(
+        "/controlled/s08/api/commands/import_legacy",
+        json={
+            "source_bundle_id": SOURCE_BUNDLE_ID,
+            "idempotency_key": "err-import-503-prior-active",
+            "expected_governance_revision": 0,
+        },
+        headers=headers,
+    )
+    assert response.status_code == 503
+    assert response.json()["detail"]["error"] == "S08_UNAVAILABLE"
+    after = client.get(active_url, headers=headers).json()
+    assert after["status"] == "active"
+    assert after["candidate_id"] == prior_candidate
+    assert after["manifest_digest"] == prior_digest
+
+
+def _assert_no_wildcard_dicts(
+    schemas: dict[str, Any], ref: str, seen: set[str] | None = None
+) -> None:
+    """Fail when any schema reachable from ``ref`` uses an untyped
+    additionalProperties (``true`` or an empty object): those are the
+    ``{[key: string]: unknown}`` leaks that break generated OpenAPI clients.
+    A closed model's ``additionalProperties: false`` and typed value dicts
+    (``{"type": ...}`` / ``{"$ref": ...}``) are allowed."""
+    seen = set() if seen is None else seen
+    name = ref.rsplit("/", 1)[-1]
+    if name in seen:
+        return
+    seen.add(name)
+
+    def walk(node: Any) -> None:
+        if not isinstance(node, dict):
+            return
+        if "additionalProperties" in node:
+            values = node["additionalProperties"]
+            assert values is False or (
+                isinstance(values, dict) and values
+            ), f"{name} leaks a wildcard dict: {node}"
+        nested_ref = node.get("$ref")
+        if isinstance(nested_ref, str) and nested_ref.startswith(
+            "#/components/schemas/"
+        ):
+            _assert_no_wildcard_dicts(schemas, nested_ref, seen)
+        for value in node.values():
+            walk(value)
+
+    walk(schemas[name])
+
+
+def test_s08_openapi_t08_surface_is_closed_typed(tmp_path: Path) -> None:
+    """(b) The exported OpenAPI registers every T08 command/query with the
+    five closed error responses, and the candidate workspace schema is
+    precisely typed end to end: no ``{[key: string]: unknown}`` dict leaks
+    for manifest, validation outcome/checks, review diff, approval binding
+    or activation status."""
+    state_path = tmp_path / "target.sqlite3"
+    env = {
+        "TASK4_S01_TEST_FIXTURE_ROOT": str(ROOT / "fixtures" / "applications"),
+        "TASK4_S01_TEST_STATE_PATH": str(state_path),
+    }
+    with s08_test_loopback(env) as server:
+        response = server.request("GET", "/openapi.json", use_session=False)
+        assert response.status == 200
+        spec = response.json()
+    schemas = spec["components"]["schemas"]
+    paths = spec["paths"]
+
+    # 1. Every T08 command and the candidate query are registered with the
+    #    five closed error responses the UI must handle.
+    for name in T08_COMMAND_NAMES:
+        path = f"/controlled/s08/api/commands/{name}"
+        assert path in paths, path
+        post = paths[path]["post"]
+        for status in ("403", "404", "409", "422", "503"):
+            assert status in post["responses"], f"{path} missing {status}"
+            error_model = post["responses"][status]["content"]["application/json"][
+                "schema"
+            ]["$ref"].rsplit("/", 1)[-1]
+            expected = (
+                "S08ValidationErrorResponse" if status == "422" else "S08ErrorResponse"
+            )
+            assert error_model == expected, f"{path} {status} -> {error_model}"
+        success = post["responses"]["200"]["content"]["application/json"]["schema"][
+            "$ref"
+        ].rsplit("/", 1)[-1]
+        assert success in schemas, f"{path} success model {success}"
+
+    # 1b. The operator stop-activations command declares the same closed set.
+    stop_path = paths["/controlled/s08/api/commands/stop_activations"]
+    for status in ("403", "404", "409", "422", "503"):
+        assert status in stop_path["post"]["responses"], status
+
+    # 1c. Every T08-used query declares the closed error set too.
+    for query_path in (
+        "/controlled/s08/api/queries/status",
+        "/controlled/s08/api/queries/active",
+        "/controlled/s08/api/queries/candidates",
+        "/controlled/s08/api/queries/drafts",
+        "/controlled/s08/api/queries/events",
+    ):
+        assert query_path in paths, query_path
+        for status in ("403", "404", "409", "422", "503"):
+            assert status in paths[query_path]["get"]["responses"], (
+                f"{query_path} missing {status}"
+            )
+
+    candidate_path = paths[CANDIDATE_QUERY_PATH]
+    assert "get" in candidate_path
+    for status in ("403", "404", "409", "422", "503"):
+        assert status in candidate_path["get"]["responses"], status
+    workspace_ref = candidate_path["get"]["responses"]["200"]["content"][
+        "application/json"
+    ]["schema"]["$ref"]
+    assert workspace_ref.rsplit("/", 1)[-1] == "S08CandidateWorkspaceResponse"
+
+    # 2. Every T08 command request body is the exact closed DTO and the
+    #    status/active/workspace responses are closed typed end to end: no
+    #    reachable ``{[key: string]: unknown}`` dict remains on any
+    #    T08-used request or response.
+    command_bodies = {
+        "import_legacy": "S08ImportLegacyBody",
+        "revise_draft": "S08ReviseDraftBody",
+        "freeze_candidate": "S08FreezeCandidateBody",
+        "request_validation": "S08CandidateCommandBody",
+        "submit_review": "S08CandidateCommandBody",
+        "approve": "S08ApproveBody",
+        "reject": "S08RejectBody",
+        "schedule": "S08ScheduleBody",
+        "cancel": "S08RejectBody",
+        "stop_activations": "S08StopActivationsBody",
+    }
+    for name, expected in command_bodies.items():
+        command_path = paths[f"/controlled/s08/api/commands/{name}"]
+        body_ref = command_path["post"]["requestBody"]["content"][
+            "application/json"
+        ]["schema"]["$ref"]
+        assert body_ref.rsplit("/", 1)[-1] == expected, (name, body_ref)
+        _assert_no_wildcard_dicts(schemas, body_ref)
+        success = command_path["post"]["responses"]["200"]["content"][
+            "application/json"
+        ]["schema"]["$ref"]
+        _assert_no_wildcard_dicts(schemas, success)
+
+    status_ref = paths["/controlled/s08/api/queries/status"]["get"]["responses"][
+        "200"
+    ]["content"]["application/json"]["schema"]["$ref"]
+    assert status_ref.rsplit("/", 1)[-1] == "S08StatusResponse"
+    _assert_no_wildcard_dicts(schemas, status_ref)
+    active_ref = paths["/controlled/s08/api/queries/active"]["get"]["responses"][
+        "200"
+    ]["content"]["application/json"]["schema"]["$ref"]
+    _assert_no_wildcard_dicts(schemas, active_ref)
+    for query_path in (
+        "/controlled/s08/api/queries/candidates",
+        "/controlled/s08/api/queries/drafts",
+        "/controlled/s08/api/queries/events",
+    ):
+        query_ref = paths[query_path]["get"]["responses"]["200"]["content"][
+            "application/json"
+        ]["schema"]["$ref"]
+        _assert_no_wildcard_dicts(schemas, query_ref)
+
+    # 2b. Every error response registered on a T08 command or query path is
+    #     also a closed typed model (no wildcard dicts), matching the closed
+    #     S08ErrorResponse/S08ValidationErrorResponse components.
+    error_refs: set[str] = set()
+    for t08_path in (
+        *(f"/controlled/s08/api/commands/{name}" for name in command_bodies),
+        "/controlled/s08/api/queries/status",
+        "/controlled/s08/api/queries/active",
+        CANDIDATE_QUERY_PATH,
+        "/controlled/s08/api/queries/candidates",
+        "/controlled/s08/api/queries/drafts",
+        "/controlled/s08/api/queries/events",
+    ):
+        method = "post" if "/commands/" in t08_path else "get"
+        for status, response in paths[t08_path][method]["responses"].items():
+            if status == "200":
+                continue
+            error_refs.add(
+                response["content"]["application/json"]["schema"]["$ref"].rsplit(
+                    "/", 1
+                )[-1]
+            )
+    for name in sorted(error_refs):
+        _assert_no_wildcard_dicts(schemas, f"#/components/schemas/{name}")
+
+    public_schema_text = json.dumps(schemas, sort_keys=True)
+    assert "raw_outcomes" not in public_schema_text
+    assert "S08RawEvidence" not in public_schema_text
+
+    # 3. The closed typed DTOs are registered components.
+    for name in (
+        "S08CandidateWorkspaceResponse",
+        "S08CandidateManifest",
+        "S08ValidationBundle",
+        "S08ValidationCheck",
+        "S08ReviewMaterial",
+        "S08ApprovalBinding",
+        "S08ActiveAnchor",
+        "S08ErrorResponse",
+        "S08ValidationErrorResponse",
+        "S08ActivationHold",
+        "S08DraftMetadata",
+        "S08DraftValidity",
+    ):
+        assert name in schemas, name
+
+    # 4. No wildcard dict anywhere reachable from the workspace schema.
+    _assert_no_wildcard_dicts(schemas, workspace_ref)
+
+
+def test_s08_react_shell_identity_no_store_and_missing_build_503(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(e) /controlled/s08/react mirrors /controlled/s02/react: served only
+    to a registered S08 identity, no-store, no session, and a closed 503
+    when the shared build is missing or incomplete."""
+    state_path = tmp_path / "target.sqlite3"
+    env = {
+        "TASK4_S01_TEST_FIXTURE_ROOT": str(ROOT / "fixtures" / "applications"),
+        "TASK4_S01_TEST_STATE_PATH": str(state_path),
+    }
+    with s08_test_loopback(env) as server:
+        denied = server.request("GET", "/controlled/s08/react", use_session=False)
+        assert denied.status == 403
+        assert denied.json()["detail"]["error"] == "S08_FORBIDDEN"
+        for headers in (admin_headers(), approver_headers()):
+            shell = server.request(
+                "GET",
+                "/controlled/s08/react",
+                headers=headers,
+                use_session=False,
+            )
+            assert shell.status == 200, shell.text
+            assert shell.headers["cache-control"] == "no-store"
+            assert shell.headers["pragma"] == "no-cache"
+            assert "set-cookie" not in shell.headers
+            assert 'type="module"' in shell.text
+            assert 'src="/static/react/assets/' in shell.text
+
+    # The global demo token cannot preempt or grant access to S08's own
+    # registered identities.  Both shell and API must reach the S08 auth
+    # boundary when TASK4_WEB_TOKEN is enabled.
+    with s08_test_loopback(
+        {
+            "TASK4_S01_TEST_FIXTURE_ROOT": str(ROOT / "fixtures" / "applications"),
+            "TASK4_S01_TEST_STATE_PATH": str(tmp_path / "global-token.sqlite3"),
+            "TASK4_WEB_TOKEN": "global-token-not-an-s08-identity",
+        }
+    ) as server:
+        shell = server.request(
+            "GET",
+            "/controlled/s08/react",
+            headers=admin_headers(),
+            use_session=False,
+        )
+        status = server.request(
+            "GET",
+            f"/controlled/s08/api/queries/status?scope={S08_SCOPE}",
+            headers=admin_headers(),
+            use_session=False,
+        )
+        global_only = server.request(
+            "GET",
+            "/controlled/s08/react",
+            headers={"Authorization": "Bearer global-token-not-an-s08-identity"},
+            use_session=False,
+        )
+        assert shell.status == 200
+        assert status.status == 200
+        assert global_only.status == 403
+        assert global_only.json()["detail"]["error"] == "S08_FORBIDDEN"
+
+    # A valid read-role credential is insufficient when the complete
+    # Admin/Approver/Operator authority could not be constructed.  The shell
+    # must fail closed just like its API instead of exposing a usable surface.
+    from task4_consistency.web import app as webapp
+
+    monkeypatch.setattr(webapp, "S08_ADMIN_CREDENTIAL", ADMIN_CREDENTIAL)
+    monkeypatch.setattr(webapp, "S08_ADMIN_SUBJECT", "c-demo-policy-admin")
+    monkeypatch.setattr(webapp, "S08_APPROVER_CREDENTIAL", APPROVER_CREDENTIAL)
+    monkeypatch.setattr(webapp, "S08_APPROVER_SUBJECT", "c-demo-policy-approver")
+    monkeypatch.setattr(webapp, "S08_OPERATOR_CREDENTIAL", "")
+    monkeypatch.setattr(webapp, "S08_OPERATOR_SUBJECT", "")
+    monkeypatch.setattr(webapp, "S08_CONFIGURED", False)
+    monkeypatch.setattr(webapp, "S08_SERVICE", None)
+    client = TestClient(webapp.app)
+    for credential in (ADMIN_CREDENTIAL, APPROVER_CREDENTIAL):
+        unavailable = client.get(
+            "/controlled/s08/react",
+            headers={"Authorization": f"Bearer {credential}"},
+        )
+        assert unavailable.status_code == 503
+        assert unavailable.json() == {
+            "detail": {
+                "error": "S08_UNAVAILABLE",
+                "message": "Controlled S08 policy governance is unavailable",
+            }
+        }
+
+    # Missing/incomplete build fails closed with the stable error code.  The
+    # build path is server-fixed, so the missing-build seam is exercised
+    # in-process on the same ASGI app (the test_t06_http pattern).
+    monkeypatch.setattr(webapp, "S01_REACT_INDEX", Path("/nonexistent/index.html"))
+    monkeypatch.setattr(webapp, "S08_ADMIN_CREDENTIAL", ADMIN_CREDENTIAL)
+    monkeypatch.setattr(webapp, "S08_ADMIN_SUBJECT", "c-demo-policy-admin")
+    monkeypatch.setattr(webapp, "S08_APPROVER_CREDENTIAL", APPROVER_CREDENTIAL)
+    monkeypatch.setattr(webapp, "S08_APPROVER_SUBJECT", "c-demo-policy-approver")
+    client = TestClient(webapp.app)
+    missing = client.get(
+        "/controlled/s08/react",
+        headers={"Authorization": f"Bearer {APPROVER_CREDENTIAL}"},
+    )
+    assert missing.status_code == 503
+    assert missing.json()["detail"]["error"] == "S08_REACT_UNAVAILABLE"

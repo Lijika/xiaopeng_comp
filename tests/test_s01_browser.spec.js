@@ -844,6 +844,8 @@ test("a reviewer corrects a source-backed VIN and sees immutable rerun history",
   expect(navigation.status()).toBe(200);
 
   await page.getByRole("button", { name: "提交受控场景" }).click();
+  await expect(page.getByTestId("receipt-panel")).toBeVisible();
+  await expect(page.getByTestId("receipt-id")).not.toHaveText("");
   const initialRun = await page.request.post(
     `${s04Server.baseURL}/controlled/s01/api/_test/commands/process`,
     { data: { worker_id: "s04-browser-initial", now: 0 } },

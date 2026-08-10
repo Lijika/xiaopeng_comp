@@ -206,6 +206,19 @@ class SQLiteTargetStore:
         self.projection_watermark = 0
         self.cohort_stop: dict[str, Any] | None = None
         self._store_revision = 0
+        # Verified-row cache keyed by (table, item_id, payload,
+        # integrity_sha256): reload/persist re-verify every immutable row on
+        # every call, which dominates store I/O as the ledger grows.  A hit
+        # re-parses the already-verified canonical payload into a fresh
+        # object graph, so cache values are never shared with a live store
+        # collection: mutating a loaded row cannot poison a later reload.
+        # Any tamper (payload or seal change) misses the key and still runs
+        # the full verification, so the integrity contract is unchanged --
+        # only the repeated re-verification of unchanged rows is skipped.
+        # Idempotency rows additionally bind the persisted fingerprint in
+        # the cache identity: the seal covers {fingerprint, result}, so a
+        # warm hit must never bypass that binding.
+        self._integrity_cache: dict[tuple[str, ...], str] = {}
         self._ensure_schema()
         self.reload()
 
@@ -246,6 +259,7 @@ class SQLiteTargetStore:
             setattr(cloned, name, copy.deepcopy(getattr(self, name)))
         cloned.projection_watermark = self.projection_watermark
         cloned._store_revision = self._store_revision
+        cloned._integrity_cache = dict(self._integrity_cache)
         return cloned
 
     def _connect(self) -> sqlite3.Connection:
@@ -348,10 +362,22 @@ class SQLiteTargetStore:
 
     @staticmethod
     def _decode_immutable(
-        table: str, item_id: str, payload: str, integrity_sha256: str | None
+        table: str,
+        item_id: str,
+        payload: str,
+        integrity_sha256: str | None,
+        cache: dict[tuple[str, ...], Any] | None = None,
     ) -> Any:
-        if not integrity_sha256:
+        if integrity_sha256 is None:
             raise _integrity_error(table, item_id, "missing seal")
+        if cache is not None:
+            key = (table, item_id, payload, integrity_sha256)
+            cached = cache.get(key)
+            if cached is not None:
+                # The cached value is the verified canonical payload; parsing
+                # it again yields a fresh object graph that shares nothing
+                # with any previously loaded collection.
+                return json.loads(cached)
         try:
             value = json.loads(payload)
         except (TypeError, json.JSONDecodeError) as error:
@@ -361,23 +387,33 @@ class SQLiteTargetStore:
         expected = _integrity_digest(table, item_id, payload)
         if not hmac.compare_digest(integrity_sha256, expected):
             raise _integrity_error(table, item_id, "seal mismatch")
+        if cache is not None:
+            cache[(table, item_id, payload, integrity_sha256)] = payload
         return value
 
     @classmethod
     def _immutable_rows(
-        cls, connection: sqlite3.Connection, table: str
+        cls,
+        connection: sqlite3.Connection,
+        table: str,
+        cache: dict[tuple[str, ...], Any] | None = None,
     ) -> list[tuple[str, Any]]:
         rows = connection.execute(
             f"SELECT item_id, payload, integrity_sha256 FROM {table} ORDER BY rowid"
         ).fetchall()
         return [
-            (item_id, cls._decode_immutable(table, item_id, payload, digest))
+            (
+                item_id,
+                cls._decode_immutable(table, item_id, payload, digest, cache),
+            )
             for item_id, payload, digest in rows
         ]
 
     @classmethod
     def _idempotency_rows(
-        cls, connection: sqlite3.Connection
+        cls,
+        connection: sqlite3.Connection,
+        cache: dict[tuple[str, ...], Any] | None = None,
     ) -> list[tuple[str, str, Any]]:
         rows = connection.execute(
             "SELECT command_key, fingerprint, payload, integrity_sha256 "
@@ -385,6 +421,16 @@ class SQLiteTargetStore:
         ).fetchall()
         values = []
         for key, fingerprint, payload, digest in rows:
+            if cache is not None:
+                # The persisted fingerprint is part of the binding the seal
+                # covers ({fingerprint, result}); a warm hit must therefore
+                # key on it too, or a fingerprint tamper after warm-up would
+                # bypass verification exactly like a fresh owner rejects it.
+                cache_key = ("idempotency", key, fingerprint, payload, digest)
+                cached = cache.get(cache_key)
+                if cached is not None:
+                    values.append((key, fingerprint, json.loads(cached)))
+                    continue
             try:
                 result = json.loads(payload)
             except (TypeError, json.JSONDecodeError) as error:
@@ -397,12 +443,16 @@ class SQLiteTargetStore:
                 raise _integrity_error("idempotency", key, "missing seal")
             if not hmac.compare_digest(digest, expected):
                 raise _integrity_error("idempotency", key, "seal mismatch")
+            if cache is not None:
+                cache[("idempotency", key, fingerprint, payload, digest)] = payload
             values.append((key, fingerprint, result))
         return values
 
     @classmethod
     def _outbox_rows(
-        cls, connection: sqlite3.Connection
+        cls,
+        connection: sqlite3.Connection,
+        cache: dict[tuple[str, ...], Any] | None = None,
     ) -> list[dict[str, Any]]:
         rows = connection.execute(
             "SELECT item_id, payload, integrity_sha256, delivery_status, "
@@ -411,7 +461,9 @@ class SQLiteTargetStore:
         ).fetchall()
         values = []
         for item_id, payload, digest, delivery_status, delivery_revision, delivery_digest in rows:
-            event = cls._decode_immutable("outbox", item_id, payload, digest)
+            event = cls._decode_immutable(
+                "outbox", item_id, payload, digest, cache
+            )
             if event.get("event_id") != item_id or "status" in event:
                 raise _integrity_error("outbox", item_id, "invalid event body")
             cls._verify_delivery(
@@ -437,14 +489,18 @@ class SQLiteTargetStore:
                 if table == "idempotency":
                     self.idempotency = {
                         key: (fingerprint, payload)
-                        for key, fingerprint, payload in self._idempotency_rows(connection)
+                        for key, fingerprint, payload in self._idempotency_rows(
+                            connection, self._integrity_cache
+                        )
                     }
                     continue
                 if table == "outbox":
-                    self.outbox = self._outbox_rows(connection)
+                    self.outbox = self._outbox_rows(
+                        connection, self._integrity_cache
+                    )
                     continue
                 values = (
-                    self._immutable_rows(connection, table)
+                    self._immutable_rows(connection, table, self._integrity_cache)
                     if table in _IMMUTABLE_MAP_TABLES or table in _IMMUTABLE_LIST_IDS
                     else self._rows(connection, table)
                 )
@@ -539,48 +595,94 @@ class SQLiteTargetStore:
                     )
 
                 self._upsert_map(connection, "applications", self.applications)
-                self._sync_immutable_map(connection, "receipts", self.receipts)
-                self._sync_immutable_list(
-                    connection, "lifecycle_events", self.lifecycle_events
+                self._sync_immutable_map(
+                    connection, "receipts", self.receipts, self._integrity_cache
                 )
                 self._sync_immutable_list(
-                    connection, "evidence_events", self.evidence_events
+                    connection,
+                    "lifecycle_events",
+                    self.lifecycle_events,
+                    self._integrity_cache,
                 )
-                self._sync_immutable_list(connection, "audit_events", self.audit_events)
+                self._sync_immutable_list(
+                    connection,
+                    "evidence_events",
+                    self.evidence_events,
+                    self._integrity_cache,
+                )
+                self._sync_immutable_list(
+                    connection,
+                    "audit_events",
+                    self.audit_events,
+                    self._integrity_cache,
+                )
                 self._upsert_list(connection, "jobs", self.jobs, "job_id")
                 self._sync_idempotency(connection)
-                self._sync_immutable_list(connection, "attempts", self.attempts)
-                self._sync_immutable_list(connection, "runs", self.runs)
-                self._sync_immutable_list(connection, "findings", self.findings)
-                self._sync_immutable_list(connection, "work_items", self.work_items)
                 self._sync_immutable_list(
-                    connection, "review_records", self.review_records
+                    connection, "attempts", self.attempts, self._integrity_cache
                 )
                 self._sync_immutable_list(
-                    connection, "recovery_events", self.recovery_events
+                    connection, "runs", self.runs, self._integrity_cache
                 )
-                self._sync_immutable_list(connection, "inbox", self.inbox)
+                self._sync_immutable_list(
+                    connection, "findings", self.findings, self._integrity_cache
+                )
+                self._sync_immutable_list(
+                    connection, "work_items", self.work_items, self._integrity_cache
+                )
+                self._sync_immutable_list(
+                    connection,
+                    "review_records",
+                    self.review_records,
+                    self._integrity_cache,
+                )
+                self._sync_immutable_list(
+                    connection,
+                    "recovery_events",
+                    self.recovery_events,
+                    self._integrity_cache,
+                )
+                self._sync_immutable_list(
+                    connection, "inbox", self.inbox, self._integrity_cache
+                )
                 self._sync_outbox(connection)
                 self._sync_mutable_map(connection, "projections", self.projections)
                 self._sync_mutable_map(connection, "sessions", self.sessions)
                 self._sync_immutable_list(
-                    connection, "demo_sessions", self.demo_sessions
+                    connection,
+                    "demo_sessions",
+                    self.demo_sessions,
+                    self._integrity_cache,
                 )
                 self._sync_immutable_list(
-                    connection, "deletion_receipts", self.deletion_receipts
+                    connection,
+                    "deletion_receipts",
+                    self.deletion_receipts,
+                    self._integrity_cache,
                 )
                 self._sync_immutable_list(
-                    connection, "policy_artifacts", self.policy_artifacts
+                    connection,
+                    "policy_artifacts",
+                    self.policy_artifacts,
+                    self._integrity_cache,
                 )
                 self._sync_immutable_list(
-                    connection, "policy_manifests", self.policy_manifests
+                    connection,
+                    "policy_manifests",
+                    self.policy_manifests,
+                    self._integrity_cache,
                 )
                 self._sync_immutable_list(
-                    connection, "policy_governance_events",
+                    connection,
+                    "policy_governance_events",
                     self.policy_governance_events,
+                    self._integrity_cache,
                 )
                 self._sync_immutable_list(
-                    connection, "policy_attempts", self.policy_attempts
+                    connection,
+                    "policy_attempts",
+                    self.policy_attempts,
+                    self._integrity_cache,
                 )
                 self._sync_mutable_map(connection, "policy_drafts", self.policy_drafts)
                 self._upsert_list(connection, "policy_jobs", self.policy_jobs, "policy_job_id")
@@ -745,11 +847,13 @@ class SQLiteTargetStore:
         connection: sqlite3.Connection,
         table: str,
         values: dict[str, Any],
+        cache: dict[tuple[str, str, str, str], Any] | None = None,
     ) -> None:
         cls._sync_immutable_rows(
             connection,
             table,
             {str(item_id): _encode(value) for item_id, value in values.items()},
+            cache,
         )
 
     @classmethod
@@ -758,6 +862,7 @@ class SQLiteTargetStore:
         connection: sqlite3.Connection,
         table: str,
         values: list[dict[str, Any]],
+        cache: dict[tuple[str, str, str, str], Any] | None = None,
     ) -> None:
         id_field = _IMMUTABLE_LIST_IDS[table]
         rows: dict[str, str] = {}
@@ -770,7 +875,7 @@ class SQLiteTargetStore:
             if previous is not None and previous != payload:
                 raise _integrity_error(table, item_id, "conflicting staged payload")
             rows[item_id] = payload
-        cls._sync_immutable_rows(connection, table, rows)
+        cls._sync_immutable_rows(connection, table, rows, cache)
 
     @classmethod
     def _sync_immutable_rows(
@@ -778,6 +883,7 @@ class SQLiteTargetStore:
         connection: sqlite3.Connection,
         table: str,
         staged: dict[str, str],
+        cache: dict[tuple[str, str, str, str], Any] | None = None,
     ) -> None:
         persisted = {
             item_id: (payload, digest)
@@ -793,7 +899,9 @@ class SQLiteTargetStore:
             existing = persisted.get(item_id)
             if existing is not None:
                 existing_payload, digest = existing
-                cls._decode_immutable(table, item_id, existing_payload, digest)
+                cls._decode_immutable(
+                    table, item_id, existing_payload, digest, cache
+                )
                 if existing_payload != payload:
                     raise _integrity_error(table, item_id, "immutable payload changed")
                 continue
@@ -919,7 +1027,9 @@ class SQLiteTargetStore:
                 delivery_revision,
                 delivery_digest,
             ) = existing
-            self._decode_immutable("outbox", item_id, existing_payload, digest)
+            self._decode_immutable(
+                "outbox", item_id, existing_payload, digest, self._integrity_cache
+            )
             self._verify_delivery(
                 item_id, existing_status, delivery_revision, delivery_digest
             )

@@ -66,6 +66,24 @@ RESERVATION_SCHEMA = "s08-schedule-reservation/1"
 IMPORTER_VERSION = "s08-importer/1"
 VALIDATOR_SUITE = "s08-validation-suite/1"
 VALIDATOR_BUILD = "s08-validator/3"
+
+# Registered stable worker-failure reason codes: the only values a diagnostic
+# job row or a public outcome may carry.  Raw exception text and internal
+# write points never leave the service boundary.
+_WORKER_REASON_CODES: dict[str, dict[str, str]] = {
+    "validation": {
+        "PolicyUnavailable": "S08_VALIDATION_UNAVAILABLE",
+        "PolicyInvalidTransition": "S08_VALIDATION_INVALID_STATE",
+        "PolicyConflict": "S08_VALIDATION_CONFLICT",
+        "default": "S08_VALIDATION_INTERNAL",
+    },
+    "activation": {
+        "PolicyUnavailable": "S08_ACTIVATION_UNAVAILABLE",
+        "PolicyInvalidTransition": "S08_ACTIVATION_INVALID_STATE",
+        "PolicyConflict": "S08_ACTIVATION_CONFLICT",
+        "default": "S08_ACTIVATION_INTERNAL",
+    },
+}
 _READINESS_POLICY_ID = "c-demo-readiness/1"
 _PROTECTED_CHECK_IDS = frozenset({"R_VIN_CROSS", "R_ENGINE_CROSS", "R_ID_EXACT"})
 _BOOTSTRAP_REASON = "S08 one-time bootstrap migration release"
@@ -686,6 +704,7 @@ class PolicyGovernanceService:
         principal: PolicyPrincipal,
         reason_code: str,
         details: dict[str, Any] | None = None,
+        trusted_time: int | None = None,
     ) -> dict[str, Any]:
         revision = len(staged.policy_governance_events) + 1
         event: dict[str, Any] = {
@@ -701,7 +720,9 @@ class PolicyGovernanceService:
                 "role": principal.role,
                 "source_id": principal.source_id,
             },
-            "trusted_time": self._trusted_time(),
+            "trusted_time": (
+                self._trusted_time() if trusted_time is None else trusted_time
+            ),
             "reason_code": reason_code,
         }
         if details:
@@ -1342,9 +1363,7 @@ class PolicyGovernanceService:
             ]
             if existing:
                 raise PolicyConflict("validation job already exists for this candidate")
-            policy_job_id = self._stable_id(
-                "policy_job", f"{candidate_id}:validation:{self._trusted_time()}"
-            )
+            policy_job_id = self._stable_id("policy_job", key)
             staged.policy_jobs.append(
                 {
                     "policy_job_id": policy_job_id,
@@ -2091,6 +2110,30 @@ class PolicyGovernanceService:
         self, worker_id: str = "s08-activator", now: int | None = None
     ) -> dict[str, Any]:
         """Claim and execute one durable policy job (validation or activation)."""
+        claim = self._claim_policy_job(worker_id, now)
+        if isinstance(claim, dict):
+            return claim
+        job, observed_now, snapshot = claim
+        # Run the job body outside the lock: validation/activation compute
+        # from the claimed snapshot (their own deep copy), then re-acquire
+        # the lock for the guarded result write.  Holding the lock across
+        # the long computation queued every read query behind the worker
+        # and pushed poll requests past the HTTP response contract.
+        if job["kind"] == "validation":
+            return self._run_validation_job(job, observed_now, snapshot)
+        return self._run_activation_job(job, observed_now, snapshot)
+
+    def _claim_policy_job(
+        self, worker_id: str, now: int | None = None
+    ) -> dict[str, Any] | tuple[dict[str, Any], int, SQLiteTargetStore]:
+        """Claim one ready job under the lock and persist the claimed
+        attempt identity (worker/fence/attempt/lease) in the same short
+        transaction, so a crash after claim leaves a first durable attempt.
+
+        Returns ``(job, observed_now, snapshot)`` with ``snapshot`` the
+        immutable claim-time store the compute phase must use -- never a
+        later copy of the mutable store -- or a ``{"status": ...}`` dict for
+        authority-unavailable / idle / contention outcomes."""
         with self._lock:
             if not self.audit_available or not self.storage_available:
                 return {
@@ -2124,99 +2167,126 @@ class PolicyGovernanceService:
                 selected["fence"] = int(selected.get("fence", 0)) + 1
                 selected["attempt_no"] = int(selected.get("attempt_no", 0)) + 1
                 selected["lease_until"] = observed_now + 30
+                staged.policy_attempts.append(
+                    self._attempt_record(
+                        selected, status="running", started_at=observed_now
+                    )
+                )
                 try:
                     staged.persist()
                 except StaleStoreRevision:
                     self._store.reload()
                     continue
                 self._store = staged
-                job = copy.deepcopy(selected)
-                if job["kind"] == "validation":
-                    return self._run_validation_job(job, observed_now)
-                return self._run_activation_job(job, observed_now)
-            return {"status": "blocked", "reason_code": "POLICY_JOB_CLAIM_CONTENTION"}
+                # ``staged`` is this thread's private snapshot: every other
+                # mutation replaces the store object instead of editing it in
+                # place, so the compute phase needs a snapshot that is a
+                # *different* object from the live store.  Return an
+                # independent claim-time deep copy: a later reload of
+                # ``self._store`` (a public query between claim and compute)
+                # must never mutate what the compute phase reads.
+                return copy.deepcopy(selected), observed_now, copy.deepcopy(staged)
+            return {
+                "status": "blocked",
+                "reason_code": "POLICY_JOB_CLAIM_CONTENTION",
+            }
 
     def _run_validation_job(
-        self, job: dict[str, Any], now: int
+        self, job: dict[str, Any], now: int, snapshot: SQLiteTargetStore
     ) -> dict[str, Any]:
         candidate_id = job["candidate_id"]
+        state: dict[str, Any] | None = None
         try:
-            owner = copy.deepcopy(self._store)
+            owner = copy.deepcopy(snapshot)
             state = self._require_candidate_state(owner, candidate_id)
             if state["status"] != "candidate":
                 raise PolicyInvalidTransition("candidate is no longer pending validation")
             bundle, outcome = self._validate_candidate(owner, state)
-            self._before_write("s08.validation")
-            staged = copy.deepcopy(self._store)
-            staged_job = next(
-                item
-                for item in staged.policy_jobs
-                if item["policy_job_id"] == job["policy_job_id"]
-            )
-            staged_job["status"] = "complete"
-            staged_job.pop("lease_until", None)
-            staged.policy_attempts.append(
-                {
-                    "attempt_id": self._stable_id(
-                        "policy_attempt",
-                        f"{job['policy_job_id']}:{job['attempt_no']}:{job['worker_id']}",
+            with self._lock:
+                self._before_write("s08.validation")
+                # Authoritative store before any terminal classification: a
+                # concurrent writer in another service must be visible here,
+                # never replaced by a stale in-memory copy.
+                self._store.reload()
+                staged = copy.deepcopy(self._store)
+                # Fresh trusted settlement time: the claim-time ``now`` is
+                # started_at only.  A long computation must prove its lease
+                # is still live at the write point, not at the claim point.
+                settlement_now = self._trusted_time()
+                # Exact ownership gate: the job row must still be leased by
+                # this worker/fence/attempt under the owned lease.  A stale
+                # worker (reclaimed, restarted or completed by another fence)
+                # settles only its own discarded attempt and never touches
+                # the job row or any domain fact.
+                current_job = self._owned_job(staged, job, settlement_now)
+                if current_job is None:
+                    return self._settle_stale_attempt(staged, job, now)
+                # The candidate must still be pending validation when the
+                # result lands: a command issued while the computation ran
+                # (cancel) must not be overwritten by a stale verdict.  The
+                # job settles as discarded -- never diagnostic -- so a
+                # cancelled candidate is not surfaced as a validation
+                # failure.
+                current = self._require_candidate_state(staged, candidate_id)
+                if current["status"] != state["status"]:
+                    return self._settle_discarded(
+                        staged, job, now, settlement_now
+                    )
+                current_job["status"] = "complete"
+                current_job.pop("lease_until", None)
+                staged.policy_attempts.append(
+                    self._attempt_record(
+                        job,
+                        status="complete",
+                        started_at=now,
+                        result={
+                            "validation_bundle_id": bundle["validation_bundle_id"],
+                            "validation_bundle_digest": bundle["digest"],
+                            "outcome": outcome,
+                        },
+                    )
+                )
+                staged.policy_artifacts.append(bundle["artifact"])
+                self._append_governance_event(
+                    staged,
+                    kind="validated" if outcome == "validated" else "rejected",
+                    principal=PolicyPrincipal(
+                        subject=self._operator_subject,
+                        role="operator",
+                        scope=job["scope"],
+                        source_id="s08-policy-worker",
                     ),
-                    "policy_job_id": job["policy_job_id"],
-                    "kind": "validation",
-                    "candidate_id": candidate_id,
-                    "fence": job["fence"],
-                    "attempt_no": job["attempt_no"],
-                    "started_at": job["started_at"]
-                    if "started_at" in job
-                    else now,
-                    "status": "complete",
-                    "result": {
+                    reason_code=(
+                        "S08_VALIDATION_PASSED"
+                        if outcome == "validated"
+                        else "S08_VALIDATION_REJECTED"
+                    ),
+                    details={
+                        "candidate_id": candidate_id,
                         "validation_bundle_id": bundle["validation_bundle_id"],
                         "validation_bundle_digest": bundle["digest"],
-                        "outcome": outcome,
                     },
-                }
-            )
-            staged.policy_artifacts.append(bundle["artifact"])
-            self._append_governance_event(
-                staged,
-                kind="validated" if outcome == "validated" else "rejected",
-                principal=PolicyPrincipal(
-                    subject=self._operator_subject,
-                    role="operator",
-                    scope=job["scope"],
-                    source_id="s08-policy-worker",
-                ),
-                reason_code=(
-                    "S08_VALIDATION_PASSED"
-                    if outcome == "validated"
-                    else "S08_VALIDATION_REJECTED"
-                ),
-                details={
-                    "candidate_id": candidate_id,
-                    "validation_bundle_id": bundle["validation_bundle_id"],
-                    "validation_bundle_digest": bundle["digest"],
-                },
-            )
-            AuditOutboxOwner(staged).append_outbox(
-                {
-                    "event_id": self._stable_id(
-                        "outbox", f"s08:validation:{candidate_id}"
-                    ),
-                    "kind": "s08_validation_completed",
-                    "scope": job["scope"],
-                    "candidate_id": candidate_id,
-                    "validation_bundle_id": bundle["validation_bundle_id"],
-                    "outcome": outcome,
-                    "status": "pending",
-                }
-            )
-            if not self._persist_worker(staged):
-                return {
-                    "status": "retry",
-                    "kind": "validation",
-                    "candidate_id": candidate_id,
-                }
+                    trusted_time=settlement_now,
+                )
+                AuditOutboxOwner(staged).append_outbox(
+                    {
+                        "event_id": self._stable_id(
+                            "outbox", f"s08:validation:{candidate_id}"
+                        ),
+                        "kind": "s08_validation_completed",
+                        "scope": job["scope"],
+                        "candidate_id": candidate_id,
+                        "validation_bundle_id": bundle["validation_bundle_id"],
+                        "outcome": outcome,
+                        "status": "pending",
+                    }
+                )
+                if not self._persist_worker(staged):
+                    return {
+                        "status": "retry",
+                        "kind": "validation",
+                        "candidate_id": candidate_id,
+                    }
             return {
                 "status": "complete",
                 "kind": "validation",
@@ -2229,39 +2299,85 @@ class PolicyGovernanceService:
             PolicyInvalidTransition,
             PolicyUnavailable,
             PolicyConflict,
+            KeyError,
             RuntimeError,
-        ):
-            staged = copy.deepcopy(self._store)
-            staged_job = next(
-                (
-                    item
-                    for item in staged.policy_jobs
-                    if item["policy_job_id"] == job["policy_job_id"]
-                ),
-                None,
-            )
-            if staged_job is not None:
-                staged_job["status"] = "diagnostic"
+        ) as error:
+            with self._lock:
+                # Authoritative store before any terminal classification: a
+                # stale in-memory copy must never decide that a cancelled
+                # candidate's unchanged state is an applicable failure.
+                self._store.reload()
+                staged = copy.deepcopy(self._store)
                 try:
-                    staged.persist()
-                    self._store = staged
-                except StaleStoreRevision:
-                    self._store.reload()
+                    settlement_now = self._trusted_time()
+                except PolicyUnavailable:
+                    return {
+                        "status": "retry",
+                        "kind": "validation",
+                        "candidate_id": candidate_id,
+                    }
+                current_job = self._owned_job(staged, job, settlement_now)
+                if current_job is None:
+                    return self._settle_stale_attempt(staged, job, now)
+                # The candidate must still be in the state the worker
+                # validated against even when the compute phase raised: a
+                # concurrent cancel invalidates the still-owned job, which
+                # settles as discarded -- never a diagnostic lie.  Only an
+                # owned, live compute failure whose claim-time candidate was
+                # pending AND whose fresh candidate is still pending may
+                # become diagnostic; a cancelled candidate that never changed
+                # between claim and settlement (e.g. a reclaimed job) is not
+                # an applicable failure either.
+                try:
+                    current = self._require_candidate_state(staged, candidate_id)
+                except (PolicyNotFound, KeyError):
+                    return self._settle_discarded(
+                        staged, job, now, settlement_now
+                    )
+                if not (
+                    state is not None
+                    and state["status"] == "candidate"
+                    and current["status"] == "candidate"
+                ):
+                    return self._settle_discarded(
+                        staged, job, now, settlement_now
+                    )
+                reason_code = self._worker_reason_code("validation", error)
+                current_job["status"] = "diagnostic"
+                current_job["reason_code"] = reason_code
+                staged.policy_attempts.append(
+                    self._attempt_record(
+                        job,
+                        status="failed",
+                        started_at=now,
+                        result={"reason_code": reason_code},
+                    )
+                )
+                if not self._persist_worker(staged):
+                    return {
+                        "status": "retry",
+                        "kind": "validation",
+                        "candidate_id": candidate_id,
+                    }
             return {
                 "status": "failed",
                 "kind": "validation",
                 "candidate_id": candidate_id,
+                "reason_code": reason_code,
             }
 
     def _run_activation_job(
-        self, job: dict[str, Any], now: int
+        self, job: dict[str, Any], now: int, snapshot: SQLiteTargetStore
     ) -> dict[str, Any]:
         candidate_id = job["candidate_id"]
         scope = job["scope"]
+        state: dict[str, Any] | None = None
+        claim_hold = False
         try:
-            owner = copy.deepcopy(self._store)
+            owner = copy.deepcopy(snapshot)
             state = self._require_candidate_state(owner, candidate_id)
-            if self._activation_hold(owner, scope) is not None:
+            claim_hold = self._activation_hold(owner, scope) is not None
+            if claim_hold:
                 raise PolicyInvalidTransition("activation hold is in effect")
             if state["status"] not in {"approved", "scheduled"}:
                 raise PolicyInvalidTransition(
@@ -2362,171 +2478,207 @@ class PolicyGovernanceService:
                 raise PolicyUnavailable(
                     "required audit or storage authority is unavailable"
                 )
-            self._before_write("s08.activation")
-            staged = copy.deepcopy(self._store)
-            staged_job = next(
-                item
-                for item in staged.policy_jobs
-                if item["policy_job_id"] == job["policy_job_id"]
-            )
-            staged_job["status"] = "complete"
-            staged_job.pop("lease_until", None)
-            staged.policy_attempts.append(
-                {
-                    "attempt_id": self._stable_id(
-                        "policy_attempt",
-                        f"{job['policy_job_id']}:{job['attempt_no']}:{job['worker_id']}",
-                    ),
-                    "policy_job_id": job["policy_job_id"],
-                    "kind": "activation",
-                    "candidate_id": candidate_id,
-                    "fence": job["fence"],
-                    "attempt_no": job["attempt_no"],
-                    "started_at": now,
-                    "status": "complete",
-                    "result": {
-                        "approval_binding_id": job["approval_binding_id"],
-                        "activation_event_id": None,
-                        "active_generation": None,
-                    },
-                }
-            )
-            prior = self._fold_active_projection(
-                staged.policy_governance_events, scope
-            )
-            generation = (
-                int(prior["active_generation"]) + 1 if prior is not None else 1
-            )
-            activation_event = self._append_governance_event(
-                staged,
-                kind="activated",
-                principal=PolicyPrincipal(
-                    subject=self._operator_subject,
-                    role="operator",
-                    scope=scope,
-                    source_id="s08-policy-worker",
-                ),
-                reason_code="S08_ACTIVATED",
-                details={
-                    "candidate_id": candidate_id,
-                    "approval_binding_id": job["approval_binding_id"],
-                    "validation_bundle_id": state["validation_bundle_id"],
-                    "validation_bundle_digest": state["validation_bundle_digest"],
-                    "manifest_id": state["manifest_id"],
-                    "manifest_digest": state["manifest_digest"],
-                    "recovery_release_id": state.get("recovery_release_id"),
-                    "active_generation": generation,
-                    "activation_event_id": None,
-                    "bootstrap": False,
-                },
-            )
-            activation_event["activation_event_id"] = activation_event["event_id"]
-            activation_event["active_generation"] = generation
-            activation_event_id = activation_event["event_id"]
-            if prior is not None:
-                self._append_governance_event(
+            with self._lock:
+                self._before_write("s08.activation")
+                # Authoritative store before any terminal classification: a
+                # concurrent writer in another service must be visible here,
+                # never replaced by a stale in-memory copy.
+                self._store.reload()
+                staged = copy.deepcopy(self._store)
+                # Fresh trusted settlement time: the claim-time ``now`` is
+                # started_at only; the lease must still be live at the write
+                # point after a long activation computation.
+                settlement_now = self._trusted_time()
+                # Exact ownership gate: the job row must still be leased by
+                # this worker/fence/attempt under the owned lease.  A stale
+                # worker (reclaimed, restarted or completed by another fence)
+                # settles only its own discarded attempt and never touches
+                # the job row or any domain fact.
+                current_job = self._owned_job(staged, job, settlement_now)
+                if current_job is None:
+                    return self._settle_stale_attempt(staged, job, now)
+                # The candidate must still be in the state the worker
+                # validated against: a command issued while the computation
+                # ran must not be overwritten by a stale activation.  The
+                # job settles as discarded so a cancelled candidate is not
+                # surfaced as an activation failure.
+                current = self._require_candidate_state(staged, candidate_id)
+                if (
+                    current["status"] != state["status"]
+                    or self._activation_hold(staged, scope) is not None
+                ):
+                    return self._settle_discarded(
+                        staged, job, now, settlement_now
+                    )
+                # The frozen scope/validity window is revalidated at the
+                # trusted settlement time, not only at claim time: a
+                # validity expiry crossed during compute while the lease is
+                # still live must settle as discarded and leave the prior
+                # active release/generation untouched.
+                try:
+                    self._require_candidate_scope_valid_at(
+                        staged, candidate_id, settlement_now
+                    )
+                except PolicyInvalidTransition:
+                    return self._settle_discarded(
+                        staged, job, now, settlement_now
+                    )
+                current_job["status"] = "complete"
+                current_job.pop("lease_until", None)
+                prior = self._fold_active_projection(
+                    staged.policy_governance_events, scope
+                )
+                generation = (
+                    int(prior["active_generation"]) + 1 if prior is not None else 1
+                )
+                activation_event = self._append_governance_event(
                     staged,
-                    kind="superseded",
+                    kind="activated",
                     principal=PolicyPrincipal(
                         subject=self._operator_subject,
                         role="operator",
                         scope=scope,
                         source_id="s08-policy-worker",
                     ),
-                    reason_code="S08_SUPERSEDED",
+                    reason_code="S08_ACTIVATED",
                     details={
-                        "candidate_id": prior["candidate_id"],
-                        "successor_candidate_id": candidate_id,
-                        "successor_activation_event_id": activation_event_id,
+                        "candidate_id": candidate_id,
+                        "approval_binding_id": job["approval_binding_id"],
+                        "validation_bundle_id": state["validation_bundle_id"],
+                        "validation_bundle_digest": state["validation_bundle_digest"],
+                        "manifest_id": state["manifest_id"],
+                        "manifest_digest": state["manifest_digest"],
+                        "recovery_release_id": state.get("recovery_release_id"),
                         "active_generation": generation,
+                        "activation_event_id": None,
+                        "bootstrap": False,
+                    },
+                    trusted_time=settlement_now,
+                )
+                activation_event["activation_event_id"] = activation_event["event_id"]
+                activation_event["active_generation"] = generation
+                activation_event_id = activation_event["event_id"]
+                # The terminal attempt must record the exact result this
+                # transaction publishes: finalize the activated event
+                # identity and generation first, then persist them in the
+                # complete attempt -- no placeholder nulls survive restart.
+                staged.policy_attempts.append(
+                    self._attempt_record(
+                        job,
+                        status="complete",
+                        started_at=now,
+                        result={
+                            "approval_binding_id": job["approval_binding_id"],
+                            "activation_event_id": activation_event_id,
+                            "active_generation": generation,
+                        },
+                    )
+                )
+                if prior is not None:
+                    self._append_governance_event(
+                        staged,
+                        kind="superseded",
+                        principal=PolicyPrincipal(
+                            subject=self._operator_subject,
+                            role="operator",
+                            scope=scope,
+                            source_id="s08-policy-worker",
+                        ),
+                        reason_code="S08_SUPERSEDED",
+                        details={
+                            "candidate_id": prior["candidate_id"],
+                            "successor_candidate_id": candidate_id,
+                            "successor_activation_event_id": activation_event_id,
+                            "active_generation": generation,
+                        },
+                        trusted_time=settlement_now,
+                    )
+                manifest = candidate_manifest
+                staged.policy_active_projections[scope] = {
+                    "schema_version": "s08-active-projection/1",
+                    "scope": scope,
+                    "active_generation": generation,
+                    "activation_event_id": activation_event_id,
+                    "candidate_id": candidate_id,
+                    "manifest_id": manifest["manifest_id"],
+                    "manifest_digest": manifest["digest"],
+                    "approval_binding_id": job["approval_binding_id"],
+                    "approval_binding_digest": content_digest(binding),
+                    "validation_bundle_id": state["validation_bundle_id"],
+                    "validation_bundle_digest": state["validation_bundle_digest"],
+                    "recovery_release_id": state["recovery_release_id"],
+                    "activated_at": settlement_now,
+                    "bootstrap": False,
+                    "components": manifest["components"],
+                }
+                reservation = staged.policy_schedule_reservations.get(job["reservation_id"])
+                if reservation is None or reservation.get("status") != "pending":
+                    raise PolicyUnavailable("schedule reservation is no longer pending")
+                reservation["status"] = "completed"
+                staged.policy_schedule_reservations[job["reservation_id"]] = reservation
+                AuditOutboxOwner(staged).append_outbox(
+                    {
+                        "event_id": self._stable_id("outbox", activation_event_id),
+                        "kind": "s08_activated",
+                        "scope": scope,
+                        "candidate_id": candidate_id,
+                        "activation_event_id": activation_event_id,
+                        "active_generation": generation,
+                        "status": "pending",
+                    }
+                )
+                # Stable operation identity: the activation job id doubles as the
+                # idempotency key, so response loss is reconciled by replaying
+                # the original operation instead of guessing a fresh key.
+                operation_key = self._idempotency_key(
+                    PolicyPrincipal(
+                        subject=self._operator_subject,
+                        role="operator",
+                        scope=scope,
+                        source_id="s08-policy-worker",
+                    ),
+                    "activate",
+                    job["policy_job_id"],
+                )
+                activation_fingerprint = self._fingerprint(
+                    "activate",
+                    candidate_id,
+                    job["approval_binding_id"],
+                    job.get("activation_at"),
+                )
+                staged.idempotency[operation_key] = (
+                    activation_fingerprint,
+                    {
+                        "status": "accepted",
+                        "activation_event_id": activation_event_id,
+                        "active_generation": generation,
+                        "candidate_id": candidate_id,
                     },
                 )
-            manifest = candidate_manifest
-            staged.policy_active_projections[scope] = {
-                "schema_version": "s08-active-projection/1",
-                "scope": scope,
-                "active_generation": generation,
-                "activation_event_id": activation_event_id,
-                "candidate_id": candidate_id,
-                "manifest_id": manifest["manifest_id"],
-                "manifest_digest": manifest["digest"],
-                "approval_binding_id": job["approval_binding_id"],
-                "approval_binding_digest": content_digest(binding),
-                "validation_bundle_id": state["validation_bundle_id"],
-                "validation_bundle_digest": state["validation_bundle_digest"],
-                "recovery_release_id": state["recovery_release_id"],
-                "activated_at": now,
-                "bootstrap": False,
-                "components": manifest["components"],
-            }
-            reservation = staged.policy_schedule_reservations.get(job["reservation_id"])
-            if reservation is None or reservation.get("status") != "pending":
-                raise PolicyUnavailable("schedule reservation is no longer pending")
-            reservation["status"] = "completed"
-            staged.policy_schedule_reservations[job["reservation_id"]] = reservation
-            AuditOutboxOwner(staged).append_outbox(
-                {
-                    "event_id": self._stable_id("outbox", activation_event_id),
-                    "kind": "s08_activated",
-                    "scope": scope,
-                    "candidate_id": candidate_id,
-                    "activation_event_id": activation_event_id,
-                    "active_generation": generation,
-                    "status": "pending",
-                }
-            )
-            # Stable operation identity: the activation job id doubles as the
-            # idempotency key, so response loss is reconciled by replaying
-            # the original operation instead of guessing a fresh key.
-            operation_key = self._idempotency_key(
-                PolicyPrincipal(
-                    subject=self._operator_subject,
-                    role="operator",
-                    scope=scope,
-                    source_id="s08-policy-worker",
-                ),
-                "activate",
-                job["policy_job_id"],
-            )
-            activation_fingerprint = self._fingerprint(
-                "activate",
-                candidate_id,
-                job["approval_binding_id"],
-                job.get("activation_at"),
-            )
-            staged.idempotency[operation_key] = (
-                activation_fingerprint,
-                {
-                    "status": "accepted",
-                    "activation_event_id": activation_event_id,
-                    "active_generation": generation,
-                    "candidate_id": candidate_id,
-                },
-            )
-            self._append_audit(
-                staged,
-                action="activation",
-                principal=PolicyPrincipal(
-                    subject=self._operator_subject,
-                    role="operator",
-                    scope=scope,
-                    source_id="s08-policy-worker",
-                ),
-                result="accepted",
-                reason_code="S08_ACTIVATED",
-                details={
-                    "candidate_id": candidate_id,
-                    "activation_event_id": activation_event_id,
-                    "active_generation": generation,
-                    "operation_key": operation_key,
-                },
-            )
-            if not self._persist_worker(staged):
-                return {
-                    "status": "retry",
-                    "kind": "activation",
-                    "candidate_id": candidate_id,
-                }
+                self._append_audit(
+                    staged,
+                    action="activation",
+                    principal=PolicyPrincipal(
+                        subject=self._operator_subject,
+                        role="operator",
+                        scope=scope,
+                        source_id="s08-policy-worker",
+                    ),
+                    result="accepted",
+                    reason_code="S08_ACTIVATED",
+                    details={
+                        "candidate_id": candidate_id,
+                        "activation_event_id": activation_event_id,
+                        "active_generation": generation,
+                        "operation_key": operation_key,
+                    },
+                )
+                if not self._persist_worker(staged):
+                    return {
+                        "status": "retry",
+                        "kind": "activation",
+                        "candidate_id": candidate_id,
+                    }
             return {
                 "status": "complete",
                 "kind": "activation",
@@ -2543,28 +2695,98 @@ class PolicyGovernanceService:
             ValueError,
             RuntimeError,
         ) as error:
-            staged = copy.deepcopy(self._store)
-            staged_job = next(
-                (
-                    item
-                    for item in staged.policy_jobs
-                    if item["policy_job_id"] == job["policy_job_id"]
-                ),
-                None,
-            )
-            if staged_job is not None:
-                staged_job["status"] = "diagnostic"
-                staged_job["terminal_reason"] = f"{type(error).__name__}: {error}"
+            with self._lock:
+                # Authoritative store before any terminal classification: a
+                # stale in-memory copy must never decide that a cancelled or
+                # held candidate's unchanged state is an applicable failure.
+                self._store.reload()
+                staged = copy.deepcopy(self._store)
                 try:
-                    staged.persist()
-                    self._store = staged
-                except StaleStoreRevision:
-                    self._store.reload()
+                    settlement_now = self._trusted_time()
+                except PolicyUnavailable:
+                    return {
+                        "status": "retry",
+                        "kind": "activation",
+                        "candidate_id": candidate_id,
+                    }
+                current_job = self._owned_job(staged, job, settlement_now)
+                if current_job is None:
+                    return self._settle_stale_attempt(staged, job, now)
+                # The candidate must still be in the state the worker
+                # validated against even when the compute phase raised: a
+                # concurrent cancel or hold invalidates the still-owned job,
+                # which settles as discarded -- never a diagnostic lie and
+                # never a fake activation failure.  Only an owned, live
+                # compute failure whose claim-time state was approved or
+                # scheduled with no hold AND whose fresh state/hold still
+                # apply may become diagnostic; an already-cancelled or
+                # already-held candidate that never changed between claim
+                # and settlement (e.g. a reclaimed job) is not applicable
+                # either.
+                try:
+                    current = self._require_candidate_state(staged, candidate_id)
+                except (PolicyNotFound, KeyError):
+                    return self._settle_discarded(
+                        staged, job, now, settlement_now
+                    )
+                claim_applicable = (
+                    state is not None
+                    and state["status"] in {"approved", "scheduled"}
+                    and not claim_hold
+                )
+                try:
+                    fresh_hold = self._activation_hold(staged, scope) is not None
+                except KeyError:
+                    # Corrupt hold evidence at settlement: fail closed --
+                    # the worker must not classify any diagnostic on
+                    # unverifiable state, so the attempt settles discarded.
+                    fresh_hold = True
+                fresh_applicable = (
+                    current["status"] in {"approved", "scheduled"}
+                    and not fresh_hold
+                )
+                if not (claim_applicable and fresh_applicable):
+                    return self._settle_discarded(
+                        staged, job, now, settlement_now
+                    )
+                # The frozen scope/validity window is revalidated at the
+                # trusted settlement time on the failure path too: a compute
+                # exception landing after valid_to crossed (lease still
+                # live, state/hold unchanged) must settle as discarded --
+                # never a diagnostic -- because the activation cannot
+                # legally land at the settlement time.
+                try:
+                    self._require_candidate_scope_valid_at(
+                        staged, candidate_id, settlement_now
+                    )
+                except PolicyInvalidTransition:
+                    return self._settle_discarded(
+                        staged, job, now, settlement_now
+                    )
+                except PolicyUnavailable as scope_error:
+                    error = scope_error
+                reason_code = self._worker_reason_code("activation", error)
+                current_job["status"] = "diagnostic"
+                current_job["reason_code"] = reason_code
+                staged.policy_attempts.append(
+                    self._attempt_record(
+                        job,
+                        status="failed",
+                        started_at=now,
+                        result={"reason_code": reason_code},
+                    )
+                )
+                if not self._persist_worker(staged):
+                    return {
+                        "status": "retry",
+                        "kind": "activation",
+                        "candidate_id": candidate_id,
+                    }
             return {
                 "status": "failed",
                 "kind": "activation",
                 "candidate_id": candidate_id,
-                "error": f"{type(error).__name__}: {error}",
+                "reason_code": reason_code,
             }
 
     # ------------------------------------------------------------ bootstrap
@@ -4885,9 +5107,13 @@ class PolicyGovernanceService:
                     self._store, state["manifest_id"]
                 )
             if state.get("validation_bundle_id"):
-                workspace["validation_bundle"] = self._artifact(
+                validation_bundle = self._artifact(
                     self._store, state["validation_bundle_id"]
                 )
+                # Raw frozen-corpus outcomes remain sealed Registry evidence;
+                # the browser workspace exposes only minimized validation facts.
+                validation_bundle["results"].pop("raw_outcomes", None)
+                workspace["validation_bundle"] = validation_bundle
             if state.get("approval_binding_id"):
                 workspace["approval_binding"] = self._artifact(
                     self._store, state["approval_binding_id"]
@@ -4904,6 +5130,263 @@ class PolicyGovernanceService:
                     self._store, state, principal.scope
                 )
             return workspace
+
+    # Server-owned workspace actions: the single authority for the command
+    # surface a (status, role) pair may issue.  Every entry is exactly a
+    # command the service guards accept for this (status, role); the HTTP
+    # adapter and the React panel both consume this projection and never
+    # re-derive a transition table.
+    _S08_ADMIN_ACTIONS_BY_STATUS: dict[str, tuple[str, ...]] = {
+        "candidate": ("request_validation", "cancel"),
+        "validated": ("submit_review", "cancel"),
+        "in_review": ("cancel",),
+        "approved": ("schedule", "cancel"),
+        "scheduled": ("cancel",),
+        "active": (),
+        "superseded": (),
+        "rejected": (),
+        "cancelled": (),
+    }
+    _S08_APPROVER_ACTIONS_BY_STATUS: dict[str, tuple[str, ...]] = {
+        "candidate": (),
+        "validated": ("reject",),
+        "in_review": ("approve", "reject"),
+        "approved": (),
+        "scheduled": (),
+        "active": (),
+        "superseded": (),
+        "rejected": (),
+        "cancelled": (),
+    }
+
+    @classmethod
+    def _candidate_actions(cls, status: str, role: str) -> list[str]:
+        """The exact command names the backend accepts for this candidate
+        status and role.  Approval also requires the candidate author to
+        differ from the approver; only the Rule Administrator can author a
+        candidate, so the approver can never approve their own work and the
+        admin table never offers approve."""
+        table = (
+            cls._S08_ADMIN_ACTIONS_BY_STATUS
+            if role == "admin"
+            else cls._S08_APPROVER_ACTIONS_BY_STATUS
+        )
+        return list(table.get(status, ()))
+
+    def query_candidate_workspace(
+        self, principal: PolicyPrincipal, candidate_id: str
+    ) -> dict[str, Any]:
+        """The single atomic candidate workspace: one lock hold and one store
+        reload builds the authoritative status, revision, prior-active anchor,
+        events, job outcomes and server-owned actions together, so a worker
+        transition can never land between the reads and yield an inconsistent
+        projection.  The HTTP adapter maps this snapshot into the closed DTO
+        and owns no domain transition rules."""
+        _validate_principal(principal)
+        with self._lock:
+            self._store.reload()
+            state = self._require_candidate_state(self._store, candidate_id)
+            workspace: dict[str, Any] = {
+                "track": "C-DEMO",
+                "capability_gate": "G3",
+                "candidate_id": candidate_id,
+                "status": state["status"],
+                "manifest_id": state.get("manifest_id"),
+                "manifest_digest": state.get("manifest_digest"),
+                "validation_bundle_id": state.get("validation_bundle_id"),
+                "validation_bundle_digest": state.get("validation_bundle_digest"),
+                "approval_binding_id": state.get("approval_binding_id"),
+                "approval_binding_digest": state.get("approval_binding_digest"),
+                "activation_event_id": state.get("activation_event_id"),
+                "active_generation": state.get("active_generation"),
+                "author_subject": state.get("author_subject"),
+                "recovery_release_id": state.get("recovery_release_id"),
+                "activation_time": state.get("activation_time"),
+            }
+            if state.get("manifest_id") and state["status"] not in {
+                "candidate",
+                "cancelled",
+            }:
+                workspace["manifest"] = self._manifest(
+                    self._store, state["manifest_id"]
+                )
+            if state.get("validation_bundle_id"):
+                validation_bundle = self._artifact(
+                    self._store, state["validation_bundle_id"]
+                )
+                validation_bundle["results"].pop("raw_outcomes", None)
+                workspace["validation_bundle"] = validation_bundle
+            if state.get("approval_binding_id"):
+                workspace["approval_binding"] = self._artifact(
+                    self._store, state["approval_binding_id"]
+                )
+            # The prospective review material (component changes,
+            # applicable-check delta, behavior result, mapping ledger and
+            # unsupported report) is exposed before approval; approve()
+            # binds exactly these recomputed bytes.
+            if state.get("manifest_id") and state["status"] not in {
+                "candidate",
+                "cancelled",
+            }:
+                workspace["review_material"] = self._review_material(
+                    self._store, state, principal.scope
+                )
+            events = self._store.policy_governance_events
+            scope_events = [
+                event
+                for event in events
+                if event.get("scope") == principal.scope
+            ]
+            # The fencing revision is the global append-only ledger length,
+            # exactly the same value query_status reports and
+            # _verify_governance_revision validates against; the candidate
+            # timeline below stays scope-filtered for display.
+            workspace["governance_revision"] = len(events)
+            workspace["actor_role"] = principal.role
+            workspace["actions"] = self._candidate_actions(
+                state["status"], principal.role
+            )
+            active = self._fold_active_projection(events, principal.scope)
+            workspace["active_anchor"] = (
+                {
+                    "candidate_id": active["candidate_id"],
+                    "manifest_digest": active["manifest_digest"],
+                }
+                if active is not None
+                else None
+            )
+            # The candidate's full governance timeline: every event of the
+            # candidate itself plus the events of the originating draft (the
+            # freeze event is the only link between the two identities).
+            # Append-only ledger order keeps the list revision-ascending.
+            origin_draft_id = next(
+                (
+                    event.get("draft_id")
+                    for event in scope_events
+                    if event.get("kind") == "candidate_frozen"
+                    and event.get("candidate_id") == candidate_id
+                ),
+                None,
+            )
+            workspace["events"] = [
+                {
+                    "event_id": event["event_id"],
+                    "revision": event["revision"],
+                    "kind": event["kind"],
+                    "actor": event["actor"],
+                    "trusted_time": event["trusted_time"],
+                    "reason_code": event.get("reason_code"),
+                    "candidate_id": event.get("candidate_id"),
+                    "draft_id": event.get("draft_id"),
+                    "manifest_id": event.get("manifest_id"),
+                    "approval_binding_id": event.get("approval_binding_id"),
+                    "activation_event_id": event.get("activation_event_id"),
+                    "active_generation": event.get("active_generation"),
+                }
+                for event in scope_events
+                if event.get("candidate_id") == candidate_id
+                or (
+                    origin_draft_id is not None
+                    and event.get("draft_id") == origin_draft_id
+                )
+            ]
+            workspace["validation_outcome"] = self._validation_outcome(state)
+            workspace["activation_outcome"] = self._activation_outcome(state)
+            return workspace
+
+    def _validation_outcome(
+        self, state: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """The authoritative terminal or in-flight state of this candidate's
+        validation job, projected from the append-only ledger verdicts and
+        the durable job row; never derived by the browser.  A candidate that
+        validated and then moved on (approved/superseded/cancelled) still
+        reports the validated terminal, because the ledger event is
+        immutable."""
+        events = self._store.policy_governance_events
+        verdicts = [
+            event
+            for event in events
+            if event.get("candidate_id") == state["candidate_id"]
+            and event.get("kind") in {"validated", "rejected"}
+            and event.get("validation_bundle_id")
+        ]
+        if verdicts:
+            last = verdicts[-1]
+            if last["kind"] == "validated":
+                return {
+                    "status": "validated",
+                    "reason_code": "S08_VALIDATION_PASSED",
+                }
+            return {
+                "status": "rejected",
+                "reason_code": "S08_VALIDATION_REJECTED",
+            }
+        if state["status"] == "cancelled":
+            # A cancelled candidate has no validation terminal unless the
+            # ledger already carries a verdict (handled above).
+            return None
+        job = next(
+            (
+                item
+                for item in reversed(self._store.policy_jobs)
+                if item.get("kind") == "validation"
+                and item.get("candidate_id") == state["candidate_id"]
+            ),
+            None,
+        )
+        if job is None:
+            return None
+        if job.get("status") == "diagnostic":
+            return {
+                "status": "failed",
+                "reason_code": job.get("reason_code") or "S08_VALIDATION_INTERNAL",
+            }
+        return {"status": "pending", "reason_code": None}
+
+    def _activation_outcome(
+        self, state: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """The authoritative terminal or in-flight state of this candidate's
+        activation: the append-only ``activated`` event is the terminal
+        success (a later supersession does not rewrite it), a diagnostic
+        worker failure is the terminal failure that keeps the prior-active
+        anchor visible, and anything else is pending.  Never derived by the
+        browser.  Failure carries only the registered stable reason code."""
+        activated = [
+            event
+            for event in self._store.policy_governance_events
+            if event.get("kind") == "activated"
+            and event.get("candidate_id") == state["candidate_id"]
+        ]
+        if activated:
+            last = activated[-1]
+            return {
+                "status": "active",
+                "activation_event_id": last.get("activation_event_id"),
+                "active_generation": last.get("active_generation"),
+            }
+        if state["status"] == "cancelled":
+            # A cancelled candidate has no activation terminal unless the
+            # ledger already carries an activation (handled above).
+            return None
+        job = next(
+            (
+                item
+                for item in self._store.policy_jobs
+                if item.get("kind") == "activation"
+                and item.get("candidate_id") == state["candidate_id"]
+            ),
+            None,
+        )
+        if job is None:
+            return None
+        if job.get("status") == "diagnostic":
+            return {
+                "status": "failed",
+                "reason_code": job.get("reason_code") or "S08_ACTIVATION_INTERNAL",
+            }
+        return {"status": "pending", "reason_code": None}
 
     def query_events(self, principal: PolicyPrincipal) -> dict[str, Any]:
         _validate_principal(principal)
@@ -4976,6 +5459,136 @@ class PolicyGovernanceService:
         except StaleStoreRevision:
             self._store.reload()
             raise PolicyConflict("store revision advanced concurrently") from None
+
+    @staticmethod
+    def _owned_job(
+        staged: SQLiteTargetStore, job: dict[str, Any], now: int
+    ) -> dict[str, Any] | None:
+        """The current job row iff the exact claim still owns it AND the
+        owned lease is still live at the trusted settlement time: same
+        identity, still leased by this worker/fence/attempt under the same
+        lease_until, and ``lease_until > now``.  A stale worker (reclaimed
+        by a newer fence, completed, restarted, or expired with no
+        successor) gets ``None`` and must never touch the row or publish
+        any domain fact."""
+        for item in staged.policy_jobs:
+            if item.get("policy_job_id") != job["policy_job_id"]:
+                continue
+            if (
+                item.get("status") == "leased"
+                and item.get("worker_id") == job.get("worker_id")
+                and item.get("fence") == job.get("fence")
+                and item.get("attempt_no") == job.get("attempt_no")
+                and item.get("lease_until") == job.get("lease_until")
+                and int(item.get("lease_until", 0)) > now
+            ):
+                return item
+            return None
+        return None
+
+    @staticmethod
+    def _attempt_record(
+        job: dict[str, Any],
+        *,
+        status: str,
+        started_at: int,
+        result: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """One durable attempt record.  The claim-time ``running`` record
+        carries the base id; every terminal record uses a status-suffixed id
+        because the attempts table is append-only, so a claim, a terminal
+        outcome and a stale settlement of the same attempt never collide."""
+        suffix = "" if status == "running" else f":{status}"
+        record: dict[str, Any] = {
+            "attempt_id": PolicyGovernanceService._stable_id(
+                "policy_attempt",
+                f"{job['policy_job_id']}:{job['attempt_no']}:{job['worker_id']}{suffix}",
+            ),
+            "policy_job_id": job["policy_job_id"],
+            "kind": job["kind"],
+            "candidate_id": job.get("candidate_id"),
+            "fence": job["fence"],
+            "attempt_no": job["attempt_no"],
+            "started_at": started_at,
+            "status": status,
+        }
+        if result is not None:
+            record["result"] = result
+        return record
+
+    def _settle_stale_attempt(
+        self, staged: SQLiteTargetStore, job: dict[str, Any], now: int
+    ) -> dict[str, Any]:
+        """Ownership was lost before this worker's terminal write: the stale
+        claim settles only as its own discarded attempt; the newer lease and
+        every domain fact stay untouched.  Called with the lock already held
+        and ``staged`` a fresh copy of the current store."""
+        staged.policy_attempts.append(
+            self._attempt_record(
+                job,
+                status="discarded",
+                started_at=now,
+                result={"outcome": "discarded", "reason_code": "S08_ATTEMPT_STALE"},
+            )
+        )
+        if not self._persist_worker(staged):
+            return {
+                "status": "retry",
+                "kind": job["kind"],
+                "candidate_id": job.get("candidate_id"),
+            }
+        return {
+            "status": "discarded",
+            "kind": job["kind"],
+            "candidate_id": job.get("candidate_id"),
+            "reason_code": "S08_ATTEMPT_STALE",
+        }
+
+    def _settle_discarded(
+        self,
+        staged: SQLiteTargetStore,
+        job: dict[str, Any],
+        now: int,
+        settlement_now: int,
+    ) -> dict[str, Any]:
+        """A still-owned job whose candidate was invalidated while the
+        worker computed (cancel, hold, or any state change) settles as
+        complete + discarded: the stale verdict is never published, and the
+        job is never lied about as diagnostic.  Re-checks ownership against
+        the trusted settlement time because every terminal write must prove
+        the exact claim is still live."""
+        current_job = self._owned_job(staged, job, settlement_now)
+        if current_job is None:
+            return self._settle_stale_attempt(staged, job, now)
+        current_job["status"] = "complete"
+        current_job.pop("lease_until", None)
+        staged.policy_attempts.append(
+            self._attempt_record(
+                job,
+                status="discarded",
+                started_at=now,
+                result={"outcome": "discarded"},
+            )
+        )
+        if not self._persist_worker(staged):
+            return {
+                "status": "retry",
+                "kind": job["kind"],
+                "candidate_id": job.get("candidate_id"),
+            }
+        return {
+            "status": "discarded",
+            "kind": job["kind"],
+            "candidate_id": job.get("candidate_id"),
+        }
+
+    @staticmethod
+    def _worker_reason_code(kind: str, error: Exception) -> str:
+        """The registered stable reason code for a worker failure: raw
+        exception text and internal write points never reach the job row or
+        any public outcome."""
+        table = _WORKER_REASON_CODES.get(kind, _WORKER_REASON_CODES["activation"])
+        return table.get(type(error).__name__, table["default"])
 
     def _persist_worker(self, staged: SQLiteTargetStore) -> bool:
         try:

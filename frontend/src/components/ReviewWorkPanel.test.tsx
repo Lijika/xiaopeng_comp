@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { act, screen, waitFor } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -2978,5 +2978,204 @@ describe("ReviewWorkPanel business exception request (T05)", () => {
     expect(screen.getByTestId("exception-recovery-status")).toHaveTextContent(
       "权威状态正常",
     );
+  });
+});
+
+/** A run carrying the complete server-governed release pin.  Every governed
+ * field is optional on the type, so legacy runs omit them entirely and the
+ * panel must render placeholders instead of inventing a release. */
+function governedRunPayload(overrides: Record<string, unknown> = {}) {
+  return {
+    ...historyPayload().runs[0],
+    candidate_id: "candidate_t42pin0001",
+    manifest_id: "manifest_t42pin0001",
+    manifest_digest: "11".repeat(32),
+    validation_bundle_id: "validation_t42pin0001",
+    validation_bundle_digest: "22".repeat(32),
+    approval_binding_id: "approval_t42pin0001",
+    approval_binding_digest: "33".repeat(32),
+    activation_event_id: "activation_t42pin0001",
+    active_generation: 2,
+    release_id: "auto_lease@1.9.0",
+    release_digest: "44".repeat(32),
+    components: [
+      { type: "ruleset", id: "component_rules_t42pin", digest: "55".repeat(32) },
+      {
+        type: "semantic_catalog",
+        id: "component_catalog_t42pin",
+        digest: "66".repeat(32),
+      },
+      {
+        type: "entity_knowledge",
+        id: "component_kb_t42pin",
+        digest: "77".repeat(32),
+      },
+    ],
+    ...overrides,
+  };
+}
+
+describe("ReviewWorkPanel governed-release pin (T08)", () => {
+  it("renders the complete governed-release pin for the current run", async () => {
+    fetchRouter({
+      ...baseRoutes(),
+      [`GET ${HISTORY_PATH}`]: () =>
+        jsonResponse(historyPayload({ runs: [governedRunPayload()] })),
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    const runs = restrictedElements("review-history-run");
+    expect(runs).toHaveLength(1);
+    expect(runs[0].textContent).toContain("· 当前");
+    const pin = within(runs[0]);
+    expect(pin.getByTestId("review-run-candidate")).toHaveTextContent(
+      "candidate_t42pin0001",
+    );
+    expect(pin.getByTestId("review-run-manifest")).toHaveTextContent(
+      "manifest_t42pin0001",
+    );
+    expect(pin.getByTestId("review-run-manifest-digest")).toHaveTextContent(
+      "11".repeat(32),
+    );
+    expect(
+      pin.getByTestId("review-run-validation-bundle"),
+    ).toHaveTextContent("validation_t42pin0001");
+    expect(
+      pin.getByTestId("review-run-validation-bundle-digest"),
+    ).toHaveTextContent("22".repeat(32));
+    expect(pin.getByTestId("review-run-approval-binding")).toHaveTextContent(
+      "approval_t42pin0001",
+    );
+    expect(
+      pin.getByTestId("review-run-approval-binding-digest"),
+    ).toHaveTextContent("33".repeat(32));
+    expect(pin.getByTestId("review-run-activation-event")).toHaveTextContent(
+      "activation_t42pin0001",
+    );
+    expect(pin.getByTestId("review-run-active-generation")).toHaveTextContent(
+      "2",
+    );
+    expect(pin.getByTestId("review-run-release")).toHaveTextContent(
+      "auto_lease@1.9.0",
+    );
+    expect(pin.getByTestId("review-run-release-digest")).toHaveTextContent(
+      "44".repeat(32),
+    );
+  });
+
+  it("renders the complete governed-release pin for a non-current run", async () => {
+    fetchRouter({
+      ...baseRoutes(),
+      [`GET ${HISTORY_PATH}`]: () =>
+        jsonResponse(
+          historyPayload({
+            runs: [
+              historyPayload().runs[0],
+              {
+                ...governedRunPayload(),
+                run_id: "run_t42pinold",
+                current: false,
+                currentness_reason: "SUPERSEDED_BY_EVIDENCE_REVISION",
+              },
+            ],
+          }),
+        ),
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    const runs = restrictedElements("review-history-run");
+    expect(runs).toHaveLength(2);
+    const nonCurrent = runs.find((run) =>
+      (run.textContent ?? "").includes("· 非当前"),
+    );
+    expect(nonCurrent).toBeDefined();
+    const pin = within(nonCurrent as HTMLElement);
+    expect(pin.getByTestId("review-run-candidate")).toHaveTextContent(
+      "candidate_t42pin0001",
+    );
+    expect(pin.getByTestId("review-run-manifest")).toHaveTextContent(
+      "manifest_t42pin0001",
+    );
+    expect(pin.getByTestId("review-run-approval-binding")).toHaveTextContent(
+      "approval_t42pin0001",
+    );
+    expect(pin.getByTestId("review-run-activation-event")).toHaveTextContent(
+      "activation_t42pin0001",
+    );
+    expect(pin.getByTestId("review-run-active-generation")).toHaveTextContent(
+      "2",
+    );
+    expect(pin.getByTestId("review-run-release")).toHaveTextContent(
+      "auto_lease@1.9.0",
+    );
+  });
+
+  it("renders no governed pin block for legacy runs without governed identity", async () => {
+    const legacy = historyPayload().runs[0];
+    fetchRouter({
+      ...baseRoutes(),
+      [`GET ${HISTORY_PATH}`]: () =>
+        jsonResponse(
+          historyPayload({
+            runs: [
+              legacy,
+              {
+                ...legacy,
+                run_id: "run_t42pinlegacy",
+                current: false,
+                currentness_reason: "LEGACY_RUN_BEFORE_GOVERNED_RELEASE",
+                candidate_id: null,
+                manifest_id: null,
+                manifest_digest: null,
+                validation_bundle_id: null,
+                validation_bundle_digest: null,
+                approval_binding_id: null,
+                approval_binding_digest: null,
+                activation_event_id: null,
+                active_generation: null,
+                release_id: null,
+                release_digest: null,
+                components: null,
+              },
+            ],
+          }),
+        ),
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    const runs = restrictedElements("review-history-run");
+    expect(runs).toHaveLength(2);
+    // Legacy runs predate the governed release: they carry no governed
+    // identity, so the pin block is absent entirely and the base history row
+    // (run id, status, currentness) renders exactly as before.
+    for (const run of runs) {
+      expect(
+        within(run).queryByTestId("review-run-governed-pin"),
+      ).not.toBeInTheDocument();
+      expect(run.textContent).toContain(" · ");
+    }
+  });
+
+  it("renders the pinned components with kind, id and digest", async () => {
+    fetchRouter({
+      ...baseRoutes(),
+      [`GET ${HISTORY_PATH}`]: () =>
+        jsonResponse(historyPayload({ runs: [governedRunPayload()] })),
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    const runs = restrictedElements("review-history-run");
+    expect(runs).toHaveLength(1);
+    const components = within(runs[0]).getAllByTestId("review-run-component");
+    expect(components).toHaveLength(3);
+    expect(components[0].textContent).toContain("ruleset");
+    expect(components[0].textContent).toContain("component_rules_t42pin");
+    expect(components[0].textContent).toContain("55".repeat(32));
+    expect(components[1].textContent).toContain("semantic_catalog");
+    expect(components[1].textContent).toContain("component_catalog_t42pin");
+    expect(components[1].textContent).toContain("66".repeat(32));
+    expect(components[2].textContent).toContain("entity_knowledge");
+    expect(components[2].textContent).toContain("component_kb_t42pin");
+    expect(components[2].textContent).toContain("77".repeat(32));
   });
 });

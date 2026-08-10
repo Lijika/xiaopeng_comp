@@ -13,6 +13,7 @@ import {
   request,
   HttpError,
   isDefinitiveRejection,
+  isDefinitiveS08Rejection,
   type ApplicationHistoryResponse,
   type ClaimResult,
   type CurrentRouteResponse,
@@ -21,6 +22,17 @@ import {
   type ReleaseResult,
   type RenewResult,
   type ReviewWorkResponse,
+  type S08ApproveResponse,
+  type S08CancelResponse,
+  type S08CandidateWorkspaceResponse,
+  type S08FreezeCandidateResponse,
+  type S08ImportLegacyResponse,
+  type S08RejectResponse,
+  type S08RequestValidationResponse,
+  type S08ReviseDraftResponse,
+  type S08ScheduleResponse,
+  type S08StatusResponse,
+  type S08SubmitReviewResponse,
   type SubmitResult,
   type VerifyRecoveryResult,
   type WorkspaceResponse,
@@ -80,6 +92,13 @@ export const INTEGRATOR_REQUEST_KEY = (requestId: string) =>
   ["s02", "supplement-request", requestId] as const;
 export const EXCEPTION_VIEW_KEY = (requestId: string) =>
   ["s05", "exception-request", requestId] as const;
+export const S08_CANDIDATE_KEY = (candidateId: string) =>
+  ["s08", "candidate-workspace", candidateId] as const;
+export const S08_STATUS_KEY = ["s08", "status"] as const;
+
+/** The fixed governed scope of the C-DEMO workspace (server-owned fact, not
+ * an input; the draft metadata editor repeats it for the published record). */
+export const S08_SCOPE = "C-DEMO/demo";
 
 /**
  * The S01 manual-review command bodies are bound to the generated OpenAPI
@@ -608,4 +627,250 @@ export function useDemoEvaluationSummary(): UseQueryResult<DemoEvaluationSummary
     enabled: false,
     retry: false,
   });
+}
+
+/**
+ * The S08 command bodies are bound to the generated OpenAPI request schemas;
+ * a backend contract change fails strict typecheck here.
+ */
+export type S08ImportCommand = paths["/controlled/s08/api/commands/import_legacy"]["post"]["requestBody"]["content"]["application/json"];
+export type S08ReviseCommand = paths["/controlled/s08/api/commands/revise_draft"]["post"]["requestBody"]["content"]["application/json"];
+export type S08FreezeCommand = paths["/controlled/s08/api/commands/freeze_candidate"]["post"]["requestBody"]["content"]["application/json"];
+export type S08ValidationCommand = paths["/controlled/s08/api/commands/request_validation"]["post"]["requestBody"]["content"]["application/json"];
+export type S08SubmitReviewCommand = paths["/controlled/s08/api/commands/submit_review"]["post"]["requestBody"]["content"]["application/json"];
+export type S08ApproveCommand = paths["/controlled/s08/api/commands/approve"]["post"]["requestBody"]["content"]["application/json"];
+export type S08RejectCommand = paths["/controlled/s08/api/commands/reject"]["post"]["requestBody"]["content"]["application/json"];
+export type S08ScheduleCommand = paths["/controlled/s08/api/commands/schedule"]["post"]["requestBody"]["content"]["application/json"];
+export type S08CancelCommand = paths["/controlled/s08/api/commands/cancel"]["post"]["requestBody"]["content"]["application/json"];
+
+/**
+ * The authoritative S08 governance revision for the draft workflow.  The
+ * Admin-only status query is the only place the revision is minted before a
+ * candidate exists; every draft command fences on it.  Existence-hiding 404
+ * and other client errors are never retried; only transient statuses are.
+ */
+export function useS08Status(): UseQueryResult<S08StatusResponse> {
+  return useQuery({
+    queryKey: S08_STATUS_KEY,
+    queryFn: () =>
+      request<S08StatusResponse>(
+        `/controlled/s08/api/queries/status?scope=${encodeURIComponent(S08_SCOPE)}`,
+      ),
+    retry: retryPolicy,
+  });
+}
+
+/**
+ * The one authoritative S08 candidate workspace read.  The server owns the
+ * candidate status, digests, actions and the governance revision; the panel
+ * never derives transition rights locally.  Existence-hiding 404 and other
+ * client errors are never retried; only transient server statuses are.
+ */
+export function useCandidateWorkspace(
+  candidateId: string | null,
+): UseQueryResult<S08CandidateWorkspaceResponse> {
+  return useQuery({
+    queryKey: S08_CANDIDATE_KEY(candidateId ?? ""),
+    enabled: candidateId !== null,
+    queryFn: () =>
+      request<S08CandidateWorkspaceResponse>(
+        `/controlled/s08/api/queries/candidate/${encodeURIComponent(candidateId ?? "")}`,
+      ),
+    retry: retryPolicy,
+  });
+}
+
+/**
+ * The S08 command hooks share the review-command shape: a retry:false POST
+ * through the thin same-origin adapter whose acceptance invalidates the
+ * server-owned S08 queries (the candidate workspace first of all).  No
+ * optimistic transition is ever applied, and the panel supplies the latest
+ * authoritative ``expected_governance_revision`` from the workspace.
+ */
+function useS08CommandMutation<TResult, TCommand>(
+  path: string,
+): UseMutationResult<TResult, Error, TCommand> {
+  return useReviewCommandMutation<TResult, TCommand>(path, ["s08"]);
+}
+
+export function useImportLegacy(): UseMutationResult<
+  S08ImportLegacyResponse,
+  Error,
+  S08ImportCommand
+> {
+  return useS08CommandMutation<S08ImportLegacyResponse, S08ImportCommand>(
+    "/controlled/s08/api/commands/import_legacy",
+  );
+}
+
+export function useReviseDraft(): UseMutationResult<
+  S08ReviseDraftResponse,
+  Error,
+  S08ReviseCommand
+> {
+  return useS08CommandMutation<S08ReviseDraftResponse, S08ReviseCommand>(
+    "/controlled/s08/api/commands/revise_draft",
+  );
+}
+
+export function useFreezeCandidate(): UseMutationResult<
+  S08FreezeCandidateResponse,
+  Error,
+  S08FreezeCommand
+> {
+  return useS08CommandMutation<S08FreezeCandidateResponse, S08FreezeCommand>(
+    "/controlled/s08/api/commands/freeze_candidate",
+  );
+}
+
+export function useRequestValidation(): UseMutationResult<
+  S08RequestValidationResponse,
+  Error,
+  S08ValidationCommand
+> {
+  return useS08CommandMutation<
+    S08RequestValidationResponse,
+    S08ValidationCommand
+  >("/controlled/s08/api/commands/request_validation");
+}
+
+export function useSubmitReview(): UseMutationResult<
+  S08SubmitReviewResponse,
+  Error,
+  S08SubmitReviewCommand
+> {
+  return useS08CommandMutation<S08SubmitReviewResponse, S08SubmitReviewCommand>(
+    "/controlled/s08/api/commands/submit_review",
+  );
+}
+
+export function useApproveCandidate(): UseMutationResult<
+  S08ApproveResponse,
+  Error,
+  S08ApproveCommand
+> {
+  return useS08CommandMutation<S08ApproveResponse, S08ApproveCommand>(
+    "/controlled/s08/api/commands/approve",
+  );
+}
+
+export function useRejectCandidate(): UseMutationResult<
+  S08RejectResponse,
+  Error,
+  S08RejectCommand
+> {
+  return useS08CommandMutation<S08RejectResponse, S08RejectCommand>(
+    "/controlled/s08/api/commands/reject",
+  );
+}
+
+export function useScheduleActivation(): UseMutationResult<
+  S08ScheduleResponse,
+  Error,
+  S08ScheduleCommand
+> {
+  return useS08CommandMutation<S08ScheduleResponse, S08ScheduleCommand>(
+    "/controlled/s08/api/commands/schedule",
+  );
+}
+
+export function useCancelCandidate(): UseMutationResult<
+  S08CancelResponse,
+  Error,
+  S08CancelCommand
+> {
+  return useS08CommandMutation<S08CancelResponse, S08CancelCommand>(
+    "/controlled/s08/api/commands/cancel",
+  );
+}
+
+export type S08StatusPollOutcome =
+  | "idle"
+  | "waiting"
+  | "converged"
+  | "timed_out"
+  | "terminal";
+
+/**
+ * Bounded status polling for an asynchronous S08 owner transition
+ * (validation and activation are background jobs).  While ``active``, only
+ * the authoritative candidate workspace is refetched, at most
+ * ``maxAttempts`` times; the poll converges on the exact server status set,
+ * turns terminal on a definitive rejection or on the caller's
+ * ``alsoTerminal`` predicate (e.g. an activation outcome that ended
+ * diagnostic), and never claims convergence from an elapsed-timeout
+ * (``timed_out`` is the bounded end, never ``converged``).
+ */
+export function useS08StatusPoll(
+  candidateId: string | null,
+  active: boolean,
+  terminalStatuses: readonly string[],
+  options: {
+    intervalMs?: number;
+    maxAttempts?: number;
+    alsoTerminal?: (workspace: S08CandidateWorkspaceResponse) => boolean;
+  } = {},
+): S08StatusPollOutcome {
+  const { intervalMs = 1_500, maxAttempts = 80, alsoTerminal } = options;
+  const queryClient = useQueryClient();
+  const [outcome, setOutcome] = useState<S08StatusPollOutcome>("idle");
+  useEffect(() => {
+    if (candidateId === null || !active) {
+      setOutcome("idle");
+      return;
+    }
+    setOutcome("waiting");
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let attempts = 0;
+    const poll = async () => {
+      if (cancelled) return;
+      attempts += 1;
+      await queryClient.refetchQueries({
+        queryKey: S08_CANDIDATE_KEY(candidateId),
+      });
+      if (cancelled) return;
+      const state = queryClient.getQueryState(S08_CANDIDATE_KEY(candidateId));
+      const error = state?.error;
+      const hasError = error !== undefined && error !== null;
+      if (hasError && isDefinitiveS08Rejection(error)) {
+        setOutcome("terminal");
+        return;
+      }
+      if (!hasError) {
+        const data = queryClient.getQueryData<S08CandidateWorkspaceResponse>(
+          S08_CANDIDATE_KEY(candidateId),
+        );
+        if (data !== undefined) {
+          if (terminalStatuses.includes(data.status)) {
+            setOutcome("converged");
+            return;
+          }
+          if (alsoTerminal !== undefined && alsoTerminal(data)) {
+            setOutcome("terminal");
+            return;
+          }
+        }
+      }
+      if (attempts >= maxAttempts) {
+        setOutcome("timed_out");
+        return;
+      }
+      timer = setTimeout(poll, intervalMs);
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) clearTimeout(timer);
+    };
+  }, [
+    candidateId,
+    active,
+    terminalStatuses.join(","),
+    intervalMs,
+    maxAttempts,
+    alsoTerminal,
+    queryClient,
+  ]);
+  return outcome;
 }

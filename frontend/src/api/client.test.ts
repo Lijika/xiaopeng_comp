@@ -4,6 +4,7 @@ import {
   HttpError,
   isDefinitiveIntegratorRejection,
   isDefinitiveS05Rejection,
+  isDefinitiveS08Rejection,
   request,
 } from "./client";
 
@@ -169,5 +170,41 @@ describe("S05 definitive rejection classifier (T05)", () => {
 
   it("keeps non-HTTP transport failures unknown", () => {
     expect(isDefinitiveS05Rejection(new TypeError("fetch failed"))).toBe(false);
+  });
+});
+
+describe("S08 definitive rejection classifier (T08)", () => {
+  function httpError(status: number, errorCode: string | undefined): HttpError {
+    return new HttpError(status, errorCode === undefined ? {} : { error: errorCode });
+  }
+
+  it("treats the registered S08_FORBIDDEN 403 as definitive", () => {
+    expect(isDefinitiveS08Rejection(httpError(403, "S08_FORBIDDEN"))).toBe(true);
+  });
+
+  it("keeps a generic 403 unknown (may be a proxy or unrelated gate)", () => {
+    expect(isDefinitiveS08Rejection(httpError(403, undefined))).toBe(false);
+  });
+
+  it("treats the registered S08 404/409/422 statuses as definitive", () => {
+    for (const status of [404, 409, 422]) {
+      expect(isDefinitiveS08Rejection(httpError(status, "S08_X"))).toBe(true);
+    }
+  });
+
+  it("treats the structured S08_UNAVAILABLE 503 as definitive", () => {
+    expect(isDefinitiveS08Rejection(httpError(503, "S08_UNAVAILABLE"))).toBe(true);
+  });
+
+  it("keeps a generic or unrelated 503 unknown so the idempotency key is retained", () => {
+    expect(isDefinitiveS08Rejection(httpError(503, undefined))).toBe(false);
+    expect(isDefinitiveS08Rejection(httpError(503, "S08_REACT_UNAVAILABLE"))).toBe(
+      false,
+    );
+    expect(isDefinitiveS08Rejection(httpError(503, "S03_UNAVAILABLE"))).toBe(false);
+  });
+
+  it("keeps non-HTTP transport failures unknown", () => {
+    expect(isDefinitiveS08Rejection(new TypeError("fetch failed"))).toBe(false);
   });
 });

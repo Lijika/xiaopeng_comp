@@ -44,6 +44,23 @@ export type DemoBatchCheckResponse =
 export type DemoBatchItem = components["schemas"]["DemoBatchItem"];
 export type DemoEvaluationSummaryResponse =
   components["schemas"]["DemoEvaluationSummaryResponse"];
+export type S08CandidateWorkspaceResponse =
+  components["schemas"]["S08CandidateWorkspaceResponse"];
+export type S08ImportLegacyResponse =
+  components["schemas"]["S08ImportLegacyResponse"];
+export type S08ReviseDraftResponse =
+  components["schemas"]["S08ReviseDraftResponse"];
+export type S08FreezeCandidateResponse =
+  components["schemas"]["S08FreezeCandidateResponse"];
+export type S08RequestValidationResponse =
+  components["schemas"]["S08RequestValidationResponse"];
+export type S08SubmitReviewResponse =
+  components["schemas"]["S08SubmitReviewResponse"];
+export type S08ApproveResponse = components["schemas"]["S08ApproveResponse"];
+export type S08RejectResponse = components["schemas"]["S08RejectResponse"];
+export type S08ScheduleResponse = components["schemas"]["S08ScheduleResponse"];
+export type S08CancelResponse = components["schemas"]["S08CancelResponse"];
+export type S08StatusResponse = components["schemas"]["S08StatusResponse"];
 
 /** A structured server rejection; never invents identifiers or evidence. */
 export class HttpError extends Error {
@@ -170,6 +187,42 @@ export function isDefinitiveIntegratorRejection(
     );
   }
   return INTEGRATOR_DEFINITIVE_STATUSES.has(error.status);
+}
+
+/**
+ * The S08 command surface's definitive-rejection classifier.  The registered
+ * S08 pre-command responses are the evidence: a structured ``S08_FORBIDDEN``
+ * 403 or ``S08_UNAVAILABLE`` 503 is definitive (the governance authority
+ * failed closed before commit), as are the registered 404/409/422 statuses.
+ * A generic 403/503, an unreadable payload, or a transport/lost response
+ * stays unknown and retains the byte-identical command and key for exact
+ * replay.
+ */
+const S08_DEFINITIVE_STATUSES: ReadonlySet<number> = new Set([404, 409, 422]);
+const S08_403_DEFINITIVE_ERROR_CODES: ReadonlySet<string> = new Set([
+  "S08_FORBIDDEN",
+]);
+const S08_503_DEFINITIVE_ERROR_CODES: ReadonlySet<string> = new Set([
+  "S08_UNAVAILABLE",
+]);
+
+export function isDefinitiveS08Rejection(
+  error: unknown,
+): error is HttpError {
+  if (!(error instanceof HttpError)) return false;
+  if (error.status === 403) {
+    return (
+      error.errorCode !== undefined &&
+      S08_403_DEFINITIVE_ERROR_CODES.has(error.errorCode)
+    );
+  }
+  if (error.status === 503) {
+    return (
+      error.errorCode !== undefined &&
+      S08_503_DEFINITIVE_ERROR_CODES.has(error.errorCode)
+    );
+  }
+  return S08_DEFINITIVE_STATUSES.has(error.status);
 }
 
 /**

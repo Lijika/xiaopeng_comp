@@ -52,6 +52,35 @@ function newIdempotencyKey(): string {
   return crypto.randomUUID();
 }
 
+/** The server-owned governed-release pin value.  Every governed field is
+ * optional on the S01HistoryRun type (legacy runs predate the governed
+ * release), so absent values render a placeholder and the browser never
+ * invents a candidate, digest, or release. */
+function pinText(value: string | number | null | undefined): string {
+  return value === null || value === undefined ? "—" : String(value);
+}
+
+/** True when the run carries any server-governed release identity.  Legacy
+ * runs (which always carry a release id/digest and runtime components but
+ * never the governed candidate/manifest/validation/approval/activation
+ * fields) render exactly as before with no pin block, so the governed pin
+ * never changes the legacy history DOM. */
+function hasGovernedPin(
+  run: components["schemas"]["S01HistoryRun"],
+): boolean {
+  return [
+    run.candidate_id,
+    run.manifest_id,
+    run.manifest_digest,
+    run.validation_bundle_id,
+    run.validation_bundle_digest,
+    run.approval_binding_id,
+    run.approval_binding_digest,
+    run.activation_event_id,
+    run.active_generation,
+  ].some((value) => value !== null && value !== undefined);
+}
+
 type S01EvidenceLink = components["schemas"]["S01EvidenceLink"];
 
 type Action =
@@ -560,13 +589,109 @@ function HistorySection({
       <h3 id="review-history-title">历史（服务端权威）</h3>
       <ol data-testid="review-history-runs">
         {history.data.runs.map((run) => (
-          <li key={run.run_id}>
+          <li key={run.run_id} data-testid="review-history-run">
             {run.run_id}
             {" · "}
             {run.status}
             {" · "}
             {run.currentness_reason}
             {run.current === true ? " · 当前" : " · 非当前"}
+            {hasGovernedPin(run) && (
+              <div data-testid="review-run-governed-pin">
+                <h4>治理发布固定（服务端权威）</h4>
+                <dl className="facts">
+                  <div>
+                    <dt>候选</dt>
+                    <dd data-testid="review-run-candidate">
+                      {pinText(run.candidate_id)}
+                    </dd>
+                  </div>
+                <div>
+                  <dt>清单</dt>
+                  <dd data-testid="review-run-manifest">
+                    {pinText(run.manifest_id)}
+                  </dd>
+                </div>
+                <div>
+                  <dt>清单摘要</dt>
+                  <dd data-testid="review-run-manifest-digest">
+                    {pinText(run.manifest_digest)}
+                  </dd>
+                </div>
+                <div>
+                  <dt>验证包</dt>
+                  <dd data-testid="review-run-validation-bundle">
+                    {pinText(run.validation_bundle_id)}
+                  </dd>
+                </div>
+                <div>
+                  <dt>验证包摘要</dt>
+                  <dd data-testid="review-run-validation-bundle-digest">
+                    {pinText(run.validation_bundle_digest)}
+                  </dd>
+                </div>
+                <div>
+                  <dt>审批绑定</dt>
+                  <dd data-testid="review-run-approval-binding">
+                    {pinText(run.approval_binding_id)}
+                  </dd>
+                </div>
+                <div>
+                  <dt>审批绑定摘要</dt>
+                  <dd data-testid="review-run-approval-binding-digest">
+                    {pinText(run.approval_binding_digest)}
+                  </dd>
+                </div>
+                <div>
+                  <dt>激活事件</dt>
+                  <dd data-testid="review-run-activation-event">
+                    {pinText(run.activation_event_id)}
+                  </dd>
+                </div>
+                <div>
+                  <dt>激活代次</dt>
+                  <dd data-testid="review-run-active-generation">
+                    {pinText(run.active_generation)}
+                  </dd>
+                </div>
+                <div>
+                  <dt>发布</dt>
+                  <dd data-testid="review-run-release">
+                    {pinText(run.release_id)}
+                  </dd>
+                </div>
+                <div>
+                  <dt>发布摘要</dt>
+                  <dd data-testid="review-run-release-digest">
+                    {pinText(run.release_digest)}
+                  </dd>
+                </div>
+                <div>
+                  <dt>组件</dt>
+                  <dd data-testid="review-run-components">
+                    {run.components == null || run.components.length === 0 ? (
+                      "—"
+                    ) : (
+                      <ul>
+                        {run.components.map((component) => (
+                          <li
+                            key={`${component.type}:${component.id}`}
+                            data-testid="review-run-component"
+                          >
+                            {component.type}
+                            {" · "}
+                            {component.id}
+                            {" · "}
+                            {component.digest}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </dd>
+                </div>
+              </dl>
+              </div>
+            )}
           </li>
         ))}
       </ol>

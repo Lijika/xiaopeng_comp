@@ -6122,3 +6122,129 @@ def test_governed_pre_cutover_recovery_uses_registry_compat_release(
     recovered = restarted.process_next_job()
     assert recovered.status == "complete", recovered
     assert recovered.release_digest == stopped_spec["release_digest"]
+
+
+# --- R3: the verified-row integrity cache never leaks mutable objects ------
+
+
+def test_integrity_cache_isolation_returns_fresh_values(tmp_path: Path) -> None:
+    """Mutating a decoded immutable row, idempotency result or outbox body
+    in memory must not poison later reloads: every reload returns persisted
+    values in a different object graph, and a fresh owner agrees with the
+    authoritative SQLite snapshot."""
+    state_path = tmp_path / "cache-isolation.sqlite3"
+    service = ControlledScenarioService(
+        fixture_root=ROOT / "fixtures" / "applications",
+        rules_path=ROOT / "configs" / "rules_auto_lease.yaml",
+        state_path=state_path,
+    )
+    admitted = service.submit_demo(
+        principal=TEST_INTEGRATOR,
+        scenario_id="app_r53_bad_engine.json",
+        idempotency_key="s01-cache-isolation",
+    )
+    assert admitted.disposition is AdmissionDisposition.ACCEPTED
+    service._store.reload()
+
+    audit_row = service._store.audit_events[0]
+    original_action = audit_row["action"]
+    audit_row["action"] = "memory-only"
+
+    key, (fingerprint, result) = next(iter(service._store.idempotency.items()))
+    result["poisoned"] = True
+
+    outbox_row = service._store.outbox[0]
+    original_status = outbox_row["status"]
+    outbox_row["status"] = "poisoned"
+
+    service._store.reload()
+    reloaded_audit = service._store.audit_events[0]
+    assert reloaded_audit is not audit_row
+    assert reloaded_audit["action"] == original_action
+    _, reloaded_result = service._store.idempotency[key]
+    assert reloaded_result is not result
+    assert reloaded_result.get("poisoned") is None
+    assert service._store.outbox[0]["status"] == original_status
+
+    fresh = ControlledScenarioService(
+        fixture_root=ROOT / "fixtures" / "applications",
+        rules_path=ROOT / "configs" / "rules_auto_lease.yaml",
+        state_path=state_path,
+    )
+    assert fresh._store.audit_events[0]["action"] == original_action
+    assert fresh._store.outbox[0]["status"] == original_status
+    _, fresh_result = fresh._store.idempotency[key]
+    assert fresh_result.disposition == admitted.disposition
+
+
+def test_authoritative_reload_isolates_copied_store_mutations(
+    tmp_path: Path,
+) -> None:
+    """A copied store must not share cache-derived mutable values with its
+    source: reloading the copy re-reads SQLite into fresh objects, so a
+    mutation through the copy is invisible to the source."""
+    state_path = tmp_path / "copy-isolation.sqlite3"
+    service = ControlledScenarioService(
+        fixture_root=ROOT / "fixtures" / "applications",
+        rules_path=ROOT / "configs" / "rules_auto_lease.yaml",
+        state_path=state_path,
+    )
+    admitted = service.submit_demo(
+        principal=TEST_INTEGRATOR,
+        scenario_id="app_r53_bad_engine.json",
+        idempotency_key="s01-copy-isolation",
+    )
+    assert admitted.disposition is AdmissionDisposition.ACCEPTED
+    service._store.reload()
+    source_value = service._store.audit_events[0]["action"]
+
+    clone = copy.deepcopy(service._store)
+    clone.reload()
+    clone.audit_events[0]["action"] = "clone-only"
+    assert service._store.audit_events[0]["action"] == source_value
+    service._store.reload()
+    assert service._store.audit_events[0]["action"] == source_value
+
+
+def test_idempotency_fingerprint_cache_warm_hit_rejects_tamper_like_fresh(
+    tmp_path: Path,
+) -> None:
+    """A warm idempotency-cache hit must never bypass the fingerprint seal:
+    after warm-up, mutating only the persisted SQLite fingerprint rejects on
+    the warm owner exactly as on a fresh owner (fail-closed), while
+    same-key/same-content replay keeps working on a pristine store."""
+    state_path = tmp_path / "fingerprint-cache.sqlite3"
+
+    def build() -> ControlledScenarioService:
+        return ControlledScenarioService(
+            fixture_root=ROOT / "fixtures" / "applications",
+            rules_path=ROOT / "configs" / "rules_auto_lease.yaml",
+            state_path=state_path,
+        )
+
+    service = build()
+    admitted = service.submit_demo(
+        principal=TEST_INTEGRATOR,
+        scenario_id="app_r53_bad_engine.json",
+        idempotency_key="s01-fingerprint-cache",
+    )
+    assert admitted.disposition is AdmissionDisposition.ACCEPTED
+    replayed = service.submit_demo(
+        principal=TEST_INTEGRATOR,
+        scenario_id="app_r53_bad_engine.json",
+        idempotency_key="s01-fingerprint-cache",
+    )
+    assert replayed.disposition is AdmissionDisposition.ACCEPTED
+    assert replayed.replayed is True
+    service._store.reload()  # warm the verified-row cache
+    key = next(iter(service._store.idempotency))
+    with sqlite3.connect(state_path) as connection:
+        connection.execute(
+            "UPDATE idempotency SET fingerprint = ? WHERE command_key = ?",
+            ("tampered-fingerprint", key),
+        )
+    with pytest.raises(RuntimeError) as warm_error:
+        service._store.reload()
+    with pytest.raises(RuntimeError) as fresh_error:
+        build()
+    assert type(warm_error.value) is type(fresh_error.value)

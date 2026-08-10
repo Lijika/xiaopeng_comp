@@ -1514,6 +1514,21 @@ def test_s01_manual_review_openapi_contract_is_closed() -> None:
         }
 
 
+def test_s01_lifespan_prewarms_openapi_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastapi.testclient import TestClient
+    from task4_consistency.web import app as webapp
+
+    monkeypatch.setattr(webapp, "S01_REQUIRE_CONFIGURED_STARTUP", False)
+    monkeypatch.setattr(webapp, "S01_BACKGROUND_ENABLED", False)
+    monkeypatch.setattr(webapp.app, "openapi_schema", None)
+
+    with TestClient(webapp.app) as client:
+        assert webapp.app.openapi_schema is not None
+        assert client.get("/openapi.json").status_code == 200
+
+
 @pytest.mark.parametrize(
     "cas_fault",
     (

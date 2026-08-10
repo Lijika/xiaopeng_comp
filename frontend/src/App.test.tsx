@@ -1026,3 +1026,85 @@ describe("queue shell (App)", () => {
     );
   });
 });
+
+describe("governed policy-release shell (T08)", () => {
+  const CANDIDATE = "candidate_t08app000000000000000000000000";
+
+  it("mounts the S08 shell on /controlled/s08/react without a candidate and never issues S01 reads", async () => {
+    // The Admin draft workflow fences every command on the server revision,
+    // so the one S08 status query is the expected and authorized read of
+    // this shell; S01/S02/S05 reads and any POST must never fire.
+    const router = fetchRouter({
+      "GET /controlled/s08/api/queries/status": () =>
+        new Response(
+          JSON.stringify({
+            track: "C-DEMO",
+            capability_gate: "G3",
+            bootstrap: true,
+            scope: "C-DEMO/demo",
+            governance_revision: 3,
+            active_generation: 1,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    window.history.pushState(null, "", "/controlled/s08/react");
+    renderWithQuery(<App />);
+    await waitFor(() =>
+      expect(screen.getByTestId("t08-draft-workflow")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("s08-boundary-track")).toHaveTextContent(
+      "C-DEMO",
+    );
+    expect(screen.getByTestId("s08-boundary-gate")).toHaveTextContent("S08");
+    expect(screen.queryByTestId("queue-panel")).not.toBeInTheDocument();
+    expect(
+      router.calls.filter((call) => call.url.includes("/controlled/s01/")),
+    ).toHaveLength(0);
+    expect(
+      router.calls.filter((call) => call.url.includes("/controlled/s02/")),
+    ).toHaveLength(0);
+    expect(
+      router.calls.filter((call) => call.url.includes("/controlled/s05/")),
+    ).toHaveLength(0);
+    expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(
+      0,
+    );
+  });
+
+  it("mounts the candidate workspace from the non-sensitive URL navigation state and never issues S01 reads", async () => {
+    const router = fetchRouter({
+      [`GET /controlled/s08/api/queries/candidate/${CANDIDATE}`]: () =>
+        new Response(
+          JSON.stringify({
+            track: "C-DEMO",
+            capability_gate: "G3",
+            candidate_id: CANDIDATE,
+            status: "in_review",
+            governance_revision: 3,
+            actor_role: "approver",
+            actions: ["approve", "reject"],
+            events: [],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    window.history.pushState(
+      null,
+      "",
+      `/controlled/s08/react?candidate=${encodeURIComponent(CANDIDATE)}`,
+    );
+    renderWithQuery(<App />);
+    await waitFor(() =>
+      expect(screen.getByTestId("t08-workspace-status")).toHaveTextContent(
+        "in_review",
+      ),
+    );
+    expect(
+      router.calls.filter((call) => call.url.includes("/controlled/s01/")),
+    ).toHaveLength(0);
+    expect(
+      router.calls.filter((call) => call.url.includes("/controlled/s02/")),
+    ).toHaveLength(0);
+  });
+});
