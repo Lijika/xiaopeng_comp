@@ -2552,3 +2552,272 @@ def test_loopback_audit_or_storage_failure_creates_no_visible_target_revision(
         )
         assert queue.status == 200
         assert queue.json() == {"items": [], "recovery_items": [], "projection_watermark": 0}
+
+
+# ---------------------------------------------------------------------------
+# Architecture preflight review-round-1 regression (S08 router registration).
+# The S08 HTTP adapter resolves authority per FastAPI app: registration binds
+# the application module on app.state, requests resolve it from request.app,
+# same-app/same-module registration is idempotent, a conflicting module for
+# an already registered app is rejected atomically, and two apps in one
+# process stay isolated.  See /tmp/codex/architecture-preflight-review-
+# round-1-fix-brief.md finding S1.
+# ---------------------------------------------------------------------------
+
+
+def test_s08_http_direct_import_is_cycle_free() -> None:
+    """Direct import of the S08 HTTP adapter loads no application module and
+    introduces no import cycle.
+
+    The assertion runs in an isolated child process (round-2 hardening,
+    SP-R2-1): popping the module out of sys.modules in-process would leave the
+    parent package attribute bound to a temporary module, so the parent
+    pytest process keeps exactly one S08 module identity.
+    """
+    script = """
+import sys
+import task4_consistency.web.s08_http as s08_http
+assert "task4_consistency.web.app" not in sys.modules, "app module imported"
+assert hasattr(s08_http, "s08_router")
+assert hasattr(s08_http, "register_router")
+assert len(s08_http.s08_router.routes) == 17
+assert not hasattr(s08_http, "_app"), "module-level _app authority found"
+print("S08_DIRECT_IMPORT_OK")
+"""
+    env = os.environ.copy()
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "S08_DIRECT_IMPORT_OK" in result.stdout
+
+
+def _s08_dummy_module(
+    *,
+    credential: str,
+    subject: str,
+    scope_marker: str,
+) -> Any:
+    """A self-contained stand-in application module for registration tests:
+    distinct credentials plus a fake governed service whose status query
+    echoes a per-module marker through a valid S08StatusResponse shape."""
+    import types
+
+    def _bearer(request: Any, expected: str) -> bool:
+        return request.headers.get("Authorization") == f"Bearer {expected}"
+
+    service = types.SimpleNamespace(
+        query_status=lambda principal: {
+            "track": "C-DEMO",
+            "capability_gate": "G3",
+            "scope": scope_marker,
+            "governance_revision": 1,
+            "bootstrap": True,
+            "watermark": 0,
+        }
+    )
+    return types.SimpleNamespace(
+        S08_SERVICE=service,
+        S08_ADMIN_CREDENTIAL=credential,
+        S08_ADMIN_SUBJECT=subject,
+        S08_APPROVER_CREDENTIAL="",
+        S08_APPROVER_SUBJECT="",
+        S08_OPERATOR_CREDENTIAL="",
+        S08_OPERATOR_SUBJECT="",
+        _s01_has_credential=_bearer,
+        _s01_disable_cache=lambda response: None,
+    )
+
+
+def test_s08_router_registration_is_idempotent() -> None:
+    """Registering the same app and authority twice leaves route objects,
+    effective S08 route count, route order and OpenAPI unchanged at 17."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from task4_consistency.web import s08_http
+
+    app = FastAPI()
+    module = _s08_dummy_module(
+        credential="idem-admin", subject="idem-admin-subject", scope_marker="C-DEMO/idem"
+    )
+    s08_http.register_router(app, module)
+    routes_before = list(app.routes)
+    openapi_before = app.openapi()
+    s08_before = [
+        (path, method)
+        for path, item in openapi_before["paths"].items()
+        if path.startswith("/controlled/s08")
+        for method in item
+        if method in {"get", "post"}
+    ]
+    assert len(s08_before) == 17
+
+    s08_http.register_router(app, module)  # same app, same module -> no-op
+
+    assert list(app.routes) == routes_before
+    # Drop the cached schema so the comparison is an independent regeneration.
+    app.openapi_schema = None
+    assert app.openapi() == openapi_before
+    s08_after = [
+        (path, method)
+        for path, item in app.openapi()["paths"].items()
+        if path.startswith("/controlled/s08")
+        for method in item
+        if method in {"get", "post"}
+    ]
+    assert s08_after == s08_before
+    assert len(s08_after) == 17
+    with TestClient(app) as client:
+        response = client.get(
+            "/controlled/s08/api/queries/status",
+            headers={"Authorization": "Bearer idem-admin"},
+        )
+        assert response.status_code == 200
+        assert response.json()["scope"] == "C-DEMO/idem"
+
+
+def test_s08_router_rejects_conflicting_binding() -> None:
+    """Registering the same app with a second authority raises a
+    deterministic exception and leaves the original binding and routes
+    unchanged."""
+    from fastapi import FastAPI
+
+    from task4_consistency.web import s08_http
+
+    app = FastAPI()
+    first = _s08_dummy_module(
+        credential="conflict-admin", subject="conflict-a", scope_marker="C-DEMO/first"
+    )
+    second = _s08_dummy_module(
+        credential="conflict-admin-2", subject="conflict-b", scope_marker="C-DEMO/second"
+    )
+    s08_http.register_router(app, first)
+    routes_before = list(app.routes)
+    openapi_before = app.openapi()
+
+    with pytest.raises(RuntimeError):
+        s08_http.register_router(app, second)
+
+    assert (
+        getattr(app.state, s08_http._S08_APP_MODULE_STATE_KEY, None) is first
+    )
+    assert list(app.routes) == routes_before
+    # Drop the cached schema so the comparison is an independent regeneration.
+    app.openapi_schema = None
+    assert app.openapi() == openapi_before
+
+
+def test_s08_router_bindings_are_app_scoped() -> None:
+    """Two FastAPI apps registered with distinct service/credential modules
+    keep every request bound to its own module after both registrations."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from task4_consistency.web import s08_http
+
+    app_one = FastAPI()
+    app_two = FastAPI()
+    module_one = _s08_dummy_module(
+        credential="app1-admin", subject="app1-subject", scope_marker="C-DEMO/one"
+    )
+    module_two = _s08_dummy_module(
+        credential="app2-admin", subject="app2-subject", scope_marker="C-DEMO/two"
+    )
+    s08_http.register_router(app_one, module_one)
+    s08_http.register_router(app_two, module_two)
+
+    with TestClient(app_one) as client_one, TestClient(app_two) as client_two:
+        one = client_one.get(
+            "/controlled/s08/api/queries/status",
+            headers={"Authorization": "Bearer app1-admin"},
+        )
+        assert one.status_code == 200
+        assert one.json()["scope"] == "C-DEMO/one"
+        two = client_two.get(
+            "/controlled/s08/api/queries/status",
+            headers={"Authorization": "Bearer app2-admin"},
+        )
+        assert two.status_code == 200
+        assert two.json()["scope"] == "C-DEMO/two"
+        # Cross-app credentials resolve against the wrong app's authority.
+        denied = client_one.get(
+            "/controlled/s08/api/queries/status",
+            headers={"Authorization": "Bearer app2-admin"},
+        )
+        assert denied.status_code == 403
+        assert denied.json()["detail"]["error"] == "S08_FORBIDDEN"
+
+
+def test_s08_public_factories_keep_single_registration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated public create_app() and create_s01_test_app() calls preserve
+    one shared app and one S08 registration."""
+    import task4_consistency.web.app as webapp
+
+    state_path = Path(tempfile.mkdtemp(prefix="xiaopeng-s01-factory-")) / "target.sqlite3"
+    globals_saved = {
+        name: getattr(webapp, name, None)
+        for name in (
+            "S08_SERVICE",
+            "S01_SERVICE",
+            "S01_TEST_DRIVER",
+            "S01_BACKGROUND_ENABLED",
+            "S01_REQUIRE_CONFIGURED_STARTUP",
+        )
+    }
+    try:
+        monkeypatch.setenv("TASK4_S01_TEST_STATE_PATH", str(state_path))
+        monkeypatch.setenv(
+            "TASK4_S01_TEST_FIXTURE_ROOT", str(ROOT / "fixtures" / "applications")
+        )
+        monkeypatch.setenv("TASK4_S01_TEST_AUDIT_AVAILABLE", "1")
+        monkeypatch.setenv("TASK4_S01_TEST_STORAGE_AVAILABLE", "1")
+        monkeypatch.setenv("TASK4_S01_TEST_BACKGROUND_ENABLED", "0")
+        monkeypatch.setattr(webapp, "S08_CONFIGURED", True)
+        for name, value in (
+            ("S08_ADMIN_CREDENTIAL", "factory-admin-credential"),
+            ("S08_ADMIN_SUBJECT", "factory-admin"),
+            ("S08_APPROVER_CREDENTIAL", "factory-approver-credential"),
+            ("S08_APPROVER_SUBJECT", "factory-approver"),
+            ("S08_OPERATOR_CREDENTIAL", "factory-operator-credential"),
+            ("S08_OPERATOR_SUBJECT", "factory-operator"),
+        ):
+            monkeypatch.setattr(webapp, name, value)
+
+        first = webapp.create_s01_test_app()
+        second = webapp.create_s01_test_app()
+        assert first is second
+        assert webapp.create_app() is first
+
+        spec = first.openapi()
+        s08_paths = [
+            path
+            for path in spec["paths"]
+            if path.startswith("/controlled/s08")
+        ]
+        assert len(s08_paths) == 17
+        from task4_consistency.web import s08_http
+
+        assert (
+            getattr(first.state, s08_http._S08_APP_MODULE_STATE_KEY, None)
+            is webapp
+        )
+        # One-process module identity after the child-process direct-import
+        # check (SP-R2-1): the parent package attribute, sys.modules and a
+        # subsequent package import all resolve the same S08 module.
+        import task4_consistency.web as web_pkg
+        import task4_consistency.web.s08_http as s08_via_import
+
+        assert web_pkg.s08_http is s08_via_import
+        assert sys.modules["task4_consistency.web.s08_http"] is s08_via_import
+    finally:
+        for name, saved in globals_saved.items():
+            setattr(webapp, name, saved)
