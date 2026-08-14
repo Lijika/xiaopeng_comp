@@ -119,6 +119,17 @@ S08_APPROVER_CREDENTIAL = os.environ.get("TASK4_S08_APPROVER_CREDENTIAL", "").st
 S08_APPROVER_SUBJECT = os.environ.get("TASK4_S08_APPROVER_SUBJECT", "").strip()
 S08_OPERATOR_CREDENTIAL = os.environ.get("TASK4_S08_OPERATOR_CREDENTIAL", "").strip()
 S08_OPERATOR_SUBJECT = os.environ.get("TASK4_S08_OPERATOR_SUBJECT", "").strip()
+# S09 least-privilege diagnostic identities: one separate credential and
+# subject per namespace (reproduction replay vs counterfactual simulation),
+# never shared with the activation operator.
+S09_REPLAY_CREDENTIAL = os.environ.get("TASK4_S09_REPLAY_CREDENTIAL", "").strip()
+S09_REPLAY_SUBJECT = os.environ.get("TASK4_S09_REPLAY_SUBJECT", "").strip()
+S09_SIMULATION_CREDENTIAL = os.environ.get(
+    "TASK4_S09_SIMULATION_CREDENTIAL", ""
+).strip()
+S09_SIMULATION_SUBJECT = os.environ.get(
+    "TASK4_S09_SIMULATION_SUBJECT", ""
+).strip()
 S08_MIGRATION_ADMIN_SUBJECT = (
     os.environ.get("TASK4_S08_MIGRATION_ADMIN_SUBJECT", "").strip()
     or "c-demo-migration-admin"
@@ -147,8 +158,65 @@ S08_CONFIGURED = bool(
     )
     == 3
 )
+
+
+def _s09_diagnostic_configuration_valid() -> bool:
+    """The S09 configuration gate for replay/simulation identities.
+
+    Every replay and simulation credential/subject must be present and all
+    five controlled identities (admin, approver, activation operator,
+    replay operator, simulation operator) must be mutually unique in both
+    credentials and subjects.  Missing or aliased S09 configuration makes
+    diagnostic authorization fail closed; it never changes S08 command
+    authorization, which is gated by ``S08_CONFIGURED`` alone."""
+    return bool(
+        S09_REPLAY_CREDENTIAL
+        and S09_REPLAY_SUBJECT
+        and S09_SIMULATION_CREDENTIAL
+        and S09_SIMULATION_SUBJECT
+        and len(
+            {
+                S08_ADMIN_CREDENTIAL,
+                S08_APPROVER_CREDENTIAL,
+                S08_OPERATOR_CREDENTIAL,
+                S09_REPLAY_CREDENTIAL,
+                S09_SIMULATION_CREDENTIAL,
+            }
+        )
+        == 5
+        and len(
+            {
+                S08_ADMIN_SUBJECT,
+                S08_APPROVER_SUBJECT,
+                S08_OPERATOR_SUBJECT,
+                S09_REPLAY_SUBJECT,
+                S09_SIMULATION_SUBJECT,
+            }
+        )
+        == 5
+    )
 S08_SERVICE: PolicyGovernanceService | None = None
 S08_DEFAULT_KB_PATH = ROOT / "configs" / "kb" / "entity_kb.json"
+
+
+def _s09_lifecycle_impact_snapshot(
+    owner: Any, final_impact_digest: str | None = None
+) -> dict[str, Any]:
+    """The S09 cross-owner read seam: Governance asks the Lifecycle to
+    build the read-only impact snapshot over the same physical store
+    snapshot Governance already reloaded.  Resolves the live S01 service at
+    call time because the Governance service is constructed first."""
+    if S01_SERVICE is None:
+        raise RuntimeError("S01 lifecycle authority is not configured")
+    return S01_SERVICE.build_policy_impact_snapshot(owner, final_impact_digest)
+
+
+def _s09_lifecycle_diagnostic_snapshot(
+    owner: Any, application_id: str
+) -> dict[str, Any]:
+    if S01_SERVICE is None:
+        raise RuntimeError("S01 lifecycle authority is not configured")
+    return S01_SERVICE.build_policy_diagnostic_snapshot(owner, application_id)
 
 
 def _s08_policy_service(
@@ -180,6 +248,8 @@ def _s08_policy_service(
             corpus_root=corpus_root,
             clock=clock,
             fault_injector=fault_injector,
+            lifecycle_snapshot_provider=_s09_lifecycle_impact_snapshot,
+            diagnostic_snapshot_provider=_s09_lifecycle_diagnostic_snapshot,
         )
     except Exception:
         return None
@@ -321,6 +391,11 @@ class S01BackgroundRuntime:
                 )
                 if policy_process is not None:
                     policy_process()
+                impact_process = getattr(
+                    self._service, "process_next_policy_impact", None
+                )
+                if impact_process is not None:
+                    impact_process()
             except Exception:
                 reason_code = "S01_BACKGROUND_RUNTIME_EXCEPTION"
                 self._mark_unhealthy(reason_code)
@@ -454,6 +529,7 @@ class OptionalTokenAuth(BaseHTTPMiddleware):
         "/controlled/s02",
         "/controlled/s05",
         "/controlled/s08",
+        "/controlled/s09",
     )
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
@@ -1266,6 +1342,47 @@ class S01ApplicationHistoryResponse(BaseModel):
     corrections: list[S01HistoryCorrection]
     business_exceptions: list[S01HistoryBusinessException]
     attachment_versions: list[S01HistoryAttachmentVersion]
+
+
+class S09ImpactDispositionMember(BaseModel):
+    """The minimized per-member impact consumption receipt: identity,
+    partition, required/current disposition, target generation and the
+    single Operational Re-evaluation job reference.  No raw field value,
+    OCR text, attachment locator or free text is ever exposed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    application_id: str
+    cycle: int
+    partition: str
+    required_disposition: str
+    disposition: str
+    target_generation: int
+    reevaluation_job_id: str | None = None
+    reevaluation_job_count: int = 0
+
+
+class S09ImpactDispositionsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    final_impact_digest: str
+    member_count: int
+    unconsumed_count: int
+    members: list[S09ImpactDispositionMember]
+    projection_watermark: int = 0
+
+
+class S09ImpactDispositionsSummaryResponse(BaseModel):
+    """The minimized Reviewer view: aggregate digest, counts and projection
+    watermark only; per-member application/job receipts stay behind the
+    authorized audit/reconciliation route."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    final_impact_digest: str
+    member_count: int
+    unconsumed_count: int
+    projection_watermark: int = 0
 
 
 class S01ClaimResult(BaseModel):
@@ -4229,6 +4346,65 @@ def controlled_s04_demo_application_history(
         return _s01_service().application_history_view(
             principal=principal,
             application_id=application_id,
+        )
+    except QueryNotFound as error:
+        raise _s03_not_found(error) from error
+
+
+@app.get(
+    "/controlled/s01/api/queries/impact-dispositions",
+    response_model=S09ImpactDispositionsSummaryResponse,
+    response_model_exclude_none=True,
+    responses={
+        404: {"model": S01ErrorResponse},
+    },
+)
+def controlled_s09_impact_dispositions(
+    request: Request,
+    response: Response,
+    final_impact_digest: str,
+) -> dict[str, Any]:
+    """The minimized Reviewer view of one final impact manifest: aggregate
+    digest/count/watermark only.  Per-member receipts live behind the
+    audit/reconciliation route."""
+    _s01_disable_cache(response)
+    principal = _s04_demo_reviewer_principal(request)
+    try:
+        return _s01_service().impact_dispositions_view(
+            principal=principal,
+            final_impact_digest=final_impact_digest,
+        )
+    except QueryNotFound as error:
+        raise _s03_not_found(error) from error
+
+
+@app.get(
+    "/controlled/s01/api/queries/impact-dispositions/reconciliation",
+    response_model=S09ImpactDispositionsResponse,
+    response_model_exclude_none=True,
+    responses={
+        404: {"model": S01ErrorResponse},
+    },
+)
+def controlled_s09_impact_dispositions_reconciliation(
+    request: Request,
+    response: Response,
+    final_impact_digest: str,
+) -> dict[str, Any]:
+    """The authorized audit/reconciliation view: per-member application and
+    reevaluation-job receipts for one final impact manifest, bound to the
+    registered auditor credential and the C-DEMO resource scope."""
+    _s01_disable_cache(response)
+    principal = _s01_require_auditor(request)
+    try:
+        return _s01_service().impact_dispositions_view(
+            principal=S01CommandPrincipal(
+                subject=principal.subject,
+                role="auditor",
+                scope=principal.scope,
+                source_id="c-demo-audit-console",
+            ),
+            final_impact_digest=final_impact_digest,
         )
     except QueryNotFound as error:
         raise _s03_not_found(error) from error

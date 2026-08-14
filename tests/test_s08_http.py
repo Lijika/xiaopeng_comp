@@ -32,6 +32,8 @@ SOURCE_BUNDLE_ID = "c-demo-legacy-baseline/1"
 ADMIN_CREDENTIAL = "s08-registered-admin-test-credential"
 APPROVER_CREDENTIAL = "s08-registered-approver-test-credential"
 OPERATOR_CREDENTIAL = "s08-registered-operator-test-credential"
+REPLAY_CREDENTIAL = "s09-registered-replay-test-credential"
+SIMULATION_CREDENTIAL = "s09-registered-simulation-test-credential"
 _POLL_TIMEOUT_SECONDS = 8.0
 
 
@@ -45,6 +47,10 @@ def s08_test_loopback(
         "TASK4_S08_APPROVER_SUBJECT": "c-demo-policy-approver",
         "TASK4_S08_OPERATOR_CREDENTIAL": OPERATOR_CREDENTIAL,
         "TASK4_S08_OPERATOR_SUBJECT": "c-demo-policy-operator",
+        "TASK4_S09_REPLAY_CREDENTIAL": REPLAY_CREDENTIAL,
+        "TASK4_S09_REPLAY_SUBJECT": "c-demo-replay-operator",
+        "TASK4_S09_SIMULATION_CREDENTIAL": SIMULATION_CREDENTIAL,
+        "TASK4_S09_SIMULATION_SUBJECT": "c-demo-simulation-operator",
         # Uvicorn imports the module before invoking the test factory.  Keep
         # that unused default wiring fail-closed so only the explicit test
         # authority performs the governed bootstrap.
@@ -99,6 +105,14 @@ def operator_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {OPERATOR_CREDENTIAL}"}
 
 
+def replay_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {REPLAY_CREDENTIAL}"}
+
+
+def simulation_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {SIMULATION_CREDENTIAL}"}
+
+
 def _json(server: UvicornLoopback, method: str, path: str, body: dict[str, Any] | None = None,
           headers: dict[str, str] | None = None) -> dict[str, Any]:
     response = server.request(method, path, body=body, headers=headers, use_session=False)
@@ -108,7 +122,47 @@ def _json(server: UvicornLoopback, method: str, path: str, body: dict[str, Any] 
 
 def _post_command(server: UvicornLoopback, name: str, body: dict[str, Any],
                   headers: dict[str, str]) -> dict[str, Any]:
-    return _json(server, "POST", f"/controlled/s08/api/commands/{name}", body, headers)
+    prefix = (
+        "/controlled/s09"
+        if name == "preview_impact"
+        else "/controlled/s08"
+    )
+    return _json(server, "POST", f"{prefix}/api/commands/{name}", body, headers)
+
+
+def _preview_and_approve(
+    server: UvicornLoopback,
+    candidate_id: str,
+    activation_time: int,
+    recovery_release_id: str,
+    idempotency_key: str,
+) -> dict[str, Any]:
+    """Preview the immutable conservative impact and bind its exact digest
+    in the approval (the S09 approval contract)."""
+    preview = _post_command(
+        server,
+        "preview_impact",
+        {
+            "candidate_id": candidate_id,
+            "idempotency_key": f"{idempotency_key}-preview",
+            "expected_governance_revision": _governance_revision(server),
+        },
+        admin_headers(),
+    )
+    assert preview["status"] == "accepted", preview
+    return _post_command(
+        server,
+        "approve",
+        {
+            "candidate_id": candidate_id,
+            "activation_time": activation_time,
+            "recovery_release_id": recovery_release_id,
+            "preview_manifest_id": preview["manifest_id"],
+            "idempotency_key": idempotency_key,
+            "expected_governance_revision": _governance_revision(server),
+        },
+        approver_headers(),
+    )
 
 
 def _governance_revision(server: UvicornLoopback) -> int:
@@ -299,17 +353,18 @@ def test_first_governed_release_activates_and_new_run_pins_complete_manifest(
         # Leave enough room for approval/status requests before the
         # non-retroactive schedule check, while staying inside the poll window.
         activation_time = int(time.time()) + 5
-        approval_result = _post_command(
+        approval_result = _preview_and_approve(
+
             server,
-            "approve",
-            {
-                "candidate_id": candidate_id,
-                "activation_time": activation_time,
-                "recovery_release_id": bootstrap["candidate_id"],
-                "idempotency_key": "s08-tracer-approve-1",
-                "expected_governance_revision": _governance_revision(server),
-            },
-            approver_headers(),
+
+            candidate_id,
+
+            activation_time,
+
+            bootstrap["candidate_id"],
+
+            "s08-tracer-approve-1",
+
         )
         assert approval_result["status"] == "accepted"
         approval_binding_id = approval_result["approval_binding_id"]
@@ -445,6 +500,7 @@ def test_role_auth_claim_labels_stop_activation_and_restart_reconciliation(
                 "candidate_id": "candidate_000000000000000000000000",
                 "activation_time": 4102444800,
                 "recovery_release_id": "candidate_000000000000000000000000",
+                "preview_manifest_id": "preview_sha256_" + "1" * 64,
                 "idempotency_key": "role-approve-1",
                 "expected_governance_revision": 0,
             },
@@ -563,17 +619,18 @@ def test_role_auth_claim_labels_stop_activation_and_restart_reconciliation(
             admin_headers(),
         )
         activation_time = int(time.time()) + 30
-        approval = _post_command(
+        approval = _preview_and_approve(
+
             server,
-            "approve",
-            {
-                "candidate_id": candidate_id,
-                "activation_time": activation_time,
-                "recovery_release_id": active["candidate_id"],
-                "idempotency_key": "drill-approve-1",
-                "expected_governance_revision": _governance_revision(server),
-            },
-            approver_headers(),
+
+            candidate_id,
+
+            activation_time,
+
+            active["candidate_id"],
+
+            "drill-approve-1",
+
         )
         _post_command(
             server,
@@ -813,7 +870,8 @@ def test_approver_can_read_exact_candidate_diff_but_cannot_mutate(
             assert denied.status == 403
             assert denied.json()["detail"]["error"] == "S08_FORBIDDEN"
 
-        # 3. The author (admin) cannot approve the candidate.
+        # 3. The author (admin) cannot approve the candidate (SoD): the
+        #    approve credential role never matches the admin bearer.
         denied = server.request(
             "POST",
             "/controlled/s08/api/commands/approve",
@@ -821,6 +879,8 @@ def test_approver_can_read_exact_candidate_diff_but_cannot_mutate(
                 "candidate_id": candidate_id,
                 "activation_time": int(time.time()) + 60,
                 "recovery_release_id": bootstrap["candidate_id"],
+                "preview_manifest_id": "preview_sha256_"
+                + "1" * 64,
                 "idempotency_key": "g3-admin-approve",
                 "expected_governance_revision": _governance_revision(server),
             },
@@ -832,17 +892,18 @@ def test_approver_can_read_exact_candidate_diff_but_cannot_mutate(
         # 4. The approver approves; the fixed binding is readable and pins
         #    the exact machine diff, digests, scope and activation time.
         activation_time = int(time.time()) + 60
-        approval = _post_command(
+        approval = _preview_and_approve(
+
             server,
-            "approve",
-            {
-                "candidate_id": candidate_id,
-                "activation_time": activation_time,
-                "recovery_release_id": bootstrap["candidate_id"],
-                "idempotency_key": "g3-approve-1",
-                "expected_governance_revision": _governance_revision(server),
-            },
-            approver_headers(),
+
+            candidate_id,
+
+            activation_time,
+
+            bootstrap["candidate_id"],
+
+            "g3-approve-1",
+
         )
         assert approval["status"] == "accepted"
         _wait_for_candidate_status(server, candidate_id, "approved")
@@ -1119,17 +1180,18 @@ def test_review_material_lists_component_changes_for_behavior_equivalent_version
         assert review["applicable_check_delta"]["removed"] == []
         # The bound diff fixes exactly the same review material.
         activation_time = int(time.time()) + 60
-        approval = _post_command(
+        approval = _preview_and_approve(
+
             server,
-            "approve",
-            {
-                "candidate_id": candidate_id,
-                "activation_time": activation_time,
-                "recovery_release_id": bootstrap["candidate_id"],
-                "idempotency_key": "g3-version-approve",
-                "expected_governance_revision": _governance_revision(server),
-            },
-            approver_headers(),
+
+            candidate_id,
+
+            activation_time,
+
+            bootstrap["candidate_id"],
+
+            "g3-version-approve",
+
         )
         assert approval["status"] == "accepted"
         workspace = server.request(
@@ -1384,7 +1446,19 @@ def test_candidate_workspace_is_closed_typed_and_self_sufficient(
         assert admin_workspace["actions"] == ["cancel"]
 
         # (d) 409: a stale governance revision is rejected with the stable
-        # closed S08_CONFLICT envelope.
+        # closed S08_CONFLICT envelope.  The preview itself is a governance
+        # fact, so the stale approval binds its manifest and fences on the
+        # pre-preview revision.
+        stale_preview = _post_command(
+            server,
+            "preview_impact",
+            {
+                "candidate_id": candidate_id,
+                "idempotency_key": "ws-stale-approve-preview",
+                "expected_governance_revision": _governance_revision(server),
+            },
+            admin_headers(),
+        )
         stale = server.request(
             "POST",
             "/controlled/s08/api/commands/approve",
@@ -1392,6 +1466,7 @@ def test_candidate_workspace_is_closed_typed_and_self_sufficient(
                 "candidate_id": candidate_id,
                 "activation_time": int(time.time()) + 3600,
                 "recovery_release_id": bootstrap["candidate_id"],
+                "preview_manifest_id": stale_preview["manifest_id"],
                 "idempotency_key": "ws-stale-approve",
                 "expected_governance_revision": workspace["governance_revision"] - 1,
             },
@@ -1418,6 +1493,8 @@ def test_candidate_workspace_is_closed_typed_and_self_sufficient(
                 "candidate_id": candidate_id,
                 "activation_time": int(time.time()) + 3600,
                 "recovery_release_id": bootstrap["candidate_id"],
+                "preview_manifest_id": "preview_sha256_"
+                + "1" * 64,
                 "idempotency_key": "ws-admin-approve",
                 "expected_governance_revision": _governance_revision(server),
             },
@@ -1434,17 +1511,18 @@ def test_candidate_workspace_is_closed_typed_and_self_sufficient(
         # Approved: the fixed approval binding is typed on the wire and the
         # author-admin may schedule or cancel.
         activation_time = int(time.time()) + 3600
-        approval = _post_command(
+        approval = _preview_and_approve(
+
             server,
-            "approve",
-            {
-                "candidate_id": candidate_id,
-                "activation_time": activation_time,
-                "recovery_release_id": bootstrap["candidate_id"],
-                "idempotency_key": "ws-approve",
-                "expected_governance_revision": _governance_revision(server),
-            },
-            approver_headers(),
+
+            candidate_id,
+
+            activation_time,
+
+            bootstrap["candidate_id"],
+
+            "ws-approve",
+
         )
         _wait_for_candidate_status(server, candidate_id, "approved")
         workspace = _candidate_workspace(server, candidate_id, admin_headers())
@@ -1460,13 +1538,17 @@ def test_candidate_workspace_is_closed_typed_and_self_sufficient(
         assert binding["diff"]["schema_version"] == "s08-review-material/1"
         assert binding["diff"]["changes"] == review["changes"]
         # (f) The governance timeline now runs to the approval binding, with
-        # the independent approver as the actor of the approval event.
+        # the independent approver as the actor of the approval event; the
+        # immutable impact previews precede the approval (the stale-revision
+        # drill previews once, the successful approval previews again).
         assert [event["kind"] for event in workspace["events"]] == [
             "imported",
             "draft_revised",
             "candidate_frozen",
             "validated",
             "in_review",
+            "impact_previewed",
+            "impact_previewed",
             "approved",
         ]
         assert workspace["events"][-1]["actor"]["subject"] == "c-demo-policy-approver"
@@ -1535,17 +1617,18 @@ def test_s08_active_workspace_projects_activation_outcome_and_prior_anchor(
             admin_headers(),
         )
         activation_time = int(time.time()) + 5
-        approval = _post_command(
+        approval = _preview_and_approve(
+
             server,
-            "approve",
-            {
-                "candidate_id": candidate_id,
-                "activation_time": activation_time,
-                "recovery_release_id": bootstrap["candidate_id"],
-                "idempotency_key": "actout-approve",
-                "expected_governance_revision": _governance_revision(server),
-            },
-            approver_headers(),
+
+            candidate_id,
+
+            activation_time,
+
+            bootstrap["candidate_id"],
+
+            "actout-approve",
+
         )
         _post_command(
             server,
@@ -2059,3 +2142,185 @@ def test_s08_react_shell_identity_no_store_and_missing_build_503(
     )
     assert missing.status_code == 503
     assert missing.json()["detail"]["error"] == "S08_REACT_UNAVAILABLE"
+
+
+def _s09_identity_request() -> Any:
+    from types import SimpleNamespace
+
+    import task4_consistency.web.app as app_module
+
+    return SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(_s08_application_module=app_module))
+    )
+
+
+@pytest.mark.parametrize(
+    "role, attr, other",
+    [
+        ("replay_operator", "CREDENTIAL", "ADMIN"),
+        ("replay_operator", "CREDENTIAL", "APPROVER"),
+        ("replay_operator", "CREDENTIAL", "OPERATOR"),
+        ("replay_operator", "SUBJECT", "ADMIN"),
+        ("replay_operator", "SUBJECT", "APPROVER"),
+        ("replay_operator", "SUBJECT", "OPERATOR"),
+        ("simulation_operator", "CREDENTIAL", "ADMIN"),
+        ("simulation_operator", "CREDENTIAL", "APPROVER"),
+        ("simulation_operator", "CREDENTIAL", "OPERATOR"),
+        ("simulation_operator", "SUBJECT", "ADMIN"),
+        ("simulation_operator", "SUBJECT", "APPROVER"),
+        ("simulation_operator", "SUBJECT", "OPERATOR"),
+        ("replay_operator", "CREDENTIAL", "SIMULATION"),
+        ("simulation_operator", "SUBJECT", "REPLAY"),
+    ],
+)
+def test_s09_diagnostic_identity_aliases_fail_closed(
+    monkeypatch: pytest.MonkeyPatch, role: str, attr: str, other: str
+) -> None:
+    """R6/ST-3/SP-6: any replay/simulation credential or subject aliasing
+    another controlled identity makes diagnostic authorization fail closed
+    at configuration/authorization time."""
+    from fastapi import HTTPException
+
+    import task4_consistency.web.app as app_module
+    import task4_consistency.web.s08_http as http_module
+
+    values = {
+        "S08_ADMIN_CREDENTIAL": "admin-cred",
+        "S08_ADMIN_SUBJECT": "admin-subject",
+        "S08_APPROVER_CREDENTIAL": "approver-cred",
+        "S08_APPROVER_SUBJECT": "approver-subject",
+        "S08_OPERATOR_CREDENTIAL": "operator-cred",
+        "S08_OPERATOR_SUBJECT": "operator-subject",
+        "S09_REPLAY_CREDENTIAL": "replay-cred",
+        "S09_REPLAY_SUBJECT": "replay-subject",
+        "S09_SIMULATION_CREDENTIAL": "simulation-cred",
+        "S09_SIMULATION_SUBJECT": "simulation-subject",
+    }
+    for name, value in values.items():
+        monkeypatch.setattr(app_module, name, value)
+    monkeypatch.setattr(
+        app_module,
+        "_s01_has_credential",
+        lambda request, credential: credential == "presented-secret",
+    )
+    s09_prefix = "S09_REPLAY" if role == "replay_operator" else "S09_SIMULATION"
+    other_prefix = "S08" if other in {"ADMIN", "APPROVER", "OPERATOR"} else "S09"
+    monkeypatch.setattr(app_module, f"{s09_prefix}_{attr}", values[f"{other_prefix}_{other}_{attr}"])
+    with pytest.raises(HTTPException) as error:
+        http_module._s08_require_role(_s09_identity_request(), role)
+    assert error.value.status_code == 403
+    assert error.value.detail["error"] == "S08_FORBIDDEN"
+
+
+@pytest.mark.parametrize(
+    "role, missing_attr",
+    [
+        ("replay_operator", "S09_REPLAY_CREDENTIAL"),
+        ("replay_operator", "S09_REPLAY_SUBJECT"),
+        ("simulation_operator", "S09_SIMULATION_CREDENTIAL"),
+        ("simulation_operator", "S09_SIMULATION_SUBJECT"),
+    ],
+)
+def test_s09_missing_diagnostic_identity_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, role: str, missing_attr: str
+) -> None:
+    """R6: a missing replay/simulation credential or subject keeps the
+    diagnostic role fail-closed without disabling S08 command roles."""
+    from fastapi import HTTPException
+
+    import task4_consistency.web.app as app_module
+    import task4_consistency.web.s08_http as http_module
+
+    values = {
+        "S08_ADMIN_CREDENTIAL": "admin-cred",
+        "S08_ADMIN_SUBJECT": "admin-subject",
+        "S08_APPROVER_CREDENTIAL": "approver-cred",
+        "S08_APPROVER_SUBJECT": "approver-subject",
+        "S08_OPERATOR_CREDENTIAL": "operator-cred",
+        "S08_OPERATOR_SUBJECT": "operator-subject",
+        "S09_REPLAY_CREDENTIAL": "replay-cred",
+        "S09_REPLAY_SUBJECT": "replay-subject",
+        "S09_SIMULATION_CREDENTIAL": "simulation-cred",
+        "S09_SIMULATION_SUBJECT": "simulation-subject",
+    }
+    for name, value in values.items():
+        monkeypatch.setattr(app_module, name, value)
+    monkeypatch.setattr(app_module, missing_attr, "")
+    monkeypatch.setattr(
+        app_module,
+        "_s01_has_credential",
+        lambda request, credential: credential == "presented-secret",
+    )
+    with pytest.raises(HTTPException) as error:
+        http_module._s08_require_role(_s09_identity_request(), role)
+    assert error.value.status_code == 403
+    assert error.value.detail["error"] == "S08_FORBIDDEN"
+    # S08 command authorization is unchanged by the missing S09 identity.
+    monkeypatch.setattr(
+        app_module,
+        "_s01_has_credential",
+        lambda request, credential: credential == "operator-cred",
+    )
+    operator = http_module._s08_require_role(_s09_identity_request(), "operator")
+    assert operator.role == "operator"
+
+
+def test_s09_distinct_diagnostic_identities_authorize_and_stay_mutually_unusable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R6: distinct replay/simulation identities authorize their own roles;
+    replay, simulation and activation credentials are mutually unusable."""
+    from fastapi import HTTPException
+
+    import task4_consistency.web.app as app_module
+    import task4_consistency.web.s08_http as http_module
+
+    values = {
+        "S08_ADMIN_CREDENTIAL": "admin-cred",
+        "S08_ADMIN_SUBJECT": "admin-subject",
+        "S08_APPROVER_CREDENTIAL": "approver-cred",
+        "S08_APPROVER_SUBJECT": "approver-subject",
+        "S08_OPERATOR_CREDENTIAL": "operator-cred",
+        "S08_OPERATOR_SUBJECT": "operator-subject",
+        "S09_REPLAY_CREDENTIAL": "replay-cred",
+        "S09_REPLAY_SUBJECT": "replay-subject",
+        "S09_SIMULATION_CREDENTIAL": "simulation-cred",
+        "S09_SIMULATION_SUBJECT": "simulation-subject",
+    }
+    for name, value in values.items():
+        monkeypatch.setattr(app_module, name, value)
+    request = _s09_identity_request()
+
+    def presenting(credential: str) -> None:
+        monkeypatch.setattr(
+            app_module,
+            "_s01_has_credential",
+            lambda request, expected, _c=credential: expected == _c,
+        )
+
+    presenting("replay-cred")
+    replay = http_module._s08_require_role(request, "replay_operator")
+    assert replay.role == "replay_operator"
+    presenting("simulation-cred")
+    simulation = http_module._s08_require_role(request, "simulation_operator")
+    assert simulation.role == "simulation_operator"
+    # Replay and simulation credentials cannot relabel into the activation
+    # operator; the activation credential cannot run a diagnostic workload.
+    presenting("replay-cred")
+    with pytest.raises(HTTPException) as error:
+        http_module._s08_require_role(request, "operator")
+    assert error.value.status_code == 403
+    presenting("simulation-cred")
+    with pytest.raises(HTTPException) as error:
+        http_module._s08_require_role(request, "operator")
+    assert error.value.status_code == 403
+    presenting("operator-cred")
+    with pytest.raises(HTTPException) as error:
+        http_module._s08_require_role(request, "replay_operator")
+    assert error.value.status_code == 403
+    with pytest.raises(HTTPException) as error:
+        http_module._s08_require_role(request, "simulation_operator")
+    assert error.value.status_code == 403
+    presenting("operator-cred")
+    operator = http_module._s08_require_role(request, "operator")
+    assert operator.role == "operator"

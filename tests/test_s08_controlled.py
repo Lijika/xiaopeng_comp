@@ -33,6 +33,7 @@ from task4_consistency.controlled.s08 import (
     canonical_bytes,
     content_digest,
 )
+from task4_consistency.controlled.s09_impact import DEPENDENCY_INDEX_VERSION
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RULES = ROOT / "configs" / "rules_auto_lease.yaml"
@@ -82,10 +83,65 @@ def make_policy_service(
         source_kb_path=kb_path,
         corpus_root=corpus_root,
     )
+    # S09 approval contract: every approval binds an immutable impact
+    # preview and envelope, so S08-only tests wire the read-only Lifecycle
+    # snapshot seam to an empty complete universe (no S09 wiring here).
+    service._lifecycle_snapshot_provider = _empty_impact_snapshot
     bootstrap = service.bootstrap_once()
     if expect_bootstrap:
         assert bootstrap["status"] == "activated", bootstrap
     return service, rules_path, kb_path
+
+
+def _empty_impact_snapshot(
+    owner: Any, final_impact_digest: str | None = None
+) -> dict[str, Any]:
+    """The S08-test impact snapshot: a complete but empty application
+    universe, so the S09 preview/envelope/final-impact pipeline stays
+    well-formed without any S01 wiring."""
+    return {
+        "scope": S08_SCOPE,
+        "complete": True,
+        "lifecycle_watermark": 0,
+        "dependency_index_digest": "0" * 64,
+        "dependency_index_version": DEPENDENCY_INDEX_VERSION,
+        "applications": [],
+        "universe": {
+            "complete": True,
+            "count": 0,
+            "digest": hashlib.sha256(b"[]").hexdigest(),
+        },
+    }
+
+
+def preview_and_approve(
+    service: PolicyGovernanceService,
+    *,
+    candidate_id: str,
+    activation_time: int,
+    recovery_release_id: str,
+    idempotency_key: str,
+    approver: PolicyPrincipal = APPROVER,
+) -> dict[str, Any]:
+    """Preview the conservative impact of a candidate and bind its exact
+    digest in the approval (the S09 approval contract)."""
+    if service._lifecycle_snapshot_provider is None:
+        service._lifecycle_snapshot_provider = _empty_impact_snapshot
+    preview = service.preview_impact(
+        principal=ADMIN,
+        candidate_id=candidate_id,
+        idempotency_key=f"pv-{time.time_ns()}",
+        expected_governance_revision=governance_revision(service),
+    )
+    return service.approve(
+        principal=approver,
+        candidate_id=candidate_id,
+        activation_time=activation_time,
+        recovery_release_id=recovery_release_id,
+        preview_manifest_id=preview["manifest_id"],
+        idempotency_key=idempotency_key,
+        expected_governance_revision=governance_revision(service),
+    )
 
 
 def governance_revision(service: PolicyGovernanceService) -> int:
@@ -938,6 +994,12 @@ def test_candidate_scope_covers_bound_and_actual_activation_time(
 
     service, _, _ = make_policy_service(tmp_path / "bound")
     candidate = reviewed_candidate(service, now + 30, "bound-expiry")
+    preview = service.preview_impact(
+        principal=ADMIN,
+        candidate_id=candidate,
+        idempotency_key="approve-after-expiry-preview",
+        expected_governance_revision=governance_revision(service),
+    )
     revision_before = governance_revision(service)
     with pytest.raises(PolicyInvalidTransition):
         service.approve(
@@ -945,21 +1007,21 @@ def test_candidate_scope_covers_bound_and_actual_activation_time(
             candidate_id=candidate,
             activation_time=now + 60,
             recovery_release_id=service.query_active(ADMIN)["candidate_id"],
+            preview_manifest_id=preview["manifest_id"],
             idempotency_key="approve-after-expiry",
-            expected_governance_revision=revision_before,
+            expected_governance_revision=governance_revision(service),
         )
     assert governance_revision(service) == revision_before
     assert service.query_active(ADMIN)["active_generation"] == 1
 
     delayed, _, _ = make_policy_service(tmp_path / "delayed")
     delayed_candidate = reviewed_candidate(delayed, now + 120, "delayed-expiry")
-    approval = delayed.approve(
-        principal=APPROVER,
+    approval = preview_and_approve(
+        delayed,
         candidate_id=delayed_candidate,
         activation_time=now + 60,
         recovery_release_id=delayed.query_active(ADMIN)["candidate_id"],
         idempotency_key="approve-before-expiry",
-        expected_governance_revision=governance_revision(delayed),
     )
     delayed.schedule(
         principal=ADMIN,
@@ -989,13 +1051,12 @@ def test_candidate_scope_covers_bound_and_actual_activation_time(
     expiring_candidate = reviewed_candidate(
         expiring, now + 120, "resolution-expiry"
     )
-    approval = expiring.approve(
-        principal=APPROVER,
+    approval = preview_and_approve(
+        expiring,
         candidate_id=expiring_candidate,
         activation_time=now + 60,
         recovery_release_id=expiring.query_active(ADMIN)["candidate_id"],
         idempotency_key="approve-expiring-resolution",
-        expected_governance_revision=governance_revision(expiring),
     )
     expiring.schedule(
         principal=ADMIN,
@@ -1066,13 +1127,12 @@ def test_validation_rejects_protected_io_alias_and_nondeterminism_without_overri
         assert active["status"] == "active"
         assert active["active_generation"] == 1
         with pytest.raises(PolicyInvalidTransition):
-            service.approve(
-                principal=APPROVER,
+            preview_and_approve(
+                service,
                 candidate_id=candidate_id,
                 activation_time=int(time.time()) + 60,
                 recovery_release_id=active["candidate_id"],
                 idempotency_key=f"approve-{time.time_ns()}",
-                expected_governance_revision=governance_revision(service),
             )
 
     # (a) Protected-baseline weakening is a protected failure at both the
@@ -1445,13 +1505,13 @@ def _full_flow(
         expected_governance_revision=governance_revision(service),
     )
     activation_at = int(time.time()) + max(activation_delay, 60)
-    approved = service.approve(
-        principal=approver,
+    approved = preview_and_approve(
+        service,
         candidate_id=candidate_id,
         activation_time=activation_at,
         recovery_release_id=service.query_active(admin)["candidate_id"],
         idempotency_key=f"a-{time.time_ns()}",
-        expected_governance_revision=governance_revision(service),
+        approver=approver,
     )
     scheduled = service.schedule(
         principal=admin,
@@ -1473,7 +1533,7 @@ def test_stale_approval_diff_cannot_schedule_after_anchor_activation(
     bootstrap_id = service.query_active(ADMIN)["candidate_id"]
     now = int(time.time())
 
-    def approve_candidate(activation_time: int) -> tuple[str, dict[str, Any]]:
+    def prepare_candidate() -> str:
         draft_id = import_draft(service)
         candidate_id, worker = freeze_and_validate(service, draft_id)
         assert worker["outcome"] == "validated"
@@ -1483,20 +1543,31 @@ def test_stale_approval_diff_cannot_schedule_after_anchor_activation(
             idempotency_key=f"review-{time.time_ns()}",
             expected_governance_revision=governance_revision(service),
         )
-        approved = service.approve(
-            principal=APPROVER,
+        return candidate_id
+
+    def approve_candidate(
+        candidate_id: str, activation_time: int
+    ) -> dict[str, Any]:
+        return preview_and_approve(
+            service,
             candidate_id=candidate_id,
             activation_time=activation_time,
             recovery_release_id=bootstrap_id,
             idempotency_key=f"approve-{time.time_ns()}",
-            expected_governance_revision=governance_revision(service),
         )
         return candidate_id, approved
 
     rules_path.write_bytes(
         rules_path.read_bytes().replace(b'version: "1.9.0"', b'version: "2.0.0"')
     )
-    candidate_a, approval_a = approve_candidate(now + 300)
+    candidate_a = prepare_candidate()
+
+    rules_path.write_bytes(
+        rules_path.read_bytes().replace(b'version: "2.0.0"', b'version: "3.0.0"')
+    )
+    candidate_b = prepare_candidate()
+    approval_b = approve_candidate(candidate_b, now + 400)
+    approval_a = approve_candidate(candidate_a, now + 300)
     service.schedule(
         principal=ADMIN,
         approval_binding_id=approval_a["approval_binding_id"],
@@ -1505,10 +1576,6 @@ def test_stale_approval_diff_cannot_schedule_after_anchor_activation(
         expected_governance_revision=governance_revision(service),
     )
 
-    rules_path.write_bytes(
-        rules_path.read_bytes().replace(b'version: "2.0.0"', b'version: "3.0.0"')
-    )
-    candidate_b, approval_b = approve_candidate(now + 400)
     binding_b = service._artifact(service._store, approval_b["approval_binding_id"])
     assert binding_b["diff"]["anchor_candidate_id"] == bootstrap_id
 
@@ -1631,13 +1698,12 @@ def test_governance_commands_are_revisioned_idempotent_and_role_separated(
         expected_governance_revision=governance_revision(service),
     )
     activation_at = int(time.time()) + 30
-    service.approve(
-        principal=APPROVER,
+    preview_and_approve(
+        service,
         candidate_id=candidate_id,
         activation_time=activation_at,
         recovery_release_id=service.query_active(ADMIN)["candidate_id"],
         idempotency_key=f"a-{time.time_ns()}",
-        expected_governance_revision=governance_revision(service),
     )
     approval_binding_id = next(
         item
@@ -1734,6 +1800,7 @@ def test_governance_commands_are_revisioned_idempotent_and_role_separated(
             candidate_id=candidate_id,
             activation_time=int(time.time()) + 60,
             recovery_release_id=service.query_active(ADMIN)["candidate_id"],
+            preview_manifest_id="",
             idempotency_key=f"self-approve-{time.time_ns()}",
             expected_governance_revision=governance_revision(service),
         )
@@ -1789,6 +1856,7 @@ def test_governance_commands_are_revisioned_idempotent_and_role_separated(
                     principal=APPROVER, candidate_id=target,
                     activation_time=int(time.time()) + 60,
                     recovery_release_id=service.query_active(ADMIN)["candidate_id"],
+                    preview_manifest_id="",
                     idempotency_key=f"m-{command}-{time.time_ns()}",
                     expected_governance_revision=governance_revision(service),
                 )
@@ -1901,13 +1969,12 @@ def test_governance_commands_are_revisioned_idempotent_and_role_separated(
         expected_governance_revision=governance_revision(service),
     )
     fork_activation_at = int(time.time()) + 120
-    fork_approval = service.approve(
-        principal=APPROVER,
+    fork_approval = preview_and_approve(
+        service,
         candidate_id=forked["candidate_id"],
         activation_time=fork_activation_at,
         recovery_release_id=service.query_active(ADMIN)["candidate_id"],
         idempotency_key=f"fork-a-{time.time_ns()}",
-        expected_governance_revision=governance_revision(service),
     )
     assert fork_approval["candidate_id"] == forked["candidate_id"]
     assert fork_approval["approval_binding_id"] != approval_binding_id
@@ -2002,7 +2069,39 @@ def test_concurrent_overlapping_activation_has_one_winner_and_no_mixed_projectio
 
     first = make()
     first.bootstrap_once()
-    _, candidate_id, _, _ = _full_flow(first, activation_delay=300)
+    draft = import_draft(first)
+    revised = first.revise_draft(
+        principal=ADMIN,
+        draft_id=draft,
+        metadata={
+            "scope": S08_SCOPE,
+            "validity": {"valid_from": "2000-01-01T00:00:00Z"},
+            "source": SOURCE_BUNDLE_ID,
+            "reason": "overlap anchor",
+        },
+        idempotency_key=f"r-{time.time_ns()}",
+        expected_governance_revision=governance_revision(first),
+    )
+    frozen = first.freeze_candidate(
+        principal=ADMIN,
+        draft_id=revised["draft_id"],
+        idempotency_key=f"f-{time.time_ns()}",
+        expected_governance_revision=governance_revision(first),
+    )
+    candidate_id = frozen["candidate_id"]
+    first.request_validation(
+        principal=ADMIN,
+        candidate_id=candidate_id,
+        idempotency_key=f"v-{time.time_ns()}",
+        expected_governance_revision=governance_revision(first),
+    )
+    first.process_next_policy_job()
+    first.submit_review(
+        principal=ADMIN,
+        candidate_id=candidate_id,
+        idempotency_key=f"rv-{time.time_ns()}",
+        expected_governance_revision=governance_revision(first),
+    )
     second = make()
 
     # 1. Overlapping schedule: while the first candidate's reservation is
@@ -2041,20 +2140,34 @@ def test_concurrent_overlapping_activation_has_one_winner_and_no_mixed_projectio
         idempotency_key=f"rv-{time.time_ns()}",
         expected_governance_revision=governance_revision(first),
     )
-    activation_at = int(time.time()) + 30
-    approved = first.approve(
-        principal=APPROVER,
+    activation_b = int(time.time()) + 30
+    approved_b = preview_and_approve(
+        first,
         candidate_id=second_candidate,
+        activation_time=activation_b,
+        recovery_release_id=first.query_active(ADMIN)["candidate_id"],
+        idempotency_key=f"a-{time.time_ns()}",
+    )
+    activation_at = int(time.time()) + 300
+    approved_a = preview_and_approve(
+        first,
+        candidate_id=candidate_id,
         activation_time=activation_at,
         recovery_release_id=first.query_active(ADMIN)["candidate_id"],
         idempotency_key=f"a-{time.time_ns()}",
+    )
+    first.schedule(
+        principal=ADMIN,
+        approval_binding_id=approved_a["approval_binding_id"],
+        activation_at=activation_at,
+        idempotency_key=f"s-{time.time_ns()}",
         expected_governance_revision=governance_revision(first),
     )
     with pytest.raises(PolicyConflict):
         first.schedule(
             principal=ADMIN,
-            approval_binding_id=approved["approval_binding_id"],
-            activation_at=activation_at,
+            approval_binding_id=approved_b["approval_binding_id"],
+            activation_at=activation_b,
             idempotency_key=f"s-{time.time_ns()}",
             expected_governance_revision=governance_revision(first),
         )
@@ -2177,7 +2290,8 @@ def test_audit_or_partial_commit_failure_preserves_prior_active(
     assert pin["active_generation"] == 1
 
     # (1b) A successful activation commits exactly one audit, one idempotency
-    #      result, one outbox event and the activation/supersession facts.
+    #      result, the activation/supersession facts and two outbox events
+    #      (S08 activation + S09 final-impact consumption obligation).
     service_ok, _, _ = make_policy_service(tmp_path / "success")
     _, success_candidate, _, activation_at = _full_flow(service_ok)
     audit_before = len(service_ok._store.audit_events)
@@ -2194,7 +2308,9 @@ def test_audit_or_partial_commit_failure_preserves_prior_active(
     ]
     assert len(activation_audits) == 1
     assert len(service_ok._store.audit_events) == audit_before + 1
-    assert len(service_ok._store.outbox) == outbox_before + 1
+    # The activation commits two outbox facts: the S08 activation and the
+    # S09 final-impact consumption obligation (the Lifecycle consumer).
+    assert len(service_ok._store.outbox) == outbox_before + 2
     assert len(service_ok._store.idempotency) == idem_before + 1
     assert any(
         isinstance(binding, tuple)
@@ -2486,6 +2602,10 @@ def _governed_s01(
             corpus_root=CORPUS,
         )
         assert policy.bootstrap_once()["status"] == "activated"
+    # S09 approval contract: every approval binds the immutable impact
+    # preview; S08-only flows over the governed fixture wire the read-only
+    # empty Lifecycle snapshot seam.
+    policy._lifecycle_snapshot_provider = _empty_impact_snapshot
     service = S01Service(
         fixture_root=ROOT / "fixtures" / "applications",
         rules_path=rules_path,
@@ -3474,13 +3594,12 @@ def test_validator_build_change_invalidates_prior_evidence(
     with pytest.raises(PolicyUnavailable):
         service._review_material(service._store, state, S08_SCOPE)
     with pytest.raises(PolicyUnavailable):
-        service.approve(
-            principal=APPROVER,
+        preview_and_approve(
+            service,
             candidate_id=candidate_id,
             activation_time=int(time.time()) + 60,
             recovery_release_id=service.query_active(ADMIN)["candidate_id"],
             idempotency_key=f"code-approve-{time.time_ns()}",
-            expected_governance_revision=governance_revision(service),
         )
     monkeypatch.setattr(
         s08_module, "_VALIDATOR_CODE_DIGEST", current_code_digest
@@ -3491,13 +3610,12 @@ def test_validator_build_change_invalidates_prior_evidence(
     with pytest.raises(PolicyUnavailable):
         service._review_material(service._store, state, S08_SCOPE)
     with pytest.raises(PolicyUnavailable):
-        service.approve(
-            principal=APPROVER,
+        preview_and_approve(
+            service,
             candidate_id=candidate_id,
             activation_time=int(time.time()) + 60,
             recovery_release_id=service.query_active(ADMIN)["candidate_id"],
             idempotency_key=f"vb-approve-{time.time_ns()}",
-            expected_governance_revision=governance_revision(service),
         )
     assert service.query_active(ADMIN)["active_generation"] == 1
 
@@ -3784,6 +3902,7 @@ def test_workspace_query_is_one_atomic_snapshot_across_interleaved_commit(
         source_kb_path=kb_path,
         corpus_root=CORPUS,
     )
+    other._lifecycle_snapshot_provider = _empty_impact_snapshot
 
     def reload_with_interleaved_commit() -> None:
         original_reload()
@@ -3863,13 +3982,12 @@ def test_workspace_projects_terminal_outcomes_for_superseded_and_cancelled(
         expected_governance_revision=governance_revision(service),
     )
     second_at = int(time.time()) + 30
-    second_approval = service.approve(
-        principal=APPROVER,
+    second_approval = preview_and_approve(
+        service,
         candidate_id=second_candidate,
         activation_time=second_at,
         recovery_release_id=service.query_active(ADMIN)["candidate_id"],
         idempotency_key=f"a-{time.time_ns()}",
-        expected_governance_revision=governance_revision(service),
     )
     service.schedule(
         principal=ADMIN,
@@ -5077,13 +5195,12 @@ def test_scope_expiry_during_compute_settles_discarded(tmp_path: Path) -> None:
         expected_governance_revision=governance_revision(service),
     )
     activation_at = base + 10
-    approval = service.approve(
-        principal=APPROVER,
+    approval = preview_and_approve(
+        service,
         candidate_id=candidate_id,
         activation_time=activation_at,
         recovery_release_id=service.query_active(ADMIN)["candidate_id"],
         idempotency_key=f"scope-expiry-approve-{time.time_ns()}",
-        expected_governance_revision=governance_revision(service),
     )
     service.schedule(
         principal=ADMIN,
@@ -5224,13 +5341,12 @@ def test_scope_expiry_during_compute_exception_discards(
         expected_governance_revision=governance_revision(service),
     )
     activation_at = base + 10
-    approval = service.approve(
-        principal=APPROVER,
+    approval = preview_and_approve(
+        service,
         candidate_id=candidate_id,
         activation_time=activation_at,
         recovery_release_id=service.query_active(ADMIN)["candidate_id"],
         idempotency_key=f"scope-expiry-exc-approve-{time.time_ns()}",
-        expected_governance_revision=governance_revision(service),
     )
     service.schedule(
         principal=ADMIN,

@@ -909,6 +909,50 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/controlled/s01/api/queries/impact-dispositions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Controlled S09 Impact Dispositions
+         * @description The minimized Reviewer view of one final impact manifest: aggregate
+         *     digest/count/watermark only.  Per-member receipts live behind the
+         *     audit/reconciliation route.
+         */
+        get: operations["controlled_s09_impact_dispositions_controlled_s01_api_queries_impact_dispositions_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s01/api/queries/impact-dispositions/reconciliation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Controlled S09 Impact Dispositions Reconciliation
+         * @description The authorized audit/reconciliation view: per-member application and
+         *     reevaluation-job receipts for one final impact manifest, bound to the
+         *     registered auditor credential and the C-DEMO resource scope.
+         */
+        get: operations["controlled_s09_impact_dispositions_reconciliation_controlled_s01_api_queries_impact_dispositions_reconciliation_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/controlled/s01/api/queries/queue": {
         parameters: {
             query?: never;
@@ -1664,6 +1708,139 @@ export interface paths {
         get: operations["controlled_s08_react_page_controlled_s08_react_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s09/api/commands/impose_hold": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * S09 Impose Hold
+         * @description Impose a scoped Policy Safety Hold: automatic routing, new RunSpec
+         *     publication and current completion fail closed until an explicit
+         *     governed recovery releases the hold.
+         */
+        post: operations["s09_impose_hold_controlled_s09_api_commands_impose_hold_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s09/api/commands/preview_impact": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * S09 Preview Impact
+         * @description The immutable conservative impact preview for a changed governed
+         *     release; the Policy Approver binds its exact digest at approval time.
+         *     Both the Rule Administrator and the Policy Approver may run this
+         *     read-only computation.
+         */
+        post: operations["s09_preview_impact_controlled_s09_api_commands_preview_impact_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s09/api/commands/propose_rollback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * S09 Propose Rollback
+         * @description Revalidate the exact historical release and stage a fresh rollback
+         *     candidate; an incompatible rollback keeps the hold and requires a
+         *     governed forward fix.
+         */
+        post: operations["s09_propose_rollback_controlled_s09_api_commands_propose_rollback_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s09/api/commands/recover_hold": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * S09 Recover Hold
+         * @description The separate, idempotent, separation-of-duties hold recovery: only
+         *     the independent Policy Approver may confirm release of a hold imposed
+         *     by the activation operator.
+         */
+        post: operations["s09_recover_hold_controlled_s09_api_commands_recover_hold_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s09/api/commands/replay": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * S09 Replay
+         * @description Isolated reproduction replay with a namespaced replay identity and
+         *     its own command/result DTO: read-only, zero business revisions, one
+         *     explicit application.
+         */
+        post: operations["s09_replay_controlled_s09_api_commands_replay_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s09/api/commands/simulate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * S09 Simulate
+         * @description Isolated counterfactual simulation with a namespaced simulation
+         *     identity and its own command/result DTO: read-only, zero business
+         *     revisions, never current, one explicit application.
+         */
+        post: operations["s09_simulate_controlled_s09_api_commands_simulate_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3470,6 +3647,14 @@ export interface components {
             capability_gate: string;
             /** Components */
             components?: components["schemas"]["S08ComponentRef"][];
+            /** Final Impact Digest */
+            final_impact_digest?: string | null;
+            /** Final Impact Manifest Id */
+            final_impact_manifest_id?: string | null;
+            /** Final Impact Member Count */
+            final_impact_member_count?: number | null;
+            /** Holds */
+            holds?: components["schemas"]["S09HoldRef"][];
             /** Manifest Digest */
             manifest_digest?: string | null;
             /** Manifest Id */
@@ -3501,7 +3686,9 @@ export interface components {
         /**
          * S08ApprovalBinding
          * @description The fixed approver binding: the exact candidate/validation digests,
-         *     the bound diff, scope, activation time and recovery release.
+         *     the bound diff, scope, activation time and recovery release, plus the
+         *     S09 impact preview/envelope the Approver binds for governed changes
+         *     (absent on pre-S09 bootstrap bindings).
          */
         S08ApprovalBinding: {
             /** Activation Time */
@@ -3513,6 +3700,13 @@ export interface components {
             /** Candidate Id */
             candidate_id: string;
             diff: components["schemas"]["S08ReviewMaterial"];
+            impact_envelope?: components["schemas"]["S09ImpactEnvelope"] | null;
+            /** Impact Envelope Digest */
+            impact_envelope_digest?: string | null;
+            /** Preview Manifest Digest */
+            preview_manifest_digest?: string | null;
+            /** Preview Manifest Id */
+            preview_manifest_id?: string | null;
             /** Recovery Release Id */
             recovery_release_id: string;
             /** Schema Version */
@@ -3534,6 +3728,8 @@ export interface components {
             expected_governance_revision: number;
             /** Idempotency Key */
             idempotency_key: string;
+            /** Preview Manifest Id */
+            preview_manifest_id: string;
             /** Recovery Release Id */
             recovery_release_id: string;
         };
@@ -3553,6 +3749,13 @@ export interface components {
             candidate_id: string;
             /** Governance Revision */
             governance_revision: number;
+            impact_envelope?: components["schemas"]["S09ImpactEnvelope"] | null;
+            /** Impact Envelope Digest */
+            impact_envelope_digest?: string | null;
+            /** Preview Manifest Digest */
+            preview_manifest_digest?: string | null;
+            /** Preview Manifest Id */
+            preview_manifest_id?: string | null;
             /** Recovery Release Id */
             recovery_release_id: string;
             /**
@@ -4197,8 +4400,12 @@ export interface components {
             bootstrap: boolean;
             /** Capability Gate */
             capability_gate: string;
+            /** Final Impact Digest */
+            final_impact_digest?: string | null;
             /** Governance Revision */
             governance_revision: number;
+            /** Holds */
+            holds?: components["schemas"]["S09HoldRef"][];
             /** Scope */
             scope: string;
             /** Track */
@@ -4385,6 +4592,644 @@ export interface components {
             python: string;
             /** Suite */
             suite: string;
+        };
+        /** S09AuthorityRange */
+        S09AuthorityRange: {
+            /** Maximum */
+            maximum: number;
+            /** Minimum */
+            minimum: number;
+        };
+        /**
+         * S09AuthorityWatermarks
+         * @description The approved preview-time authority watermarks: the Governance
+         *     revision at preview and the Lifecycle projection watermark.  The final
+         *     manifest may only move the governance revision forward; the lifecycle
+         *     watermark must match exactly.
+         */
+        S09AuthorityWatermarks: {
+            /** Governance Revision */
+            governance_revision: number;
+            /** Lifecycle Watermark */
+            lifecycle_watermark: number;
+        };
+        /** S09CountCeilings */
+        S09CountCeilings: {
+            /** Max Total */
+            max_total: number;
+            /** Per Partition */
+            per_partition: {
+                [key: string]: number;
+            };
+        };
+        /**
+         * S09DependencyIndex
+         * @description The approved dependency-index completeness fact bound by the
+         *     envelope: the digest of the Lifecycle-owned dependency index.
+         */
+        S09DependencyIndex: {
+            /** Complete */
+            complete: boolean;
+            /** Index Digest */
+            index_digest: string;
+            /** Oracle Version */
+            oracle_version: string;
+        };
+        /**
+         * S09DiagnosticCheck
+         * @description The minimized diagnostic check: rule identity, verdict, severity and
+         *     registered reason codes only -- no raw value, OCR text, locator or free
+         *     text ever leaves the runner.
+         */
+        S09DiagnosticCheck: {
+            /** Reason Codes */
+            reason_codes?: string[];
+            /** Rule Id */
+            rule_id: string;
+            /** Severity */
+            severity: string;
+            /** Verdict */
+            verdict: string;
+        };
+        /**
+         * S09DiagnosticNormalizationOutcome
+         * @description The minimized normalization outcome: rule/document/field identity,
+         *     the OCR-fix flag and a digest of the normalized value (never the raw
+         *     value itself), so migration differentials compare machine-decidable
+         *     behavior without exposing content.
+         */
+        S09DiagnosticNormalizationOutcome: {
+            /** Document Id */
+            document_id: string;
+            /** Document Role */
+            document_role: string;
+            /** Field */
+            field: string;
+            /** Normalized Sha256 */
+            normalized_sha256?: string | null;
+            /** Observation Id */
+            observation_id?: string | null;
+            /** Ocr Fix */
+            ocr_fix: boolean;
+            /** Rule Id */
+            rule_id: string;
+        };
+        /**
+         * S09DiagnosticSelectionOutcome
+         * @description The minimized selection outcome: rule/document/field identity and
+         *     the machine decision only -- no raw field value, OCR text, locator or
+         *     free text ever leaves the runner.
+         */
+        S09DiagnosticSelectionOutcome: {
+            /** Document Id */
+            document_id: string;
+            /** Document Role */
+            document_role: string;
+            /** Field */
+            field: string;
+            /** Observation Id */
+            observation_id?: string | null;
+            /** Reason Code */
+            reason_code: string;
+            /** Rule Id */
+            rule_id: string;
+            /** Selected */
+            selected: boolean;
+        };
+        /**
+         * S09EnvelopeRef
+         * @description One release reference inside the impact envelope: identity plus the
+         *     exact manifest digest the approver bound.
+         */
+        S09EnvelopeRef: {
+            /** Candidate Id */
+            candidate_id: string;
+            /** Manifest Digest */
+            manifest_digest: string;
+        };
+        /**
+         * S09HoldRef
+         * @description One immutable Policy Safety Hold fact: identity, reason, scope,
+         *     actor, authority revision, evidence digest and the fixed recovery
+         *     criterion.  Never auto-expires.
+         */
+        S09HoldRef: {
+            /** Authority Revision */
+            authority_revision?: number | null;
+            /** Event Id */
+            event_id: string;
+            /** Evidence Digest */
+            evidence_digest?: string | null;
+            /** Hold Id */
+            hold_id: string;
+            /** Hold Scope */
+            hold_scope: string;
+            /** Imposed At */
+            imposed_at?: number | null;
+            /** Imposed By */
+            imposed_by: string;
+            /** Reason Code */
+            reason_code: string;
+            /** Recovery Criterion Digest */
+            recovery_criterion_digest?: string | null;
+            /** Recovery Criterion Id */
+            recovery_criterion_id?: string | null;
+            /** Scope */
+            scope: string;
+        };
+        /**
+         * S09ImpactDispositionMember
+         * @description The minimized per-member impact consumption receipt: identity,
+         *     partition, required/current disposition, target generation and the
+         *     single Operational Re-evaluation job reference.  No raw field value,
+         *     OCR text, attachment locator or free text is ever exposed.
+         */
+        S09ImpactDispositionMember: {
+            /** Application Id */
+            application_id: string;
+            /** Cycle */
+            cycle: number;
+            /** Disposition */
+            disposition: string;
+            /** Partition */
+            partition: string;
+            /**
+             * Reevaluation Job Count
+             * @default 0
+             */
+            reevaluation_job_count: number;
+            /** Reevaluation Job Id */
+            reevaluation_job_id?: string | null;
+            /** Required Disposition */
+            required_disposition: string;
+            /** Target Generation */
+            target_generation: number;
+        };
+        /** S09ImpactDispositionsResponse */
+        S09ImpactDispositionsResponse: {
+            /** Final Impact Digest */
+            final_impact_digest: string;
+            /** Member Count */
+            member_count: number;
+            /** Members */
+            members: components["schemas"]["S09ImpactDispositionMember"][];
+            /**
+             * Projection Watermark
+             * @default 0
+             */
+            projection_watermark: number;
+            /** Unconsumed Count */
+            unconsumed_count: number;
+        };
+        /**
+         * S09ImpactDispositionsSummaryResponse
+         * @description The minimized Reviewer view: aggregate digest, counts and projection
+         *     watermark only; per-member application/job receipts stay behind the
+         *     authorized audit/reconciliation route.
+         */
+        S09ImpactDispositionsSummaryResponse: {
+            /** Final Impact Digest */
+            final_impact_digest: string;
+            /** Member Count */
+            member_count: number;
+            /**
+             * Projection Watermark
+             * @default 0
+             */
+            projection_watermark: number;
+            /** Unconsumed Count */
+            unconsumed_count: number;
+        };
+        /**
+         * S09ImpactEnvelope
+         * @description The machine-decidable approval envelope: the exact preview digest,
+         *     predecessor/candidate references, scope, oracle version, authority
+         *     watermarks, dependency index, dependency categories, risk class,
+         *     member-delta rules, count ceilings, approvals and protected conditions
+         *     -- the typed wire shape of the digest-bound envelope the Approver binds
+         *     at approval time.
+         */
+        S09ImpactEnvelope: {
+            authority_watermarks: components["schemas"]["S09AuthorityWatermarks"];
+            candidate: components["schemas"]["S09EnvelopeRef"];
+            count_ceilings: components["schemas"]["S09CountCeilings"];
+            /** Dependency Categories */
+            dependency_categories: string[];
+            dependency_index: components["schemas"]["S09DependencyIndex"];
+            /** Digest */
+            digest: string;
+            member_delta_rules: components["schemas"]["S09MemberDeltaRules"];
+            /** Oracle Version */
+            oracle_version: string;
+            permitted_authority_movement: components["schemas"]["S09PermittedAuthorityMovement"];
+            predecessor: components["schemas"]["S09EnvelopeRef"];
+            /** Preview Digest */
+            preview_digest: string;
+            /** Protected Conditions */
+            protected_conditions: string[];
+            /** Required Approvals */
+            required_approvals: string[];
+            /** Risk Class */
+            risk_class: string;
+            /** Schema Version */
+            schema_version: string;
+            /** Scope */
+            scope: string;
+        };
+        /**
+         * S09ImposeHoldBody
+         * @description The closed hold-imposition command: a registered reason and the
+         *     scope the Policy Safety Hold covers (open_cycle, the served scope, or
+         *     one application id).
+         */
+        S09ImposeHoldBody: {
+            /** Expected Governance Revision */
+            expected_governance_revision: number;
+            /** Hold Scope */
+            hold_scope: string;
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Reason Code */
+            reason_code: string;
+        };
+        /** S09ImposeHoldResponse */
+        S09ImposeHoldResponse: {
+            /** Governance Event Id */
+            governance_event_id: string;
+            /** Governance Revision */
+            governance_revision: number;
+            /** Hold Id */
+            hold_id: string;
+            /** Hold Scope */
+            hold_scope: string;
+            /** Reason Code */
+            reason_code: string;
+            /** Recovery Criterion Digest */
+            recovery_criterion_digest: string;
+            /** Recovery Criterion Id */
+            recovery_criterion_id: string;
+            /**
+             * Replayed
+             * @default false
+             */
+            replayed: boolean;
+            /**
+             * Status
+             * @constant
+             */
+            status: "accepted";
+        };
+        /** S09MemberDeltaRules */
+        S09MemberDeltaRules: {
+            /** Max Added */
+            max_added: number;
+            /**
+             * Removal
+             * @constant
+             */
+            removal: "machine_proof_only";
+        };
+        /** S09PermittedAuthorityMovement */
+        S09PermittedAuthorityMovement: {
+            governance_revision: components["schemas"]["S09AuthorityRange"];
+            lifecycle_watermark: components["schemas"]["S09AuthorityRange"];
+        };
+        /**
+         * S09PreviewBody
+         * @description The closed impact-preview command: one governed candidate whose
+         *     conservative impact is computed against the active predecessor.
+         */
+        S09PreviewBody: {
+            /** Candidate Id */
+            candidate_id: string;
+            /** Expected Governance Revision */
+            expected_governance_revision: number;
+            /** Idempotency Key */
+            idempotency_key: string;
+        };
+        /** S09PreviewResponse */
+        S09PreviewResponse: {
+            /** Digest */
+            digest: string;
+            /** Expanded To Full Scope */
+            expanded_to_full_scope: boolean;
+            /** Governance Revision */
+            governance_revision: number;
+            /** Level */
+            level: number;
+            /** Manifest Id */
+            manifest_id: string;
+            /** Member Count */
+            member_count: number;
+            /** Oracle Version */
+            oracle_version: string;
+            /** Partition Counts */
+            partition_counts: {
+                [key: string]: number;
+            };
+            /**
+             * Phase
+             * @constant
+             */
+            phase: "preview";
+            /**
+             * Replayed
+             * @default false
+             */
+            replayed: boolean;
+            /** Scope */
+            scope: string;
+            /**
+             * Status
+             * @constant
+             */
+            status: "accepted";
+            /** Target Generation */
+            target_generation: number;
+            /** Zero Hit Proof */
+            zero_hit_proof: boolean;
+        };
+        /**
+         * S09ProposeRollbackBody
+         * @description The closed rollback-proposal command: revalidate the exact
+         *     historical governed release and stage a fresh rollback candidate.
+         */
+        S09ProposeRollbackBody: {
+            /** Expected Governance Revision */
+            expected_governance_revision: number;
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Reason Code */
+            reason_code: string;
+            /** Release Candidate Id */
+            release_candidate_id: string;
+        };
+        /** S09ProposeRollbackResponse */
+        S09ProposeRollbackResponse: {
+            /** Candidate Id */
+            candidate_id: string;
+            compatibility: components["schemas"]["S09RollbackCompatibility"];
+            /** Governance Revision */
+            governance_revision: number;
+            /** Manifest Digest */
+            manifest_digest: string;
+            /** Manifest Id */
+            manifest_id: string;
+            /**
+             * Replayed
+             * @default false
+             */
+            replayed: boolean;
+            /** Rollback Target Id */
+            rollback_target_id: string;
+            /**
+             * Status
+             * @constant
+             */
+            status: "accepted";
+            /** Validation Bundle Digest */
+            validation_bundle_digest: string;
+            /** Validation Bundle Id */
+            validation_bundle_id: string;
+        };
+        /**
+         * S09RecoverHoldBody
+         * @description The closed hold-recovery command: the exact hold identity and the
+         *     exact recovery generation that must equal the active generation.
+         */
+        S09RecoverHoldBody: {
+            /** Expected Governance Revision */
+            expected_governance_revision: number;
+            /** Hold Id */
+            hold_id: string;
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Recovery Generation */
+            recovery_generation: number;
+        };
+        /** S09RecoverHoldResponse */
+        S09RecoverHoldResponse: {
+            /** Governance Revision */
+            governance_revision: number;
+            /** Hold Id */
+            hold_id: string;
+            /** Hold Released Event Id */
+            hold_released_event_id: string;
+            /** Recovery Generation */
+            recovery_generation: number;
+            /**
+             * Replayed
+             * @default false
+             */
+            replayed: boolean;
+            /**
+             * Status
+             * @constant
+             */
+            status: "accepted";
+        };
+        /**
+         * S09ReplayBody
+         * @description The closed reproduction-replay command: one exact governed release
+         *     over one fixed evidence snapshot for one explicit application.  A
+         *     separate replay identity; an omitted application never enumerates.
+         */
+        S09ReplayBody: {
+            /** Application Id */
+            application_id: string;
+            /** Expected Governance Revision */
+            expected_governance_revision: number;
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Release Candidate Id */
+            release_candidate_id: string;
+        };
+        /**
+         * S09ReplayBundle
+         * @description The closed replay result schema: one bundle whose namespace is fixed
+         *     to the isolated replay identity.
+         */
+        S09ReplayBundle: {
+            /** Application Id */
+            application_id: string;
+            /** Approval Binding Id */
+            approval_binding_id?: string | null;
+            /** Bundle Digest */
+            bundle_digest?: string | null;
+            /** Bundle Id */
+            bundle_id?: string | null;
+            /**
+             * Business Revision Delta
+             * @default 0
+             */
+            business_revision_delta: number;
+            /** Check Count */
+            check_count?: number | null;
+            /** Checks */
+            checks?: components["schemas"]["S09DiagnosticCheck"][];
+            /** Finding Count */
+            finding_count?: number | null;
+            /**
+             * Namespace
+             * @constant
+             */
+            namespace: "s09-replay";
+            /** Normalization Outcomes */
+            normalization_outcomes?: components["schemas"]["S09DiagnosticNormalizationOutcome"][];
+            /** Outcome */
+            outcome: string;
+            /** Reason Code */
+            reason_code?: string | null;
+            /** Release Candidate Id */
+            release_candidate_id: string;
+            /** Release Manifest Digest */
+            release_manifest_digest?: string | null;
+            /** Release Manifest Id */
+            release_manifest_id?: string | null;
+            /** Route */
+            route?: string | null;
+            /** Run Identity */
+            run_identity?: string | null;
+            /** Schema Version */
+            schema_version: string;
+            /** Selection Outcomes */
+            selection_outcomes?: components["schemas"]["S09DiagnosticSelectionOutcome"][];
+        };
+        /** S09ReplayResponse */
+        S09ReplayResponse: {
+            /** Bundle Count */
+            bundle_count: number;
+            /** Bundles */
+            bundles: components["schemas"]["S09ReplayBundle"][];
+            /** Business Revision Delta */
+            business_revision_delta: number;
+            /** Governance Revision */
+            governance_revision: number;
+            /**
+             * Namespace
+             * @constant
+             */
+            namespace: "s09-replay";
+            /** Release Candidate Id */
+            release_candidate_id: string;
+            /**
+             * Replayed
+             * @default false
+             */
+            replayed: boolean;
+            /**
+             * Status
+             * @constant
+             */
+            status: "accepted";
+        };
+        /**
+         * S09RollbackCompatibility
+         * @description The machine-decidable rollback compatibility verdict: compatible
+         *     only when the exact historical artifacts revalidate against the
+         *     current gates.
+         */
+        S09RollbackCompatibility: {
+            /** Compatible */
+            compatible: boolean;
+            /** Reason Code */
+            reason_code: string;
+        };
+        /**
+         * S09SimulationBody
+         * @description The closed counterfactual-simulation command: one exact governed
+         *     release over one fixed evidence snapshot for one explicit application.
+         *     A separate simulation identity; an omitted application never
+         *     enumerates.
+         */
+        S09SimulationBody: {
+            /** Application Id */
+            application_id: string;
+            /** Expected Governance Revision */
+            expected_governance_revision: number;
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Release Candidate Id */
+            release_candidate_id: string;
+        };
+        /**
+         * S09SimulationBundle
+         * @description The closed simulation result schema: one bundle whose namespace is
+         *     fixed to the isolated simulation identity.
+         */
+        S09SimulationBundle: {
+            /** Application Id */
+            application_id: string;
+            /** Approval Binding Id */
+            approval_binding_id?: string | null;
+            /** Bundle Digest */
+            bundle_digest?: string | null;
+            /** Bundle Id */
+            bundle_id?: string | null;
+            /**
+             * Business Revision Delta
+             * @default 0
+             */
+            business_revision_delta: number;
+            /** Check Count */
+            check_count?: number | null;
+            /** Checks */
+            checks?: components["schemas"]["S09DiagnosticCheck"][];
+            /** Finding Count */
+            finding_count?: number | null;
+            /**
+             * Namespace
+             * @constant
+             */
+            namespace: "s09-simulation";
+            /** Normalization Outcomes */
+            normalization_outcomes?: components["schemas"]["S09DiagnosticNormalizationOutcome"][];
+            /** Outcome */
+            outcome: string;
+            /** Reason Code */
+            reason_code?: string | null;
+            /** Release Candidate Id */
+            release_candidate_id: string;
+            /** Release Manifest Digest */
+            release_manifest_digest?: string | null;
+            /** Release Manifest Id */
+            release_manifest_id?: string | null;
+            /** Route */
+            route?: string | null;
+            /** Run Identity */
+            run_identity?: string | null;
+            /** Schema Version */
+            schema_version: string;
+            /** Selection Outcomes */
+            selection_outcomes?: components["schemas"]["S09DiagnosticSelectionOutcome"][];
+        };
+        /** S09SimulationResponse */
+        S09SimulationResponse: {
+            /** Bundle Count */
+            bundle_count: number;
+            /** Bundles */
+            bundles: components["schemas"]["S09SimulationBundle"][];
+            /** Business Revision Delta */
+            business_revision_delta: number;
+            /** Governance Revision */
+            governance_revision: number;
+            /**
+             * Namespace
+             * @constant
+             */
+            namespace: "s09-simulation";
+            /** Release Candidate Id */
+            release_candidate_id: string;
+            /**
+             * Replayed
+             * @default false
+             */
+            replayed: boolean;
+            /**
+             * Status
+             * @constant
+             */
+            status: "accepted";
         };
         /** T05BusinessExceptionOperationsResult */
         T05BusinessExceptionOperationsResult: {
@@ -7391,6 +8236,86 @@ export interface operations {
             };
         };
     };
+    controlled_s09_impact_dispositions_controlled_s01_api_queries_impact_dispositions_get: {
+        parameters: {
+            query: {
+                final_impact_digest: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S09ImpactDispositionsSummaryResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    controlled_s09_impact_dispositions_reconciliation_controlled_s01_api_queries_impact_dispositions_reconciliation_get: {
+        parameters: {
+            query: {
+                final_impact_digest: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S09ImpactDispositionsResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     controlled_s01_queue_controlled_s01_api_queries_queue_get: {
         parameters: {
             query?: never;
@@ -9303,6 +10228,420 @@ export interface operations {
                 };
                 content: {
                     "text/html": string;
+                };
+            };
+        };
+    };
+    s09_impose_hold_controlled_s09_api_commands_impose_hold_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["S09ImposeHoldBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S09ImposeHoldResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ValidationErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+        };
+    };
+    s09_preview_impact_controlled_s09_api_commands_preview_impact_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["S09PreviewBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S09PreviewResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ValidationErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+        };
+    };
+    s09_propose_rollback_controlled_s09_api_commands_propose_rollback_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["S09ProposeRollbackBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S09ProposeRollbackResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ValidationErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+        };
+    };
+    s09_recover_hold_controlled_s09_api_commands_recover_hold_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["S09RecoverHoldBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S09RecoverHoldResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ValidationErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+        };
+    };
+    s09_replay_controlled_s09_api_commands_replay_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["S09ReplayBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S09ReplayResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ValidationErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+        };
+    };
+    s09_simulate_controlled_s09_api_commands_simulate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["S09SimulationBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S09SimulationResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ValidationErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
                 };
             };
         };

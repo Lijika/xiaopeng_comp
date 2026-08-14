@@ -53,6 +53,22 @@ from task4_consistency.controlled.s01_store import (
     SQLiteTargetStore,
     StaleStoreRevision,
 )
+from task4_consistency.controlled.s09_diagnostics import (
+    S09DiagnosticBundleWriter,
+    S09DiagnosticRunner,
+    S09DiagnosticView,
+)
+from task4_consistency.controlled.s09_impact import (
+    DEPENDENCY_INDEX_VERSION,
+    HOLD_RECOVERY_CRITERION_ID,
+    IMPACT_ENVELOPE_SCHEMA,
+    IMPACT_MANIFEST_SCHEMA,
+    ImpactUnprovable,
+    build_impact_envelope,
+    build_impact_manifest,
+    content_digest as s09_content_digest,
+    verify_impact_manifest_digest,
+)
 
 S08_SCOPE = "C-DEMO/demo"
 SOURCE_BUNDLE_ID = "c-demo-legacy-baseline/1"
@@ -541,7 +557,13 @@ def _validate_principal(principal: PolicyPrincipal | None) -> None:
         or len(principal.subject) > 200
     ):
         raise PolicyInvalidTransition("policy principal subject is invalid")
-    if principal.role not in {"admin", "approver", "operator"}:
+    if principal.role not in {
+        "admin",
+        "approver",
+        "operator",
+        "replay_operator",
+        "simulation_operator",
+    }:
         raise PolicyInvalidTransition("policy principal role is invalid")
     if principal.scope != S08_SCOPE:
         raise PolicyInvalidTransition("policy principal scope is not served")
@@ -571,6 +593,15 @@ class PolicyGovernanceService:
         source_rules_path: str | Path | None = None,
         source_kb_path: str | Path | None = None,
         corpus_root: str | Path | None = None,
+        lifecycle_snapshot_provider: (
+            Callable[
+                [SQLiteTargetStore, str | None], dict[str, Any]
+            ]
+            | None
+        ) = None,
+        diagnostic_snapshot_provider: (
+            Callable[[SQLiteTargetStore, str], dict[str, Any]] | None
+        ) = None,
     ) -> None:
         for name, value in (
             ("migration admin", migration_admin_subject),
@@ -611,6 +642,8 @@ class PolicyGovernanceService:
         self._store = SQLiteTargetStore(state_path)
         self._lock = threading.RLock()
         self._checker_cache: dict[str, TargetChecker] = {}
+        self._lifecycle_snapshot_provider = lifecycle_snapshot_provider
+        self._diagnostic_snapshot_provider = diagnostic_snapshot_provider
 
     # ------------------------------------------------------------------ ids
 
@@ -838,6 +871,9 @@ class PolicyGovernanceService:
                         "created_at": event.get("trusted_time"),
                     }
                 )
+                if event.get("rollback"):
+                    state["rollback"] = True
+                    state["rollback_target_id"] = event.get("rollback_target_id")
             elif kind in _ACTIVATION_KINDS:
                 state["status"] = (
                     "superseded" if kind == "superseded" else "active"
@@ -1643,6 +1679,7 @@ class PolicyGovernanceService:
         recovery_release_id: str,
         idempotency_key: str,
         expected_governance_revision: int | None,
+        preview_manifest_id: str,
     ) -> dict[str, Any]:
         _validate_principal(principal)
         if principal.role != "approver":
@@ -1659,8 +1696,22 @@ class PolicyGovernanceService:
             or recovery_release_id.strip() != recovery_release_id
         ):
             raise PolicyInvalidTransition("recovery release identity is invalid")
+        if (
+            not isinstance(preview_manifest_id, str)
+            or not preview_manifest_id
+            or preview_manifest_id.strip() != preview_manifest_id
+        ):
+            raise PolicyInvalidTransition("impact preview identity is invalid")
+        # S-1/S-5: every newly approved candidate binds the immutable impact
+        # preview, so the approval fingerprint covers the preview identity
+        # and the same idempotency key with a different preview must conflict
+        # instead of replaying the first approval binding.
         fingerprint = self._fingerprint(
-            "approve", candidate_id, activation_time, recovery_release_id
+            "approve",
+            candidate_id,
+            activation_time,
+            recovery_release_id,
+            preview_manifest_id,
         )
 
         def mutate(staged: SQLiteTargetStore, key: str) -> dict[str, Any]:
@@ -1701,6 +1752,27 @@ class PolicyGovernanceService:
                 "recovery_release_id": recovery_release_id,
                 "approved_by": principal.subject,
             }
+            # S09: the approval always binds the immutable impact preview and
+            # the machine-decidable envelope derived from it.  Any change to
+            # predecessor/candidate/scope/oracle/dependency category/risk,
+            # any full-scope expansion, any member/count ceiling breach
+            # requires a new preview and a new approval.
+            preview = self._preview_manifest(staged, preview_manifest_id)
+            if str(preview.get("candidate", {}).get("candidate_id")) != candidate_id:
+                raise PolicyInvalidTransition(
+                    "impact preview does not belong to the candidate"
+                )
+            envelope = self._impact_envelope(
+                staged, preview=preview, candidate=state
+            )
+            binding_material.update(
+                {
+                    "preview_manifest_id": preview_manifest_id,
+                    "preview_manifest_digest": str(preview["digest"]),
+                    "impact_envelope": envelope,
+                    "impact_envelope_digest": str(envelope["digest"]),
+                }
+            )
             binding_digest = content_digest(binding_material)
             approval_binding_id = f"approval_sha256_{binding_digest}"
             if not any(
@@ -1759,6 +1831,14 @@ class PolicyGovernanceService:
                 "approver_subject": principal.subject,
                 "activation_time": activation_time,
                 "recovery_release_id": recovery_release_id,
+                "preview_manifest_id": binding_material.get("preview_manifest_id"),
+                "preview_manifest_digest": binding_material.get(
+                    "preview_manifest_digest"
+                ),
+                "impact_envelope": binding_material.get("impact_envelope"),
+                "impact_envelope_digest": binding_material.get(
+                    "impact_envelope_digest"
+                ),
                 "governance_revision": len(staged.policy_governance_events),
             }
             staged.idempotency[key] = (fingerprint, result)
@@ -1856,15 +1936,20 @@ class PolicyGovernanceService:
 
         def mutate(staged: SQLiteTargetStore, key: str) -> dict[str, Any]:
             self._verify_governance_revision(staged, expected_governance_revision)
-            if self._activation_hold(staged, principal.scope) is not None:
-                raise PolicyInvalidTransition("activation hold is in effect")
-            if activation_at < self._trusted_time():
-                raise PolicyInvalidTransition("activation time is retroactive")
             binding = self._artifact(staged, approval_binding_id)
             if binding.get("schema_version") != APPROVAL_BINDING_SCHEMA:
                 raise PolicyInvalidTransition("approval binding is not verifiable")
             candidate_id = str(binding["candidate_id"])
             state = self._require_candidate_state(staged, candidate_id)
+            if (
+                self._activation_hold(staged, principal.scope) is not None
+                and not state.get("rollback")
+            ):
+                # The hold blocks ordinary activations; the dedicated
+                # governed rollback command is explicitly permitted.
+                raise PolicyInvalidTransition("activation hold is in effect")
+            if activation_at < self._trusted_time():
+                raise PolicyInvalidTransition("activation time is retroactive")
             if state["status"] != "approved":
                 raise PolicyInvalidTransition(
                     f"candidate {candidate_id} cannot be scheduled from {state['status']}"
@@ -2034,6 +2119,1663 @@ class PolicyGovernanceService:
 
         return self._run_command(
             principal, "stop_activations", idempotency_key, fingerprint, mutate
+        )
+
+    # ------------------------------------------------------------ S09 impact
+
+    def _lifecycle_impact_snapshot(
+        self,
+        owner: SQLiteTargetStore,
+        final_impact_digest: str | None = None,
+    ) -> dict[str, Any]:
+        """The read-only, side-effect-free Lifecycle-owned impact snapshot.
+
+        Governance never reads application state directly: the Lifecycle
+        builds the snapshot from the same physical store snapshot Governance
+        already reloaded, so one consistent view is used inside the
+        activation transaction without any cross-owner write."""
+        if self._lifecycle_snapshot_provider is None:
+            raise PolicyUnavailable(
+                "Lifecycle impact snapshot provider is not wired"
+            )
+        try:
+            snapshot = self._lifecycle_snapshot_provider(owner, final_impact_digest)
+        except Exception as error:
+            raise PolicyUnavailable(
+                "Lifecycle impact snapshot is unavailable"
+            ) from error
+        if not isinstance(snapshot, dict) or snapshot.get("complete") is not True:
+            raise PolicyUnavailable("Lifecycle impact snapshot is incomplete")
+        return snapshot
+
+    def _impact_manifest_request(
+        self,
+        owner: SQLiteTargetStore,
+        *,
+        phase: str,
+        candidate: dict[str, Any],
+        generation: int,
+        envelope: dict[str, Any] | None,
+        final_impact_digest: str | None = None,
+    ) -> dict[str, Any]:
+        active = self._fold_active_projection(
+            owner.policy_governance_events, S08_SCOPE
+        )
+        if active is None:
+            raise PolicyInvalidTransition("no active predecessor release exists")
+        predecessor_manifest = self._verify_pinned_manifest(
+            owner,
+            active["manifest_id"],
+            active["manifest_digest"],
+        )
+        predecessor_components = {
+            str(item["type"]): str(item["digest"])
+            for item in predecessor_manifest["components"]
+        }
+        candidate_manifest = self._verify_pinned_manifest(
+            owner,
+            candidate["manifest_id"],
+            candidate["manifest_digest"],
+        )
+        candidate_components = {
+            str(item["type"]): str(item["digest"])
+            for item in candidate_manifest["components"]
+        }
+        snapshot = self._lifecycle_impact_snapshot(owner, final_impact_digest)
+        return {
+            "phase": phase,
+            "scope": S08_SCOPE,
+            "predecessor": {
+                "candidate_id": active["candidate_id"],
+                "manifest_id": active["manifest_id"],
+                "manifest_digest": active["manifest_digest"],
+                "activation_event_id": active["activation_event_id"],
+                "active_generation": active["active_generation"],
+                "components": predecessor_components,
+            },
+            "candidate": {
+                "candidate_id": candidate["candidate_id"],
+                "manifest_id": candidate["manifest_id"],
+                "manifest_digest": candidate["manifest_digest"],
+                "components": candidate_components,
+            },
+            "target_generation": generation,
+            "authority_watermarks": {
+                "governance_revision": len(owner.policy_governance_events),
+                "lifecycle_watermark": snapshot.get("lifecycle_watermark"),
+            },
+            "dependency_index": {
+                "complete": True,
+                "index_digest": str(
+                    snapshot.get("dependency_index_digest") or ""
+                ),
+                "oracle_version": snapshot.get("dependency_index_version"),
+            },
+            "snapshot": snapshot,
+            "approval_envelope": envelope or {},
+            "max_added_members": int(
+                (envelope or {}).get("member_delta_rules", {}).get("max_added", 0)
+            ),
+        }
+
+    def preview_impact(
+        self,
+        *,
+        principal: PolicyPrincipal,
+        candidate_id: str,
+        idempotency_key: str,
+        expected_governance_revision: int | None,
+    ) -> dict[str, Any]:
+        """The immutable, content-addressed conservative impact preview for
+        a changed governed release.  The preview fixes predecessor/candidate
+        digests, scope, oracle version, dependency categories, partition
+        counts/digests and the deterministic member set; approval later binds
+        this exact digest."""
+        _validate_principal(principal)
+        if principal.role not in {"admin", "approver"}:
+            raise PolicyInvalidTransition(
+                "only the Rule Administrator or Policy Approver may preview impact"
+            )
+        if (
+            not isinstance(candidate_id, str)
+            or not candidate_id
+            or candidate_id.strip() != candidate_id
+        ):
+            raise PolicyInvalidTransition("candidate identity is invalid")
+        fingerprint = self._fingerprint("preview_impact", candidate_id)
+
+        def mutate(staged: SQLiteTargetStore, key: str) -> dict[str, Any]:
+            self._verify_governance_revision(staged, expected_governance_revision)
+            state = self._require_candidate_state(staged, candidate_id)
+            if state["status"] not in {"validated", "in_review", "approved"}:
+                raise PolicyInvalidTransition(
+                    f"candidate {candidate_id} cannot be previewed from {state['status']}"
+                )
+            active = self._fold_active_projection(
+                staged.policy_governance_events, S08_SCOPE
+            )
+            if active is None:
+                raise PolicyInvalidTransition("no active predecessor release exists")
+            generation = int(active["active_generation"]) + 1
+            try:
+                manifest = build_impact_manifest(
+                    self._impact_manifest_request(
+                        staged,
+                        phase="preview",
+                        candidate=state,
+                        generation=generation,
+                        envelope=None,
+                    )
+                )
+            except ImpactUnprovable as error:
+                raise PolicyInvalidTransition(
+                    f"IMPACT_UNPROVABLE_{error.reason_code}"
+                ) from error
+            event = self._append_governance_event(
+                staged,
+                kind="impact_previewed",
+                principal=principal,
+                reason_code="S09_IMPACT_PREVIEWED",
+                details={
+                    "candidate_id": candidate_id,
+                    "manifest_id": manifest["manifest_id"],
+                    "digest": manifest["digest"],
+                    "phase": manifest["phase"],
+                    "member_count": len(manifest["members"]),
+                    "partition_counts": {
+                        name: info["count"]
+                        for name, info in manifest["partitions"].items()
+                    },
+                    "zero_hit_proof": manifest["zero_hit_proof"] is not None,
+                    "target_generation": generation,
+                    "predecessor": manifest["predecessor"],
+                    "manifest": manifest,
+                },
+            )
+            self._append_audit(
+                staged,
+                action="preview_impact",
+                principal=principal,
+                result="accepted",
+                reason_code="S09_IMPACT_PREVIEWED",
+                details={
+                    "candidate_id": candidate_id,
+                    "manifest_id": manifest["manifest_id"],
+                    "manifest_digest": manifest["digest"],
+                    "governance_event_id": event["event_id"],
+                },
+            )
+            result = {
+                "status": "accepted",
+                "phase": manifest["phase"],
+                "manifest_id": manifest["manifest_id"],
+                "digest": manifest["digest"],
+                "scope": manifest["scope"],
+                "oracle_version": manifest["oracle_version"],
+                "level": manifest["level"],
+                "expanded_to_full_scope": manifest["expanded_to_full_scope"],
+                "member_count": len(manifest["members"]),
+                "partition_counts": {
+                    name: info["count"]
+                    for name, info in manifest["partitions"].items()
+                },
+                "zero_hit_proof": manifest["zero_hit_proof"] is not None,
+                "target_generation": generation,
+                "governance_revision": len(staged.policy_governance_events),
+            }
+            staged.idempotency[key] = (fingerprint, result)
+            return result
+
+        return self._run_command(
+            principal,
+            "preview_impact",
+            idempotency_key,
+            fingerprint,
+            mutate,
+        )
+
+    def _preview_manifest(
+        self, owner: SQLiteTargetStore, preview_manifest_id: str
+    ) -> dict[str, Any]:
+        """Read one immutable impact preview from the Ledger and re-verify
+        its canonical digest before approval binds it."""
+        if (
+            not isinstance(preview_manifest_id, str)
+            or not preview_manifest_id
+            or preview_manifest_id.strip() != preview_manifest_id
+        ):
+            raise PolicyInvalidTransition("preview manifest identity is invalid")
+        events = [
+            event
+            for event in owner.policy_governance_events
+            if event.get("kind") == "impact_previewed"
+            and event.get("manifest_id") == preview_manifest_id
+        ]
+        if not events:
+            raise PolicyNotFound("impact preview is unavailable")
+        event = events[-1]
+        manifest = event.get("manifest")
+        if not isinstance(manifest, dict):
+            raise PolicyUnavailable("impact preview content is unavailable")
+        if manifest.get("schema_version") != IMPACT_MANIFEST_SCHEMA:
+            raise PolicyUnavailable("impact preview schema is not verifiable")
+        if not verify_impact_manifest_digest(manifest):
+            raise PolicyUnavailable("impact preview digest does not verify")
+        return manifest
+
+    def _impact_envelope(
+        self,
+        owner: SQLiteTargetStore,
+        *,
+        preview: dict[str, Any],
+        candidate: dict[str, Any],
+    ) -> dict[str, Any]:
+        active = self._fold_active_projection(
+            owner.policy_governance_events, S08_SCOPE
+        )
+        if active is None:
+            raise PolicyInvalidTransition("no active predecessor release exists")
+        return build_impact_envelope(
+            preview=preview,
+            predecessor={
+                "candidate_id": active["candidate_id"],
+                "manifest_digest": active["manifest_digest"],
+            },
+            candidate={
+                "candidate_id": candidate["candidate_id"],
+                "manifest_digest": candidate["manifest_digest"],
+            },
+            scope=S08_SCOPE,
+            risk_class="governed_change",
+            dependency_categories=("release_change", "evidence_dependency"),
+            required_approvals=("policy_approver",),
+            protected_conditions=(
+                "no_manual_exclusion",
+                "no_old_success_reuse",
+                "no_hold_auto_expiry",
+            ),
+            max_added_members=0,
+            max_total_members=max(
+                1, len(preview.get("members", [])) or 1
+            ),
+        )
+
+    def _verify_final_impact_within_envelope(
+        self,
+        *,
+        envelope: dict[str, Any],
+        preview: dict[str, Any],
+        final: dict[str, Any],
+    ) -> None:
+        """The activation-time final impact must stay inside the approved
+        machine-decidable envelope: same predecessor/candidate digests,
+        scope, oracle version, authority watermarks and dependency index, no
+        member removal, additions only within the count ceilings.  Any drift
+        stops activation with zero protected delta; a new preview and a new
+        approval are the next actions."""
+        if envelope.get("schema_version") != IMPACT_ENVELOPE_SCHEMA:
+            raise PolicyInvalidTransition(
+                "approval envelope schema is not verifiable"
+            )
+        if envelope.get("preview_digest") != preview.get("digest"):
+            raise PolicyInvalidTransition(
+                "approval envelope does not bind the preview digest"
+            )
+        # Approved authority facts: scope, oracle version, the preview-time
+        # authority watermarks (lifecycle watermark exact; governance
+        # revision may only move forward through the approval chain) and the
+        # dependency index digest must all match the final manifest.
+        if str(envelope.get("scope") or "") != str(final.get("scope") or ""):
+            raise PolicyInvalidTransition(
+                "final impact scope drifted outside the envelope"
+            )
+        # The final manifest must bind the exact approved envelope digest:
+        # every approved risk/dependency/approval/protection fact lives in
+        # that canonical envelope, so a final manifest carrying any other
+        # envelope identity cannot claim the approval.
+        embedded_envelope = final.get("approval_envelope") or {}
+        if str(embedded_envelope.get("digest") or "") != str(
+            envelope.get("digest") or ""
+        ):
+            raise PolicyInvalidTransition(
+                "final impact does not bind the approved envelope digest"
+            )
+        if str(envelope.get("oracle_version") or "") != str(
+            final.get("oracle_version") or ""
+        ):
+            raise PolicyInvalidTransition(
+                "final impact oracle version drifted outside the envelope"
+            )
+        envelope_watermarks = envelope.get("authority_watermarks") or {}
+        final_watermarks = final.get("authority_watermarks") or {}
+        envelope_lifecycle_watermark = envelope_watermarks.get("lifecycle_watermark")
+        final_lifecycle_watermark = final_watermarks.get("lifecycle_watermark")
+        if (
+            isinstance(envelope_lifecycle_watermark, bool)
+            or not isinstance(envelope_lifecycle_watermark, int)
+            or isinstance(final_lifecycle_watermark, bool)
+            or not isinstance(final_lifecycle_watermark, int)
+            or envelope_lifecycle_watermark != final_lifecycle_watermark
+        ):
+            raise PolicyInvalidTransition(
+                "final impact lifecycle watermark drifted outside the envelope"
+            )
+        movement = envelope.get("permitted_authority_movement") or {}
+        governance_range = movement.get("governance_revision") or {}
+        lifecycle_range = movement.get("lifecycle_watermark") or {}
+        final_governance_revision = final_watermarks.get("governance_revision")
+        governance_minimum = governance_range.get("minimum")
+        governance_maximum = governance_range.get("maximum")
+        if not (
+            isinstance(final_governance_revision, int)
+            and not isinstance(final_governance_revision, bool)
+            and isinstance(governance_minimum, int)
+            and not isinstance(governance_minimum, bool)
+            and isinstance(governance_maximum, int)
+            and not isinstance(governance_maximum, bool)
+            and governance_minimum <= final_governance_revision
+            <= governance_maximum
+        ):
+            raise PolicyInvalidTransition(
+                "final impact governance revision drifted outside the envelope"
+            )
+        lifecycle_minimum = lifecycle_range.get("minimum")
+        lifecycle_maximum = lifecycle_range.get("maximum")
+        if not (
+            isinstance(final_lifecycle_watermark, int)
+            and not isinstance(final_lifecycle_watermark, bool)
+            and isinstance(lifecycle_minimum, int)
+            and not isinstance(lifecycle_minimum, bool)
+            and isinstance(lifecycle_maximum, int)
+            and not isinstance(lifecycle_maximum, bool)
+            and lifecycle_minimum <= final_lifecycle_watermark
+            <= lifecycle_maximum
+        ):
+            raise PolicyInvalidTransition(
+                "final impact lifecycle watermark drifted outside the permitted movement"
+            )
+        envelope_dependency = envelope.get("dependency_index") or {}
+        final_dependency = final.get("dependency_index") or {}
+        if str(envelope_dependency.get("index_digest") or "") != str(
+            final_dependency.get("index_digest") or ""
+        ):
+            raise PolicyInvalidTransition(
+                "final impact dependency index drifted outside the envelope"
+            )
+        if (
+            envelope_dependency.get("complete") is not True
+            or final_dependency.get("complete") is not True
+            or envelope_dependency.get("oracle_version")
+            != DEPENDENCY_INDEX_VERSION
+            or final_dependency.get("oracle_version")
+            != DEPENDENCY_INDEX_VERSION
+        ):
+            raise PolicyInvalidTransition(
+                "final impact dependency index is incomplete"
+            )
+        if (
+            envelope.get("predecessor", {}).get("candidate_id")
+            != final.get("predecessor", {}).get("candidate_id")
+            or envelope.get("predecessor", {}).get("manifest_digest")
+            != final.get("predecessor", {}).get("manifest_digest")
+            or envelope.get("candidate", {}).get("candidate_id")
+            != final.get("candidate", {}).get("candidate_id")
+            or envelope.get("candidate", {}).get("manifest_digest")
+            != final.get("candidate", {}).get("manifest_digest")
+        ):
+            raise PolicyInvalidTransition(
+                "final impact predecessor/candidate drifted outside the envelope"
+            )
+        preview_members = {
+            (str(member["application_id"]), int(member["cycle"]))
+            for member in preview.get("members", [])
+        }
+        final_members = {
+            (str(member["application_id"]), int(member["cycle"]))
+            for member in final.get("members", [])
+        }
+        removed = preview_members - final_members
+        if removed:
+            raise PolicyInvalidTransition(
+                "final impact removed members outside the approved envelope"
+            )
+        added = final_members - preview_members
+        max_added = int(envelope.get("member_delta_rules", {}).get("max_added", 0))
+        if len(added) > max_added:
+            raise PolicyInvalidTransition(
+                "final impact expanded beyond the approved member delta"
+            )
+        max_total = int(envelope.get("count_ceilings", {}).get("max_total", 0))
+        if len(final_members) > max_total:
+            raise PolicyInvalidTransition(
+                "final impact exceeds the approved count ceiling"
+            )
+        per_partition = envelope.get("count_ceilings", {}).get(
+            "per_partition", {}
+        )
+        final_partition_counts: dict[str, int] = {}
+        for member in final.get("members", []):
+            partition = str(member.get("partition") or "")
+            final_partition_counts[partition] = (
+                final_partition_counts.get(partition, 0) + 1
+            )
+        for partition, ceiling in per_partition.items():
+            if final_partition_counts.get(str(partition), 0) > int(ceiling):
+                raise PolicyInvalidTransition(
+                    "final impact exceeds the approved partition ceiling"
+                )
+
+    def _impose_hold(
+        self,
+        staged: SQLiteTargetStore,
+        *,
+        principal: PolicyPrincipal,
+        reason_code: str,
+        hold_scope: str,
+        evidence_digest: str | None = None,
+        outbox: bool = True,
+    ) -> dict[str, Any]:
+        """Append one immutable Policy Safety Hold fact: reason, actor,
+        authority revision, evidence digest, audit binding and the fixed
+        recovery criterion.  Holds never auto-expire; only an explicit
+        governed recovery command appends the release."""
+        event = self._append_governance_event(
+            staged,
+            kind="hold_imposed",
+            principal=principal,
+            reason_code=reason_code,
+            details={
+                "hold_id": None,
+                "scope": principal.scope,
+                "hold_scope": hold_scope,
+                "authority_revision": len(staged.policy_governance_events),
+                "evidence_digest": (
+                    evidence_digest
+                    if isinstance(evidence_digest, str) and evidence_digest
+                    else None
+                ),
+                "recovery_criterion_id": HOLD_RECOVERY_CRITERION_ID,
+                "recovery_criterion_digest": s09_content_digest(
+                    {
+                        "criterion_id": HOLD_RECOVERY_CRITERION_ID,
+                        "reason_code": reason_code,
+                        "hold_scope": hold_scope,
+                    }
+                ),
+            },
+        )
+        event["hold_id"] = event["event_id"]
+        event["details"] = event.get("details") or {}
+        event["details"]["hold_id"] = event["event_id"]
+        if outbox:
+            AuditOutboxOwner(staged).append_outbox(
+                {
+                    "event_id": self._stable_id(
+                        "outbox", f"{event['event_id']}:hold"
+                    ),
+                    "kind": "s09_hold_imposed",
+                    "scope": principal.scope,
+                    "hold_id": event["event_id"],
+                    "reason_code": reason_code,
+                    "hold_scope": hold_scope,
+                    "status": "pending",
+                }
+            )
+        self._append_audit(
+            staged,
+            action="impose_hold",
+            principal=principal,
+            result="accepted",
+            reason_code="S09_HOLD_IMPOSED",
+            details={
+                "hold_id": event["event_id"],
+                "hold_reason": reason_code,
+                "hold_scope": hold_scope,
+                "governance_event_id": event["event_id"],
+            },
+        )
+        return event
+
+    def _validate_hold_scope(
+        self, owner: SQLiteTargetStore, hold_scope: str
+    ) -> str:
+        """Validate one hold scope against the served scope or a
+        Lifecycle-authoritative application identity before any fact is
+        appended.  ``open_cycle`` and the served scope are always provable;
+        a concrete application identity must exist in the Lifecycle
+        snapshot.  A narrow scope under the served prefix that cannot be
+        proved expands to the smallest trustworthy parent (the served
+        scope), so the hold retains its protective effect instead of
+        becoming an active no-op.  Any other scope is rejected with zero
+        Governance/audit-success/idempotency/outbox business delta."""
+        if hold_scope in {"open_cycle", S08_SCOPE}:
+            return hold_scope
+        snapshot = self._lifecycle_impact_snapshot(owner, None)
+        known = {
+            str(app.get("application_id") or "")
+            for app in snapshot.get("applications", [])
+            if isinstance(app, dict) and app.get("application_id")
+        }
+        if hold_scope in known:
+            return hold_scope
+        if hold_scope.startswith("C-DEMO/"):
+            return S08_SCOPE
+        raise PolicyInvalidTransition(
+            "hold scope is not a provable served scope or application identity"
+        )
+
+    def impose_hold(
+        self,
+        *,
+        principal: PolicyPrincipal,
+        reason_code: str,
+        hold_scope: str,
+        idempotency_key: str,
+        expected_governance_revision: int | None,
+    ) -> dict[str, Any]:
+        """Impose a scoped Policy Safety Hold: automatic routing, new
+        RunSpec publication and current completion fail closed while any
+        hold in the union is active.  The hold is append-only and carries
+        the fixed recovery criterion; a timer never releases it.  The scope
+        is validated against the served scope or a Lifecycle-authoritative
+        application identity before any fact is appended."""
+        _validate_principal(principal)
+        if principal.role != "operator":
+            raise PolicyInvalidTransition(
+                "only the restricted activation operator may impose a hold"
+            )
+        if (
+            not isinstance(reason_code, str)
+            or not reason_code
+            or reason_code.strip() != reason_code
+        ):
+            raise PolicyInvalidTransition("hold reason is invalid")
+        if (
+            not isinstance(hold_scope, str)
+            or not hold_scope
+            or hold_scope.strip() != hold_scope
+        ):
+            raise PolicyInvalidTransition("hold scope is invalid")
+        fingerprint = self._fingerprint("impose_hold", reason_code, hold_scope)
+
+        def mutate(staged: SQLiteTargetStore, key: str) -> dict[str, Any]:
+            self._verify_governance_revision(staged, expected_governance_revision)
+            resolved_scope = self._validate_hold_scope(staged, hold_scope)
+            event = self._impose_hold(
+                staged,
+                principal=principal,
+                reason_code=reason_code,
+                hold_scope=resolved_scope,
+            )
+            result = {
+                "status": "accepted",
+                "hold_id": event["event_id"],
+                "hold_scope": resolved_scope,
+                "reason_code": reason_code,
+                "recovery_criterion_id": HOLD_RECOVERY_CRITERION_ID,
+                "recovery_criterion_digest": event["recovery_criterion_digest"],
+                "governance_event_id": event["event_id"],
+                "governance_revision": len(staged.policy_governance_events),
+            }
+            staged.idempotency[key] = (fingerprint, result)
+            return result
+
+        return self._run_command(
+            principal, "impose_hold", idempotency_key, fingerprint, mutate
+        )
+
+    def _hold_events(
+        self, owner: SQLiteTargetStore, scope: str
+    ) -> list[dict[str, Any]]:
+        return [
+            event
+            for event in owner.policy_governance_events
+            if event.get("kind") in {"hold_imposed", "hold_released"}
+            and event.get("scope") == scope
+        ]
+
+    def load_final_impact(
+        self,
+        digest: str,
+        *,
+        store: SQLiteTargetStore | None = None,
+    ) -> dict[str, Any] | None:
+        """The read-only seam Lifecycle uses to consume one immutable final
+        impact manifest.  Never mutates anything."""
+        owner = store if store is not None else self._store
+        if store is None:
+            owner.reload()
+        events = [
+            event
+            for event in owner.policy_governance_events
+            if event.get("kind") == "impact_finalized"
+            and event.get("digest") == digest
+        ]
+        if not events:
+            return None
+        manifest = events[-1].get("manifest")
+        if not isinstance(manifest, dict):
+            return None
+        if (
+            manifest.get("schema_version") != IMPACT_MANIFEST_SCHEMA
+            or not verify_impact_manifest_digest(manifest)
+            or manifest.get("digest") != digest
+        ):
+            return None
+        return manifest
+
+    def recover_hold(
+        self,
+        *,
+        principal: PolicyPrincipal,
+        hold_id: str,
+        recovery_generation: int,
+        idempotency_key: str,
+        expected_governance_revision: int | None,
+    ) -> dict[str, Any]:
+        """The separate, idempotent, separation-of-duties recovery command:
+        release one exact Policy Safety Hold only after the recovery
+        generation is the current active generation, every final-impact
+        member has a reconcilable disposition, and no durable rerun
+        obligation remains.  Appends only hold_released, audit,
+        idempotency and outbox facts; it never restores an old success and
+        never rewinds the Ledger."""
+        _validate_principal(principal)
+        if principal.role != "approver":
+            raise PolicyInvalidTransition(
+                "only the independent Policy Approver may confirm recovery"
+            )
+        if (
+            not isinstance(hold_id, str)
+            or not hold_id
+            or hold_id.strip() != hold_id
+        ):
+            raise PolicyInvalidTransition("hold identity is invalid")
+        if (
+            isinstance(recovery_generation, bool)
+            or not isinstance(recovery_generation, int)
+            or recovery_generation < 1
+        ):
+            raise PolicyInvalidTransition("recovery generation is invalid")
+        fingerprint = self._fingerprint(
+            "recover_hold", hold_id, recovery_generation
+        )
+
+        def mutate(staged: SQLiteTargetStore, key: str) -> dict[str, Any]:
+            self._verify_governance_revision(staged, expected_governance_revision)
+            hold_events = [
+                event
+                for event in staged.policy_governance_events
+                if event.get("kind") == "hold_imposed"
+                and event.get("hold_id") == hold_id
+            ]
+            if not hold_events:
+                raise PolicyNotFound("hold is unavailable")
+            hold = hold_events[-1]
+            released_events = [
+                event
+                for event in staged.policy_governance_events
+                if event.get("kind") == "hold_released"
+                and event.get("hold_id") == hold_id
+            ]
+            if released_events:
+                # The hold is no longer active.  A second recovery key for
+                # the same exact recovery generation replays the original
+                # semantic result with zero new event/audit/outbox delta; a
+                # different generation conflicts (a hold can never be
+                # released twice).
+                last_release = released_events[-1]
+                if (
+                    int(last_release.get("recovery_generation") or 0)
+                    == int(recovery_generation)
+                ):
+                    return {
+                        "status": "accepted",
+                        "hold_id": hold_id,
+                        "hold_released_event_id": last_release["event_id"],
+                        "recovery_generation": recovery_generation,
+                        "governance_revision": len(
+                            staged.policy_governance_events
+                        ),
+                        "replayed": True,
+                    }
+                raise PolicyInvalidTransition(
+                    "hold was already released at a different recovery generation"
+                )
+            if str(hold.get("actor", {}).get("subject") or "") == principal.subject:
+                raise PolicyInvalidTransition(
+                    "the hold actor cannot confirm its own release"
+                )
+            active = self._fold_active_projection(
+                staged.policy_governance_events, S08_SCOPE
+            )
+            if active is None:
+                raise PolicyInvalidTransition("no active governed release exists")
+            if int(active["active_generation"]) != int(recovery_generation):
+                raise PolicyInvalidTransition(
+                    "recovery generation is not the current active generation"
+                )
+            # Active-hold and fixed-criterion proof: the named hold is still
+            # in the append-only active union (no release fact exists) and
+            # its recovery criterion identity/digest re-verify exactly.
+            if (
+                str(hold.get("recovery_criterion_id") or "")
+                != HOLD_RECOVERY_CRITERION_ID
+                or str(hold.get("recovery_criterion_digest") or "")
+                != s09_content_digest(
+                    {
+                        "criterion_id": HOLD_RECOVERY_CRITERION_ID,
+                        "reason_code": hold.get("reason_code"),
+                        "hold_scope": hold.get("hold_scope"),
+                    }
+                )
+            ):
+                raise PolicyInvalidTransition(
+                    "hold recovery criterion is not verifiable"
+                )
+            # Integrity and protected-baseline proof: the active release
+            # manifest and its bound validation/approval evidence must
+            # still verify against the Registry before any release.
+            active_manifest = self._verify_pinned_manifest(
+                staged,
+                active["manifest_id"],
+                active["manifest_digest"],
+            )
+            self._verify_bound_evidence(
+                staged,
+                active_manifest,
+                candidate_id=active["candidate_id"],
+                validation_bundle_id=active["validation_bundle_id"],
+                validation_bundle_digest=active["validation_bundle_digest"],
+                approval_binding_id=active["approval_binding_id"],
+                approval_binding_digest=active["approval_binding_digest"],
+            )
+            final_digest = active.get("final_impact_digest")
+            if not final_digest and not active.get("bootstrap"):
+                # An active release without a final impact digest is only
+                # the bootstrap baseline: a non-bootstrap active without the
+                # final impact can never be released as a complete empty
+                # application set.
+                raise PolicyInvalidTransition(
+                    "active release without a final impact is not a bootstrap hold"
+                )
+            snapshot = self._lifecycle_impact_snapshot(staged, final_digest)
+            unconsumed = int(snapshot.get("unconsumed_count") or 0)
+            outstanding = int(snapshot.get("outstanding_count") or 0)
+            if unconsumed or outstanding:
+                raise PolicyInvalidTransition(
+                    "recovery requires every final-impact disposition"
+                )
+            # Hold-delivery proof: the exact hold fact must have reached
+            # every application covered by its scope -- Lifecycle consumed
+            # the imposed hold (the hold identity is in the application's
+            # active hold set) and the application sits in the hold's
+            # Unprocessable frame with no current run, so old run/route/
+            # work/exception references are non-operable (claims and review
+            # work only proceed from other phases, and every work/exception
+            # record binds a run id).  A pending hold outbox also rejects
+            # recovery.  This replaces the bootstrap empty-application
+            # shortcut: an unconsumed hold can never be released as a
+            # complete empty application set.
+            if any(
+                event.get("kind") == "s09_hold_imposed"
+                and event.get("hold_id") == hold_id
+                and event.get("status") == "pending"
+                for event in staged.outbox
+            ):
+                raise PolicyInvalidTransition("hold outbox delivery is pending")
+            hold_scope = str(hold.get("hold_scope") or "")
+            covered: list[dict[str, Any]] = []
+            for app_entry in snapshot.get("applications", []):
+                if not isinstance(app_entry, dict):
+                    continue
+                application_id = str(app_entry.get("application_id") or "")
+                phase = str(app_entry.get("phase") or "")
+                if phase in {"Verification Completed", "Terminated"}:
+                    continue
+                if not (
+                    hold_scope in {"open_cycle", S08_SCOPE}
+                    or hold_scope == application_id
+                ):
+                    continue
+                covered.append(app_entry)
+            for app_entry in covered:
+                active_hold_ids = app_entry.get("active_hold_ids")
+                if (
+                    not isinstance(active_hold_ids, list)
+                    or hold_id not in {str(item) for item in active_hold_ids}
+                ):
+                    raise PolicyInvalidTransition(
+                        "hold delivery is not reconciled to a covered application"
+                    )
+                if app_entry.get("old_references_operable") is not False:
+                    raise PolicyInvalidTransition(
+                        "an old current reference remains operable"
+                    )
+                if str(app_entry.get("phase") or "") != "Unprocessable":
+                    raise PolicyInvalidTransition(
+                        "hold consumption is not in force for a covered application"
+                    )
+                # Old route/work/exception references are non-operable by
+                # construction once the hold frame is in force: Lifecycle
+                # claims and review work only proceed from other phases, and
+                # every work/exception record binds a run id, so with no
+                # current run and the Unprocessable hold frame no old
+                # reference can be operated.  (The ``route`` string itself
+                # may carry the disposition's stale/recheck value while the
+                # hold is still active; the phase is the operability gate.)
+            # Durable rerun obligations: every open-cycle member that
+            # received an applied disposition must carry its Operational
+            # Re-evaluation job, unless the hold itself blocked the
+            # reevaluation (released only by this command) or the member is
+            # under a durable assembly obligation (dependency-context
+            # change: the application stays in Assembly, proven by the
+            # Lifecycle snapshot, with the disposition as its durable
+            # receipt).
+            if final_digest:
+                manifest = self.load_final_impact(final_digest, store=staged)
+                if manifest is not None:
+                    coverage = snapshot.get("member_coverage") or {}
+                    for member in manifest.get("members", []):
+                        if str(member.get("partition") or "") != "open_cycle":
+                            continue
+                        key = (
+                            f"{str(member.get('application_id') or '')}:"
+                            f"{int(member.get('cycle') or 0)}"
+                        )
+                        info = coverage.get(key) or {}
+                        member_phase = next(
+                            (
+                                str(item.get("phase") or "")
+                                for item in snapshot.get("applications") or []
+                                if str(item.get("application_id") or "")
+                                == str(member.get("application_id") or "")
+                                and int(item.get("cycle") or 0)
+                                == int(member.get("cycle") or 0)
+                            ),
+                            "",
+                        )
+                        if (
+                            info.get("disposition") == "applied"
+                            and int(info.get("reevaluation_job_count") or 0) < 1
+                            and not info.get("blocked_by_hold")
+                            and member_phase != "Assembly"
+                        ):
+                            raise PolicyInvalidTransition(
+                                "recovery requires durable rerun obligations"
+                            )
+            event = self._append_governance_event(
+                staged,
+                kind="hold_released",
+                principal=principal,
+                reason_code="S09_HOLD_RELEASED",
+                details={
+                    "hold_id": hold_id,
+                    "release_reason": "S09_RECOVERY_CRITERION_PASSED",
+                    "recovery_generation": recovery_generation,
+                    "released_hold_reason_code": hold.get("reason_code"),
+                    "released_hold_scope": hold.get("hold_scope"),
+                },
+            )
+            AuditOutboxOwner(staged).append_outbox(
+                {
+                    "event_id": self._stable_id(
+                        "outbox", f"{event['event_id']}:release"
+                    ),
+                    "kind": "s09_hold_released",
+                    "scope": S08_SCOPE,
+                    "hold_id": hold_id,
+                    "recovery_generation": recovery_generation,
+                    "status": "pending",
+                }
+            )
+            self._append_audit(
+                staged,
+                action="recover_hold",
+                principal=principal,
+                result="accepted",
+                reason_code="S09_HOLD_RELEASED",
+                details={
+                    "hold_id": hold_id,
+                    "governance_event_id": event["event_id"],
+                    "recovery_generation": recovery_generation,
+                },
+            )
+            result = {
+                "status": "accepted",
+                "hold_id": hold_id,
+                "hold_released_event_id": event["event_id"],
+                "recovery_generation": recovery_generation,
+                "governance_revision": len(staged.policy_governance_events),
+            }
+            staged.idempotency[key] = (fingerprint, result)
+            return result
+
+        return self._run_command(
+            principal, "recover_hold", idempotency_key, fingerprint, mutate
+        )
+
+    def propose_rollback(
+        self,
+        *,
+        principal: PolicyPrincipal,
+        release_candidate_id: str,
+        reason_code: str,
+        idempotency_key: str,
+        expected_governance_revision: int | None,
+    ) -> dict[str, Any]:
+        """Propose a governed rollback: revalidate the exact historical
+        release against the current semantic field catalog, policy
+        constraints, input contract, checker, artifact integrity and
+        protected baseline, then stage a fresh rollback candidate that
+        continues through the ordinary preview/approval/schedule/activation
+        pipeline at current time.  A failed gate leaves the hold in place
+        and the only publication path is a governed forward fix; nothing is
+        ever rewound and no historical active flag is restored."""
+        _validate_principal(principal)
+        if principal.role != "operator":
+            raise PolicyInvalidTransition(
+                "only the restricted incident principal may propose a rollback"
+            )
+        if (
+            not isinstance(release_candidate_id, str)
+            or not release_candidate_id
+            or release_candidate_id.strip() != release_candidate_id
+        ):
+            raise PolicyInvalidTransition("release identity is invalid")
+        if (
+            not isinstance(reason_code, str)
+            or not reason_code
+            or reason_code.strip() != reason_code
+        ):
+            raise PolicyInvalidTransition("rollback reason is invalid")
+        fingerprint = self._fingerprint(
+            "propose_rollback", release_candidate_id, reason_code
+        )
+
+        def mutate(staged: SQLiteTargetStore, key: str) -> dict[str, Any]:
+            self._verify_governance_revision(staged, expected_governance_revision)
+            states = self._fold_candidates(staged)
+            release = states.get(release_candidate_id)
+            if (
+                release is None
+                or release.get("status") not in {"active", "superseded"}
+            ):
+                # Only a historically governed release is rollback-eligible;
+                # anything else keeps the hold and requires a forward fix.
+                raise PolicyInvalidTransition(
+                    "ROLLBACK_INCOMPATIBLE_RELEASE_NOT_GOVERNED"
+                )
+            # The exact content-addressed manifest and every component must
+            # still verify against the Registry: no latest/nearest/
+            # reconstructed substitution is ever allowed.
+            manifest = self._verify_pinned_manifest(
+                staged,
+                release["manifest_id"],
+                release["manifest_digest"],
+            )
+            draft_id = self._stable_id(
+                "draft", f"rollback:{release_candidate_id}:{fingerprint}"
+            )
+            candidate_id = self._stable_id(
+                "candidate",
+                f"{draft_id}:1:{release['manifest_digest']}",
+            )
+            if candidate_id in states:
+                raise PolicyConflict("rollback candidate identity already exists")
+            historical_frozen_events = [
+                event
+                for event in staged.policy_governance_events
+                if event.get("kind") == "candidate_frozen"
+                and event.get("candidate_id") == release_candidate_id
+            ]
+            if len(historical_frozen_events) != 1:
+                raise PolicyUnavailable(
+                    "historical release frozen evidence is unavailable"
+                )
+            historical_frozen = historical_frozen_events[-1]
+            if not any(
+                item.get("manifest_id") == manifest["manifest_id"]
+                for item in staged.policy_manifests
+            ):
+                staged.policy_manifests.append(manifest)
+            # The rollback candidate reuses the exact historical manifest
+            # and mapping ledger; its frozen fact is appended before fresh
+            # validation so the validator reads the immutable snapshot the
+            # same way it reads any candidate (nothing is persisted on a
+            # failed gate, so protected delta stays zero).
+            self._append_governance_event(
+                staged,
+                kind="candidate_frozen",
+                principal=PolicyPrincipal(
+                    subject=self._operator_subject,
+                    role="operator",
+                    scope=S08_SCOPE,
+                    source_id="s08-rollback",
+                ),
+                reason_code="S09_ROLLBACK_CANDIDATE_FROZEN",
+                details={
+                    "candidate_id": candidate_id,
+                    "manifest_id": manifest["manifest_id"],
+                    "manifest_digest": manifest["digest"],
+                    "components": copy.deepcopy(release.get("components") or []),
+                    "mapping_ledger_id": historical_frozen.get("mapping_ledger_id"),
+                    "mapping_ledger_digest": historical_frozen.get(
+                        "mapping_ledger_digest"
+                    ),
+                    "metadata": {
+                        "scope": S08_SCOPE,
+                        "validity": {"valid_from": "2000-01-01T00:00:00Z"},
+                        "source": f"rollback:{release_candidate_id}",
+                        "reason": reason_code,
+                    },
+                    "rollback": True,
+                    "rollback_target_id": release_candidate_id,
+                },
+            )
+            # Fresh validation against the current gates (semantic field
+            # catalog, operators, input contract, protected baseline).
+            rollback_state = {
+                **copy.deepcopy(release),
+                "candidate_id": candidate_id,
+            }
+            bundle, outcome = self._validate_candidate(staged, rollback_state)
+            if outcome != "validated":
+                raise PolicyInvalidTransition("ROLLBACK_INCOMPATIBLE_VALIDATION")
+            staged.policy_drafts[draft_id] = {
+                "draft_id": draft_id,
+                "schema_version": "s08-draft/1",
+                "scope": S08_SCOPE,
+                "status": "draft",
+                "bootstrap": False,
+                "rollback": True,
+                "rollback_target_id": release_candidate_id,
+                "created_by": principal.subject,
+                "created_at": self._trusted_time(),
+                "revision": 1,
+                "source_bundle_id": str(release.get("source_bundle_id") or ""),
+                "source_sha256": str(release.get("source_sha256") or ""),
+                "knowledge_sha256": str(release.get("knowledge_sha256") or ""),
+                "mapping_ledger_id": str(release.get("mapping_ledger_id") or ""),
+                "mapping_ledger_digest": str(
+                    release.get("mapping_ledger_digest") or ""
+                ),
+                "artifact_ids": [],
+                "components": copy.deepcopy(release.get("components") or []),
+                "metadata": {
+                    "scope": S08_SCOPE,
+                    "validity": {"valid_from": "2000-01-01T00:00:00Z"},
+                    "source": f"rollback:{release_candidate_id}",
+                    "reason": reason_code,
+                },
+                "candidate_id": candidate_id,
+            }
+            staged.policy_artifacts.append(bundle["artifact"])
+            operator = PolicyPrincipal(
+                subject=self._operator_subject,
+                role="operator",
+                scope=S08_SCOPE,
+                source_id="s08-rollback",
+            )
+            self._append_governance_event(
+                staged,
+                kind="rollback_proposed",
+                principal=principal,
+                reason_code="S09_ROLLBACK_PROPOSED",
+                details={
+                    "release_candidate_id": release_candidate_id,
+                    "rollback_reason": reason_code,
+                    "manifest_id": manifest["manifest_id"],
+                    "manifest_digest": manifest["digest"],
+                },
+            )
+            self._append_governance_event(
+                staged,
+                kind="validated",
+                principal=operator,
+                reason_code="S09_ROLLBACK_VALIDATED",
+                details={
+                    "candidate_id": candidate_id,
+                    "validation_bundle_id": bundle["validation_bundle_id"],
+                    "validation_bundle_digest": bundle["digest"],
+                },
+            )
+            self._append_audit(
+                staged,
+                action="propose_rollback",
+                principal=principal,
+                result="accepted",
+                reason_code="S09_ROLLBACK_PROPOSED",
+                details={
+                    "release_candidate_id": release_candidate_id,
+                    "rollback_candidate_id": candidate_id,
+                    "rollback_reason": reason_code,
+                },
+            )
+            result = {
+                "status": "accepted",
+                "candidate_id": candidate_id,
+                "manifest_id": manifest["manifest_id"],
+                "manifest_digest": manifest["digest"],
+                "validation_bundle_id": bundle["validation_bundle_id"],
+                "validation_bundle_digest": bundle["digest"],
+                "rollback_target_id": release_candidate_id,
+                "compatibility": {
+                    "compatible": True,
+                    "reason_code": "S09_ROLLBACK_COMPATIBLE",
+                },
+                "governance_revision": len(staged.policy_governance_events),
+            }
+            staged.idempotency[key] = (fingerprint, result)
+            return result
+
+        return self._run_command(
+            principal,
+            "propose_rollback",
+            idempotency_key,
+            fingerprint,
+            mutate,
+        )
+
+    # -------------------------------------------------- S09 replay/simulation
+
+    def _diagnostic_view(
+        self,
+        owner: SQLiteTargetStore,
+        *,
+        namespace: str,
+        release_candidate_id: str,
+        application_id: str,
+    ) -> S09DiagnosticView | dict[str, Any]:
+        """The store-owned least-privilege factory: resolve the exact
+        governed release and one fixed evidence snapshot, then hand the
+        isolated runner only the read-only capability view.  Missing or
+        mismatched artifacts yield closed INVALID/UNREPRODUCIBLE bundles;
+        latest/nearest/reconstructed substitution is forbidden; the view
+        and every failure bundle carry identity fields only -- never raw
+        field values, OCR text, attachment locators or free text."""
+        states = self._fold_candidates(owner)
+        release_state = states.get(release_candidate_id)
+        if (
+            release_state is None
+            or release_state.get("status") not in {"active", "superseded"}
+        ):
+            return {
+                "schema_version": "s09-diagnostic-bundle/1",
+                "namespace": namespace,
+                "release_candidate_id": release_candidate_id,
+                "application_id": application_id,
+                "bundle_id": None,
+                "outcome": "INVALID",
+                "reason_code": "RELEASE_NOT_GOVERNED",
+                "business_revision_delta": 0,
+            }
+        try:
+            manifest = self._verify_pinned_manifest(
+                owner,
+                release_state["manifest_id"],
+                release_state["manifest_digest"],
+            )
+            checker_artifact = self._artifact(
+                owner, self._component_id(manifest, "checker")
+            )
+            release = TargetRelease.from_artifact(checker_artifact)
+        except Exception:
+            return {
+                "schema_version": "s09-diagnostic-bundle/1",
+                "namespace": namespace,
+                "release_candidate_id": release_candidate_id,
+                "application_id": application_id,
+                "bundle_id": None,
+                "outcome": "UNREPRODUCIBLE",
+                "reason_code": "ARTIFACT_UNAVAILABLE",
+                "business_revision_delta": 0,
+            }
+        provider = self._diagnostic_snapshot_provider
+        if provider is None:
+            return {
+                "schema_version": "s09-diagnostic-bundle/1",
+                "namespace": namespace,
+                "release_candidate_id": release_candidate_id,
+                "application_id": application_id,
+                "bundle_id": None,
+                "outcome": "UNREPRODUCIBLE",
+                "reason_code": "FIXED_SNAPSHOT_UNAVAILABLE",
+                "business_revision_delta": 0,
+            }
+        try:
+            snapshot = provider(owner, application_id)
+        except Exception:
+            snapshot = None
+        if (
+            not isinstance(snapshot, dict)
+            or snapshot.get("schema_version") != "s09-diagnostic-snapshot/1"
+            or snapshot.get("complete") is not True
+            or snapshot.get("application_id") != application_id
+            or not isinstance(snapshot.get("run_id"), str)
+            or not isinstance(snapshot.get("run_spec"), dict)
+            or snapshot["run_spec"].get("run_id") != snapshot["run_id"]
+            or snapshot["run_spec"].get("application_id") != application_id
+            or snapshot["run_spec"].get("cycle") != snapshot.get("cycle")
+            or snapshot["run_spec"].get("evidence_snapshot_id")
+            != snapshot.get("evidence_snapshot_id")
+            or snapshot["run_spec"].get("evidence_snapshot_digest")
+            != snapshot.get("evidence_snapshot_digest")
+        ):
+            return {
+                "schema_version": "s09-diagnostic-bundle/1",
+                "namespace": namespace,
+                "release_candidate_id": release_candidate_id,
+                "application_id": application_id,
+                "bundle_id": None,
+                "outcome": "UNREPRODUCIBLE",
+                "reason_code": "FIXED_SNAPSHOT_UNAVAILABLE",
+                "business_revision_delta": 0,
+            }
+        fixed_spec = copy.deepcopy(snapshot["run_spec"])
+        public = release.public_manifest()
+        run_spec = {
+            **copy.deepcopy(fixed_spec),
+            "run_id": f"{namespace}:{release_candidate_id}:{application_id}",
+            "release_id": public["release_id"],
+            "release_digest": public["digest"],
+            "checker_build": public["checker_build"],
+            "limits": copy.deepcopy(public["limits"]),
+            "applicable_check_ids": copy.deepcopy(
+                public["applicable_check_ids"]
+            ),
+            "applicable_check_count": public["applicable_check_count"],
+            "baseline_release": copy.deepcopy(public),
+        }
+        worker_identity = (
+            "s09-replay-worker"
+            if namespace == "s09-replay"
+            else "s09-simulation-worker"
+        )
+        return S09DiagnosticView(
+            namespace=namespace,
+            release_candidate_id=release_candidate_id,
+            application_id=application_id,
+            release_manifest_id=manifest["manifest_id"],
+            release_manifest_digest=manifest["digest"],
+            approval_binding_id=str(
+                release_state.get("approval_binding_id") or ""
+            ),
+            worker_identity=worker_identity,
+            release=release,
+            fixed_run_spec=json.dumps(
+                run_spec, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ),
+        )
+
+    def _diagnostic_run_bundle(self, view: S09DiagnosticView) -> dict[str, Any]:
+        """The isolated runner seam: execute one diagnostic bundle only from
+        the read-only capability view -- never from a store.  The runner
+        cannot persist, resolve current state or write business audit; it
+        writes only its own immutable content-addressed bundle."""
+        writer = S09DiagnosticBundleWriter(
+            namespace=view.namespace,
+            worker_identity=view.worker_identity,
+        )
+        return S09DiagnosticRunner(view.worker_identity, writer).run(view)
+
+    def _require_diagnostic_principal(
+        self, principal: PolicyPrincipal, namespace: str
+    ) -> None:
+        """Least-privilege diagnostic identity: one separate operator role
+        per namespace (replay vs simulation), never the activation operator
+        and never a cross-namespace credential."""
+        _validate_principal(principal)
+        expected_role = {
+            "replay": "replay_operator",
+            "simulation": "simulation_operator",
+        }.get(namespace)
+        if principal.role != expected_role:
+            raise PolicyInvalidTransition(
+                f"only the isolated {namespace} workload may run diagnostics"
+            )
+
+    def _run_diagnostic_command(
+        self,
+        *,
+        principal: PolicyPrincipal,
+        action: str,
+        namespace: str,
+        release_candidate_id: str,
+        application_id: str,
+        idempotency_key: str,
+        expected_governance_revision: int | None,
+    ) -> dict[str, Any]:
+        """Claim, run and settle one durable isolated diagnostic command."""
+        fingerprint = self._fingerprint(action, release_candidate_id, application_id)
+        operation_key = self._idempotency_key(
+            principal, action, idempotency_key
+        )
+        worker_identity = (
+            "s09-replay-worker"
+            if namespace == "s09-replay"
+            else "s09-simulation-worker"
+        )
+        job_id = self._stable_id(
+            "policy_job", f"s09-diagnostic:{operation_key}"
+        )
+        claimed_job: dict[str, Any] | None = None
+        view_or_bundle: S09DiagnosticView | dict[str, Any] | None = None
+        authority_revision = 0
+        claim_started_at = 0
+
+        for _ in range(3):
+            with self._lock:
+                self._store.reload()
+                replay = self._replay_or_conflict(
+                    self._store, operation_key, fingerprint
+                )
+                if replay is not None:
+                    return self._result(replay[1], replayed=True)
+                self._verify_governance_revision(
+                    self._store, expected_governance_revision
+                )
+                candidates = self._fold_candidates(self._store)
+                if release_candidate_id not in candidates:
+                    raise PolicyNotFound(release_candidate_id)
+                claim_started_at = self._trusted_time()
+                jobs = [
+                    item
+                    for item in self._store.policy_jobs
+                    if item.get("policy_job_id") == job_id
+                ]
+                if len(jobs) > 1:
+                    raise PolicyUnavailable(
+                        "diagnostic command authority is not unique"
+                    )
+                current = jobs[0] if jobs else None
+                if current is not None:
+                    if current.get("fingerprint") != fingerprint:
+                        raise PolicyConflict(
+                            "diagnostic command fingerprint conflicts"
+                        )
+                    if current.get("status") == "diagnostic_complete":
+                        raise PolicyUnavailable(
+                            "diagnostic result binding is unavailable"
+                        )
+                    if (
+                        current.get("status") == "diagnostic_running"
+                        and int(current.get("lease_until") or 0)
+                        > claim_started_at
+                    ):
+                        raise PolicyConflict(
+                            "diagnostic operation is already running"
+                        )
+                    if current.get("status") != "diagnostic_running":
+                        raise PolicyUnavailable(
+                            "diagnostic command state is not recoverable"
+                        )
+                view_or_bundle = self._diagnostic_view(
+                    self._store,
+                    namespace=namespace,
+                    release_candidate_id=release_candidate_id,
+                    application_id=application_id,
+                )
+                authority_revision = len(self._store.policy_governance_events)
+                if isinstance(view_or_bundle, dict):
+                    input_digest = s09_content_digest(view_or_bundle)
+                else:
+                    input_digest = s09_content_digest(
+                        {
+                            "namespace": view_or_bundle.namespace,
+                            "release_candidate_id": (
+                                view_or_bundle.release_candidate_id
+                            ),
+                            "application_id": view_or_bundle.application_id,
+                            "release_manifest_id": (
+                                view_or_bundle.release_manifest_id
+                            ),
+                            "release_manifest_digest": (
+                                view_or_bundle.release_manifest_digest
+                            ),
+                            "approval_binding_id": (
+                                view_or_bundle.approval_binding_id
+                            ),
+                            "worker_identity": view_or_bundle.worker_identity,
+                            "fixed_run_spec_sha256": hashlib.sha256(
+                                view_or_bundle.fixed_run_spec.encode("utf-8")
+                            ).hexdigest(),
+                        }
+                    )
+                staged = copy.deepcopy(self._store)
+                staged_jobs = [
+                    item
+                    for item in staged.policy_jobs
+                    if item.get("policy_job_id") == job_id
+                ]
+                if staged_jobs:
+                    job = staged_jobs[0]
+                    if job.get("input_digest") != input_digest:
+                        raise PolicyConflict(
+                            "diagnostic fixed input changed after lease expiry"
+                        )
+                    job["fence"] = int(job.get("fence") or 0) + 1
+                    job["attempt_no"] = int(job.get("attempt_no") or 0) + 1
+                else:
+                    job = {
+                        "policy_job_id": job_id,
+                        "kind": "s09_diagnostic",
+                        "namespace": namespace,
+                        "candidate_id": release_candidate_id,
+                        "application_id": application_id,
+                        "operation_key": operation_key,
+                        "fingerprint": fingerprint,
+                        "input_digest": input_digest,
+                        "fence": 1,
+                        "attempt_no": 1,
+                        "created_at": claim_started_at,
+                    }
+                    staged.policy_jobs.append(job)
+                job.update(
+                    {
+                        "status": "diagnostic_running",
+                        "worker_id": worker_identity,
+                        "lease_until": claim_started_at + 30,
+                    }
+                )
+                staged.policy_attempts.append(
+                    self._attempt_record(
+                        job, status="running", started_at=claim_started_at
+                    )
+                )
+                try:
+                    staged.persist()
+                except StaleStoreRevision:
+                    self._store.reload()
+                    continue
+                self._store = staged
+                claimed_job = copy.deepcopy(job)
+                break
+        if claimed_job is None or view_or_bundle is None:
+            raise PolicyConflict("diagnostic claim raced with another writer")
+
+        try:
+            bundle = (
+                view_or_bundle
+                if isinstance(view_or_bundle, dict)
+                else self._diagnostic_run_bundle(view_or_bundle)
+            )
+        except Exception:
+            bundle = {
+                "schema_version": "s09-diagnostic-bundle/1",
+                "namespace": namespace,
+                "release_candidate_id": release_candidate_id,
+                "application_id": application_id,
+                "bundle_id": None,
+                "outcome": "UNREPRODUCIBLE",
+                "reason_code": "CHECKER_EXECUTION_FAILED",
+                "business_revision_delta": 0,
+            }
+        result = {
+            "status": "accepted",
+            "namespace": namespace,
+            "release_candidate_id": release_candidate_id,
+            "bundle_count": 1,
+            "bundles": [bundle],
+            "business_revision_delta": 0,
+            "governance_revision": authority_revision,
+        }
+        for _ in range(3):
+            with self._lock:
+                self._store.reload()
+                replay = self._replay_or_conflict(
+                    self._store, operation_key, fingerprint
+                )
+                if replay is not None:
+                    return self._result(replay[1], replayed=True)
+                current_jobs = [
+                    item
+                    for item in self._store.policy_jobs
+                    if item.get("policy_job_id") == job_id
+                ]
+                if len(current_jobs) != 1:
+                    raise PolicyConflict(
+                        "diagnostic claim authority is unavailable"
+                    )
+                current = current_jobs[0]
+                if not (
+                    current.get("status") == "diagnostic_running"
+                    and current.get("worker_id")
+                    == claimed_job.get("worker_id")
+                    and current.get("fence") == claimed_job.get("fence")
+                    and current.get("attempt_no")
+                    == claimed_job.get("attempt_no")
+                    and int(current.get("lease_until") or 0)
+                    > self._trusted_time()
+                ):
+                    raise PolicyConflict("diagnostic claim is stale")
+                staged = copy.deepcopy(self._store)
+                settled = next(
+                    item
+                    for item in staged.policy_jobs
+                    if item.get("policy_job_id") == job_id
+                )
+                settled["status"] = "diagnostic_complete"
+                settled["bundle_id"] = bundle.get("bundle_id")
+                settled["bundle_digest"] = bundle.get("bundle_digest")
+                settled["outcome"] = bundle.get("outcome")
+                settled.pop("lease_until", None)
+                staged.policy_attempts.append(
+                    self._attempt_record(
+                        claimed_job,
+                        status="complete",
+                        started_at=claim_started_at,
+                        result={
+                            "outcome": bundle.get("outcome"),
+                            "bundle_id": bundle.get("bundle_id"),
+                            "bundle_digest": bundle.get("bundle_digest"),
+                        },
+                    )
+                )
+                staged.idempotency[operation_key] = (fingerprint, result)
+                try:
+                    staged.persist()
+                except StaleStoreRevision:
+                    continue
+                self._store = staged
+                return self._result(result)
+        raise PolicyConflict("diagnostic result commit raced with another writer")
+
+    def replay_release(
+        self,
+        *,
+        principal: PolicyPrincipal,
+        release_candidate_id: str,
+        application_id: str,
+        idempotency_key: str,
+        expected_governance_revision: int | None,
+    ) -> dict[str, Any]:
+        """Reproduction Replay: run the exact historical release over a
+        fixed evidence snapshot with a namespaced diagnostic identity.
+        Read-only: zero business, lifecycle, evidence, decision, routing,
+        delivery, work or audit revisions are ever produced.  One explicit
+        application identity is required: an omitted identity never
+        enumerates the run universe outside an authorized scope."""
+        self._require_diagnostic_principal(principal, "replay")
+        if (
+            not isinstance(release_candidate_id, str)
+            or not release_candidate_id
+            or release_candidate_id.strip() != release_candidate_id
+        ):
+            raise PolicyInvalidTransition("release identity is invalid")
+        if (
+            not isinstance(application_id, str)
+            or not application_id
+            or application_id.strip() != application_id
+        ):
+            raise PolicyInvalidTransition("application identity is invalid")
+        if (
+            not isinstance(idempotency_key, str)
+            or not idempotency_key
+            or idempotency_key.strip() != idempotency_key
+            or len(idempotency_key) > 200
+        ):
+            raise PolicyInvalidTransition("idempotency key is invalid")
+        if not self.audit_available or not self.storage_available:
+            raise PolicyUnavailable(
+                "required audit or storage authority is unavailable"
+            )
+        return self._run_diagnostic_command(
+            principal=principal,
+            action="replay_release",
+            namespace="s09-replay",
+            release_candidate_id=release_candidate_id,
+            application_id=application_id,
+            idempotency_key=idempotency_key,
+            expected_governance_revision=expected_governance_revision,
+        )
+
+    def simulate_release(
+        self,
+        *,
+        principal: PolicyPrincipal,
+        release_candidate_id: str,
+        application_id: str,
+        idempotency_key: str,
+        expected_governance_revision: int | None,
+    ) -> dict[str, Any]:
+        """Counterfactual Simulation: evaluate a candidate release over the
+        current fixed evidence snapshot with a namespaced diagnostic
+        identity.  Read-only; a diagnostic result can never become current.
+        One explicit application identity is required: an omitted identity
+        never enumerates the run universe outside an authorized scope."""
+        self._require_diagnostic_principal(principal, "simulation")
+        if (
+            not isinstance(release_candidate_id, str)
+            or not release_candidate_id
+            or release_candidate_id.strip() != release_candidate_id
+        ):
+            raise PolicyInvalidTransition("release identity is invalid")
+        if (
+            not isinstance(application_id, str)
+            or not application_id
+            or application_id.strip() != application_id
+        ):
+            raise PolicyInvalidTransition("application identity is invalid")
+        if (
+            not isinstance(idempotency_key, str)
+            or not idempotency_key
+            or idempotency_key.strip() != idempotency_key
+            or len(idempotency_key) > 200
+        ):
+            raise PolicyInvalidTransition("idempotency key is invalid")
+        if not self.audit_available or not self.storage_available:
+            raise PolicyUnavailable(
+                "required audit or storage authority is unavailable"
+            )
+        return self._run_diagnostic_command(
+            principal=principal,
+            action="simulate_release",
+            namespace="s09-simulation",
+            release_candidate_id=release_candidate_id,
+            application_id=application_id,
+            idempotency_key=idempotency_key,
+            expected_governance_revision=expected_governance_revision,
         )
 
     def cancel(
@@ -2376,7 +4118,10 @@ class PolicyGovernanceService:
         try:
             owner = copy.deepcopy(snapshot)
             state = self._require_candidate_state(owner, candidate_id)
-            claim_hold = self._activation_hold(owner, scope) is not None
+            claim_hold = (
+                self._activation_hold(owner, scope) is not None
+                and not state.get("rollback")
+            )
             if claim_hold:
                 raise PolicyInvalidTransition("activation hold is in effect")
             if state["status"] not in {"approved", "scheduled"}:
@@ -2505,7 +4250,10 @@ class PolicyGovernanceService:
                 current = self._require_candidate_state(staged, candidate_id)
                 if (
                     current["status"] != state["status"]
-                    or self._activation_hold(staged, scope) is not None
+                    or (
+                        self._activation_hold(staged, scope) is not None
+                        and not current.get("rollback")
+                    )
                 ):
                     return self._settle_discarded(
                         staged, job, now, settlement_now
@@ -2531,6 +4279,86 @@ class PolicyGovernanceService:
                 generation = (
                     int(prior["active_generation"]) + 1 if prior is not None else 1
                 )
+                # S09: the activation-time final impact is computed inside
+                # the settlement transaction and must stay inside the
+                # approved envelope.  A final expansion outside the envelope
+                # stops activation with zero protected delta; unprovable
+                # completeness rejects activation and establishes the
+                # corresponding Policy Safety Hold.
+                final_impact_manifest = None
+                final_impact_event_id = None
+                # P-1: a non-bootstrap activation always settles a final
+                # impact inside the approved envelope.  A legacy approval
+                # binding without the bound envelope can never activate an
+                # arbitrary changed candidate; only the internal bootstrap
+                # transaction (which never passes through this worker)
+                # carries the pre-S09 baseline.
+                envelope = binding.get("impact_envelope")
+                if not isinstance(envelope, dict):
+                    raise PolicyInvalidTransition(
+                        "approval binding carries no impact envelope"
+                    )
+                preview_manifest_id = binding.get("preview_manifest_id")
+                if not isinstance(preview_manifest_id, str) or not preview_manifest_id:
+                    raise PolicyInvalidTransition(
+                        "approval envelope has no bound preview manifest"
+                    )
+                preview = self._preview_manifest(staged, preview_manifest_id)
+                if (
+                    str(preview.get("candidate", {}).get("candidate_id"))
+                    != candidate_id
+                ):
+                    raise PolicyInvalidTransition(
+                        "bound preview does not belong to the candidate"
+                    )
+                final_impact_manifest = build_impact_manifest(
+                    self._impact_manifest_request(
+                        staged,
+                        phase="final",
+                        candidate=state,
+                        generation=generation,
+                        envelope=envelope,
+                    )
+                )
+                self._verify_final_impact_within_envelope(
+                    envelope=envelope,
+                    preview=preview,
+                    final=final_impact_manifest,
+                )
+                final_event = self._append_governance_event(
+                    staged,
+                    kind="impact_finalized",
+                    principal=PolicyPrincipal(
+                        subject=self._operator_subject,
+                        role="operator",
+                        scope=scope,
+                        source_id="s08-policy-worker",
+                    ),
+                    reason_code="S09_IMPACT_FINALIZED",
+                    details={
+                        "candidate_id": candidate_id,
+                        "manifest_id": final_impact_manifest["manifest_id"],
+                        "digest": final_impact_manifest["digest"],
+                        "phase": final_impact_manifest["phase"],
+                        "member_count": len(final_impact_manifest["members"]),
+                        "partition_counts": {
+                            name: info["count"]
+                            for name, info in final_impact_manifest[
+                                "partitions"
+                            ].items()
+                        },
+                        "zero_hit_proof": (
+                            final_impact_manifest["zero_hit_proof"] is not None
+                        ),
+                        "target_generation": generation,
+                        "predecessor": final_impact_manifest["predecessor"],
+                        "envelope_digest": envelope.get("digest"),
+                        "manifest": final_impact_manifest,
+                    },
+                    trusted_time=settlement_now,
+                )
+                final_impact_event_id = final_event["event_id"]
+                self._before_write("s09.activation.impact_finalized")
                 activation_event = self._append_governance_event(
                     staged,
                     kind="activated",
@@ -2552,6 +4380,22 @@ class PolicyGovernanceService:
                         "active_generation": generation,
                         "activation_event_id": None,
                         "bootstrap": False,
+                        "final_impact_digest": (
+                            final_impact_manifest["digest"]
+                            if final_impact_manifest is not None
+                            else None
+                        ),
+                        "final_impact_manifest_id": (
+                            final_impact_manifest["manifest_id"]
+                            if final_impact_manifest is not None
+                            else None
+                        ),
+                        "final_impact_member_count": (
+                            len(final_impact_manifest["members"])
+                            if final_impact_manifest is not None
+                            else None
+                        ),
+                        "final_impact_event_id": final_impact_event_id,
                     },
                     trusted_time=settlement_now,
                 )
@@ -2610,6 +4454,21 @@ class PolicyGovernanceService:
                     "activated_at": settlement_now,
                     "bootstrap": False,
                     "components": manifest["components"],
+                    "final_impact_digest": (
+                        final_impact_manifest["digest"]
+                        if final_impact_manifest is not None
+                        else None
+                    ),
+                    "final_impact_manifest_id": (
+                        final_impact_manifest["manifest_id"]
+                        if final_impact_manifest is not None
+                        else None
+                    ),
+                    "final_impact_member_count": (
+                        len(final_impact_manifest["members"])
+                        if final_impact_manifest is not None
+                        else None
+                    ),
                 }
                 reservation = staged.policy_schedule_reservations.get(job["reservation_id"])
                 if reservation is None or reservation.get("status") != "pending":
@@ -2624,9 +4483,34 @@ class PolicyGovernanceService:
                         "candidate_id": candidate_id,
                         "activation_event_id": activation_event_id,
                         "active_generation": generation,
+                        "final_impact_digest": (
+                            final_impact_manifest["digest"]
+                            if final_impact_manifest is not None
+                            else None
+                        ),
                         "status": "pending",
                     }
                 )
+                if final_impact_manifest is not None:
+                    self._before_write("s09.activation.impact_outbox")
+                    AuditOutboxOwner(staged).append_outbox(
+                        {
+                            "event_id": self._stable_id(
+                                "outbox",
+                                f"{activation_event_id}:final-impact",
+                            ),
+                            "kind": "s09_impact_activated",
+                            "scope": scope,
+                            "candidate_id": candidate_id,
+                            "activation_event_id": activation_event_id,
+                            "active_generation": generation,
+                            "final_impact_digest": final_impact_manifest["digest"],
+                            "final_impact_member_count": len(
+                                final_impact_manifest["members"]
+                            ),
+                            "status": "pending",
+                        }
+                    )
                 # Stable operation identity: the activation job id doubles as the
                 # idempotency key, so response loss is reconciled by replaying
                 # the original operation instead of guessing a fresh key.
@@ -2653,6 +4537,16 @@ class PolicyGovernanceService:
                         "activation_event_id": activation_event_id,
                         "active_generation": generation,
                         "candidate_id": candidate_id,
+                        "final_impact_digest": (
+                            final_impact_manifest["digest"]
+                            if final_impact_manifest is not None
+                            else None
+                        ),
+                        "final_impact_member_count": (
+                            len(final_impact_manifest["members"])
+                            if final_impact_manifest is not None
+                            else None
+                        ),
                     },
                 )
                 self._append_audit(
@@ -2691,6 +4585,7 @@ class PolicyGovernanceService:
             PolicyInvalidTransition,
             PolicyUnavailable,
             PolicyConflict,
+            ImpactUnprovable,
             KeyError,
             ValueError,
             RuntimeError,
@@ -2735,7 +4630,10 @@ class PolicyGovernanceService:
                     and not claim_hold
                 )
                 try:
-                    fresh_hold = self._activation_hold(staged, scope) is not None
+                    fresh_hold = (
+                        self._activation_hold(staged, scope) is not None
+                        and not current.get("rollback")
+                    )
                 except KeyError:
                     # Corrupt hold evidence at settlement: fail closed --
                     # the worker must not classify any diagnostic on
@@ -2776,6 +4674,33 @@ class PolicyGovernanceService:
                         result={"reason_code": reason_code},
                     )
                 )
+                if isinstance(error, ImpactUnprovable):
+                    # Unprovable impact completeness rejects activation and
+                    # establishes the corresponding scoped Policy Safety
+                    # Hold in the same settlement transaction: no partial
+                    # activation, no silent diagnostic.
+                    self._impose_hold(
+                        staged,
+                        principal=PolicyPrincipal(
+                            subject=self._operator_subject,
+                            role="operator",
+                            scope=scope,
+                            source_id="s08-policy-worker",
+                        ),
+                        reason_code=f"IMPACT_UNPROVABLE_{error.reason_code}",
+                        hold_scope=str(error.hold_scope or scope),
+                    )
+                # A failed activation must not leave the schedule
+                # reservation pending forever: the scope may only re-open
+                # through a fresh preview/approval/schedule pipeline.
+                reservation = staged.policy_schedule_reservations.get(
+                    job.get("reservation_id")
+                )
+                if (
+                    isinstance(reservation, dict)
+                    and reservation.get("status") == "pending"
+                ):
+                    reservation["status"] = "cancelled"
                 if not self._persist_worker(staged):
                     return {
                         "status": "retry",
@@ -3437,8 +5362,65 @@ class PolicyGovernanceService:
         projection = PolicyGovernanceService._fold_active_projection(
             owner.policy_governance_events, scope
         )
-        hold = projection.get("activation_hold") if projection else None
-        return hold if isinstance(hold, dict) else None
+        if projection is None:
+            return None
+        hold = projection.get("activation_hold")
+        if isinstance(hold, dict):
+            return hold
+        union = projection.get("hold_union")
+        if isinstance(union, list) and union:
+            return {
+                "event_id": union[0]["hold_id"],
+                "reason_code": union[0]["reason_code"],
+                "stopped_at": union[0]["imposed_at"],
+                "stopped_by": union[0]["imposed_by"],
+            }
+        return None
+
+    @staticmethod
+    def _active_hold_union(
+        events: list[dict[str, Any]], scope: str
+    ) -> list[dict[str, Any]]:
+        """The append-only Policy Safety Hold union: every ``hold_imposed``
+        event still lacking a matching ``hold_released`` event.  Holds never
+        auto-expire; time only triggers alerts."""
+        imposed = [
+            event
+            for event in events
+            if event.get("kind") == "hold_imposed"
+            and event.get("scope") == scope
+        ]
+        released = {
+            str(event.get("hold_id") or "")
+            for event in events
+            if event.get("kind") == "hold_released"
+            and event.get("scope") == scope
+            and str(event.get("hold_id") or "")
+        }
+        active = []
+        for event in imposed:
+            hold_id = str(event.get("hold_id") or event.get("event_id") or "")
+            if not hold_id or hold_id in released:
+                continue
+            actor = event.get("actor") or {}
+            active.append(
+                {
+                    "hold_id": hold_id,
+                    "event_id": event.get("event_id"),
+                    "reason_code": str(event.get("reason_code") or ""),
+                    "scope": str(event.get("scope") or ""),
+                    "hold_scope": str(event.get("hold_scope") or ""),
+                    "imposed_by": str(actor.get("subject") or ""),
+                    "imposed_at": event.get("trusted_time"),
+                    "authority_revision": event.get("authority_revision"),
+                    "evidence_digest": event.get("evidence_digest"),
+                    "recovery_criterion_id": event.get("recovery_criterion_id"),
+                    "recovery_criterion_digest": event.get(
+                        "recovery_criterion_digest"
+                    ),
+                }
+            )
+        return active
 
     def _require_draft(
         self, owner: SQLiteTargetStore, draft_id: str
@@ -4496,8 +6478,9 @@ class PolicyGovernanceService:
     ) -> dict[str, Any] | None:
         """Rebuild the active projection purely from append-only governance
         facts.  The highest active generation wins; a stop event adds the
-        activation hold.  The mutable projection table is only a rebuildable
-        cache and can never override this fold."""
+        activation hold; S09 Policy Safety Holds compose as an append-only
+        union of imposed/released events.  The mutable projection table is
+        only a rebuildable cache and can never override this fold."""
         activated = [
             event
             for event in events
@@ -4532,6 +6515,10 @@ class PolicyGovernanceService:
                 "stopped_at": last_hold.get("trusted_time"),
                 "stopped_by": last_hold.get("actor", {}).get("subject"),
             }
+        hold_union = cls._active_hold_union(events, scope)
+        final_impact_digest = latest.get("final_impact_digest")
+        final_impact_manifest_id = latest.get("final_impact_manifest_id")
+        final_impact_member_count = latest.get("final_impact_member_count")
         return {
             "schema_version": "s08-active-projection/1",
             "scope": scope,
@@ -4550,6 +6537,19 @@ class PolicyGovernanceService:
             "activated_at": latest.get("trusted_time"),
             "bootstrap": bool(latest.get("bootstrap")),
             "activation_hold": hold,
+            "hold_union": hold_union,
+            "final_impact_digest": (
+                str(final_impact_digest) if final_impact_digest else None
+            ),
+            "final_impact_manifest_id": (
+                str(final_impact_manifest_id) if final_impact_manifest_id else None
+            ),
+            "final_impact_member_count": (
+                int(final_impact_member_count)
+                if isinstance(final_impact_member_count, int)
+                and not isinstance(final_impact_member_count, bool)
+                else None
+            ),
             "components": None,
         }
 
@@ -4633,6 +6633,10 @@ class PolicyGovernanceService:
             "approval_binding_id": active["approval_binding_id"],
             "approval_binding_digest": active["approval_binding_digest"],
             "components": manifest["components"],
+            "final_impact_digest": active.get("final_impact_digest"),
+            "final_impact_manifest_id": active.get("final_impact_manifest_id"),
+            "final_impact_member_count": active.get("final_impact_member_count"),
+            "hold_union": copy.deepcopy(active.get("hold_union") or []),
             **release_run_spec_pin,
             "release": {
                 "release_id": public["release_id"],
@@ -5009,6 +7013,14 @@ class PolicyGovernanceService:
                 ),
                 "bootstrap": bool(active.get("bootstrap")) if active else False,
                 "activation_hold": hold,
+                "holds": (
+                    copy.deepcopy(active.get("hold_union") or [])
+                    if active is not None
+                    else []
+                ),
+                "final_impact_digest": (
+                    active.get("final_impact_digest") if active is not None else None
+                ),
                 "watermark": self._store.projection_watermark,
             }
 
@@ -5045,6 +7057,10 @@ class PolicyGovernanceService:
                 "activated_at": active["activated_at"],
                 "bootstrap": bool(active.get("bootstrap")),
                 "activation_hold": active.get("activation_hold"),
+                "holds": copy.deepcopy(active.get("hold_union") or []),
+                "final_impact_digest": active.get("final_impact_digest"),
+                "final_impact_manifest_id": active.get("final_impact_manifest_id"),
+                "final_impact_member_count": active.get("final_impact_member_count"),
                 "components": manifest["components"],
             }
 
@@ -5451,6 +7467,11 @@ class PolicyGovernanceService:
 
     @staticmethod
     def _result(value: dict[str, Any], *, replayed: bool = False) -> dict[str, Any]:
+        if "replayed" in value:
+            # A mutate already declared its replay semantics (e.g. a
+            # second recovery key for an already released hold); the
+            # wrapper never overrides it.
+            return value
         return {**value, "replayed": replayed}
 
     def _persist_staged(self, staged: SQLiteTargetStore) -> None:
@@ -5570,6 +7591,14 @@ class PolicyGovernanceService:
                 result={"outcome": "discarded"},
             )
         )
+        reservation = staged.policy_schedule_reservations.get(
+            job.get("reservation_id")
+        )
+        if (
+            isinstance(reservation, dict)
+            and reservation.get("status") == "pending"
+        ):
+            reservation["status"] = "cancelled"
         if not self._persist_worker(staged):
             return {
                 "status": "retry",

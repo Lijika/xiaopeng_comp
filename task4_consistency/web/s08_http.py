@@ -43,6 +43,11 @@ from task4_consistency.controlled.s08 import (
 
 s08_router = APIRouter()
 
+# S09 policy impact / safety hold / recovery commands live on their own
+# router so the S08 surface (and its 17-route contract) stays unchanged;
+# they share the same DTO, auth and error mapping helpers.
+s09_router = APIRouter()
+
 # The private FastAPI ``app.state`` key holding the application module bound
 # by ``register_router``; requests resolve their authority per app.
 _S08_APP_MODULE_STATE_KEY = "_s08_application_module"
@@ -77,6 +82,7 @@ def register_router(app: FastAPI, app_module: Any) -> None:
         return
     setattr(app.state, _S08_APP_MODULE_STATE_KEY, app_module)
     app.include_router(s08_router)
+    app.include_router(s09_router)
 
 
 def _s08_service(request: Request) -> PolicyGovernanceService:
@@ -98,8 +104,31 @@ def _s08_require_role(request: Request, expected: str) -> PolicyPrincipal:
         "admin": (module.S08_ADMIN_CREDENTIAL, module.S08_ADMIN_SUBJECT),
         "approver": (module.S08_APPROVER_CREDENTIAL, module.S08_APPROVER_SUBJECT),
         "operator": (module.S08_OPERATOR_CREDENTIAL, module.S08_OPERATOR_SUBJECT),
+        # The S09 least-privilege diagnostic identities are optional: an
+        # environment without them stays fail-closed (403) for those roles.
+        "replay_operator": (
+            getattr(module, "S09_REPLAY_CREDENTIAL", ""),
+            getattr(module, "S09_REPLAY_SUBJECT", ""),
+        ),
+        "simulation_operator": (
+            getattr(module, "S09_SIMULATION_CREDENTIAL", ""),
+            getattr(module, "S09_SIMULATION_SUBJECT", ""),
+        ),
     }
     credential, subject = credentials.get(expected, ("", ""))
+    if expected in {"replay_operator", "simulation_operator"} and not (
+        module._s09_diagnostic_configuration_valid()
+    ):
+        # S09 configuration gate: missing or aliased replay/simulation
+        # identities fail diagnostic authorization closed.  S08 command
+        # authorization is never affected by this gate.
+        raise HTTPException(
+            403,
+            detail={
+                "error": "S08_FORBIDDEN",
+                "message": "Registered S09 diagnostic identity required",
+            },
+        )
     if not subject or not module._s01_has_credential(request, credential):
         raise HTTPException(
             403,
@@ -113,6 +142,33 @@ def _s08_require_role(request: Request, expected: str) -> PolicyPrincipal:
         role=expected,
         scope=S08_SCOPE,
         source_id="s08-web-bearer",
+    )
+
+
+def _s08_require_preview_role(request: Request) -> PolicyPrincipal:
+    """The impact preview is the read-only computation the independent
+    Policy Approver binds at approval time, so both the Rule Administrator
+    and the Policy Approver may run it; every other surface keeps its
+    single-role separation."""
+    module = _s08_app_module(request)
+    credentials = {
+        "admin": (module.S08_ADMIN_CREDENTIAL, module.S08_ADMIN_SUBJECT),
+        "approver": (module.S08_APPROVER_CREDENTIAL, module.S08_APPROVER_SUBJECT),
+    }
+    for role, (credential, subject) in credentials.items():
+        if subject and module._s01_has_credential(request, credential):
+            return PolicyPrincipal(
+                subject=subject,
+                role=role,
+                scope=S08_SCOPE,
+                source_id="s08-web-bearer",
+            )
+    raise HTTPException(
+        403,
+        detail={
+            "error": "S08_FORBIDDEN",
+            "message": "Registered S08 identity required",
+        },
     )
 
 
@@ -206,6 +262,7 @@ class S08CandidateCommandBody(S08CommandBody):
 class S08ApproveBody(S08CandidateCommandBody):
     activation_time: int
     recovery_release_id: str
+    preview_manifest_id: str
 
 
 class S08RejectBody(S08CandidateCommandBody):
@@ -241,6 +298,26 @@ class S08ActivationHold(BaseModel):
     stopped_by: str
 
 
+class S09HoldRef(BaseModel):
+    """One immutable Policy Safety Hold fact: identity, reason, scope,
+    actor, authority revision, evidence digest and the fixed recovery
+    criterion.  Never auto-expires."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    hold_id: str
+    event_id: str
+    reason_code: str
+    scope: str  # the served governance scope the hold was imposed in
+    hold_scope: str  # the application/partition scope the hold fences
+    imposed_by: str
+    imposed_at: int | None = None
+    authority_revision: int | None = None
+    evidence_digest: str | None = None
+    recovery_criterion_id: str | None = None
+    recovery_criterion_digest: str | None = None
+
+
 class S08StatusResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -251,6 +328,8 @@ class S08StatusResponse(BaseModel):
     active_generation: int | None = None
     bootstrap: bool
     activation_hold: S08ActivationHold | None = None
+    holds: list[S09HoldRef] = Field(default_factory=list)
+    final_impact_digest: str | None = None
     watermark: int
 
 
@@ -274,6 +353,10 @@ class S08ActiveResponse(BaseModel):
     activated_at: int | None = None
     bootstrap: bool = False
     activation_hold: S08ActivationHold | None = None
+    holds: list[S09HoldRef] = Field(default_factory=list)
+    final_impact_digest: str | None = None
+    final_impact_manifest_id: str | None = None
+    final_impact_member_count: int | None = None
     components: list[S08ComponentRef] = Field(default_factory=list)
 
 
@@ -463,6 +546,10 @@ class S08ApproveResponse(S08CommandResult):
     approver_subject: str
     activation_time: int
     recovery_release_id: str
+    preview_manifest_id: str | None = None
+    preview_manifest_digest: str | None = None
+    impact_envelope: S09ImpactEnvelope | None = None
+    impact_envelope_digest: str | None = None
     governance_revision: int
 
 
@@ -504,6 +591,217 @@ class S08ManifestCompatibility(BaseModel):
     checker_build: str
     input_contract_schema: str
     evidence_readiness_policy: str
+
+
+class S09PreviewBody(S08CommandBody):
+    """The closed impact-preview command: one governed candidate whose
+    conservative impact is computed against the active predecessor."""
+
+    candidate_id: str
+
+
+class S09PreviewResponse(S08CommandResult):
+    phase: Literal["preview"]
+    manifest_id: str
+    digest: str
+    scope: str
+    oracle_version: str
+    level: int
+    expanded_to_full_scope: bool
+    member_count: int
+    partition_counts: dict[str, int]
+    zero_hit_proof: bool
+    target_generation: int
+    governance_revision: int
+
+
+class S09ImposeHoldBody(S08CommandBody):
+    """The closed hold-imposition command: a registered reason and the
+    scope the Policy Safety Hold covers (open_cycle, the served scope, or
+    one application id)."""
+
+    reason_code: str
+    hold_scope: str
+
+
+class S09ImposeHoldResponse(S08CommandResult):
+    hold_id: str
+    hold_scope: str
+    reason_code: str
+    recovery_criterion_id: str
+    recovery_criterion_digest: str
+    governance_event_id: str
+    governance_revision: int
+
+
+class S09ReplayBody(S08CommandBody):
+    """The closed reproduction-replay command: one exact governed release
+    over one fixed evidence snapshot for one explicit application.  A
+    separate replay identity; an omitted application never enumerates."""
+
+    release_candidate_id: str
+    application_id: str
+
+
+class S09SimulationBody(S08CommandBody):
+    """The closed counterfactual-simulation command: one exact governed
+    release over one fixed evidence snapshot for one explicit application.
+    A separate simulation identity; an omitted application never
+    enumerates."""
+
+    release_candidate_id: str
+    application_id: str
+
+
+class S09DiagnosticCheck(BaseModel):
+    """The minimized diagnostic check: rule identity, verdict, severity and
+    registered reason codes only -- no raw value, OCR text, locator or free
+    text ever leaves the runner."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    rule_id: str
+    verdict: str
+    severity: str
+    reason_codes: list[str] = Field(default_factory=list)
+
+
+class S09DiagnosticSelectionOutcome(BaseModel):
+    """The minimized selection outcome: rule/document/field identity and
+    the machine decision only -- no raw field value, OCR text, locator or
+    free text ever leaves the runner."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    rule_id: str
+    observation_id: str | None = None
+    document_id: str
+    document_role: str
+    field: str
+    selected: bool
+    reason_code: str
+
+
+class S09DiagnosticNormalizationOutcome(BaseModel):
+    """The minimized normalization outcome: rule/document/field identity,
+    the OCR-fix flag and a digest of the normalized value (never the raw
+    value itself), so migration differentials compare machine-decidable
+    behavior without exposing content."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    rule_id: str
+    observation_id: str | None = None
+    document_id: str
+    document_role: str
+    field: str
+    ocr_fix: bool
+    normalized_sha256: str | None = None
+
+
+class S09DiagnosticBundle(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str
+    namespace: str
+    bundle_id: str | None = None
+    bundle_digest: str | None = None
+    release_candidate_id: str
+    release_manifest_id: str | None = None
+    release_manifest_digest: str | None = None
+    application_id: str
+    outcome: str
+    reason_code: str | None = None
+    check_count: int | None = None
+    finding_count: int | None = None
+    checks: list[S09DiagnosticCheck] = Field(default_factory=list)
+    selection_outcomes: list[S09DiagnosticSelectionOutcome] = Field(
+        default_factory=list
+    )
+    normalization_outcomes: list[S09DiagnosticNormalizationOutcome] = Field(
+        default_factory=list
+    )
+    route: str | None = None
+    approval_binding_id: str | None = None
+    run_identity: str | None = None
+    business_revision_delta: int = 0
+
+
+class S09ReplayBundle(S09DiagnosticBundle):
+    """The closed replay result schema: one bundle whose namespace is fixed
+    to the isolated replay identity."""
+
+    namespace: Literal["s09-replay"]
+
+
+class S09SimulationBundle(S09DiagnosticBundle):
+    """The closed simulation result schema: one bundle whose namespace is
+    fixed to the isolated simulation identity."""
+
+    namespace: Literal["s09-simulation"]
+
+
+class S09ReplayResponse(S08CommandResult):
+    namespace: Literal["s09-replay"]
+    release_candidate_id: str
+    bundle_count: int
+    bundles: list[S09ReplayBundle]
+    business_revision_delta: int
+    governance_revision: int
+
+
+class S09SimulationResponse(S08CommandResult):
+    namespace: Literal["s09-simulation"]
+    release_candidate_id: str
+    bundle_count: int
+    bundles: list[S09SimulationBundle]
+    business_revision_delta: int
+    governance_revision: int
+
+
+class S09ProposeRollbackBody(S08CommandBody):
+    """The closed rollback-proposal command: revalidate the exact
+    historical governed release and stage a fresh rollback candidate."""
+
+    release_candidate_id: str
+    reason_code: str
+
+
+class S09RollbackCompatibility(BaseModel):
+    """The machine-decidable rollback compatibility verdict: compatible
+    only when the exact historical artifacts revalidate against the
+    current gates."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    compatible: bool
+    reason_code: str
+
+
+class S09ProposeRollbackResponse(S08CommandResult):
+    candidate_id: str
+    manifest_id: str
+    manifest_digest: str
+    validation_bundle_id: str
+    validation_bundle_digest: str
+    rollback_target_id: str
+    compatibility: S09RollbackCompatibility
+    governance_revision: int
+
+
+class S09RecoverHoldBody(S08CommandBody):
+    """The closed hold-recovery command: the exact hold identity and the
+    exact recovery generation that must equal the active generation."""
+
+    hold_id: str
+    recovery_generation: int
+
+
+class S09RecoverHoldResponse(S08CommandResult):
+    hold_id: str
+    hold_released_event_id: str
+    recovery_generation: int
+    governance_revision: int
 
 
 class S08CandidateManifest(BaseModel):
@@ -713,9 +1011,100 @@ class S08ReviewMaterial(BaseModel):
     unsupported_report: S08UnsupportedReport
 
 
+class S09EnvelopeRef(BaseModel):
+    """One release reference inside the impact envelope: identity plus the
+    exact manifest digest the approver bound."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_id: str
+    manifest_digest: str
+
+
+class S09MemberDeltaRules(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_added: int
+    removal: Literal["machine_proof_only"]
+
+
+class S09CountCeilings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_total: int
+    per_partition: dict[str, int]
+
+
+class S09AuthorityWatermarks(BaseModel):
+    """The approved preview-time authority watermarks: the Governance
+    revision at preview and the Lifecycle projection watermark.  The final
+    manifest may only move the governance revision forward; the lifecycle
+    watermark must match exactly."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    governance_revision: int
+    lifecycle_watermark: int
+
+
+class S09AuthorityRange(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    minimum: int
+    maximum: int
+
+
+class S09PermittedAuthorityMovement(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    governance_revision: S09AuthorityRange
+    lifecycle_watermark: S09AuthorityRange
+
+
+class S09DependencyIndex(BaseModel):
+    """The approved dependency-index completeness fact bound by the
+    envelope: the digest of the Lifecycle-owned dependency index."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    complete: bool
+    index_digest: str
+    oracle_version: str
+
+
+class S09ImpactEnvelope(BaseModel):
+    """The machine-decidable approval envelope: the exact preview digest,
+    predecessor/candidate references, scope, oracle version, authority
+    watermarks, dependency index, dependency categories, risk class,
+    member-delta rules, count ceilings, approvals and protected conditions
+    -- the typed wire shape of the digest-bound envelope the Approver binds
+    at approval time."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str
+    preview_digest: str
+    predecessor: S09EnvelopeRef
+    candidate: S09EnvelopeRef
+    scope: str
+    oracle_version: str
+    authority_watermarks: S09AuthorityWatermarks
+    permitted_authority_movement: S09PermittedAuthorityMovement
+    dependency_index: S09DependencyIndex
+    dependency_categories: list[str]
+    risk_class: str
+    member_delta_rules: S09MemberDeltaRules
+    count_ceilings: S09CountCeilings
+    required_approvals: list[str]
+    protected_conditions: list[str]
+    digest: str
+
+
 class S08ApprovalBinding(BaseModel):
     """The fixed approver binding: the exact candidate/validation digests,
-    the bound diff, scope, activation time and recovery release."""
+    the bound diff, scope, activation time and recovery release, plus the
+    S09 impact preview/envelope the Approver binds for governed changes
+    (absent on pre-S09 bootstrap bindings)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -729,6 +1118,10 @@ class S08ApprovalBinding(BaseModel):
     activation_time: int
     recovery_release_id: str
     approved_by: str
+    preview_manifest_id: str | None = None
+    preview_manifest_digest: str | None = None
+    impact_envelope: S09ImpactEnvelope | None = None
+    impact_envelope_digest: str | None = None
 
 
 class S08ActiveAnchor(BaseModel):
@@ -970,6 +1363,7 @@ def s08_approve(
             candidate_id=body.candidate_id,
             activation_time=body.activation_time,
             recovery_release_id=body.recovery_release_id,
+            preview_manifest_id=body.preview_manifest_id,
             idempotency_key=body.idempotency_key,
             expected_governance_revision=body.expected_governance_revision,
         ),
@@ -1029,6 +1423,153 @@ def s08_stop_activations(
         lambda principal: _s08_service(request).stop_activations(
             principal=principal,
             reason_code=body.reason_code,
+            idempotency_key=body.idempotency_key,
+            expected_governance_revision=body.expected_governance_revision,
+        ),
+    )
+
+
+@s09_router.post(
+    "/controlled/s09/api/commands/preview_impact",
+    response_model=S09PreviewResponse,
+    responses=_S08_ERROR_RESPONSES,
+)
+def s09_preview_impact(
+    body: S09PreviewBody, request: Request, response: Response
+) -> dict[str, Any]:
+    """The immutable conservative impact preview for a changed governed
+    release; the Policy Approver binds its exact digest at approval time.
+    Both the Rule Administrator and the Policy Approver may run this
+    read-only computation."""
+    module = _s08_app_module(request)
+    module._s01_disable_cache(response)
+    principal = _s08_require_preview_role(request)
+    try:
+        return _s08_service(request).preview_impact(
+            principal=principal,
+            candidate_id=body.candidate_id,
+            idempotency_key=body.idempotency_key,
+            expected_governance_revision=body.expected_governance_revision,
+        )
+    except (
+        PolicyInvalidTransition,
+        PolicyConflict,
+        PolicyNotFound,
+        PolicyUnavailable,
+        RuntimeError,
+    ) as error:
+        raise _s08_rejected(error) from error
+
+
+@s09_router.post(
+    "/controlled/s09/api/commands/impose_hold",
+    response_model=S09ImposeHoldResponse,
+    responses=_S08_ERROR_RESPONSES,
+)
+def s09_impose_hold(
+    body: S09ImposeHoldBody, request: Request, response: Response
+) -> dict[str, Any]:
+    """Impose a scoped Policy Safety Hold: automatic routing, new RunSpec
+    publication and current completion fail closed until an explicit
+    governed recovery releases the hold."""
+    return _s08_command(
+        request, response, "operator",
+        lambda principal: _s08_service(request).impose_hold(
+            principal=principal,
+            reason_code=body.reason_code,
+            hold_scope=body.hold_scope,
+            idempotency_key=body.idempotency_key,
+            expected_governance_revision=body.expected_governance_revision,
+        ),
+    )
+
+
+@s09_router.post(
+    "/controlled/s09/api/commands/propose_rollback",
+    response_model=S09ProposeRollbackResponse,
+    responses=_S08_ERROR_RESPONSES,
+)
+def s09_propose_rollback(
+    body: S09ProposeRollbackBody, request: Request, response: Response
+) -> dict[str, Any]:
+    """Revalidate the exact historical release and stage a fresh rollback
+    candidate; an incompatible rollback keeps the hold and requires a
+    governed forward fix."""
+    return _s08_command(
+        request, response, "operator",
+        lambda principal: _s08_service(request).propose_rollback(
+            principal=principal,
+            release_candidate_id=body.release_candidate_id,
+            reason_code=body.reason_code,
+            idempotency_key=body.idempotency_key,
+            expected_governance_revision=body.expected_governance_revision,
+        ),
+    )
+
+
+@s09_router.post(
+    "/controlled/s09/api/commands/replay",
+    response_model=S09ReplayResponse,
+    responses=_S08_ERROR_RESPONSES,
+)
+def s09_replay(
+    body: S09ReplayBody, request: Request, response: Response
+) -> dict[str, Any]:
+    """Isolated reproduction replay with a namespaced replay identity and
+    its own command/result DTO: read-only, zero business revisions, one
+    explicit application."""
+    return _s08_command(
+        request, response, "replay_operator",
+        lambda principal: _s08_service(request).replay_release(
+            principal=principal,
+            release_candidate_id=body.release_candidate_id,
+            application_id=body.application_id,
+            idempotency_key=body.idempotency_key,
+            expected_governance_revision=body.expected_governance_revision,
+        ),
+    )
+
+
+@s09_router.post(
+    "/controlled/s09/api/commands/simulate",
+    response_model=S09SimulationResponse,
+    responses=_S08_ERROR_RESPONSES,
+)
+def s09_simulate(
+    body: S09SimulationBody, request: Request, response: Response
+) -> dict[str, Any]:
+    """Isolated counterfactual simulation with a namespaced simulation
+    identity and its own command/result DTO: read-only, zero business
+    revisions, never current, one explicit application."""
+    return _s08_command(
+        request, response, "simulation_operator",
+        lambda principal: _s08_service(request).simulate_release(
+            principal=principal,
+            release_candidate_id=body.release_candidate_id,
+            application_id=body.application_id,
+            idempotency_key=body.idempotency_key,
+            expected_governance_revision=body.expected_governance_revision,
+        ),
+    )
+
+
+@s09_router.post(
+    "/controlled/s09/api/commands/recover_hold",
+    response_model=S09RecoverHoldResponse,
+    responses=_S08_ERROR_RESPONSES,
+)
+def s09_recover_hold(
+    body: S09RecoverHoldBody, request: Request, response: Response
+) -> dict[str, Any]:
+    """The separate, idempotent, separation-of-duties hold recovery: only
+    the independent Policy Approver may confirm release of a hold imposed
+    by the activation operator."""
+    return _s08_command(
+        request, response, "approver",
+        lambda principal: _s08_service(request).recover_hold(
+            principal=principal,
+            hold_id=body.hold_id,
+            recovery_generation=body.recovery_generation,
             idempotency_key=body.idempotency_key,
             expected_governance_revision=body.expected_governance_revision,
         ),

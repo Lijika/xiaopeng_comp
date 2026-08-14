@@ -1434,6 +1434,7 @@ describe("S08 governed policy hooks (T08)", () => {
         candidate_id: CANDIDATE,
         activation_time: 1786000000,
         recovery_release_id: "candidate_prev",
+        preview_manifest_id: "preview_sha256_1111111111111111111111111111111111111111111111111111111111111111",
         idempotency_key: "t08-approve",
         expected_governance_revision: 3,
       });
@@ -1486,6 +1487,7 @@ describe("S08 governed policy hooks (T08)", () => {
       candidate_id: CANDIDATE,
       activation_time: 1786000000,
       recovery_release_id: "candidate_prev",
+      preview_manifest_id: "preview_sha256_1111111111111111111111111111111111111111111111111111111111111111",
       idempotency_key: "t08-approve-2",
       expected_governance_revision: 3,
     });
@@ -1623,6 +1625,7 @@ describe("S08 governed policy hooks (T08)", () => {
       candidate_id: string;
       activation_time: number;
       recovery_release_id: string;
+      preview_manifest_id: string;
       idempotency_key: string;
       expected_governance_revision: number;
     }>();

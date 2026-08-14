@@ -33,6 +33,7 @@ import {
   type S08ScheduleResponse,
   type S08StatusResponse,
   type S08SubmitReviewResponse,
+  type S09PreviewResponse,
   type SubmitResult,
   type VerifyRecoveryResult,
   type WorkspaceResponse,
@@ -639,6 +640,7 @@ export type S08FreezeCommand = paths["/controlled/s08/api/commands/freeze_candid
 export type S08ValidationCommand = paths["/controlled/s08/api/commands/request_validation"]["post"]["requestBody"]["content"]["application/json"];
 export type S08SubmitReviewCommand = paths["/controlled/s08/api/commands/submit_review"]["post"]["requestBody"]["content"]["application/json"];
 export type S08ApproveCommand = paths["/controlled/s08/api/commands/approve"]["post"]["requestBody"]["content"]["application/json"];
+export type S09PreviewCommand = paths["/controlled/s09/api/commands/preview_impact"]["post"]["requestBody"]["content"]["application/json"];
 export type S08RejectCommand = paths["/controlled/s08/api/commands/reject"]["post"]["requestBody"]["content"]["application/json"];
 export type S08ScheduleCommand = paths["/controlled/s08/api/commands/schedule"]["post"]["requestBody"]["content"]["application/json"];
 export type S08CancelCommand = paths["/controlled/s08/api/commands/cancel"]["post"]["requestBody"]["content"]["application/json"];
@@ -752,6 +754,26 @@ export function useApproveCandidate(): UseMutationResult<
   return useS08CommandMutation<S08ApproveResponse, S08ApproveCommand>(
     "/controlled/s08/api/commands/approve",
   );
+}
+
+export function usePreviewImpact(): UseMutationResult<
+  S09PreviewResponse,
+  Error,
+  S09PreviewCommand
+> {
+  // The impact preview appends one immutable governance fact
+  // (impact_previewed) and returns the fresh governance revision the
+  // approval must fence on.  It must not invalidate the S08 workspace
+  // query: an invalidating mutation would block its onSuccess on the
+  // refetch, and the workspace revision is stale for the approval anyway.
+  return useMutation({
+    mutationFn: (command: S09PreviewCommand) =>
+      request<S09PreviewResponse>("/controlled/s09/api/commands/preview_impact", {
+        method: "POST",
+        body: JSON.stringify(command),
+      }),
+    retry: false,
+  });
 }
 
 export function useRejectCandidate(): UseMutationResult<

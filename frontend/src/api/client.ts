@@ -61,6 +61,7 @@ export type S08RejectResponse = components["schemas"]["S08RejectResponse"];
 export type S08ScheduleResponse = components["schemas"]["S08ScheduleResponse"];
 export type S08CancelResponse = components["schemas"]["S08CancelResponse"];
 export type S08StatusResponse = components["schemas"]["S08StatusResponse"];
+export type S09PreviewResponse = components["schemas"]["S09PreviewResponse"];
 
 /** A structured server rejection; never invents identifiers or evidence. */
 export class HttpError extends Error {

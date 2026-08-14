@@ -47,6 +47,7 @@ from .s02 import (
     is_registered_scope,
     tenant_from_scope,
 )
+from .s08 import S08_SCOPE
 
 
 class AdmissionDisposition(str, Enum):
@@ -389,6 +390,7 @@ class ControlledScenarioService:
     _S07_FAILURE_PUBLICATION_EXHAUSTED = "control.failure_publication_exhausted"
     _PINNED_RELEASE_FAILURE = "PINNED_RELEASE_UNAVAILABLE"
     _POLICY_UNAVAILABLE_FAILURE = "configuration.policy_unavailable"
+    _S09_HOLD_FAILURE = "S09_POLICY_SAFETY_HOLD"
     _APPLICATION_STATE_FAILURE = "APPLICATION_STATE_AUTHORITY_UNAVAILABLE"
     _ADMISSION_JOB_RECOVERY_FAILURE = "ADMISSION_JOB_RECOVERY_UNAVAILABLE"
     _REVIEW_SOURCE_FAILURE = "SOURCE_EVIDENCE_UNAVAILABLE"
@@ -613,6 +615,1007 @@ class ControlledScenarioService:
         if self._policy_governance is None:
             return None
         return self._policy_governance.process_next_policy_job()
+
+    # ------------------------------------------------------------ S09 impact
+
+    _S09_IMPACT_OUTBOX_KINDS = frozenset(
+        {"s09_impact_activated", "s09_hold_imposed", "s09_hold_released"}
+    )
+    _S09_TERMINAL_PARTITIONS = frozenset(
+        {"verification_completed", "terminated", "compliance_deleted"}
+    )
+
+    @staticmethod
+    def _current_run_generation(
+        owner: SQLiteTargetStore, app: dict[str, Any]
+    ) -> int | None:
+        """The active generation proved by the application's current
+        complete run, or None when no current run exists or its generation
+        cannot be derived."""
+        current_run_id = app.get("current_run_id")
+        if not current_run_id:
+            return None
+        for run in owner.runs:
+            if (
+                run.get("run_id") != current_run_id
+                or run.get("status") != "complete"
+            ):
+                continue
+            spec = run.get("spec")
+            generation = (
+                spec.get("active_generation") if isinstance(spec, dict) else None
+            )
+            if isinstance(generation, int) and not isinstance(generation, bool):
+                return generation
+            return None
+        return None
+
+    @staticmethod
+    def _holds_cover_application(
+        hold_union: list[dict[str, Any]], application_id: str
+    ) -> bool:
+        """True when any Policy Safety Hold in the union is scoped to cover
+        this application.  Holds are scope-bound: ``open_cycle`` or the
+        served scope cover every open-cycle application; a concrete
+        application id covers only that application."""
+        for hold in hold_union or []:
+            hold_scope = str(hold.get("hold_scope") or "")
+            if hold_scope in {"open_cycle", "C-DEMO/demo"}:
+                return True
+            if hold_scope == application_id:
+                return True
+        return False
+
+    @staticmethod
+    def verification_route_for_checks(
+        checks: tuple[_RunCheckResult, ...],
+        findings: list[dict[str, Any]] | tuple[dict[str, Any], ...] = (),
+    ) -> str:
+        """Return the Lifecycle-owned route for one complete run result."""
+        if any(
+            check.verdict != "consistent"
+            and check.severity in {"critical", "major"}
+            for check in checks
+        ) or any(
+            finding.get("mandatory") is True
+            and finding.get("verdict") != "consistent"
+            for finding in findings
+        ):
+            return "manual_review"
+        return "auto_complete"
+
+    def _s09_currentness_block_reasons(
+        self, owner: SQLiteTargetStore, app: Mapping[str, Any]
+    ) -> tuple[str, ...]:
+        """The shared Lifecycle currentness guard used by every current
+        route/workspace/history consumer.
+
+        Currentness stays Lifecycle-owned, but it can never be reported for
+        a run the authoritative Governance facts invalidate: the guard
+        resolves the exact same authority seam as the completion fence
+        (``resolve_run_pin`` over the same physical store snapshot) and
+        consults the scoped hold union and the final-impact
+        membership/disposition receipts.  Immediately after activation --
+        with the impact outbox still pending -- an affected old run returns
+        a stable non-current reason instead of ``CURRENT_CONTEXT_MATCH``;
+        projection lag never relaxes currentness.  Any authority/integrity
+        resolution failure fails closed exactly like the fence.  When no
+        governed activation exists (pre-cutover) or the application has no
+        current run, Lifecycle alone owns the frame."""
+        if self._policy_governance is None or not app.get("current_run_id"):
+            return ()
+        try:
+            pin = self._policy_governance.resolve_run_pin(
+                S08_SCOPE, int(self._clock()), store=owner
+            )
+        except Exception:
+            # Authority cannot be resolved: fail closed rather than report
+            # a currentness the Governance facts can no longer prove.
+            return ("BLOCKED_AUTHORITY_UNAVAILABLE",)
+        if pin is None:
+            return ()
+        reasons: list[str] = []
+        current_generation = self._current_run_generation(owner, app)
+        if (
+            current_generation is None
+            or current_generation != int(pin["active_generation"])
+        ):
+            reasons.append("STALE_GENERATION")
+        if self._holds_cover_application(
+            pin.get("hold_union") or [],
+            str(app.get("application_id") or ""),
+        ):
+            reasons.append("BLOCKED_POLICY_HOLD")
+        final_digest = pin.get("final_impact_digest")
+        if final_digest and self._policy_governance is not None:
+            try:
+                manifest = self._policy_governance.load_final_impact(
+                    final_digest, store=owner
+                )
+            except Exception:
+                manifest = None
+            if manifest is None:
+                # Integrity fail-closed: the pinned final impact cannot be
+                # verified, so currentness cannot be reported at all.
+                reasons.append("BLOCKED_AUTHORITY_UNAVAILABLE")
+            else:
+                key = (
+                    str(app.get("application_id") or ""),
+                    int(app.get("cycle") or 0),
+                )
+                if any(
+                    str(member.get("application_id") or "") == key[0]
+                    and int(member.get("cycle") or 0) == key[1]
+                    for member in manifest.get("members", [])
+                ):
+                    receipt = self._impact_receipts(owner, final_digest).get(key)
+                    if receipt is None or receipt.get("disposition") == "outstanding":
+                        reasons.append("BLOCKED_IMPACT_DISPOSITION")
+        return tuple(reasons)
+
+    def _impact_receipts(
+        self,
+        owner: SQLiteTargetStore,
+        final_impact_digest: str,
+    ) -> dict[tuple[str, int], dict[str, Any]]:
+        """Lifecycle-owned consumption receipts for one final impact digest."""
+        receipts: dict[tuple[str, int], dict[str, Any]] = {}
+        for message in owner.inbox:
+            if (
+                message.get("kind") != "s09_impact_disposition"
+                or message.get("final_impact_digest") != final_impact_digest
+            ):
+                continue
+            key = (
+                str(message.get("application_id") or ""),
+                int(message.get("cycle") or 0),
+            )
+            if not key[0] or key in receipts:
+                continue
+            receipts[key] = message
+        return receipts
+
+    def build_policy_impact_snapshot(
+        self,
+        owner: SQLiteTargetStore,
+        final_impact_digest: str | None = None,
+    ) -> dict[str, Any]:
+        """The read-only, side-effect-free Lifecycle-owned impact snapshot.
+
+        Governance passes its own reloaded store snapshot here so both
+        owners see one consistent physical view; the builder never mutates
+        anything.  The snapshot carries the deterministic application
+        universe, per-member partition/current-run/expected-revision facts,
+        and (when requested) the consumption receipts for one final impact
+        digest."""
+        deleted_ids = {
+            str(receipt.get("application_id") or "")
+            for receipt in owner.deletion_receipts
+            if isinstance(receipt, dict) and receipt.get("application_id")
+        }
+        applications: list[dict[str, Any]] = []
+        for application_id, app in owner.applications.items():
+            phase = str(app.get("phase") or "")
+            if application_id in deleted_ids:
+                partition = "compliance_deleted"
+            elif phase == "Verification Completed":
+                partition = "verification_completed"
+            elif phase == "Terminated":
+                partition = "terminated"
+            else:
+                partition = "open_cycle"
+            current_generation = self._current_run_generation(owner, app)
+            applications.append(
+                {
+                    "application_id": application_id,
+                    "cycle": int(app.get("cycle") or 1),
+                    "partition": partition,
+                    "phase": phase,
+                    "route": str(app.get("route") or ""),
+                    "current_run_id": (
+                        str(app.get("current_run_id"))
+                        if app.get("current_run_id")
+                        else None
+                    ),
+                    "current_generation": current_generation,
+                    "lifecycle_revision": int(app.get("lifecycle_revision") or 0),
+                    "evidence_revision": int(app.get("evidence_revision") or 0),
+                    "active_hold_ids": sorted(
+                        str(hold_id)
+                        for hold_id in app.get("active_hold_ids") or []
+                        if str(hold_id)
+                    ),
+                    "old_references_operable": bool(
+                        app.get("current_run_id")
+                        or phase != "Unprocessable"
+                    ),
+                }
+            )
+        identities = sorted(
+            (str(item["application_id"]), int(item["cycle"]))
+            for item in applications
+        )
+        identity_bytes = json.dumps(
+            identities,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        universe_digest = hashlib.sha256(identity_bytes).hexdigest()
+        partition_tallies = sorted(
+            (
+                partition,
+                sum(item["partition"] == partition for item in applications),
+            )
+            for partition in (
+                "open_cycle",
+                "verification_completed",
+                "terminated",
+                "compliance_deleted",
+            )
+        )
+        dependency_index_digest = hashlib.sha256(
+            json.dumps(
+                partition_tallies,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        snapshot: dict[str, Any] = {
+            "scope": "C-DEMO/demo",
+            "complete": True,
+            "lifecycle_watermark": len(owner.lifecycle_events),
+            "dependency_index_digest": dependency_index_digest,
+            "dependency_index_version": "s09-lifecycle-dependency-index/1",
+            "applications": applications,
+            "universe": {
+                "complete": True,
+                "count": len(identities),
+                "digest": universe_digest,
+            },
+        }
+        if final_impact_digest:
+            receipts = self._impact_receipts(owner, final_impact_digest)
+            unconsumed = 0
+            outstanding = 0
+            manifest = (
+                self._policy_governance.load_final_impact(
+                    final_impact_digest, store=owner
+                )
+                if self._policy_governance is not None
+                else None
+            )
+            if manifest is not None:
+                for member in manifest.get("members", []):
+                    key = (
+                        str(member.get("application_id") or ""),
+                        int(member.get("cycle") or 0),
+                    )
+                    if key not in receipts:
+                        unconsumed += 1
+                    elif receipts[key].get("disposition") == "outstanding":
+                        outstanding += 1
+            snapshot["unconsumed_count"] = unconsumed
+            snapshot["outstanding_count"] = outstanding
+            snapshot["receipts"] = {
+                f"{key[0]}:{key[1]}": dict(message)
+                for key, message in receipts.items()
+            }
+            coverage: dict[str, dict[str, Any]] = {}
+            if manifest is not None:
+                for member in manifest.get("members", []):
+                    application_id = str(member.get("application_id") or "")
+                    cycle = int(member.get("cycle") or 0)
+                    key = f"{application_id}:{cycle}"
+                    message = receipts.get((application_id, cycle))
+                    job_count = sum(
+                        job.get("kind") == "operational_reevaluation"
+                        and job.get("application_id") == application_id
+                        and job.get("final_impact_digest") == final_impact_digest
+                        for job in owner.jobs
+                    )
+                    coverage[key] = {
+                        "disposition": (
+                            str(message.get("disposition") or "")
+                            if message is not None
+                            else "outstanding"
+                        ),
+                        "reevaluation_job_count": int(job_count),
+                        "blocked_by_hold": bool(
+                            message is not None
+                            and message.get("blocked_by_hold")
+                        ),
+                    }
+            snapshot["member_coverage"] = coverage
+        return snapshot
+
+    def build_policy_diagnostic_snapshot(
+        self,
+        owner: SQLiteTargetStore,
+        application_id: str,
+    ) -> dict[str, Any]:
+        """Return one exact Lifecycle-owned fixed run snapshot for S09.
+
+        Selection is by the application's authoritative current run identity;
+        a list-order or latest-run fallback is never permitted."""
+        app = owner.applications.get(application_id)
+        if not isinstance(app, dict):
+            return {
+                "schema_version": "s09-diagnostic-snapshot/1",
+                "complete": False,
+                "application_id": application_id,
+            }
+        run_id = app.get("current_run_id")
+        if not isinstance(run_id, str) or not run_id:
+            return {
+                "schema_version": "s09-diagnostic-snapshot/1",
+                "complete": False,
+                "application_id": application_id,
+            }
+        matches = [
+            run
+            for run in owner.runs
+            if run.get("run_id") == run_id
+            and run.get("application_id") == application_id
+            and run.get("status") == "complete"
+            and isinstance(run.get("spec"), dict)
+            and isinstance(run["spec"].get("evidence_snapshot"), dict)
+        ]
+        if len(matches) != 1:
+            return {
+                "schema_version": "s09-diagnostic-snapshot/1",
+                "complete": False,
+                "application_id": application_id,
+            }
+        run_spec = copy.deepcopy(matches[0]["spec"])
+        if (
+            run_spec.get("application_id") != application_id
+            or run_spec.get("cycle") != app.get("cycle")
+            or run_spec.get("evidence_snapshot_id")
+            != app.get("current_evidence_snapshot_id")
+            or run_spec.get("evidence_snapshot_digest")
+            != app.get("current_evidence_snapshot_digest")
+        ):
+            return {
+                "schema_version": "s09-diagnostic-snapshot/1",
+                "complete": False,
+                "application_id": application_id,
+            }
+        return {
+            "schema_version": "s09-diagnostic-snapshot/1",
+            "complete": True,
+            "application_id": application_id,
+            "cycle": int(app.get("cycle") or 0),
+            "run_id": run_id,
+            "run_spec": run_spec,
+            "evidence_snapshot_id": run_spec.get("evidence_snapshot_id"),
+            "evidence_snapshot_digest": run_spec.get("evidence_snapshot_digest"),
+            "lifecycle_revision": int(app.get("lifecycle_revision") or 0),
+        }
+
+    def _create_operational_reevaluation_job(
+        self,
+        staged: SQLiteTargetStore,
+        *,
+        app: dict[str, Any],
+        final_impact_digest: str,
+        target_generation: int,
+        now: int,
+    ) -> str | None:
+        """One durable Operational Re-evaluation job per member; the stable
+        job identity makes duplicate delivery idempotent."""
+        job_id = self._stable_id(
+            "job",
+            f"operational_reevaluation:{app['application_id']}:{app['cycle']}:{final_impact_digest}",
+        )
+        for job in staged.jobs:
+            if job.get("job_id") == job_id:
+                return job_id
+        staged.jobs.append(
+            {
+                "job_id": job_id,
+                "application_id": app["application_id"],
+                "kind": "operational_reevaluation",
+                "status": "queued",
+                "fence": 0,
+                "attempt_no": 0,
+                "fingerprint": final_impact_digest,
+                "target_generation": target_generation,
+                "final_impact_digest": final_impact_digest,
+                "created_at": now,
+            }
+        )
+        return job_id
+
+    def _record_impact_disposition(
+        self,
+        staged: SQLiteTargetStore,
+        *,
+        app: dict[str, Any] | None,
+        member: dict[str, Any],
+        final_impact_digest: str,
+        disposition: str,
+        job_id: str | None,
+        now: int,
+        blocked_by_hold: bool = False,
+    ) -> None:
+        """The idempotent Lifecycle disposition receipt: one inbox message
+        per (digest, application_id, cycle) plus the append-only lifecycle
+        fact for open-cycle/tracked members."""
+        application_id = str(member["application_id"])
+        cycle = int(member["cycle"])
+        message_id = self._stable_id(
+            "impact",
+            f"{final_impact_digest}:{application_id}:{cycle}",
+        )
+        for message in staged.inbox:
+            if message.get("message_id") == message_id:
+                return
+        staged.inbox.append(
+            {
+                "message_id": message_id,
+                "kind": "s09_impact_disposition",
+                "final_impact_digest": final_impact_digest,
+                "application_id": application_id,
+                "cycle": cycle,
+                "partition": str(member.get("partition") or ""),
+                "disposition": disposition,
+                "target_generation": int(member.get("target_generation") or 0),
+                "required_disposition": str(
+                    member.get("required_disposition") or ""
+                ),
+                "job_id": job_id,
+                "blocked_by_hold": blocked_by_hold,
+                "received_at": now,
+            }
+        )
+        if app is None:
+            return
+        staged.lifecycle_events.append(
+            {
+                "event_id": self._stable_id(
+                    "lifecycle",
+                    f"{application_id}:{cycle}:impact:{final_impact_digest[:16]}",
+                ),
+                "application_id": application_id,
+                "revision": int(app.get("lifecycle_revision") or 0),
+                "phase": str(app.get("phase") or ""),
+                "cycle": cycle,
+                "auxiliary": True,
+                "reason_code": f"S09_DISPOSITION_{disposition.upper()}",
+                "final_impact_digest": final_impact_digest,
+                "disposition": disposition,
+                "target_generation": int(member.get("target_generation") or 0),
+                "partition": str(member.get("partition") or ""),
+                "job_id": job_id,
+            }
+        )
+
+    def _consume_impact_activated(
+        self,
+        staged: SQLiteTargetStore,
+        event: dict[str, Any],
+        now: int,
+    ) -> None:
+        final_impact_digest = str(event.get("final_impact_digest") or "")
+        if not final_impact_digest or self._policy_governance is None:
+            raise RuntimeError("final impact fact identity is unavailable")
+        manifest = self._policy_governance.load_final_impact(
+            final_impact_digest, store=staged
+        )
+        if manifest is None:
+            raise RuntimeError("final impact manifest is unavailable")
+        for member in manifest.get("members", []):
+            application_id = str(member.get("application_id") or "")
+            cycle = int(member.get("cycle") or 0)
+            partition = str(member.get("partition") or "")
+            target_generation = int(member.get("target_generation") or 0)
+            app = staged.applications.get(application_id)
+            if app is None or int(app.get("cycle") or 0) != cycle:
+                # The member cannot be reconciled to a live application:
+                # the tuple stays outstanding and the generation fence keeps
+                # blocking until a successor proves it.
+                self._record_impact_disposition(
+                    staged,
+                    app=None,
+                    member=member,
+                    final_impact_digest=final_impact_digest,
+                    disposition="outstanding",
+                    job_id=None,
+                    now=now,
+                )
+                continue
+            if partition == "open_cycle":
+                current_run_generation = self._current_run_generation(
+                    staged, app
+                )
+                if (
+                    current_run_generation is not None
+                    and current_run_generation >= target_generation
+                ):
+                    # A current successor already proved the exact new
+                    # generation and required context: no stale, no
+                    # reevaluation job -- only the reconcilable receipt.
+                    # Defensive branch: the completion fence forces
+                    # consumption before any target-generation run becomes
+                    # current, so in normal flow this is reached only by
+                    # duplicate delivery (no-op) or level-2 expansion.
+                    self._record_impact_disposition(
+                        staged,
+                        app=app,
+                        member=member,
+                        final_impact_digest=final_impact_digest,
+                        disposition="already_revalidated",
+                        job_id=None,
+                        now=now,
+                    )
+                    continue
+                self._apply_open_cycle_disposition(
+                    staged,
+                    app=app,
+                    member=member,
+                    final_impact_digest=final_impact_digest,
+                    target_generation=target_generation,
+                    now=now,
+                )
+            else:
+                # Terminal partitions: record historical exposure only; no
+                # historical rewrite and no reevaluation job.
+                self._record_impact_disposition(
+                    staged,
+                    app=app,
+                    member=member,
+                    final_impact_digest=final_impact_digest,
+                    disposition="historical_terminated_exposure",
+                    job_id=None,
+                    now=now,
+                )
+
+    def _apply_open_cycle_disposition(
+        self,
+        staged: SQLiteTargetStore,
+        *,
+        app: dict[str, Any],
+        member: dict[str, Any],
+        final_impact_digest: str,
+        target_generation: int,
+        now: int,
+    ) -> None:
+        app_id = app["application_id"]
+        cycle = int(app.get("cycle") or 0)
+        message_id = self._stable_id(
+            "impact",
+            f"{final_impact_digest}:{app_id}:{cycle}",
+        )
+        for message in staged.inbox:
+            if (
+                message.get("message_id") == message_id
+                and message.get("disposition") != "outstanding"
+            ):
+                return
+        phase = str(app.get("phase") or "")
+        old_run_id = app.get("current_run_id")
+        # Stale the current run and route: the old generation can never be
+        # current again after the boundary changed.
+        app["current_run_id"] = None
+        app["current_evidence_snapshot_id"] = None
+        app["current_evidence_snapshot_digest"] = None
+        app["route"] = "pending_check"
+        app["projection_pending"] = False
+        app["projection_visible"] = False
+        if old_run_id:
+            staged.lifecycle_events.append(
+                {
+                    "event_id": self._stable_id(
+                        "lifecycle",
+                        f"{app_id}:{cycle}:invalidate:{old_run_id}",
+                    ),
+                    "application_id": app_id,
+                    "revision": int(app.get("lifecycle_revision") or 0),
+                    "phase": str(app.get("phase") or ""),
+                    "cycle": cycle,
+                    "auxiliary": True,
+                    "reason_code": "S09_GENERATION_INVALIDATED",
+                    "invalidated_run_id": str(old_run_id),
+                    "final_impact_digest": final_impact_digest,
+                }
+            )
+        # Record the authoritative generation the member must re-prove.
+        app["policy_generation"] = target_generation
+        app["current_final_impact_digest"] = final_impact_digest
+        if phase == "Unprocessable":
+            # An active hold already blocks this member: the stale/recheck
+            # part of the disposition is committed, while the reevaluation
+            # itself waits for the explicit hold release -- never a timer.
+            # Recording ``applied`` keeps the tuple reconcilable so the
+            # separate recovery command can prove delivery and release the
+            # hold; the hold union itself keeps the generation fence closed.
+            self._record_impact_disposition(
+                staged,
+                app=app,
+                member=member,
+                final_impact_digest=final_impact_digest,
+                disposition="applied",
+                job_id=None,
+                now=now,
+                blocked_by_hold=True,
+            )
+            return
+        hit_reasons = {
+            str(reason) for reason in member.get("hit_reasons") or ()
+        }
+        if "evidence_dependency" in hit_reasons:
+            # P-4: a dependency-context change (readiness/normalization/
+            # comparison/semantic/entity knowledge) leaves the application in
+            # Assembly with a durable assembly obligation: the disposition is
+            # recorded, the app stays in Assembly without evidence_ready and
+            # without an Operational Re-evaluation job, and the assembly
+            # obligation (phase + policy_generation + final-impact binding)
+            # is durable store state.  Only an unchanged dependency context
+            # enters Evidence Ready with exactly one reevaluation job.
+            if phase != "Assembly":
+                self._transition_lifecycle(
+                    app, "Assembly", "S09_IMPACT_REASSEMBLE", store=staged
+                )
+            app["route"] = "pending_check"
+            app["evidence_ready"] = False
+            app["projection_pending"] = False
+            app["projection_visible"] = False
+            self._record_impact_disposition(
+                staged,
+                app=app,
+                member=member,
+                final_impact_digest=final_impact_digest,
+                disposition="applied",
+                job_id=None,
+                now=now,
+            )
+            return
+        if phase != "Evidence Ready":
+            # Every remaining open-cycle phase (Intake, Assembly, Awaiting
+            # Evidence, Checking, Routing Determination, Manual Review,
+            # Supplement, Pending Exception Approval) re-enters through
+            # Assembly; a terminal phase is never an open-cycle member.
+            if phase != "Assembly":
+                self._transition_lifecycle(
+                    app, "Assembly", "S09_IMPACT_REASSEMBLE", store=staged
+                )
+            self._transition_lifecycle(
+                app, "Evidence Ready", "S09_OPERATIONAL_RE_EVALUATION", store=staged
+            )
+        app["evidence_ready"] = True
+        job_id = self._create_operational_reevaluation_job(
+            staged,
+            app=app,
+            final_impact_digest=final_impact_digest,
+            target_generation=target_generation,
+            now=now,
+        )
+        self._record_impact_disposition(
+            staged,
+            app=app,
+            member=member,
+            final_impact_digest=final_impact_digest,
+            disposition="applied",
+            job_id=job_id,
+            now=now,
+        )
+
+    def _consume_hold_imposed(
+        self,
+        staged: SQLiteTargetStore,
+        event: dict[str, Any],
+        now: int,
+    ) -> None:
+        hold_id = str(event.get("hold_id") or "")
+        hold_scope = str(event.get("hold_scope") or "")
+        if not hold_id:
+            raise RuntimeError("hold fact identity is unavailable")
+        for app in staged.applications.values():
+            phase = str(app.get("phase") or "")
+            if phase in {
+                "Verification Completed",
+                "Terminated",
+            }:
+                continue
+            if not (
+                hold_scope in {"open_cycle", "C-DEMO/demo"}
+                or hold_scope == app["application_id"]
+            ):
+                continue
+            active_hold_ids = sorted(
+                set(app.get("active_hold_ids") or []) | {hold_id}
+            )
+            app["active_hold_ids"] = active_hold_ids
+            if phase != "Unprocessable":
+                if (
+                    phase != "Assembly"
+                    and "Unprocessable"
+                    not in self._ALLOWED_PHASE_SUCCESSORS.get(
+                        phase, frozenset()
+                    )
+                ):
+                    # Phases that cannot reach Unprocessable directly
+                    # re-enter through a legal predecessor: Evidence Ready
+                    # through Checking, the rest through Assembly.
+                    if phase == "Evidence Ready":
+                        self._transition_lifecycle(
+                            app, "Checking", "S09_HOLD_REENTER", store=staged
+                        )
+                    else:
+                        self._transition_lifecycle(
+                            app, "Assembly", "S09_IMPACT_REASSEMBLE", store=staged
+                        )
+                self._transition_lifecycle(
+                    app, "Unprocessable", "S09_POLICY_SAFETY_HOLD", store=staged
+                )
+                # The old run/route/work references are invalidated in the
+                # same transition: the phase becomes Unprocessable with no
+                # current run, so current-route/history queries return the
+                # stable non-current frame instead of an unreconstructible
+                # authority failure.
+                old_run_id = app.get("current_run_id")
+                app["current_run_id"] = None
+                app["current_evidence_snapshot_id"] = None
+                app["current_evidence_snapshot_digest"] = None
+                app["route"] = "unprocessable"
+                app["evidence_ready"] = False
+                app["projection_pending"] = False
+                app["projection_visible"] = False
+                if old_run_id:
+                    staged.lifecycle_events.append(
+                        {
+                            "event_id": self._stable_id(
+                                "lifecycle",
+                                f"{app['application_id']}:{app['cycle']}:"
+                                f"hold-invalidate:{old_run_id}",
+                            ),
+                            "application_id": app["application_id"],
+                            "revision": int(app.get("lifecycle_revision") or 0),
+                            "phase": "Unprocessable",
+                            "cycle": int(app.get("cycle") or 0),
+                            "auxiliary": True,
+                            "reason_code": "S09_HOLD_INVALIDATED",
+                            "invalidated_run_id": str(old_run_id),
+                            "hold_id": hold_id,
+                        }
+                    )
+
+    def _consume_hold_released(
+        self,
+        staged: SQLiteTargetStore,
+        event: dict[str, Any],
+        now: int,
+    ) -> None:
+        hold_id = str(event.get("hold_id") or "")
+        recovery_generation = int(event.get("recovery_generation") or 0)
+        if not hold_id:
+            raise RuntimeError("hold release fact identity is unavailable")
+        for app in staged.applications.values():
+            active_hold_ids = sorted(
+                set(app.get("active_hold_ids") or []) - {hold_id}
+            )
+            app["active_hold_ids"] = active_hold_ids
+            if active_hold_ids:
+                continue
+            if str(app.get("phase") or "") != "Unprocessable":
+                continue
+            unprocessable_reasons = [
+                item.get("reason_code")
+                for item in staged.lifecycle_events
+                if item.get("application_id") == app["application_id"]
+                and item.get("reason_code") == "S09_POLICY_SAFETY_HOLD"
+                and item.get("revision") == int(app.get("lifecycle_revision") or 0)
+            ]
+            if not unprocessable_reasons:
+                continue
+            target_generation = recovery_generation
+            app["policy_generation"] = target_generation
+            # P-4: a dependency-context obligation stays durable across the
+            # hold.  Releasing an evidence-dependent member returns it to
+            # Assembly (no Evidence Ready, no reevaluation job): the member
+            # must re-assemble its evidence before any run can become
+            # current at the recovery generation.
+            final_impact_digest = str(app.get("current_final_impact_digest") or "")
+            evidence_dependent = False
+            if final_impact_digest and self._policy_governance is not None:
+                manifest = self._policy_governance.load_final_impact(
+                    final_impact_digest, store=staged
+                )
+                if manifest is not None:
+                    evidence_dependent = any(
+                        str(m.get("application_id") or "")
+                        == str(app.get("application_id") or "")
+                        and int(m.get("cycle") or 0) == int(app.get("cycle") or 0)
+                        and "evidence_dependency"
+                        in {str(reason) for reason in m.get("hit_reasons") or ()}
+                        for m in manifest.get("members", [])
+                    )
+            if evidence_dependent:
+                self._transition_lifecycle(
+                    app, "Assembly", "S09_HOLD_RELEASE_ASSEMBLY", store=staged
+                )
+                app["route"] = "pending_check"
+                app["evidence_ready"] = False
+                app["projection_pending"] = False
+                app["projection_visible"] = False
+                staged.lifecycle_events.append(
+                    {
+                        "event_id": self._stable_id(
+                            "lifecycle",
+                            f"{app['application_id']}:{app['cycle']}:hold-release:"
+                            f"{hold_id}",
+                        ),
+                        "application_id": app["application_id"],
+                        "revision": int(app.get("lifecycle_revision") or 0),
+                        "phase": "Assembly",
+                        "cycle": int(app.get("cycle") or 0),
+                        "auxiliary": True,
+                        "reason_code": "S09_HOLD_RELEASE_CONSUMED",
+                        "hold_id": hold_id,
+                        "recovery_generation": recovery_generation,
+                    }
+                )
+                continue
+            self._transition_lifecycle(
+                app, "Evidence Ready", "S09_HOLD_RELEASE_CONSUMED", store=staged
+            )
+            app["route"] = "pending_check"
+            app["evidence_ready"] = True
+            job_id = self._create_operational_reevaluation_job(
+                staged,
+                app=app,
+                final_impact_digest=(
+                    final_impact_digest
+                    if final_impact_digest
+                    else f"recovery:{recovery_generation}"
+                ),
+                target_generation=target_generation,
+                now=now,
+            )
+            staged.lifecycle_events.append(
+                {
+                    "event_id": self._stable_id(
+                        "lifecycle",
+                        f"{app['application_id']}:{app['cycle']}:hold-release:"
+                        f"{hold_id}",
+                    ),
+                    "application_id": app["application_id"],
+                    "revision": int(app.get("lifecycle_revision") or 0),
+                    "phase": "Evidence Ready",
+                    "cycle": int(app.get("cycle") or 0),
+                    "auxiliary": True,
+                    "reason_code": "S09_HOLD_RELEASE_CONSUMED",
+                    "hold_id": hold_id,
+                    "recovery_generation": recovery_generation,
+                    "job_id": job_id,
+                }
+            )
+
+    def process_next_policy_impact(self) -> int:
+        """Consume pending immutable governance impact/hold facts into
+        Lifecycle dispositions.  At-least-once: the outbox record becomes
+        ``published`` only in the same transaction as the dispositions, and
+        every per-member receipt is idempotent under duplicate delivery."""
+        if self._policy_governance is None:
+            return 0
+        with self._lock:
+            for _ in range(3):
+                self._reload_store()
+                pending = [
+                    event
+                    for event in self._store.outbox
+                    if event.get("kind") in self._S09_IMPACT_OUTBOX_KINDS
+                    and event.get("status") == "pending"
+                ]
+                if not pending:
+                    return 0
+                staged = copy.deepcopy(self._store)
+                now = int(self._clock())
+                for event in staged.outbox:
+                    if (
+                        event.get("kind") not in self._S09_IMPACT_OUTBOX_KINDS
+                        or event.get("status") != "pending"
+                    ):
+                        continue
+                    kind = event.get("kind")
+                    if kind == "s09_impact_activated":
+                        self._consume_impact_activated(staged, event, now)
+                    elif kind == "s09_hold_imposed":
+                        self._consume_hold_imposed(staged, event, now)
+                    elif kind == "s09_hold_released":
+                        self._consume_hold_released(staged, event, now)
+                    event["status"] = "published"
+                try:
+                    staged.persist()
+                except StaleStoreRevision:
+                    continue
+                self._store = staged
+                return len(pending)
+            raise RuntimeError("policy impact consumption retry exhausted")
+
+    def impact_dispositions_view(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        final_impact_digest: str,
+    ) -> dict[str, Any]:
+        """Minimized Lifecycle-owned consumption view for one final impact
+        manifest.  An ordinary Reviewer sees only the aggregate digest,
+        counts and projection watermark; per-member application/job receipts
+        are exposed only to an authorized audit/reconciliation identity with
+        a matching resource scope.  Only digest/count/identity fields are
+        exposed; raw values and free text never leave the service."""
+        if principal.role == "reviewer":
+            detail = False
+        elif principal.role in {"auditor", "reconciliation"}:
+            detail = True
+        else:
+            raise QueryNotFound("final impact manifest is unavailable")
+        if detail and not (
+            principal.scope == "C-DEMO"
+            or self.is_c_demo_scope(principal.scope)
+        ):
+            raise QueryNotFound("final impact manifest is unavailable")
+        if self._policy_governance is None:
+            raise QueryNotFound("final impact manifest is unavailable")
+        with self._lock:
+            self._reload_store()
+            manifest = self._policy_governance.load_final_impact(
+                final_impact_digest, store=self._store
+            )
+            if manifest is None:
+                raise QueryNotFound("final impact manifest is unavailable")
+            receipts = self._impact_receipts(self._store, final_impact_digest)
+            members = []
+            for member in manifest.get("members", []):
+                application_id = str(member["application_id"])
+                cycle = int(member["cycle"])
+                key = (application_id, cycle)
+                receipt = receipts.get(key)
+                disposition = (
+                    str(receipt.get("disposition") or "")
+                    if receipt is not None
+                    else "outstanding"
+                )
+                job_ids = [
+                    job.get("job_id")
+                    for job in self._store.jobs
+                    if job.get("kind") == "operational_reevaluation"
+                    and job.get("application_id") == application_id
+                    and job.get("final_impact_digest") == final_impact_digest
+                ]
+                members.append(
+                    {
+                        "application_id": application_id,
+                        "cycle": cycle,
+                        "partition": str(member.get("partition") or ""),
+                        "required_disposition": str(
+                            member.get("required_disposition") or ""
+                        ),
+                        "disposition": disposition,
+                        "target_generation": int(
+                            member.get("target_generation") or 0
+                        ),
+                        "reevaluation_job_id": job_ids[0] if job_ids else None,
+                        "reevaluation_job_count": len(job_ids),
+                    }
+                )
+            unconsumed = sum(
+                1
+                for member in members
+                if member["disposition"] == "outstanding"
+            )
+            result: dict[str, Any] = {
+                "final_impact_digest": final_impact_digest,
+                "member_count": len(members),
+                "unconsumed_count": unconsumed,
+                "projection_watermark": self._store.projection_watermark,
+            }
+            if detail:
+                result["members"] = members
+            return result
 
     def submit_demo(
         self,
@@ -4679,6 +5682,13 @@ class ControlledScenarioService:
         """
         if not worker_id or worker_id.strip() != worker_id:
             return WorkerResult(status="rejected", reason_code="INVALID_WORKER")
+        if worker_id.startswith(("s09-replay", "s09-simulation")):
+            # The Lifecycle RunResult interface rejects diagnostic
+            # identities: reproduction replay and counterfactual simulation
+            # can never enter the normal Lifecycle CAS.
+            return WorkerResult(
+                status="rejected", reason_code="S09_DIAGNOSTIC_IDENTITY_REJECTED"
+            )
         selected_cas_fault = cas_fault or ("lifecycle_revision" if stale else None)
         if selected_cas_fault not in (None, *self._CAS_CONTEXT_FIELDS):
             return WorkerResult(status="rejected", reason_code="INVALID_CAS_FAULT")
@@ -4783,6 +5793,14 @@ class ControlledScenarioService:
                     else getattr(error, "reason", None)
                     or self._PINNED_RELEASE_FAILURE
                 )
+                if (
+                    isinstance(error, _PinnedReleaseUnavailable)
+                    and failure_reason == "S09_POLICY_SAFETY_HOLD"
+                ):
+                    return WorkerResult(
+                        status="stopped",
+                        reason_code=failure_reason,
+                    )
                 self.stop_new_cohort(
                     reason_code=self._RUNTIME_STOP_REASON,
                     failure_reason_code=failure_reason,
@@ -5479,6 +6497,11 @@ class ControlledScenarioService:
                     or self._RUNTIME_STOP_REASON
                 ),
             )
+        s09_reasons = self._s09_currentness_block_reasons(self._store, app)
+        if "BLOCKED_POLICY_HOLD" in s09_reasons:
+            return "stopped", "S09_POLICY_SAFETY_HOLD"
+        if s09_reasons:
+            return "stale", "S09_CURRENTNESS_FENCED"
         if self._review_source_evidence_readable(app):
             return None
         self.stop_new_cohort(
@@ -12103,6 +13126,12 @@ class ControlledScenarioService:
                 visible_scopes.add("C-DEMO")
             if projection is None or projection.get("visibility_scope") not in visible_scopes:
                 raise QueryNotFound(application_id)
+            # Shared currentness guard: an affected old run is never shown
+            # as a live review workspace before Governance facts settle.
+            if self._s09_currentness_block_reasons(
+                self._store, self._store.applications.get(application_id) or {}
+            ):
+                raise QueryNotFound(application_id)
             workspace_principal = S01CommandPrincipal(
                 subject=query_subject,
                 role="reviewer",
@@ -12227,12 +13256,21 @@ class ControlledScenarioService:
             self._reload_store()
             app = self._reviewer_application_authority(principal, application_id)
             current_run = self._current_run_authority(app)
+            # Shared currentness guard: authoritative Governance generation,
+            # hold union and final-impact disposition receipts may mark the
+            # reconstructed run non-current before Lifecycle consumption.
+            guard_reasons = (
+                self._s09_currentness_block_reasons(self._store, app)
+                if current_run is not None
+                else ()
+            )
             spec = current_run.get("spec", {}) if current_run is not None else {}
             lifecycle_events = [
                 event
                 for event in self._store.lifecycle_events
                 if event.get("application_id") == application_id
                 and event.get("revision") == app["lifecycle_revision"]
+                and not event.get("auxiliary")
             ]
             if len(lifecycle_events) != 1:
                 raise RuntimeError("current lifecycle route authority is unavailable")
@@ -12254,7 +13292,13 @@ class ControlledScenarioService:
                 "release_digest": spec.get("release_digest"),
                 "checker_build": spec.get("checker_build"),
                 "currentness_reason": (
-                    "CURRENT_CONTEXT_MATCH" if current_run is not None else "NO_CURRENT_RUN"
+                    guard_reasons[0]
+                    if guard_reasons
+                    else (
+                        "CURRENT_CONTEXT_MATCH"
+                        if current_run is not None
+                        else "NO_CURRENT_RUN"
+                    )
                 ),
             }
             if lifecycle.get("exception_id") is not None:
@@ -12290,6 +13334,17 @@ class ControlledScenarioService:
             self._reload_store()
             app = self._reviewer_application_authority(principal, application_id)
             current_run = self._current_run_authority(app)
+            # Shared currentness guard: when authoritative Governance facts
+            # invalidate the reconstructed run, the history frame reports it
+            # as non-current with the stable guard reason.
+            guard_reasons = (
+                self._s09_currentness_block_reasons(self._store, app)
+                if current_run is not None
+                else ()
+            )
+            guard_current_run = current_run if guard_reasons else None
+            if guard_reasons:
+                current_run = None
             exception_requests = [
                 record
                 for record in self._store.review_records
@@ -12393,11 +13448,15 @@ class ControlledScenarioService:
                         "currentness_reason": (
                             "CURRENT_CONTEXT_MATCH"
                             if is_current
-                            else invalidation.get("reason_code")
-                            or (
-                                "STALE_COMPLETION_CONTEXT"
-                                if run.get("status") == "stale"
-                                else "CONTEXT_NOT_CURRENT"
+                            else (
+                                guard_reasons[0]
+                                if run is guard_current_run
+                                else invalidation.get("reason_code")
+                                or (
+                                    "STALE_COMPLETION_CONTEXT"
+                                    if run.get("status") == "stale"
+                                    else "CONTEXT_NOT_CURRENT"
+                                )
                             )
                         ),
                         "cycle": spec["cycle"],
@@ -12568,7 +13627,9 @@ class ControlledScenarioService:
             return {
                 "schema_version": "s04-application-history/1",
                 "application_id": application_id,
-                "current_run_id": app.get("current_run_id"),
+                "current_run_id": (
+                    None if guard_reasons else app.get("current_run_id")
+                ),
                 "runs": runs,
                 "corrections": corrections,
                 "business_exceptions": business_exceptions,
@@ -14576,8 +15637,14 @@ class ControlledScenarioService:
                 for event in self._store.lifecycle_events
                 if event.get("application_id") == application_id
             ]
+            # S09 auxiliary facts (impact dispositions, invalidations, hold
+            # release consumption) are not phase transitions: they must not
+            # participate in the contiguous transition chain.
+            transition_events = [
+                event for event in lifecycle if not event.get("auxiliary")
+            ]
             canonical_events: list[tuple[int, int, str]] = []
-            for event in lifecycle:
+            for event in transition_events:
                 revision = event.get("revision")
                 cycle = event.get("cycle")
                 phase = event.get("phase")
@@ -14614,7 +15681,7 @@ class ControlledScenarioService:
                 "Unprocessable",
             }
             current_lifecycle_event = max(
-                lifecycle, key=lambda event: int(event["revision"])
+                transition_events, key=lambda event: int(event["revision"])
             )
             expected_route = {
                 "Manual Review": "manual_review",
@@ -14747,6 +15814,15 @@ class ControlledScenarioService:
                 )
             except Exception as error:
                 raise _PinnedReleaseUnavailable(self._PINNED_RELEASE_FAILURE) from error
+            if policy_pin is not None and self._holds_cover_application(
+                policy_pin.get("hold_union") or [],
+                str(app.get("application_id") or ""),
+            ):
+                # A Policy Safety Hold scoped to this application blocks
+                # new/current RunSpec publication: automatic routing and
+                # current completion fail closed until an explicit governed
+                # recovery releases every covering hold in the union.
+                raise _PinnedReleaseUnavailable(self._S09_HOLD_FAILURE)
         if policy_pin is not None:
             release = policy_pin["release"]
         elif self._policy_governance is not None:
@@ -14819,6 +15895,17 @@ class ControlledScenarioService:
                     "approval_binding_id": policy_pin["approval_binding_id"],
                     "approval_binding_digest": policy_pin["approval_binding_digest"],
                     "components": copy.deepcopy(policy_pin["components"]),
+                    "final_impact_digest": policy_pin.get("final_impact_digest"),
+                    "holds": copy.deepcopy(
+                        [
+                            {
+                                "hold_id": hold["hold_id"],
+                                "reason_code": hold["reason_code"],
+                                "hold_scope": hold["hold_scope"],
+                            }
+                            for hold in policy_pin.get("hold_union") or []
+                        ]
+                    ),
                 }
             )
         return run_spec
@@ -16046,10 +17133,8 @@ class ControlledScenarioService:
                     ],
                 }
             )
-        has_mandatory_blocker = any(
-            finding["mandatory"] and finding["verdict"] != "consistent"
-            for finding in findings
-        )
+        route = self.verification_route_for_checks(run_result.checks, findings)
+        has_mandatory_blocker = route == "manual_review"
         review_assignee = (
             self._application_review_assignee(app["application_id"])
             if has_mandatory_blocker
@@ -16062,6 +17147,116 @@ class ControlledScenarioService:
         staged_attempt = next(
             item for item in staged.attempts if item["attempt_id"] == attempt["attempt_id"]
         )
+        # S09 generation/impact/hold fence: the authoritative governance
+        # generation, final-impact membership and active hold union are
+        # rechecked at the commit point inside the same store snapshot.  Once
+        # Governance has an active generation, every governed run -- pinned
+        # or pre-cutover -- must prove the exact authoritative generation at
+        # the commit point: a missing or older generation, a listed member
+        # without a reconcilable disposition, or any active hold keeps the
+        # old result as a non-current diagnostic only.
+        s09_fence_mismatches: list[str] = []
+        if str(run_spec.get("run_id") or "").startswith(
+            ("s09-replay:", "s09-simulation:")
+        ):
+            # A diagnostic workload identity can never become current:
+            # Lifecycle rejects it as a stale diagnostic even before any
+            # governance comparison.
+            s09_fence_mismatches.append("diagnostic_identity")
+        if self._policy_governance is not None:
+            authority_unavailable = False
+            try:
+                pin = self._policy_governance.resolve_run_pin(
+                    "C-DEMO/demo", int(self._clock()), store=staged
+                )
+            except Exception:
+                # Authority unavailable: this is not a successfully resolved
+                # pre-governance state.  Fail closed -- pinned AND unpinned
+                # pre-cutover runs retain the result only as a stale
+                # diagnostic with a stable CAS mismatch.
+                pin = None
+                authority_unavailable = True
+            if authority_unavailable:
+                s09_fence_mismatches.append("authority_unavailable")
+            else:
+                authoritative_generation = (
+                    int(pin["active_generation"]) if pin is not None else None
+                )
+                hold_active = bool(
+                    pin
+                    and self._holds_cover_application(
+                        pin.get("hold_union") or [],
+                        str(staged_app.get("application_id") or ""),
+                    )
+                )
+                member_pending = False
+                impact_integrity_failed = False
+                if (
+                    pin is not None
+                    and pin.get("final_impact_digest")
+                    and staged_app.get("application_id")
+                ):
+                    try:
+                        manifest = self._policy_governance.load_final_impact(
+                            pin["final_impact_digest"], store=staged
+                        )
+                    except Exception:
+                        manifest = None
+                    if manifest is None:
+                        # Integrity fail-closed: the pinned final impact
+                        # cannot be verified, so no completion may rely on
+                        # "not a member" -- the result stays a stale
+                        # diagnostic with a stable CAS mismatch.
+                        impact_integrity_failed = True
+                    else:
+                        key = (
+                            str(staged_app.get("application_id") or ""),
+                            int(staged_app.get("cycle") or 0),
+                        )
+                        if any(
+                            str(member.get("application_id") or "") == key[0]
+                            and int(member.get("cycle") or 0) == key[1]
+                            for member in manifest.get("members", [])
+                        ):
+                            receipt = self._impact_receipts(
+                                staged, pin["final_impact_digest"]
+                            ).get(key)
+                            member_pending = (
+                                receipt is None
+                                or receipt.get("disposition") == "outstanding"
+                            )
+                pinned_generation = run_spec.get("active_generation")
+                run_generation = (
+                    int(pinned_generation)
+                    if isinstance(pinned_generation, int)
+                    and not isinstance(pinned_generation, bool)
+                    else None
+                )
+                if impact_integrity_failed:
+                    s09_fence_mismatches.append("impact_integrity")
+                if authoritative_generation is None:
+                    # No authoritative generation is resolvable: a run that
+                    # claims a pin can never become current (fail closed),
+                    # while a genuinely pre-cutover run stays compatible.
+                    if run_generation is not None:
+                        s09_fence_mismatches.append("active_generation")
+                elif run_generation != authoritative_generation:
+                    # Governance has an active generation: a missing or older
+                    # pinned generation finishes as a non-current diagnostic.
+                    s09_fence_mismatches.append("active_generation")
+                if hold_active:
+                    s09_fence_mismatches.append("policy_hold")
+                if member_pending:
+                    s09_fence_mismatches.append("impact_disposition")
+        if s09_fence_mismatches:
+            return self._record_stale_complete_result(
+                app,
+                job,
+                attempt,
+                run_spec,
+                completion_context,
+                tuple(s09_fence_mismatches),
+            )
         try:
             self._before_write("result.findings")
             staged.findings.extend(findings)
@@ -16111,7 +17306,7 @@ class ControlledScenarioService:
                 store=staged,
             )
             self._before_write("result.route")
-            staged_app["route"] = "manual_review" if has_mandatory_blocker else "auto_complete"
+            staged_app["route"] = route
             self._before_write("result.lifecycle.final")
             self._transition_lifecycle(
                 staged_app,

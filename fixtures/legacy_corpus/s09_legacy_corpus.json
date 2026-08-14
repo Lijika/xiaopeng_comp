@@ -1,0 +1,59 @@
+{
+  "schema_version": "s09-legacy-corpus/1",
+  "corpus_id": "auto-lease-legacy-1.9.0-mapped",
+  "legacy_release_ref": "bootstrap-baseline",
+  "approval_reference": "policy_approver-envelope-bound",
+  "dimensions": ["selection", "normalization", "verdicts", "reason_codes", "route"],
+  "cohort": [
+    {
+      "scenario_id": "app_r53_bad_engine.json",
+      "expected_label": "inconsistent",
+      "partition": "open_cycle",
+      "accepted_differences": {},
+      "explanation": "behavior-equivalent mapped content between the legacy bootstrap release and the approved mapped release; no accepted difference"
+    },
+    {
+      "scenario_id": "app_inconsistent_vin.json",
+      "expected_label": "inconsistent",
+      "partition": "open_cycle",
+      "accepted_differences": {},
+      "explanation": "behavior-equivalent mapped content; no accepted difference"
+    },
+    {
+      "scenario_id": "app_bad_model.json",
+      "expected_label": "inconsistent",
+      "partition": "open_cycle",
+      "accepted_differences": {},
+      "explanation": "behavior-equivalent mapped content; no accepted difference"
+    },
+    {
+      "scenario_id": "app_missing_vin_docs.json",
+      "expected_label": "uncertain",
+      "partition": "open_cycle",
+      "accepted_differences": {},
+      "explanation": "behavior-equivalent mapped content; no accepted difference"
+    }
+  ],
+  "mutation_seams": {
+    "selection": {
+      "kind": "rules",
+      "note": "R_VIN_CROSS docs drop the invoice document; every cohort application carries an invoice document, so the selected document set changes"
+    },
+    "normalization": {
+      "kind": "knowledge",
+      "note": "entity_knowledge address_aliases drop 南京市; Nanjing addresses renormalize to a different digest"
+    },
+    "verdicts": {
+      "kind": "rules",
+      "note": "R_VIN_CROSS on_missing uncertain -> inconsistent; app_missing_vin_docs lacks a VIN document so the missing-document verdict changes"
+    },
+    "reason_codes": {
+      "kind": "rules",
+      "note": "low_confidence_threshold 0.6 -> 0.99; 0.95-confidence corpus observations change verdict reason codes"
+    },
+    "route": {
+      "kind": "rules",
+      "note": "R_MODEL_CROSS severity major -> minor; app_bad_model model mismatch drops the mandatory finding and the route flips"
+    }
+  }
+}

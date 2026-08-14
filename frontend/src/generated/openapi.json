@@ -5185,6 +5185,46 @@
             "title": "Components",
             "type": "array"
           },
+          "final_impact_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Final Impact Digest"
+          },
+          "final_impact_manifest_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Final Impact Manifest Id"
+          },
+          "final_impact_member_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Final Impact Member Count"
+          },
+          "holds": {
+            "items": {
+              "$ref": "#/components/schemas/S09HoldRef"
+            },
+            "title": "Holds",
+            "type": "array"
+          },
           "manifest_digest": {
             "anyOf": [
               {
@@ -5305,7 +5345,7 @@
       },
       "S08ApprovalBinding": {
         "additionalProperties": false,
-        "description": "The fixed approver binding: the exact candidate/validation digests,\nthe bound diff, scope, activation time and recovery release.",
+        "description": "The fixed approver binding: the exact candidate/validation digests,\nthe bound diff, scope, activation time and recovery release, plus the\nS09 impact preview/envelope the Approver binds for governed changes\n(absent on pre-S09 bootstrap bindings).",
         "properties": {
           "activation_time": {
             "title": "Activation Time",
@@ -5325,6 +5365,49 @@
           },
           "diff": {
             "$ref": "#/components/schemas/S08ReviewMaterial"
+          },
+          "impact_envelope": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/S09ImpactEnvelope"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "impact_envelope_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Impact Envelope Digest"
+          },
+          "preview_manifest_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preview Manifest Digest"
+          },
+          "preview_manifest_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preview Manifest Id"
           },
           "recovery_release_id": {
             "title": "Recovery Release Id",
@@ -5384,6 +5467,10 @@
             "title": "Idempotency Key",
             "type": "string"
           },
+          "preview_manifest_id": {
+            "title": "Preview Manifest Id",
+            "type": "string"
+          },
           "recovery_release_id": {
             "title": "Recovery Release Id",
             "type": "string"
@@ -5394,7 +5481,8 @@
           "expected_governance_revision",
           "candidate_id",
           "activation_time",
-          "recovery_release_id"
+          "recovery_release_id",
+          "preview_manifest_id"
         ],
         "title": "S08ApproveBody",
         "type": "object"
@@ -5429,6 +5517,49 @@
           "governance_revision": {
             "title": "Governance Revision",
             "type": "integer"
+          },
+          "impact_envelope": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/S09ImpactEnvelope"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "impact_envelope_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Impact Envelope Digest"
+          },
+          "preview_manifest_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preview Manifest Digest"
+          },
+          "preview_manifest_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preview Manifest Id"
           },
           "recovery_release_id": {
             "title": "Recovery Release Id",
@@ -7236,9 +7367,27 @@
             "title": "Capability Gate",
             "type": "string"
           },
+          "final_impact_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Final Impact Digest"
+          },
           "governance_revision": {
             "title": "Governance Revision",
             "type": "integer"
+          },
+          "holds": {
+            "items": {
+              "$ref": "#/components/schemas/S09HoldRef"
+            },
+            "title": "Holds",
+            "type": "array"
           },
           "scope": {
             "title": "Scope",
@@ -7709,6 +7858,1502 @@
           "machine"
         ],
         "title": "S08ValidatorIdentity",
+        "type": "object"
+      },
+      "S09AuthorityRange": {
+        "additionalProperties": false,
+        "properties": {
+          "maximum": {
+            "title": "Maximum",
+            "type": "integer"
+          },
+          "minimum": {
+            "title": "Minimum",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "minimum",
+          "maximum"
+        ],
+        "title": "S09AuthorityRange",
+        "type": "object"
+      },
+      "S09AuthorityWatermarks": {
+        "additionalProperties": false,
+        "description": "The approved preview-time authority watermarks: the Governance\nrevision at preview and the Lifecycle projection watermark.  The final\nmanifest may only move the governance revision forward; the lifecycle\nwatermark must match exactly.",
+        "properties": {
+          "governance_revision": {
+            "title": "Governance Revision",
+            "type": "integer"
+          },
+          "lifecycle_watermark": {
+            "title": "Lifecycle Watermark",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "governance_revision",
+          "lifecycle_watermark"
+        ],
+        "title": "S09AuthorityWatermarks",
+        "type": "object"
+      },
+      "S09CountCeilings": {
+        "additionalProperties": false,
+        "properties": {
+          "max_total": {
+            "title": "Max Total",
+            "type": "integer"
+          },
+          "per_partition": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Per Partition",
+            "type": "object"
+          }
+        },
+        "required": [
+          "max_total",
+          "per_partition"
+        ],
+        "title": "S09CountCeilings",
+        "type": "object"
+      },
+      "S09DependencyIndex": {
+        "additionalProperties": false,
+        "description": "The approved dependency-index completeness fact bound by the\nenvelope: the digest of the Lifecycle-owned dependency index.",
+        "properties": {
+          "complete": {
+            "title": "Complete",
+            "type": "boolean"
+          },
+          "index_digest": {
+            "title": "Index Digest",
+            "type": "string"
+          },
+          "oracle_version": {
+            "title": "Oracle Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "complete",
+          "index_digest",
+          "oracle_version"
+        ],
+        "title": "S09DependencyIndex",
+        "type": "object"
+      },
+      "S09DiagnosticCheck": {
+        "additionalProperties": false,
+        "description": "The minimized diagnostic check: rule identity, verdict, severity and\nregistered reason codes only -- no raw value, OCR text, locator or free\ntext ever leaves the runner.",
+        "properties": {
+          "reason_codes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reason Codes",
+            "type": "array"
+          },
+          "rule_id": {
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "severity": {
+            "title": "Severity",
+            "type": "string"
+          },
+          "verdict": {
+            "title": "Verdict",
+            "type": "string"
+          }
+        },
+        "required": [
+          "rule_id",
+          "verdict",
+          "severity"
+        ],
+        "title": "S09DiagnosticCheck",
+        "type": "object"
+      },
+      "S09DiagnosticNormalizationOutcome": {
+        "additionalProperties": false,
+        "description": "The minimized normalization outcome: rule/document/field identity,\nthe OCR-fix flag and a digest of the normalized value (never the raw\nvalue itself), so migration differentials compare machine-decidable\nbehavior without exposing content.",
+        "properties": {
+          "document_id": {
+            "title": "Document Id",
+            "type": "string"
+          },
+          "document_role": {
+            "title": "Document Role",
+            "type": "string"
+          },
+          "field": {
+            "title": "Field",
+            "type": "string"
+          },
+          "normalized_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Normalized Sha256"
+          },
+          "observation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observation Id"
+          },
+          "ocr_fix": {
+            "title": "Ocr Fix",
+            "type": "boolean"
+          },
+          "rule_id": {
+            "title": "Rule Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "rule_id",
+          "document_id",
+          "document_role",
+          "field",
+          "ocr_fix"
+        ],
+        "title": "S09DiagnosticNormalizationOutcome",
+        "type": "object"
+      },
+      "S09DiagnosticSelectionOutcome": {
+        "additionalProperties": false,
+        "description": "The minimized selection outcome: rule/document/field identity and\nthe machine decision only -- no raw field value, OCR text, locator or\nfree text ever leaves the runner.",
+        "properties": {
+          "document_id": {
+            "title": "Document Id",
+            "type": "string"
+          },
+          "document_role": {
+            "title": "Document Role",
+            "type": "string"
+          },
+          "field": {
+            "title": "Field",
+            "type": "string"
+          },
+          "observation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observation Id"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "rule_id": {
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "selected": {
+            "title": "Selected",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "rule_id",
+          "document_id",
+          "document_role",
+          "field",
+          "selected",
+          "reason_code"
+        ],
+        "title": "S09DiagnosticSelectionOutcome",
+        "type": "object"
+      },
+      "S09EnvelopeRef": {
+        "additionalProperties": false,
+        "description": "One release reference inside the impact envelope: identity plus the\nexact manifest digest the approver bound.",
+        "properties": {
+          "candidate_id": {
+            "title": "Candidate Id",
+            "type": "string"
+          },
+          "manifest_digest": {
+            "title": "Manifest Digest",
+            "type": "string"
+          }
+        },
+        "required": [
+          "candidate_id",
+          "manifest_digest"
+        ],
+        "title": "S09EnvelopeRef",
+        "type": "object"
+      },
+      "S09HoldRef": {
+        "additionalProperties": false,
+        "description": "One immutable Policy Safety Hold fact: identity, reason, scope,\nactor, authority revision, evidence digest and the fixed recovery\ncriterion.  Never auto-expires.",
+        "properties": {
+          "authority_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Authority Revision"
+          },
+          "event_id": {
+            "title": "Event Id",
+            "type": "string"
+          },
+          "evidence_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence Digest"
+          },
+          "hold_id": {
+            "title": "Hold Id",
+            "type": "string"
+          },
+          "hold_scope": {
+            "title": "Hold Scope",
+            "type": "string"
+          },
+          "imposed_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Imposed At"
+          },
+          "imposed_by": {
+            "title": "Imposed By",
+            "type": "string"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "recovery_criterion_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recovery Criterion Digest"
+          },
+          "recovery_criterion_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recovery Criterion Id"
+          },
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          }
+        },
+        "required": [
+          "hold_id",
+          "event_id",
+          "reason_code",
+          "scope",
+          "hold_scope",
+          "imposed_by"
+        ],
+        "title": "S09HoldRef",
+        "type": "object"
+      },
+      "S09ImpactDispositionMember": {
+        "additionalProperties": false,
+        "description": "The minimized per-member impact consumption receipt: identity,\npartition, required/current disposition, target generation and the\nsingle Operational Re-evaluation job reference.  No raw field value,\nOCR text, attachment locator or free text is ever exposed.",
+        "properties": {
+          "application_id": {
+            "title": "Application Id",
+            "type": "string"
+          },
+          "cycle": {
+            "title": "Cycle",
+            "type": "integer"
+          },
+          "disposition": {
+            "title": "Disposition",
+            "type": "string"
+          },
+          "partition": {
+            "title": "Partition",
+            "type": "string"
+          },
+          "reevaluation_job_count": {
+            "default": 0,
+            "title": "Reevaluation Job Count",
+            "type": "integer"
+          },
+          "reevaluation_job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reevaluation Job Id"
+          },
+          "required_disposition": {
+            "title": "Required Disposition",
+            "type": "string"
+          },
+          "target_generation": {
+            "title": "Target Generation",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "application_id",
+          "cycle",
+          "partition",
+          "required_disposition",
+          "disposition",
+          "target_generation"
+        ],
+        "title": "S09ImpactDispositionMember",
+        "type": "object"
+      },
+      "S09ImpactDispositionsResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "final_impact_digest": {
+            "title": "Final Impact Digest",
+            "type": "string"
+          },
+          "member_count": {
+            "title": "Member Count",
+            "type": "integer"
+          },
+          "members": {
+            "items": {
+              "$ref": "#/components/schemas/S09ImpactDispositionMember"
+            },
+            "title": "Members",
+            "type": "array"
+          },
+          "projection_watermark": {
+            "default": 0,
+            "title": "Projection Watermark",
+            "type": "integer"
+          },
+          "unconsumed_count": {
+            "title": "Unconsumed Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "final_impact_digest",
+          "member_count",
+          "unconsumed_count",
+          "members"
+        ],
+        "title": "S09ImpactDispositionsResponse",
+        "type": "object"
+      },
+      "S09ImpactDispositionsSummaryResponse": {
+        "additionalProperties": false,
+        "description": "The minimized Reviewer view: aggregate digest, counts and projection\nwatermark only; per-member application/job receipts stay behind the\nauthorized audit/reconciliation route.",
+        "properties": {
+          "final_impact_digest": {
+            "title": "Final Impact Digest",
+            "type": "string"
+          },
+          "member_count": {
+            "title": "Member Count",
+            "type": "integer"
+          },
+          "projection_watermark": {
+            "default": 0,
+            "title": "Projection Watermark",
+            "type": "integer"
+          },
+          "unconsumed_count": {
+            "title": "Unconsumed Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "final_impact_digest",
+          "member_count",
+          "unconsumed_count"
+        ],
+        "title": "S09ImpactDispositionsSummaryResponse",
+        "type": "object"
+      },
+      "S09ImpactEnvelope": {
+        "additionalProperties": false,
+        "description": "The machine-decidable approval envelope: the exact preview digest,\npredecessor/candidate references, scope, oracle version, authority\nwatermarks, dependency index, dependency categories, risk class,\nmember-delta rules, count ceilings, approvals and protected conditions\n-- the typed wire shape of the digest-bound envelope the Approver binds\nat approval time.",
+        "properties": {
+          "authority_watermarks": {
+            "$ref": "#/components/schemas/S09AuthorityWatermarks"
+          },
+          "candidate": {
+            "$ref": "#/components/schemas/S09EnvelopeRef"
+          },
+          "count_ceilings": {
+            "$ref": "#/components/schemas/S09CountCeilings"
+          },
+          "dependency_categories": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Dependency Categories",
+            "type": "array"
+          },
+          "dependency_index": {
+            "$ref": "#/components/schemas/S09DependencyIndex"
+          },
+          "digest": {
+            "title": "Digest",
+            "type": "string"
+          },
+          "member_delta_rules": {
+            "$ref": "#/components/schemas/S09MemberDeltaRules"
+          },
+          "oracle_version": {
+            "title": "Oracle Version",
+            "type": "string"
+          },
+          "permitted_authority_movement": {
+            "$ref": "#/components/schemas/S09PermittedAuthorityMovement"
+          },
+          "predecessor": {
+            "$ref": "#/components/schemas/S09EnvelopeRef"
+          },
+          "preview_digest": {
+            "title": "Preview Digest",
+            "type": "string"
+          },
+          "protected_conditions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Protected Conditions",
+            "type": "array"
+          },
+          "required_approvals": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Required Approvals",
+            "type": "array"
+          },
+          "risk_class": {
+            "title": "Risk Class",
+            "type": "string"
+          },
+          "schema_version": {
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "preview_digest",
+          "predecessor",
+          "candidate",
+          "scope",
+          "oracle_version",
+          "authority_watermarks",
+          "permitted_authority_movement",
+          "dependency_index",
+          "dependency_categories",
+          "risk_class",
+          "member_delta_rules",
+          "count_ceilings",
+          "required_approvals",
+          "protected_conditions",
+          "digest"
+        ],
+        "title": "S09ImpactEnvelope",
+        "type": "object"
+      },
+      "S09ImposeHoldBody": {
+        "additionalProperties": false,
+        "description": "The closed hold-imposition command: a registered reason and the\nscope the Policy Safety Hold covers (open_cycle, the served scope, or\none application id).",
+        "properties": {
+          "expected_governance_revision": {
+            "minimum": 0.0,
+            "title": "Expected Governance Revision",
+            "type": "integer"
+          },
+          "hold_scope": {
+            "title": "Hold Scope",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "expected_governance_revision",
+          "reason_code",
+          "hold_scope"
+        ],
+        "title": "S09ImposeHoldBody",
+        "type": "object"
+      },
+      "S09ImposeHoldResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "governance_event_id": {
+            "title": "Governance Event Id",
+            "type": "string"
+          },
+          "governance_revision": {
+            "title": "Governance Revision",
+            "type": "integer"
+          },
+          "hold_id": {
+            "title": "Hold Id",
+            "type": "string"
+          },
+          "hold_scope": {
+            "title": "Hold Scope",
+            "type": "string"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "recovery_criterion_digest": {
+            "title": "Recovery Criterion Digest",
+            "type": "string"
+          },
+          "recovery_criterion_id": {
+            "title": "Recovery Criterion Id",
+            "type": "string"
+          },
+          "replayed": {
+            "default": false,
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "status": {
+            "const": "accepted",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "hold_id",
+          "hold_scope",
+          "reason_code",
+          "recovery_criterion_id",
+          "recovery_criterion_digest",
+          "governance_event_id",
+          "governance_revision"
+        ],
+        "title": "S09ImposeHoldResponse",
+        "type": "object"
+      },
+      "S09MemberDeltaRules": {
+        "additionalProperties": false,
+        "properties": {
+          "max_added": {
+            "title": "Max Added",
+            "type": "integer"
+          },
+          "removal": {
+            "const": "machine_proof_only",
+            "title": "Removal",
+            "type": "string"
+          }
+        },
+        "required": [
+          "max_added",
+          "removal"
+        ],
+        "title": "S09MemberDeltaRules",
+        "type": "object"
+      },
+      "S09PermittedAuthorityMovement": {
+        "additionalProperties": false,
+        "properties": {
+          "governance_revision": {
+            "$ref": "#/components/schemas/S09AuthorityRange"
+          },
+          "lifecycle_watermark": {
+            "$ref": "#/components/schemas/S09AuthorityRange"
+          }
+        },
+        "required": [
+          "governance_revision",
+          "lifecycle_watermark"
+        ],
+        "title": "S09PermittedAuthorityMovement",
+        "type": "object"
+      },
+      "S09PreviewBody": {
+        "additionalProperties": false,
+        "description": "The closed impact-preview command: one governed candidate whose\nconservative impact is computed against the active predecessor.",
+        "properties": {
+          "candidate_id": {
+            "title": "Candidate Id",
+            "type": "string"
+          },
+          "expected_governance_revision": {
+            "minimum": 0.0,
+            "title": "Expected Governance Revision",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "expected_governance_revision",
+          "candidate_id"
+        ],
+        "title": "S09PreviewBody",
+        "type": "object"
+      },
+      "S09PreviewResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "digest": {
+            "title": "Digest",
+            "type": "string"
+          },
+          "expanded_to_full_scope": {
+            "title": "Expanded To Full Scope",
+            "type": "boolean"
+          },
+          "governance_revision": {
+            "title": "Governance Revision",
+            "type": "integer"
+          },
+          "level": {
+            "title": "Level",
+            "type": "integer"
+          },
+          "manifest_id": {
+            "title": "Manifest Id",
+            "type": "string"
+          },
+          "member_count": {
+            "title": "Member Count",
+            "type": "integer"
+          },
+          "oracle_version": {
+            "title": "Oracle Version",
+            "type": "string"
+          },
+          "partition_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Partition Counts",
+            "type": "object"
+          },
+          "phase": {
+            "const": "preview",
+            "title": "Phase",
+            "type": "string"
+          },
+          "replayed": {
+            "default": false,
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          },
+          "status": {
+            "const": "accepted",
+            "title": "Status",
+            "type": "string"
+          },
+          "target_generation": {
+            "title": "Target Generation",
+            "type": "integer"
+          },
+          "zero_hit_proof": {
+            "title": "Zero Hit Proof",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "status",
+          "phase",
+          "manifest_id",
+          "digest",
+          "scope",
+          "oracle_version",
+          "level",
+          "expanded_to_full_scope",
+          "member_count",
+          "partition_counts",
+          "zero_hit_proof",
+          "target_generation",
+          "governance_revision"
+        ],
+        "title": "S09PreviewResponse",
+        "type": "object"
+      },
+      "S09ProposeRollbackBody": {
+        "additionalProperties": false,
+        "description": "The closed rollback-proposal command: revalidate the exact\nhistorical governed release and stage a fresh rollback candidate.",
+        "properties": {
+          "expected_governance_revision": {
+            "minimum": 0.0,
+            "title": "Expected Governance Revision",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "release_candidate_id": {
+            "title": "Release Candidate Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "expected_governance_revision",
+          "release_candidate_id",
+          "reason_code"
+        ],
+        "title": "S09ProposeRollbackBody",
+        "type": "object"
+      },
+      "S09ProposeRollbackResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_id": {
+            "title": "Candidate Id",
+            "type": "string"
+          },
+          "compatibility": {
+            "$ref": "#/components/schemas/S09RollbackCompatibility"
+          },
+          "governance_revision": {
+            "title": "Governance Revision",
+            "type": "integer"
+          },
+          "manifest_digest": {
+            "title": "Manifest Digest",
+            "type": "string"
+          },
+          "manifest_id": {
+            "title": "Manifest Id",
+            "type": "string"
+          },
+          "replayed": {
+            "default": false,
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "rollback_target_id": {
+            "title": "Rollback Target Id",
+            "type": "string"
+          },
+          "status": {
+            "const": "accepted",
+            "title": "Status",
+            "type": "string"
+          },
+          "validation_bundle_digest": {
+            "title": "Validation Bundle Digest",
+            "type": "string"
+          },
+          "validation_bundle_id": {
+            "title": "Validation Bundle Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "candidate_id",
+          "manifest_id",
+          "manifest_digest",
+          "validation_bundle_id",
+          "validation_bundle_digest",
+          "rollback_target_id",
+          "compatibility",
+          "governance_revision"
+        ],
+        "title": "S09ProposeRollbackResponse",
+        "type": "object"
+      },
+      "S09RecoverHoldBody": {
+        "additionalProperties": false,
+        "description": "The closed hold-recovery command: the exact hold identity and the\nexact recovery generation that must equal the active generation.",
+        "properties": {
+          "expected_governance_revision": {
+            "minimum": 0.0,
+            "title": "Expected Governance Revision",
+            "type": "integer"
+          },
+          "hold_id": {
+            "title": "Hold Id",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "recovery_generation": {
+            "title": "Recovery Generation",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "expected_governance_revision",
+          "hold_id",
+          "recovery_generation"
+        ],
+        "title": "S09RecoverHoldBody",
+        "type": "object"
+      },
+      "S09RecoverHoldResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "governance_revision": {
+            "title": "Governance Revision",
+            "type": "integer"
+          },
+          "hold_id": {
+            "title": "Hold Id",
+            "type": "string"
+          },
+          "hold_released_event_id": {
+            "title": "Hold Released Event Id",
+            "type": "string"
+          },
+          "recovery_generation": {
+            "title": "Recovery Generation",
+            "type": "integer"
+          },
+          "replayed": {
+            "default": false,
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "status": {
+            "const": "accepted",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "hold_id",
+          "hold_released_event_id",
+          "recovery_generation",
+          "governance_revision"
+        ],
+        "title": "S09RecoverHoldResponse",
+        "type": "object"
+      },
+      "S09ReplayBody": {
+        "additionalProperties": false,
+        "description": "The closed reproduction-replay command: one exact governed release\nover one fixed evidence snapshot for one explicit application.  A\nseparate replay identity; an omitted application never enumerates.",
+        "properties": {
+          "application_id": {
+            "title": "Application Id",
+            "type": "string"
+          },
+          "expected_governance_revision": {
+            "minimum": 0.0,
+            "title": "Expected Governance Revision",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "release_candidate_id": {
+            "title": "Release Candidate Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "expected_governance_revision",
+          "release_candidate_id",
+          "application_id"
+        ],
+        "title": "S09ReplayBody",
+        "type": "object"
+      },
+      "S09ReplayBundle": {
+        "additionalProperties": false,
+        "description": "The closed replay result schema: one bundle whose namespace is fixed\nto the isolated replay identity.",
+        "properties": {
+          "application_id": {
+            "title": "Application Id",
+            "type": "string"
+          },
+          "approval_binding_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approval Binding Id"
+          },
+          "bundle_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bundle Digest"
+          },
+          "bundle_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bundle Id"
+          },
+          "business_revision_delta": {
+            "default": 0,
+            "title": "Business Revision Delta",
+            "type": "integer"
+          },
+          "check_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Check Count"
+          },
+          "checks": {
+            "items": {
+              "$ref": "#/components/schemas/S09DiagnosticCheck"
+            },
+            "title": "Checks",
+            "type": "array"
+          },
+          "finding_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finding Count"
+          },
+          "namespace": {
+            "const": "s09-replay",
+            "title": "Namespace",
+            "type": "string"
+          },
+          "normalization_outcomes": {
+            "items": {
+              "$ref": "#/components/schemas/S09DiagnosticNormalizationOutcome"
+            },
+            "title": "Normalization Outcomes",
+            "type": "array"
+          },
+          "outcome": {
+            "title": "Outcome",
+            "type": "string"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Code"
+          },
+          "release_candidate_id": {
+            "title": "Release Candidate Id",
+            "type": "string"
+          },
+          "release_manifest_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Release Manifest Digest"
+          },
+          "release_manifest_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Release Manifest Id"
+          },
+          "route": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Route"
+          },
+          "run_identity": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Identity"
+          },
+          "schema_version": {
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "selection_outcomes": {
+            "items": {
+              "$ref": "#/components/schemas/S09DiagnosticSelectionOutcome"
+            },
+            "title": "Selection Outcomes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "schema_version",
+          "namespace",
+          "release_candidate_id",
+          "application_id",
+          "outcome"
+        ],
+        "title": "S09ReplayBundle",
+        "type": "object"
+      },
+      "S09ReplayResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "bundle_count": {
+            "title": "Bundle Count",
+            "type": "integer"
+          },
+          "bundles": {
+            "items": {
+              "$ref": "#/components/schemas/S09ReplayBundle"
+            },
+            "title": "Bundles",
+            "type": "array"
+          },
+          "business_revision_delta": {
+            "title": "Business Revision Delta",
+            "type": "integer"
+          },
+          "governance_revision": {
+            "title": "Governance Revision",
+            "type": "integer"
+          },
+          "namespace": {
+            "const": "s09-replay",
+            "title": "Namespace",
+            "type": "string"
+          },
+          "release_candidate_id": {
+            "title": "Release Candidate Id",
+            "type": "string"
+          },
+          "replayed": {
+            "default": false,
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "status": {
+            "const": "accepted",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "namespace",
+          "release_candidate_id",
+          "bundle_count",
+          "bundles",
+          "business_revision_delta",
+          "governance_revision"
+        ],
+        "title": "S09ReplayResponse",
+        "type": "object"
+      },
+      "S09RollbackCompatibility": {
+        "additionalProperties": false,
+        "description": "The machine-decidable rollback compatibility verdict: compatible\nonly when the exact historical artifacts revalidate against the\ncurrent gates.",
+        "properties": {
+          "compatible": {
+            "title": "Compatible",
+            "type": "boolean"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "compatible",
+          "reason_code"
+        ],
+        "title": "S09RollbackCompatibility",
+        "type": "object"
+      },
+      "S09SimulationBody": {
+        "additionalProperties": false,
+        "description": "The closed counterfactual-simulation command: one exact governed\nrelease over one fixed evidence snapshot for one explicit application.\nA separate simulation identity; an omitted application never\nenumerates.",
+        "properties": {
+          "application_id": {
+            "title": "Application Id",
+            "type": "string"
+          },
+          "expected_governance_revision": {
+            "minimum": 0.0,
+            "title": "Expected Governance Revision",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "release_candidate_id": {
+            "title": "Release Candidate Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "expected_governance_revision",
+          "release_candidate_id",
+          "application_id"
+        ],
+        "title": "S09SimulationBody",
+        "type": "object"
+      },
+      "S09SimulationBundle": {
+        "additionalProperties": false,
+        "description": "The closed simulation result schema: one bundle whose namespace is\nfixed to the isolated simulation identity.",
+        "properties": {
+          "application_id": {
+            "title": "Application Id",
+            "type": "string"
+          },
+          "approval_binding_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approval Binding Id"
+          },
+          "bundle_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bundle Digest"
+          },
+          "bundle_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bundle Id"
+          },
+          "business_revision_delta": {
+            "default": 0,
+            "title": "Business Revision Delta",
+            "type": "integer"
+          },
+          "check_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Check Count"
+          },
+          "checks": {
+            "items": {
+              "$ref": "#/components/schemas/S09DiagnosticCheck"
+            },
+            "title": "Checks",
+            "type": "array"
+          },
+          "finding_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finding Count"
+          },
+          "namespace": {
+            "const": "s09-simulation",
+            "title": "Namespace",
+            "type": "string"
+          },
+          "normalization_outcomes": {
+            "items": {
+              "$ref": "#/components/schemas/S09DiagnosticNormalizationOutcome"
+            },
+            "title": "Normalization Outcomes",
+            "type": "array"
+          },
+          "outcome": {
+            "title": "Outcome",
+            "type": "string"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Code"
+          },
+          "release_candidate_id": {
+            "title": "Release Candidate Id",
+            "type": "string"
+          },
+          "release_manifest_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Release Manifest Digest"
+          },
+          "release_manifest_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Release Manifest Id"
+          },
+          "route": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Route"
+          },
+          "run_identity": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Identity"
+          },
+          "schema_version": {
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "selection_outcomes": {
+            "items": {
+              "$ref": "#/components/schemas/S09DiagnosticSelectionOutcome"
+            },
+            "title": "Selection Outcomes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "schema_version",
+          "namespace",
+          "release_candidate_id",
+          "application_id",
+          "outcome"
+        ],
+        "title": "S09SimulationBundle",
+        "type": "object"
+      },
+      "S09SimulationResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "bundle_count": {
+            "title": "Bundle Count",
+            "type": "integer"
+          },
+          "bundles": {
+            "items": {
+              "$ref": "#/components/schemas/S09SimulationBundle"
+            },
+            "title": "Bundles",
+            "type": "array"
+          },
+          "business_revision_delta": {
+            "title": "Business Revision Delta",
+            "type": "integer"
+          },
+          "governance_revision": {
+            "title": "Governance Revision",
+            "type": "integer"
+          },
+          "namespace": {
+            "const": "s09-simulation",
+            "title": "Namespace",
+            "type": "string"
+          },
+          "release_candidate_id": {
+            "title": "Release Candidate Id",
+            "type": "string"
+          },
+          "replayed": {
+            "default": false,
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "status": {
+            "const": "accepted",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "namespace",
+          "release_candidate_id",
+          "bundle_count",
+          "bundles",
+          "business_revision_delta",
+          "governance_revision"
+        ],
+        "title": "S09SimulationResponse",
         "type": "object"
       },
       "T05BusinessExceptionOperationsResult": {
@@ -12317,6 +13962,106 @@
         "summary": "Controlled S05 Business Exception View"
       }
     },
+    "/controlled/s01/api/queries/impact-dispositions": {
+      "get": {
+        "description": "The minimized Reviewer view of one final impact manifest: aggregate\ndigest/count/watermark only.  Per-member receipts live behind the\naudit/reconciliation route.",
+        "operationId": "controlled_s09_impact_dispositions_controlled_s01_api_queries_impact_dispositions_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "final_impact_digest",
+            "required": true,
+            "schema": {
+              "title": "Final Impact Digest",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S09ImpactDispositionsSummaryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S09 Impact Dispositions"
+      }
+    },
+    "/controlled/s01/api/queries/impact-dispositions/reconciliation": {
+      "get": {
+        "description": "The authorized audit/reconciliation view: per-member application and\nreevaluation-job receipts for one final impact manifest, bound to the\nregistered auditor credential and the C-DEMO resource scope.",
+        "operationId": "controlled_s09_impact_dispositions_reconciliation_controlled_s01_api_queries_impact_dispositions_reconciliation_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "final_impact_digest",
+            "required": true,
+            "schema": {
+              "title": "Final Impact Digest",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S09ImpactDispositionsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S09 Impact Dispositions Reconciliation"
+      }
+    },
     "/controlled/s01/api/queries/queue": {
       "get": {
         "operationId": "controlled_s01_queue_controlled_s01_api_queries_queue_get",
@@ -14475,6 +16220,480 @@
           }
         },
         "summary": "Controlled S08 React Page"
+      }
+    },
+    "/controlled/s09/api/commands/impose_hold": {
+      "post": {
+        "description": "Impose a scoped Policy Safety Hold: automatic routing, new RunSpec\npublication and current completion fail closed until an explicit\ngoverned recovery releases the hold.",
+        "operationId": "s09_impose_hold_controlled_s09_api_commands_impose_hold_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S09ImposeHoldBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S09ImposeHoldResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ValidationErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "S09 Impose Hold"
+      }
+    },
+    "/controlled/s09/api/commands/preview_impact": {
+      "post": {
+        "description": "The immutable conservative impact preview for a changed governed\nrelease; the Policy Approver binds its exact digest at approval time.\nBoth the Rule Administrator and the Policy Approver may run this\nread-only computation.",
+        "operationId": "s09_preview_impact_controlled_s09_api_commands_preview_impact_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S09PreviewBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S09PreviewResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ValidationErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "S09 Preview Impact"
+      }
+    },
+    "/controlled/s09/api/commands/propose_rollback": {
+      "post": {
+        "description": "Revalidate the exact historical release and stage a fresh rollback\ncandidate; an incompatible rollback keeps the hold and requires a\ngoverned forward fix.",
+        "operationId": "s09_propose_rollback_controlled_s09_api_commands_propose_rollback_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S09ProposeRollbackBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S09ProposeRollbackResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ValidationErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "S09 Propose Rollback"
+      }
+    },
+    "/controlled/s09/api/commands/recover_hold": {
+      "post": {
+        "description": "The separate, idempotent, separation-of-duties hold recovery: only\nthe independent Policy Approver may confirm release of a hold imposed\nby the activation operator.",
+        "operationId": "s09_recover_hold_controlled_s09_api_commands_recover_hold_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S09RecoverHoldBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S09RecoverHoldResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ValidationErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "S09 Recover Hold"
+      }
+    },
+    "/controlled/s09/api/commands/replay": {
+      "post": {
+        "description": "Isolated reproduction replay with a namespaced replay identity and\nits own command/result DTO: read-only, zero business revisions, one\nexplicit application.",
+        "operationId": "s09_replay_controlled_s09_api_commands_replay_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S09ReplayBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S09ReplayResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ValidationErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "S09 Replay"
+      }
+    },
+    "/controlled/s09/api/commands/simulate": {
+      "post": {
+        "description": "Isolated counterfactual simulation with a namespaced simulation\nidentity and its own command/result DTO: read-only, zero business\nrevisions, never current, one explicit application.",
+        "operationId": "s09_simulate_controlled_s09_api_commands_simulate_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S09SimulationBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S09SimulationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ValidationErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "S09 Simulate"
       }
     },
     "/demo/react": {

@@ -167,6 +167,25 @@ describe("PolicyReleasePanel T08", () => {
           ),
           { status: 200, headers: { "Content-Type": "application/json" } },
         ),
+      "POST /controlled/s09/api/commands/preview_impact": () =>
+        new Response(
+          JSON.stringify({
+            status: "accepted",
+            phase: "preview",
+            manifest_id: "preview_sha256_1111111111111111111111111111111111111111111111111111111111111111",
+            digest: "1".repeat(64),
+            scope: "C-DEMO/demo",
+            oracle_version: "s09-impact-oracle/1",
+            level: 1,
+            expanded_to_full_scope: false,
+            member_count: 1,
+            partition_counts: {"open_cycle": 1},
+            zero_hit_proof: false,
+            target_generation: 2,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+
       "POST /controlled/s08/api/commands/approve": () =>
         new Response(
           JSON.stringify({
@@ -212,10 +231,19 @@ describe("PolicyReleasePanel T08", () => {
     );
 
     const posts = router.calls.filter((call) => call.method === "POST");
-    expect(posts).toHaveLength(1);
-    const body = posts[0].body as Record<string, unknown>;
-    expect(posts[0].url).toBe("/controlled/s08/api/commands/approve");
+    // The approval first previews the immutable impact, then binds its
+    // exact manifest identity.
+    expect(posts).toHaveLength(2);
+    expect(posts[0].url).toBe("/controlled/s09/api/commands/preview_impact");
+    expect((posts[0].body as Record<string, unknown>).candidate_id).toBe(
+      CANDIDATE,
+    );
+    const body = posts[1].body as Record<string, unknown>;
+    expect(posts[1].url).toBe("/controlled/s08/api/commands/approve");
     expect(body.candidate_id).toBe(CANDIDATE);
+    expect(body.preview_manifest_id).toBe(
+      "preview_sha256_1111111111111111111111111111111111111111111111111111111111111111",
+    );
     expect(body.expected_governance_revision).toBe(3);
     expect(body.recovery_release_id).toBe(
       "candidate_t08bootstrap00000000000000000",
@@ -243,6 +271,25 @@ describe("PolicyReleasePanel T08", () => {
           ),
           { status: 200, headers: { "Content-Type": "application/json" } },
         ),
+      "POST /controlled/s09/api/commands/preview_impact": () =>
+        new Response(
+          JSON.stringify({
+            status: "accepted",
+            phase: "preview",
+            manifest_id: "preview_sha256_1111111111111111111111111111111111111111111111111111111111111111",
+            digest: "1".repeat(64),
+            scope: "C-DEMO/demo",
+            oracle_version: "s09-impact-oracle/1",
+            level: 1,
+            expanded_to_full_scope: false,
+            member_count: 1,
+            partition_counts: {"open_cycle": 1},
+            zero_hit_proof: false,
+            target_generation: 2,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+
       "POST /controlled/s08/api/commands/approve": () =>
         new Response(
           JSON.stringify({
@@ -296,6 +343,25 @@ describe("PolicyReleasePanel T08", () => {
           { status: 200, headers: { "Content-Type": "application/json" } },
         );
       },
+      "POST /controlled/s09/api/commands/preview_impact": () =>
+        new Response(
+          JSON.stringify({
+            status: "accepted",
+            phase: "preview",
+            manifest_id: "preview_sha256_1111111111111111111111111111111111111111111111111111111111111111",
+            digest: "1".repeat(64),
+            scope: "C-DEMO/demo",
+            oracle_version: "s09-impact-oracle/1",
+            level: 1,
+            expanded_to_full_scope: false,
+            member_count: 1,
+            partition_counts: {"open_cycle": 1},
+            zero_hit_proof: false,
+            target_generation: 2,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+
       "POST /controlled/s08/api/commands/approve": () => {
         approvePosts += 1;
         return new Response(
@@ -493,6 +559,25 @@ describe("PolicyReleasePanel T08 review findings", () => {
           ),
           { status: 200, headers: { "Content-Type": "application/json" } },
         ),
+      "POST /controlled/s09/api/commands/preview_impact": () =>
+        new Response(
+          JSON.stringify({
+            status: "accepted",
+            phase: "preview",
+            manifest_id: "preview_sha256_1111111111111111111111111111111111111111111111111111111111111111",
+            digest: "1".repeat(64),
+            scope: "C-DEMO/demo",
+            oracle_version: "s09-impact-oracle/1",
+            level: 1,
+            expanded_to_full_scope: false,
+            member_count: 1,
+            partition_counts: {"open_cycle": 1},
+            zero_hit_proof: false,
+            target_generation: 2,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+
       "POST /controlled/s08/api/commands/approve": () =>
         new Response(
           JSON.stringify({ detail: [] }),
@@ -594,6 +679,25 @@ describe("PolicyReleasePanel T08 review findings", () => {
           ),
           { status: 200, headers: { "Content-Type": "application/json" } },
         ),
+      "POST /controlled/s09/api/commands/preview_impact": () =>
+        new Response(
+          JSON.stringify({
+            status: "accepted",
+            phase: "preview",
+            manifest_id: "preview_sha256_1111111111111111111111111111111111111111111111111111111111111111",
+            digest: "1".repeat(64),
+            scope: "C-DEMO/demo",
+            oracle_version: "s09-impact-oracle/1",
+            level: 1,
+            expanded_to_full_scope: false,
+            member_count: 1,
+            partition_counts: {"open_cycle": 1},
+            zero_hit_proof: false,
+            target_generation: 2,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+
       "POST /controlled/s08/api/commands/approve": () => {
         approvePosts += 1;
         if (approveStatus === "network") {
@@ -913,6 +1017,25 @@ describe("PolicyReleasePanel T08 review findings", () => {
           ),
           { status: 200, headers: { "Content-Type": "application/json" } },
         ),
+      "POST /controlled/s09/api/commands/preview_impact": () =>
+        new Response(
+          JSON.stringify({
+            status: "accepted",
+            phase: "preview",
+            manifest_id: "preview_sha256_1111111111111111111111111111111111111111111111111111111111111111",
+            digest: "1".repeat(64),
+            scope: "C-DEMO/demo",
+            oracle_version: "s09-impact-oracle/1",
+            level: 1,
+            expanded_to_full_scope: false,
+            member_count: 1,
+            partition_counts: {"open_cycle": 1},
+            zero_hit_proof: false,
+            target_generation: 2,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+
       "POST /controlled/s08/api/commands/approve": () => {
         approvePosts += 1;
         return new Response(
@@ -946,9 +1069,19 @@ describe("PolicyReleasePanel T08 review findings", () => {
     expect(JSON.parse(secondKey).idempotency_key).not.toBe(
       JSON.parse(firstKey).idempotency_key,
     );
-    expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(
-      2,
-    );
+    // Two approvals, each preceded by its immutable impact preview.
+    const posts = router.calls.filter((call) => call.method === "POST");
+    expect(posts).toHaveLength(4);
+    expect(
+      posts.filter(
+        (call) => call.url === "/controlled/s09/api/commands/preview_impact",
+      ),
+    ).toHaveLength(2);
+    expect(
+      posts.filter(
+        (call) => call.url === "/controlled/s08/api/commands/approve",
+      ),
+    ).toHaveLength(2);
   });
 
   it("after an unknown transport outcome, editing or switching actions posts nothing", async () => {
@@ -963,6 +1096,25 @@ describe("PolicyReleasePanel T08 review findings", () => {
           ),
           { status: 200, headers: { "Content-Type": "application/json" } },
         ),
+      "POST /controlled/s09/api/commands/preview_impact": () =>
+        new Response(
+          JSON.stringify({
+            status: "accepted",
+            phase: "preview",
+            manifest_id: "preview_sha256_1111111111111111111111111111111111111111111111111111111111111111",
+            digest: "1".repeat(64),
+            scope: "C-DEMO/demo",
+            oracle_version: "s09-impact-oracle/1",
+            level: 1,
+            expanded_to_full_scope: false,
+            member_count: 1,
+            partition_counts: {"open_cycle": 1},
+            zero_hit_proof: false,
+            target_generation: 2,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+
       "POST /controlled/s08/api/commands/approve": () => {
         approvePosts += 1;
         if (approveStatus === "network") {
@@ -1019,6 +1171,25 @@ describe("PolicyReleasePanel T08 review findings", () => {
           ),
           { status: 200, headers: { "Content-Type": "application/json" } },
         ),
+      "POST /controlled/s09/api/commands/preview_impact": () =>
+        new Response(
+          JSON.stringify({
+            status: "accepted",
+            phase: "preview",
+            manifest_id: "preview_sha256_1111111111111111111111111111111111111111111111111111111111111111",
+            digest: "1".repeat(64),
+            scope: "C-DEMO/demo",
+            oracle_version: "s09-impact-oracle/1",
+            level: 1,
+            expanded_to_full_scope: false,
+            member_count: 1,
+            partition_counts: {"open_cycle": 1},
+            zero_hit_proof: false,
+            target_generation: 2,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+
       "POST /controlled/s08/api/commands/approve": () => {
         approvePosts += 1;
         if (approvePosts === 1) {
@@ -1078,6 +1249,25 @@ describe("PolicyReleasePanel T08 review findings", () => {
           { status: 200, headers: { "Content-Type": "application/json" } },
         );
       },
+      "POST /controlled/s09/api/commands/preview_impact": () =>
+        new Response(
+          JSON.stringify({
+            status: "accepted",
+            phase: "preview",
+            manifest_id: "preview_sha256_1111111111111111111111111111111111111111111111111111111111111111",
+            digest: "1".repeat(64),
+            scope: "C-DEMO/demo",
+            oracle_version: "s09-impact-oracle/1",
+            level: 1,
+            expanded_to_full_scope: false,
+            member_count: 1,
+            partition_counts: {"open_cycle": 1},
+            zero_hit_proof: false,
+            target_generation: 2,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+
       "POST /controlled/s08/api/commands/approve": () => {
         approvePosts += 1;
         if (approvePosts === 1) {
@@ -1157,6 +1347,25 @@ describe("PolicyReleasePanel T08 review findings", () => {
           { status: 200, headers: { "Content-Type": "application/json" } },
         );
       },
+      "POST /controlled/s09/api/commands/preview_impact": () =>
+        new Response(
+          JSON.stringify({
+            status: "accepted",
+            phase: "preview",
+            manifest_id: "preview_sha256_1111111111111111111111111111111111111111111111111111111111111111",
+            digest: "1".repeat(64),
+            scope: "C-DEMO/demo",
+            oracle_version: "s09-impact-oracle/1",
+            level: 1,
+            expanded_to_full_scope: false,
+            member_count: 1,
+            partition_counts: {"open_cycle": 1},
+            zero_hit_proof: false,
+            target_generation: 2,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+
       "POST /controlled/s08/api/commands/approve": () => {
         approvePosts += 1;
         if (approvePosts === 1) throw new TypeError("network down");
@@ -1228,6 +1437,25 @@ describe("PolicyReleasePanel T08 review findings", () => {
           ),
           { status: 200, headers: { "Content-Type": "application/json" } },
         ),
+      "POST /controlled/s09/api/commands/preview_impact": () =>
+        new Response(
+          JSON.stringify({
+            status: "accepted",
+            phase: "preview",
+            manifest_id: "preview_sha256_1111111111111111111111111111111111111111111111111111111111111111",
+            digest: "1".repeat(64),
+            scope: "C-DEMO/demo",
+            oracle_version: "s09-impact-oracle/1",
+            level: 1,
+            expanded_to_full_scope: false,
+            member_count: 1,
+            partition_counts: {"open_cycle": 1},
+            zero_hit_proof: false,
+            target_generation: 2,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+
       "POST /controlled/s08/api/commands/approve": () => {
         approvePosts += 1;
         if (approvePosts === 1) {
@@ -1615,6 +1843,25 @@ describe("PolicyReleasePanel T08 review findings", () => {
           ),
           { status: 200, headers: { "Content-Type": "application/json" } },
         ),
+      "POST /controlled/s09/api/commands/preview_impact": () =>
+        new Response(
+          JSON.stringify({
+            status: "accepted",
+            phase: "preview",
+            manifest_id: "preview_sha256_1111111111111111111111111111111111111111111111111111111111111111",
+            digest: "1".repeat(64),
+            scope: "C-DEMO/demo",
+            oracle_version: "s09-impact-oracle/1",
+            level: 1,
+            expanded_to_full_scope: false,
+            member_count: 1,
+            partition_counts: {"open_cycle": 1},
+            zero_hit_proof: false,
+            target_generation: 2,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+
       "POST /controlled/s08/api/commands/approve": () => {
         throw new Error(
           "approve must never fire while the draft latch is unknown",
@@ -1683,6 +1930,25 @@ describe("PolicyReleasePanel T08 review findings", () => {
           ),
           { status: 200, headers: { "Content-Type": "application/json" } },
         ),
+      "POST /controlled/s09/api/commands/preview_impact": () =>
+        new Response(
+          JSON.stringify({
+            status: "accepted",
+            phase: "preview",
+            manifest_id: "preview_sha256_1111111111111111111111111111111111111111111111111111111111111111",
+            digest: "1".repeat(64),
+            scope: "C-DEMO/demo",
+            oracle_version: "s09-impact-oracle/1",
+            level: 1,
+            expanded_to_full_scope: false,
+            member_count: 1,
+            partition_counts: {"open_cycle": 1},
+            zero_hit_proof: false,
+            target_generation: 2,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+
       "POST /controlled/s08/api/commands/approve": () => {
         approvePosts += 1;
         throw new TypeError("network down");

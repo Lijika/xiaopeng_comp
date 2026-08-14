@@ -1034,6 +1034,16 @@ class TargetChecker:
         ):
             if key not in run_spec:
                 raise ValueError(f"RunSpec governed pin is incomplete: {key}")
+        final_impact_digest = run_spec.get("final_impact_digest")
+        if final_impact_digest is not None and (
+            not isinstance(final_impact_digest, str)
+            or len(final_impact_digest) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in final_impact_digest
+            )
+        ):
+            raise ValueError("RunSpec final impact digest is invalid")
         if run_spec["policy_scope"] != "C-DEMO/demo":
             raise ValueError("RunSpec policy scope does not match the served scope")
         if (

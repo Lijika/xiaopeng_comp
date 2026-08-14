@@ -27,6 +27,7 @@ import {
   type S08ScheduleCommand,
   type S08SubmitReviewCommand,
   type S08ValidationCommand,
+  usePreviewImpact,
 } from "../api/hooks";
 import { Button } from "./ui/button";
 
@@ -570,9 +571,11 @@ function WorkspaceActions({
     "none" | "unavailable" | "timed_out"
   >("none");
   const [notice, setNotice] = useState<string | null>(null);
+  const [previewing, setPreviewing] = useState(false);
 
   const validate = useRequestValidation();
   const submitReview = useSubmitReview();
+  const previewImpact = usePreviewImpact();
   const approve = useApproveCandidate();
   const reject = useRejectCandidate();
   const schedule = useScheduleActivation();
@@ -618,11 +621,16 @@ function WorkspaceActions({
       "idempotency_key" | "expected_governance_revision"
     >,
     onSuccess?: (result: unknown) => void,
+    revisionOverride?: number,
   ) => {
     onConflict("");
     setActionError(null);
     setNotice(null);
-    const lockedBody = commandLatch.lock(action, command, revision);
+    const lockedBody = commandLatch.lock(
+      action,
+      command,
+      revisionOverride ?? revision,
+    );
     if (lockedBody === null) return;
     onRegisterAttempt({
       send: (body, callbacks) =>
@@ -772,15 +780,58 @@ function WorkspaceActions({
           data-testid="t08-approve-form"
           onSubmit={(event) => {
             event.preventDefault();
-            run<S08ApproveCommand>(
-              approve,
-              "approve",
+            setActionError(null);
+            setNotice(null);
+            // S09: every approval binds the immutable impact preview.  The
+            // server owns the conservative impact computation; the panel
+            // previews first (a read-only computation that never touches
+            // the command latch) and passes the exact manifest identity
+            // into the approval command, which the latch protects.
+            setPreviewing(true);
+            previewImpact.mutate(
               {
                 candidate_id: workspace.candidate_id,
-                activation_time: epochSeconds(activationTime),
-                recovery_release_id: recoveryReleaseId,
+                idempotency_key: crypto.randomUUID(),
+                expected_governance_revision: revision,
               },
-              () => setNotice("已审批并锁定发布计划"),
+              {
+                onSuccess: (result) => {
+                  setPreviewing(false);
+                  const preview = result as
+                    | {
+                        status?: string;
+                        manifest_id?: string;
+                        governance_revision?: number;
+                      }
+                    | undefined;
+                  if (!preview?.manifest_id) {
+                    setActionError("影响预览不可用：服务器未返回预览清单");
+                    return;
+                  }
+                  // The preview itself advances the governance revision
+                  // (one immutable impact_previewed fact), so the approval
+                  // fences on the preview's fresh revision, never the
+                  // pre-preview workspace revision.
+                  run<S08ApproveCommand>(
+                    approve,
+                    "approve",
+                    {
+                      candidate_id: workspace.candidate_id,
+                      activation_time: epochSeconds(activationTime),
+                      recovery_release_id: recoveryReleaseId,
+                      preview_manifest_id: preview.manifest_id,
+                    },
+                    () => setNotice("已审批并锁定发布计划"),
+                    typeof preview.governance_revision === "number"
+                      ? preview.governance_revision
+                      : revision,
+                  );
+                },
+                onError: (error) => {
+                  setPreviewing(false);
+                  setActionError(commandRejectionText(error));
+                },
+              },
             );
           }}
         >
@@ -811,9 +862,13 @@ function WorkspaceActions({
           <Button
             type="submit"
             data-testid="t08-approve-button"
-            disabled={approve.isPending || locked}
+            disabled={approve.isPending || previewing || locked}
           >
-            {approve.isPending ? "审批中…" : "审批并锁定发布计划"}
+            {previewing
+              ? "影响预览计算中…"
+              : approve.isPending
+                ? "审批中…"
+                : "审批并锁定发布计划"}
           </Button>
         </form>
       )}
