@@ -91,6 +91,14 @@ async function startServer(extraEnv = {}) {
         TASK4_S08_OPERATOR_SUBJECT: "t08-browser-policy-operator",
         TASK4_S01_AUDITOR_CREDENTIAL: AUDITOR_CREDENTIAL,
         TASK4_S01_AUDITOR_SUBJECT: "t09-browser-auditor",
+        // F-SPEC-1: the T09 governance scope gate covers all six controlled
+        // identities, so the browser server must register distinct replay
+        // and simulation identities beside the four governance roles.
+        TASK4_S09_REPLAY_CREDENTIAL: "s09-browser-replay-test-credential",
+        TASK4_S09_REPLAY_SUBJECT: "t09-browser-replay-operator",
+        TASK4_S09_SIMULATION_CREDENTIAL:
+          "s09-browser-simulation-test-credential",
+        TASK4_S09_SIMULATION_SUBJECT: "t09-browser-simulation-operator",
         ...extraEnv,
       },
       stdio: ["ignore", "pipe", "pipe"],

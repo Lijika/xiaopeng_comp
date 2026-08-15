@@ -167,45 +167,16 @@ S08_CONFIGURED = bool(
     == 3
 )
 
-# The T09 governance scope gate: the four workspace roles (admin, approver,
-# operator, auditor) must each carry their own credential and subject.  Any
-# alias or missing identity disables the whole governed scope before
-# authorization; S08 command authorization is unaffected and gated by
-# ``S08_CONFIGURED`` alone.
-S09_GOVERNANCE_CONFIGURED = bool(
-    S08_CONFIGURED
-    and S01_AUDITOR_CREDENTIAL
-    and S01_AUDITOR_SUBJECT
-    and len(
-        {
-            S08_ADMIN_CREDENTIAL,
-            S08_APPROVER_CREDENTIAL,
-            S08_OPERATOR_CREDENTIAL,
-            S01_AUDITOR_CREDENTIAL,
-        }
-    )
-    == 4
-    and len(
-        {
-            S08_ADMIN_SUBJECT,
-            S08_APPROVER_SUBJECT,
-            S08_OPERATOR_SUBJECT,
-            S01_AUDITOR_SUBJECT,
-        }
-    )
-    == 4
-)
-
-
-def _s09_diagnostic_configuration_valid() -> bool:
-    """The S09 configuration gate for replay/simulation identities.
+def _s09_identities_configuration_valid() -> bool:
+    """The single six-identity T09 configuration gate (F-SPEC-1).
 
     Every replay and simulation credential/subject must be present and all
     six controlled identities (admin, approver, activation operator, the
     Auditor, replay operator, simulation operator) must be mutually unique
-    in both credentials and subjects.  Missing or aliased S09 configuration
-    makes diagnostic authorization fail closed; it never changes S08 command
-    authorization, which is gated by ``S08_CONFIGURED`` alone."""
+    in both credentials and subjects.  Missing or aliased configuration
+    disables the whole governed T09 scope (workspace, React shell, mutation
+    and diagnostic commands) before authorization; it never changes S08
+    command authorization, which is gated by ``S08_CONFIGURED`` alone."""
     return bool(
         S09_REPLAY_CREDENTIAL
         and S09_REPLAY_SUBJECT
@@ -234,6 +205,24 @@ def _s09_diagnostic_configuration_valid() -> bool:
         )
         == 6
     )
+
+
+# The T09 governance scope gate: all six T09 identities (admin, approver,
+# operator, auditor, replay operator, simulation operator) must each carry
+# their own credential and subject.  Any alias or missing identity disables
+# the whole governed scope before authorization; S08 command authorization
+# is unaffected and gated by ``S08_CONFIGURED`` alone.
+S09_GOVERNANCE_CONFIGURED = bool(
+    S08_CONFIGURED and _s09_identities_configuration_valid()
+)
+
+
+def _s09_diagnostic_configuration_valid() -> bool:
+    """The S09 configuration gate for replay/simulation identities: the
+    single six-identity predicate shared with the governance scope."""
+    return _s09_identities_configuration_valid()
+
+
 S08_SERVICE: PolicyGovernanceService | None = None
 S08_DEFAULT_KB_PATH = ROOT / "configs" / "kb" / "entity_kb.json"
 

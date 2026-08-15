@@ -1483,6 +1483,32 @@ export function GovernanceWorkspacePanel() {
     workspaceData?.actor_role === "auditor" ? finalDigest : null,
   );
 
+  // F-SPEC-2 cached refetch currentness: a failed refetch after a successful
+  // load keeps the old server facts in TanStack Query, so the panel must
+  // classify that stale authority explicitly — deterministic 403/404 hide
+  // the protected surface, transient 5xx/transport failures label the
+  // last-known facts and fence every mutation until an explicit reload.
+  const workspaceRefetchFailed =
+    workspaceQuery.isRefetchError && workspaceQuery.data !== undefined;
+  const workspaceRefetchError = workspaceQuery.error;
+  const staleWorkspace =
+    workspaceRefetchFailed &&
+    !(
+      workspaceRefetchError instanceof HttpError &&
+      (workspaceRefetchError.status === 403 ||
+        workspaceRefetchError.status === 404)
+    );
+  const reconRefetchFailed =
+    reconciliation.isRefetchError && reconciliation.data !== undefined;
+  const reconRefetchError = reconciliation.error;
+  const reconDetailHidden =
+    reconRefetchFailed &&
+    reconRefetchError instanceof HttpError &&
+    (reconRefetchError.status === 403 || reconRefetchError.status === 404);
+  // The page-level command fence: the sent-command latch plus any stale
+  // workspace authority that cannot be presented as current.
+  const fenced = locked || staleWorkspace;
+
   // The panel's authoritative reconciliation refetches the workspace.
   useEffect(() => {
     reconcileRef.current = async () => {
@@ -1651,6 +1677,32 @@ export function GovernanceWorkspacePanel() {
     );
   };
 
+  // F-SPEC-2: a cached refetch 403/404 hides the stale protected surface —
+  // actions, holds, Security Audit refs — before any authorization state is
+  // presented as current.
+  if (
+    workspaceRefetchFailed &&
+    workspaceRefetchError instanceof HttpError &&
+    (workspaceRefetchError.status === 403 ||
+      workspaceRefetchError.status === 404)
+  ) {
+    return (
+      <section
+        className="panel"
+        data-testid={
+          workspaceRefetchError.status === 403
+            ? "t09-forbidden"
+            : "t09-not-found"
+        }
+        role="alert"
+      >
+        {workspaceRefetchError.status === 403
+          ? rejectionText(workspaceRefetchError)
+          : "治理工作区不可访问"}
+      </section>
+    );
+  }
+
   if (workspaceQuery.isLoading || workspaceQuery.data === undefined) {
     if (!workspaceQuery.isError) {
       return (
@@ -1719,6 +1771,19 @@ export function GovernanceWorkspacePanel() {
     <>
       <section className="panel" data-testid="t09-workspace">
         <h2>治理影响与安全冻结工作区</h2>
+        {staleWorkspace && (
+          <div data-testid="t09-stale" role="alert">
+            <p>
+              连接不稳定：显示的是上次已知权威状态，命令已禁用，请重新加载
+            </p>
+            <Button
+              data-testid="t09-workspace-reload"
+              onClick={() => void workspaceQuery.refetch()}
+            >
+              重新加载权威状态
+            </Button>
+          </div>
+        )}
         <dl className="facts">
           <div>
             <dt>当前角色</dt>
@@ -1880,7 +1945,7 @@ export function GovernanceWorkspacePanel() {
                   setHoldReason(event.target.value);
                 }}
                 required
-                disabled={locked}
+                disabled={fenced}
               />
             </label>
             <label>
@@ -1891,13 +1956,13 @@ export function GovernanceWorkspacePanel() {
                   setHoldScope(event.target.value);
                 }}
                 required
-                disabled={locked}
+                disabled={fenced}
               />
             </label>
             <Button
               type="submit"
               data-testid="t09-impose-button"
-              disabled={imposeHold.isPending || locked}
+              disabled={imposeHold.isPending || fenced}
             >
               {imposeHold.isPending ? "冻结中…" : "施加安全冻结"}
             </Button>
@@ -1920,7 +1985,7 @@ export function GovernanceWorkspacePanel() {
                   setRollbackRelease(event.target.value);
                 }}
                 required
-                disabled={locked}
+                disabled={fenced}
               />
             </label>
             <label>
@@ -1931,13 +1996,13 @@ export function GovernanceWorkspacePanel() {
                   setRollbackReason(event.target.value);
                 }}
                 required
-                disabled={locked}
+                disabled={fenced}
               />
             </label>
             <Button
               type="submit"
               data-testid="t09-rollback-button"
-              disabled={proposeRollback.isPending || locked}
+              disabled={proposeRollback.isPending || fenced}
             >
               {proposeRollback.isPending ? "校验中…" : "提出兼容回滚"}
             </Button>
@@ -1983,7 +2048,7 @@ export function GovernanceWorkspacePanel() {
                   setRecoverHoldId(event.target.value);
                 }}
                 required
-                disabled={locked}
+                disabled={fenced}
               />
             </label>
             <label>
@@ -1996,13 +2061,13 @@ export function GovernanceWorkspacePanel() {
                 }}
                 required
                 readOnly
-                disabled={locked}
+                disabled={fenced}
               />
             </label>
             <Button
               type="submit"
               data-testid="t09-recover-button"
-              disabled={recoverHold.isPending || locked}
+              disabled={recoverHold.isPending || fenced}
             >
               {recoverHold.isPending ? "恢复中…" : "确认恢复（释放冻结）"}
             </Button>
@@ -2016,6 +2081,38 @@ export function GovernanceWorkspacePanel() {
               <p data-testid="t09-recon-loading" role="status">
                 对账明细加载中…
               </p>
+            )}
+            {reconRefetchFailed &&
+              reconRefetchError instanceof HttpError &&
+              reconRefetchError.status === 403 && (
+                <p data-testid="t09-recon-forbidden" role="alert">
+                  无权访问对账明细
+                </p>
+              )}
+            {reconRefetchFailed &&
+              reconRefetchError instanceof HttpError &&
+              reconRefetchError.status === 404 && (
+                <p data-testid="t09-recon-pending" role="alert">
+                  对账投影尚未生成，请稍后刷新
+                </p>
+              )}
+            {reconRefetchFailed && !reconDetailHidden && (
+              <>
+                <p data-testid="t09-recon-unavailable" role="alert">
+                  对账明细暂不可用
+                </p>
+                <Button
+                  data-testid="t09-recon-reload"
+                  onClick={() => void reconciliation.refetch()}
+                >
+                  重新加载对账明细
+                </Button>
+                {reconciliation.data !== undefined && (
+                  <p data-testid="t09-recon-stale" role="alert">
+                    上次已知对账明细（可能过期）
+                  </p>
+                )}
+              </>
             )}
             {reconciliation.data === undefined && reconciliation.isError && (
               <p
@@ -2052,7 +2149,7 @@ export function GovernanceWorkspacePanel() {
                   重新加载对账明细
                 </Button>
               )}
-            {reconciliation.data !== undefined && (
+            {reconciliation.data !== undefined && !reconDetailHidden && (
               <>
                 <dl className="facts">
                   <div>

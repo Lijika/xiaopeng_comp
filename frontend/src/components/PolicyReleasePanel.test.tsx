@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
@@ -3511,5 +3511,390 @@ describe("GovernanceWorkspacePanel T09", () => {
       Number(text.match(/修订 (\d+)/)?.[1]),
     );
     expect(revisions).toEqual([...revisions].sort((a, b) => a - b));
+  });
+
+  describe("F-SPEC-2 cached refetch currentness", () => {
+    function renderGovernanceWithClient() {
+      const client = createQueryClient();
+      const view = render(<GovernanceWorkspacePanel />, {
+        wrapper: wrap(client),
+      });
+      return { client, ...view };
+    }
+
+    function workspaceResponse(
+      payload: unknown,
+      status = 200,
+    ): Response {
+      return new Response(JSON.stringify(payload), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    function reconError(status: number): Response {
+      return workspaceResponse(
+        { detail: { error: `ERR_${status}`, message: "reconciliation" } },
+        status,
+      );
+    }
+
+    function reconciliationPayload() {
+      return {
+        final_impact_digest: "f".repeat(64),
+        member_count: 1,
+        unconsumed_count: 0,
+        outstanding_count: 0,
+        projection_watermark: 5,
+        members: [
+          {
+            application_id: "app_t09recon000000000000000000",
+            cycle: 1,
+            partition: "open_cycle",
+            disposition: "applied",
+            target_generation: 2,
+            reevaluation_job_id: "job_t09recon000000000000000000",
+            reevaluation_job_count: 1,
+          },
+        ],
+      };
+    }
+
+    it.each([403, 404])(
+      "workspace cached %i hides the stale protected surface before any command",
+      async (status) => {
+        let calls = 0;
+        fetchRouter({
+          [`GET ${WORKSPACE_PATH9}`]: () => {
+            calls += 1;
+            if (calls === 1) {
+              return workspaceResponse(
+                workspacePayload9("auditor", [], {
+                  audit_events: [
+                    {
+                      event_id: "audit_t09cached000000000000000000000001",
+                      action: "s08_impose_hold",
+                      subject: "c-demo-policy-operator",
+                      role: "operator",
+                      result: "accepted",
+                      reason_code: "S09_HOLD_IMPOSED",
+                      event_time: 1786000000,
+                      hold_id: "governance_hold0000000000000000001",
+                    },
+                  ],
+                }),
+              );
+            }
+            return reconError(status);
+          },
+        });
+        const { client } = renderGovernanceWithClient();
+        await waitFor(() =>
+          expect(screen.getByTestId("t09-audit")).toBeInTheDocument(),
+        );
+        await client.refetchQueries({ queryKey: ["s09"] });
+        const expected = status === 403 ? "t09-forbidden" : "t09-not-found";
+        await waitFor(() =>
+          expect(screen.getByTestId(expected)).toBeInTheDocument(),
+        );
+        // The stale protected surface is gone: no workspace, no audit refs,
+        // no command surface.
+        expect(screen.queryByTestId("t09-workspace")).not.toBeInTheDocument();
+        expect(screen.queryByTestId("t09-audit")).not.toBeInTheDocument();
+        expect(screen.queryByTestId("t09-impose-form")).not.toBeInTheDocument();
+      },
+    );
+
+    it("workspace cached 500 marks last-known, fences every mutation and recovers on reload", async () => {
+      let calls = 0;
+      fetchRouter({
+        [`GET ${WORKSPACE_PATH9}`]: () => {
+          calls += 1;
+          if (calls === 1 || calls === 3) {
+            return workspaceResponse(
+              workspacePayload9(
+                "operator",
+                ["impose_hold", "propose_rollback"],
+                calls === 3
+                  ? { governance_revision: 4, holds: [] }
+                  : { governance_revision: 3, holds: [] },
+              ),
+            );
+          }
+          return workspaceResponse(
+            { detail: { error: "ERR_500", message: "server" } },
+            500,
+          );
+        },
+      });
+      const { client } = renderGovernanceWithClient();
+      await waitFor(() =>
+        expect(screen.getByTestId("t09-impose-button")).toBeEnabled(),
+      );
+      await client.refetchQueries({ queryKey: ["s09"] });
+      await waitFor(() =>
+        expect(screen.getByTestId("t09-stale")).toBeInTheDocument(),
+      );
+      // The last-known facts stay visible but every mutation control is
+      // fenced and an explicit reload is offered.
+      expect(screen.getByTestId("t09-role")).toHaveTextContent("operator");
+      expect(screen.getByTestId("t09-revision")).toHaveTextContent("3");
+      expect(screen.getByTestId("t09-impose-button")).toBeDisabled();
+      expect(screen.getByTestId("t09-rollback-button")).toBeDisabled();
+      fireEvent.click(screen.getByTestId("t09-workspace-reload"));
+      await waitFor(() =>
+        expect(screen.queryByTestId("t09-stale")).not.toBeInTheDocument(),
+      );
+      // The successful reload restores the fresh authoritative revision.
+      expect(screen.getByTestId("t09-revision")).toHaveTextContent("4");
+      expect(screen.getByTestId("t09-impose-button")).toBeEnabled();
+    });
+
+    it("workspace cached 503 retries transiently then marks last-known, fences every mutation and recovers on reload", async () => {
+      // 503 is a transient status in retryPolicy, so the query retries
+      // (with backoff) before the error is definitive; the mock keeps
+      // failing across every retry and only succeeds after the explicit
+      // reload turns the state machine off.
+      let calls = 0;
+      let failRefetch = true;
+      fetchRouter({
+        [`GET ${WORKSPACE_PATH9}`]: () => {
+          calls += 1;
+          if (calls === 1 || !failRefetch) {
+            return workspaceResponse(
+              workspacePayload9(
+                "operator",
+                ["impose_hold", "propose_rollback"],
+                calls === 1
+                  ? { governance_revision: 3, holds: [] }
+                  : { governance_revision: 4, holds: [] },
+              ),
+            );
+          }
+          return workspaceResponse(
+            { detail: { error: "ERR_503", message: "server" } },
+            503,
+          );
+        },
+      });
+      const { client } = renderGovernanceWithClient();
+      await waitFor(() =>
+        expect(screen.getByTestId("t09-impose-button")).toBeEnabled(),
+      );
+      await client.refetchQueries({ queryKey: ["s09"] });
+      await waitFor(
+        () => expect(screen.getByTestId("t09-stale")).toBeInTheDocument(),
+        { timeout: 8_000 },
+      );
+      // The last-known facts stay visible but every mutation control is
+      // fenced and an explicit reload is offered.
+      expect(screen.getByTestId("t09-role")).toHaveTextContent("operator");
+      expect(screen.getByTestId("t09-revision")).toHaveTextContent("3");
+      expect(screen.getByTestId("t09-impose-button")).toBeDisabled();
+      expect(screen.getByTestId("t09-rollback-button")).toBeDisabled();
+      failRefetch = false;
+      fireEvent.click(screen.getByTestId("t09-workspace-reload"));
+      await waitFor(() =>
+        expect(screen.queryByTestId("t09-stale")).not.toBeInTheDocument(),
+      );
+      // The successful reload restores the fresh authoritative revision.
+      expect(screen.getByTestId("t09-revision")).toHaveTextContent("4");
+      expect(screen.getByTestId("t09-impose-button")).toBeEnabled();
+    });
+
+    it("workspace cached transient failure keeps the auditor surface stale and restores it on reload", async () => {
+      // The transient status is retried by retryPolicy before the error is
+      // definitive, so the mock fails across every retry and only succeeds
+      // after the explicit reload turns the state machine off.
+      let calls = 0;
+      let failRefetch = true;
+      fetchRouter({
+        [`GET ${WORKSPACE_PATH9}`]: () => {
+          calls += 1;
+          if (calls === 1 || !failRefetch) {
+            return workspaceResponse(
+              workspacePayload9("auditor", [], {
+                governance_revision: calls === 1 ? 3 : 4,
+                audit_events: [
+                  {
+                    event_id: "audit_t09stale0000000000000000000000001",
+                    action: "s08_impose_hold",
+                    subject: "c-demo-policy-operator",
+                    role: "operator",
+                    result: "accepted",
+                    reason_code: "S09_HOLD_IMPOSED",
+                    event_time: 1786000000,
+                    hold_id: "governance_hold0000000000000000001",
+                  },
+                ],
+              }),
+            );
+          }
+          return workspaceResponse(
+            { detail: { error: "ERR_503", message: "server" } },
+            503,
+          );
+        },
+      });
+      const { client } = renderGovernanceWithClient();
+      await waitFor(() =>
+        expect(screen.getByTestId("t09-audit")).toBeInTheDocument(),
+      );
+      await client.refetchQueries({ queryKey: ["s09"] });
+      await waitFor(
+        () => expect(screen.getByTestId("t09-stale")).toBeInTheDocument(),
+        { timeout: 8_000 },
+      );
+      // The cached auditor surface stays visible but is labelled stale.
+      expect(screen.getByTestId("t09-role")).toHaveTextContent("auditor");
+      expect(screen.getByTestId("t09-audit")).toBeInTheDocument();
+      failRefetch = false;
+      fireEvent.click(screen.getByTestId("t09-workspace-reload"));
+      await waitFor(() =>
+        expect(screen.queryByTestId("t09-stale")).not.toBeInTheDocument(),
+      );
+      // The successful reload restores the fresh authoritative revision
+      // and the audit facts along with it.
+      expect(screen.getByTestId("t09-revision")).toHaveTextContent("4");
+      expect(screen.getByTestId("t09-audit")).toBeInTheDocument();
+      expect(screen.getByTestId("t09-audit-record")).toHaveTextContent(
+        "s08_impose_hold · c-demo-policy-operator · operator · accepted · S09_HOLD_IMPOSED · 冻结 governance_hold0000000000000000001",
+      );
+    });
+
+    it("workspace cached transport failure marks last-known and fences mutations", async () => {
+      let calls = 0;
+      fetchRouter({
+        [`GET ${WORKSPACE_PATH9}`]: () => {
+          calls += 1;
+          if (calls === 1) {
+            return workspaceResponse(
+              workspacePayload9("operator", ["impose_hold"]),
+            );
+          }
+          return Promise.reject(new TypeError("network down"));
+        },
+      });
+      const { client } = renderGovernanceWithClient();
+      await waitFor(() =>
+        expect(screen.getByTestId("t09-impose-button")).toBeEnabled(),
+      );
+      await client.refetchQueries({ queryKey: ["s09"] });
+      await waitFor(
+        () => expect(screen.getByTestId("t09-stale")).toBeInTheDocument(),
+        { timeout: 8_000 },
+      );
+      expect(screen.getByTestId("t09-impose-button")).toBeDisabled();
+      expect(screen.getByTestId("t09-workspace-reload")).toBeInTheDocument();
+    });
+
+    it.each([403, 404, 500, 503])(
+      "reconciliation cached %i distinguishes the state from stale detail",
+      async (status) => {
+        let reconCalls = 0;
+        let failRefetch = true;
+        fetchRouter({
+          [`GET ${WORKSPACE_PATH9}`]: () =>
+            workspaceResponse(workspacePayload9("auditor", [])),
+          "GET /controlled/s01/api/queries/impact-dispositions/reconciliation":
+            () => {
+              reconCalls += 1;
+              if (reconCalls === 1 || !failRefetch) {
+                return workspaceResponse(reconciliationPayload());
+              }
+              return reconError(status);
+            },
+        });
+        const { client } = renderGovernanceWithClient();
+        await waitFor(() =>
+          expect(screen.getByTestId("t09-recon-members")).toBeInTheDocument(),
+        );
+        await client.refetchQueries({ queryKey: ["s09"] });
+        const expected =
+          status === 403
+            ? "t09-recon-forbidden"
+            : status === 404
+              ? "t09-recon-pending"
+              : "t09-recon-unavailable";
+        await waitFor(
+          () => expect(screen.getByTestId(expected)).toBeInTheDocument(),
+          { timeout: 8_000 },
+        );
+        if (status === 403 || status === 404) {
+          // The stale detail is hidden for the deterministic 403/404 states
+          // and no reload is offered for the 403 denial.
+          expect(
+            screen.queryByTestId("t09-recon-members"),
+          ).not.toBeInTheDocument();
+          expect(
+            screen.queryByTestId("t09-recon-reload"),
+          ).not.toBeInTheDocument();
+        } else {
+          // Transient failures keep the last-known detail but label it.
+          expect(screen.getByTestId("t09-recon-stale")).toBeInTheDocument();
+          expect(
+            screen.getByTestId("t09-recon-members"),
+          ).toBeInTheDocument();
+          // The explicit reload restores the fresh authoritative detail.
+          failRefetch = false;
+          fireEvent.click(screen.getByTestId("t09-recon-reload"));
+          await waitFor(() =>
+            expect(
+              screen.queryByTestId("t09-recon-stale"),
+            ).not.toBeInTheDocument(),
+          );
+          expect(
+            screen.queryByTestId("t09-recon-unavailable"),
+          ).not.toBeInTheDocument();
+          expect(screen.getByTestId("t09-recon-members")).toBeInTheDocument();
+        }
+      },
+      30_000,
+    );
+
+    it("a command success whose invalidation refetch fails never leaves unmarked cached authority", async () => {
+      const user = userEvent.setup();
+      let workspaceCalls = 0;
+      fetchRouter({
+        [`GET ${WORKSPACE_PATH9}`]: () => {
+          workspaceCalls += 1;
+          if (workspaceCalls === 1) {
+            return workspaceResponse(
+              workspacePayload9("operator", ["impose_hold"]),
+            );
+          }
+          return workspaceResponse(
+            { detail: { error: "ERR_500", message: "server" } },
+            500,
+          );
+        },
+        "POST /controlled/s09/api/commands/impose_hold": () =>
+          workspaceResponse({
+            status: "accepted",
+            hold_id: HOLD.hold_id,
+            hold_scope: HOLD.hold_scope,
+            reason_code: HOLD.reason_code,
+            recovery_criterion_id: HOLD.recovery_criterion_id,
+            recovery_criterion_digest: HOLD.recovery_criterion_digest,
+            governance_event_id: HOLD.event_id,
+            governance_revision: 4,
+          }),
+      });
+      renderGovernanceWithClient();
+      await waitFor(() =>
+        expect(screen.getByTestId("t09-impose-button")).toBeEnabled(),
+      );
+      await user.type(screen.getByLabelText("冻结原因码"), "S09_TEST_HOLD");
+      await user.click(screen.getByTestId("t09-impose-button"));
+      await waitFor(() =>
+        expect(screen.getByTestId("t09-action-ok")).toBeInTheDocument(),
+      );
+      // The invalidation refetch after the accepted command fails: the
+      // cached authority must carry the explicit last-known marker.
+      await waitFor(() =>
+        expect(screen.getByTestId("t09-stale")).toBeInTheDocument(),
+      );
+      expect(screen.getByTestId("t09-impose-button")).toBeDisabled();
+    });
   });
 });

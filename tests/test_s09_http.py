@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from tests.test_s01_http import (
+    AUDITOR_CREDENTIAL,
     UvicornLoopback,
     auditor_auth_headers,
     demo_auth_headers,
@@ -26,7 +27,9 @@ from tests.test_s08_http import (
     ADMIN_CREDENTIAL,
     APPROVER_CREDENTIAL,
     OPERATOR_CREDENTIAL,
+    REPLAY_CREDENTIAL,
     S08_SCOPE,
+    SIMULATION_CREDENTIAL,
     SOURCE_BUNDLE_ID,
     _governance_revision,
     _post_command,
@@ -1200,12 +1203,154 @@ _ALIAS_CREDENTIALS = {
     "admin": ADMIN_CREDENTIAL,
     "approver": APPROVER_CREDENTIAL,
     "operator": OPERATOR_CREDENTIAL,
+    "auditor": AUDITOR_CREDENTIAL,
+    "replay": REPLAY_CREDENTIAL,
+    "simulation": SIMULATION_CREDENTIAL,
 }
 _ALIAS_SUBJECTS = {
     "admin": "c-demo-policy-admin",
     "approver": "c-demo-policy-approver",
     "operator": "c-demo-policy-operator",
+    "auditor": "c-demo-test-auditor",
+    "replay": "c-demo-replay-operator",
+    "simulation": "c-demo-simulation-operator",
 }
+
+
+@pytest.mark.parametrize(
+    "aliased,other,alias",
+    [
+        (aliased, other, alias)
+        for aliased in ("replay", "simulation")
+        for other in (
+            "admin",
+            "approver",
+            "operator",
+            "auditor",
+            "replay",
+            "simulation",
+        )
+        for alias in ("credential", "subject")
+        if other != aliased
+    ],
+)
+def test_t09_replay_simulation_alias_disables_governance_scope(
+    tmp_path: Path, aliased: str, other: str, alias: str
+) -> None:
+    """F-SPEC-1 fail-closed over the real HTTP seam: when a Replay or
+    Simulation identity aliases any other T09 controlled identity (Admin,
+    Approver, activation Operator, Auditor or the other diagnostic role) in
+    credential or subject, the whole governed scope is disabled before
+    authorization — the workspace, the React shell and every mutation
+    command fail closed with 503, the Auditor Security Audit projection is
+    unreachable, replay/simulation commands keep their stable 403, no
+    Governance/audit/outbox/idempotency fact is appended, and the unaffected
+    S08 three-role surface plus S01 health stay live."""
+    state_path = tmp_path / f"alias-{aliased}-{other}-{alias}.sqlite3"
+    env = {
+        "TASK4_S01_TEST_FIXTURE_ROOT": str(ROOT / "fixtures" / "applications"),
+        "TASK4_S01_TEST_STATE_PATH": str(state_path),
+    }
+    if alias == "credential":
+        env[f"TASK4_S09_{aliased.upper()}_CREDENTIAL"] = _ALIAS_CREDENTIALS[other]
+    else:
+        env[f"TASK4_S09_{aliased.upper()}_SUBJECT"] = _ALIAS_SUBJECTS[other]
+    with s08_test_loopback(env) as server:
+        # Baseline after the governed bootstrap: the aliased configuration
+        # must not append a single Governance/audit/outbox/idempotency fact.
+        baseline = _s09_governance_fact_counts(state_path)
+        # The aliased bearer must never resolve into the governed surface;
+        # the governance scope is closed before any authorization.
+        for path in (
+            "/controlled/s09/api/queries/workspace",
+            "/controlled/s09/react",
+        ):
+            response = server.request("GET", path, headers=admin_headers())
+            assert response.status == 503, f"{path}: {response.status}"
+            assert response.json()["detail"]["error"] == "S08_UNAVAILABLE"
+        # The Auditor Security Audit projection is unreachable while the
+        # governed scope is closed.
+        auditor_ws = server.request(
+            "GET",
+            "/controlled/s09/api/queries/workspace",
+            headers=auditor_auth_headers(),
+        )
+        assert auditor_ws.status == 503
+        assert auditor_ws.json()["detail"]["error"] == "S08_UNAVAILABLE"
+        # No mutation command may run from the shared bearer surface.
+        for name, body, headers in (
+            (
+                "impose_hold",
+                {
+                    "reason_code": "ALIAS_TEST",
+                    "hold_scope": "open_cycle",
+                    "idempotency_key": f"alias-{aliased}-{other}-{alias}-hold-1",
+                    "expected_governance_revision": 0,
+                },
+                operator_headers(),
+            ),
+            (
+                "propose_rollback",
+                {
+                    "release_candidate_id": "unused-candidate",
+                    "reason_code": "ALIAS_TEST",
+                    "idempotency_key": f"alias-{aliased}-{other}-{alias}-rollback-1",
+                    "expected_governance_revision": 0,
+                },
+                operator_headers(),
+            ),
+            (
+                "recover_hold",
+                {
+                    "hold_id": "unused-hold",
+                    "recovery_generation": 1,
+                    "idempotency_key": f"alias-{aliased}-{other}-{alias}-recover-1",
+                    "expected_governance_revision": 0,
+                },
+                approver_headers(),
+            ),
+        ):
+            denied = server.request(
+                "POST",
+                f"/controlled/s09/api/commands/{name}",
+                body=body,
+                headers=headers,
+            )
+            assert denied.status == 503, f"{name}: {denied.status}"
+            assert denied.json()["detail"]["error"] == "S08_UNAVAILABLE"
+        # The replay/simulation commands keep their stable fail-closed 403:
+        # the six-identity configuration gate closes before role resolution.
+        for name, headers in (
+            ("replay", replay_headers()),
+            ("simulate", simulation_headers()),
+        ):
+            denied = server.request(
+                "POST",
+                f"/controlled/s09/api/commands/{name}",
+                body={
+                    "release_candidate_id": "unused-candidate",
+                    "application_id": "unused-application",
+                    "idempotency_key": f"alias-{aliased}-{other}-{alias}-{name}-1",
+                    "expected_governance_revision": 0,
+                },
+                headers=headers,
+            )
+            assert denied.status == 403, f"{name}: {denied.status}"
+            assert denied.json()["detail"]["error"] == "S08_FORBIDDEN"
+        # The retained S08 three-role surface and the S01 health endpoint
+        # stay live; only the governed T09 scope is disabled.
+        status, _ = _json(
+            server,
+            "GET",
+            "/controlled/s08/api/queries/status",
+            headers=admin_headers(),
+        )
+        assert status == 200
+        health = server.request("GET", "/api/health")
+        assert health.status == 200
+    # No Governance, audit, outbox, or idempotency fact was appended by the
+    # failed-closed requests beyond the startup bootstrap baseline.
+    assert _s09_governance_fact_counts(state_path) == baseline
 
 
 @pytest.mark.parametrize("other_role", ("admin", "approver", "operator"))
