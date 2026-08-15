@@ -1087,6 +1087,7 @@ describe("governed policy-release shell (T08)", () => {
             recovery_anchor: null,
             holds: [],
             events: [],
+            audit_events: [],
           }),
           { status: 200, headers: { "Content-Type": "application/json" } },
         ),

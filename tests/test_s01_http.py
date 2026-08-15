@@ -37,8 +37,11 @@ SCENARIO = "app_r53_bad_engine.json"
 DEMO_CREDENTIAL = "s01-registered-demo-test-credential"
 OPERATOR_CREDENTIAL = "s01-registered-operator-test-credential"
 AUDITOR_CREDENTIAL = "s01-registered-auditor-test-credential"
-_SERVER_START_TIMEOUT_SECONDS = 5.0
-_REQUEST_TIMEOUT_SECONDS = 2.0
+# Full-suite runs spawn many uvicorn loopback subprocesses; under memory
+# pressure cold starts exceed 5s and per-request reads exceed 2s (same
+# startup-readiness pattern as the T08 30_000ms browser harness).
+_SERVER_START_TIMEOUT_SECONDS = 30.0
+_REQUEST_TIMEOUT_SECONDS = 10.0
 _SERVER_STOP_TIMEOUT_SECONDS = 5.0
 TEST_INTEGRATOR = S01CommandPrincipal(
     subject="registered-test-integrator",

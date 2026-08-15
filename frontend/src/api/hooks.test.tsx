@@ -1431,6 +1431,7 @@ describe("governed policy hooks (S08 T08 / S09 T09)", () => {
       },
       holds: [],
       events: [],
+      audit_events: [],
       ...overrides,
     };
   }

@@ -1268,13 +1268,38 @@ class S09WorkspaceEventRef(BaseModel):
     recovery_generation: int | None = None
 
 
+class S09AuditEventRef(BaseModel):
+    """The minimized Auditor-only Security Audit refs: the append-only
+    protected-action facts (actor subject/role, action, result, reason and
+    the hold/release/recovery/candidate references).  Only the registered
+    Auditor receives them in the workspace; Governance events remain the
+    release-history view and no client ever writes audit state."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str
+    action: str
+    subject: str
+    role: str
+    result: str
+    reason_code: str | None = None
+    event_time: int | None = None
+    event_sequence: int | None = None
+    candidate_id: str | None = None
+    hold_id: str | None = None
+    release_candidate_id: str | None = None
+    rollback_candidate_id: str | None = None
+    recovery_generation: int | None = None
+    governance_event_id: str | None = None
+
+
 class S09GovernanceWorkspaceResponse(BaseModel):
     """The closed T09 governance workspace: the authoritative governance
     revision, the authenticated actor role, the server-owned action list,
     the active release and known-good recovery anchor, the active hold
-    union and the append-only S09 event refs -- one atomic snapshot the
-    page renders.  The page never derives a transition, a hold or a
-    recovery option."""
+    union, the append-only S09 event refs and (for the Auditor only) the
+    minimized Security Audit refs -- one atomic snapshot the page renders.
+    The page never derives a transition, a hold or a recovery option."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1288,6 +1313,7 @@ class S09GovernanceWorkspaceResponse(BaseModel):
     recovery_anchor: S09RecoveryAnchor | None = None
     holds: list[S09HoldRef]
     events: list[S09WorkspaceEventRef]
+    audit_events: list[S09AuditEventRef]
 
 
 def _s08_command(
@@ -1522,6 +1548,16 @@ def s09_preview_impact(
     Both the Rule Administrator and the Policy Approver may run this
     read-only computation."""
     module = _s08_app_module(request)
+    if not getattr(module, "S09_GOVERNANCE_CONFIGURED", False):
+        # P-5: an aliased or missing Auditor identity closes the governed
+        # scope before any authorization.
+        raise HTTPException(
+            503,
+            detail={
+                "error": "S08_UNAVAILABLE",
+                "message": "Controlled S09 policy governance is unavailable",
+            },
+        )
     module._s01_disable_cache(response)
     principal = _s08_require_preview_role(request)
     try:
@@ -1552,6 +1588,17 @@ def s09_impose_hold(
     """Impose a scoped Policy Safety Hold: automatic routing, new RunSpec
     publication and current completion fail closed until an explicit
     governed recovery releases the hold."""
+    module = _s08_app_module(request)
+    if not getattr(module, "S09_GOVERNANCE_CONFIGURED", False):
+        # P-5: an aliased or missing Auditor identity closes the governed
+        # scope before any authorization.
+        raise HTTPException(
+            503,
+            detail={
+                "error": "S08_UNAVAILABLE",
+                "message": "Controlled S09 policy governance is unavailable",
+            },
+        )
     return _s08_command(
         request, response, "operator",
         lambda principal: _s08_service(request).impose_hold(
@@ -1575,6 +1622,17 @@ def s09_propose_rollback(
     """Revalidate the exact historical release and stage a fresh rollback
     candidate; an incompatible rollback keeps the hold and requires a
     governed forward fix."""
+    module = _s08_app_module(request)
+    if not getattr(module, "S09_GOVERNANCE_CONFIGURED", False):
+        # P-5: an aliased or missing Auditor identity closes the governed
+        # scope before any authorization.
+        raise HTTPException(
+            503,
+            detail={
+                "error": "S08_UNAVAILABLE",
+                "message": "Controlled S09 policy governance is unavailable",
+            },
+        )
     return _s08_command(
         request, response, "operator",
         lambda principal: _s08_service(request).propose_rollback(
@@ -1644,6 +1702,17 @@ def s09_recover_hold(
     """The separate, idempotent, separation-of-duties hold recovery: only
     the independent Policy Approver may confirm release of a hold imposed
     by the activation operator."""
+    module = _s08_app_module(request)
+    if not getattr(module, "S09_GOVERNANCE_CONFIGURED", False):
+        # P-5: an aliased or missing Auditor identity closes the governed
+        # scope before any authorization.
+        raise HTTPException(
+            503,
+            detail={
+                "error": "S08_UNAVAILABLE",
+                "message": "Controlled S09 policy governance is unavailable",
+            },
+        )
     return _s08_command(
         request, response, "approver",
         lambda principal: _s08_service(request).recover_hold(
@@ -1754,8 +1823,18 @@ def _s09_require_read_role(request: Request) -> PolicyPrincipal:
     """The T09 read surface for the four governance workspace roles: the
     Rule Administrator, the Policy Approver, the activation Operator and
     the Auditor each read the atomic workspace under their own identity.
-    Every other identity fails closed with the stable 403."""
+    Every other identity fails closed with the stable 403, and an aliased
+    or missing Auditor identity disables the whole governed scope with a
+    closed 503 before any authorization (P-5)."""
     module = _s08_app_module(request)
+    if not getattr(module, "S09_GOVERNANCE_CONFIGURED", False):
+        raise HTTPException(
+            503,
+            detail={
+                "error": "S08_UNAVAILABLE",
+                "message": "Controlled S09 policy governance is unavailable",
+            },
+        )
     credentials = {
         "admin": (module.S08_ADMIN_CREDENTIAL, module.S08_ADMIN_SUBJECT),
         "approver": (module.S08_APPROVER_CREDENTIAL, module.S08_APPROVER_SUBJECT),

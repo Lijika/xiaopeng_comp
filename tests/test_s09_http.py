@@ -10,9 +10,12 @@ and currentness is observed through the S01 application query seam.
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from tests.test_s01_http import (
     UvicornLoopback,
@@ -713,6 +716,12 @@ def test_t09_workspace_four_role_reads_over_http(tmp_path: Path) -> None:
                 "release_candidate_id": bootstrap_candidate_id
             }
             assert workspace["holds"] == []
+            # The minimized Security Audit refs are Auditor-only (P-3): the
+            # bootstrap writes no audit fact, so the initial auditor
+            # workspace may still be empty, but no other role ever receives
+            # audit detail.
+            assert isinstance(workspace["audit_events"], list)
+            assert workspace["audit_events"] == [] or role == "auditor"
 
         # A changed release activates with the bootstrap recorded as the
         # known-good recovery anchor.
@@ -843,6 +852,146 @@ def test_t09_workspace_four_role_reads_over_http(tmp_path: Path) -> None:
             if event["kind"] == "hold_imposed"
         )
         assert hold_event["hold_id"] == hold_id
+
+
+def test_t09_auditor_security_audit_refs_stay_immutable_over_http(
+    tmp_path: Path,
+) -> None:
+    """P-3 over the real HTTP seam: the Auditor reads the exact append-only
+    Security Audit facts (actor subject/role, action/result/reason and the
+    hold plus recovery references) from the workspace; the other roles
+    receive no audit detail, and recovery appends exactly one new audit
+    fact while every earlier fact stays byte-equal."""
+    state_path = tmp_path / "target.sqlite3"
+    env = {
+        "TASK4_S01_TEST_FIXTURE_ROOT": str(ROOT / "fixtures" / "applications"),
+        "TASK4_S01_TEST_STATE_PATH": str(state_path),
+    }
+    workspace_path = "/controlled/s09/api/queries/workspace"
+    with s08_test_loopback(env) as server:
+        bootstrap = _json(
+            server,
+            "GET",
+            f"/controlled/s08/api/queries/active?scope={S08_SCOPE}",
+            headers=admin_headers(),
+        )[1]
+        bootstrap_candidate_id = bootstrap["candidate_id"]
+        candidate_id = _new_candidate_in_review(server)
+        activation_at = int(time.time()) + 5
+        status, preview = _command(
+            server,
+            "preview_impact",
+            {
+                "candidate_id": candidate_id,
+                "idempotency_key": "t09-audit-http-preview",
+                "expected_governance_revision": _governance_revision(server),
+            },
+            admin_headers(),
+        )
+        assert status == 200, preview
+        status, approval = _command(
+            server,
+            "approve",
+            {
+                "candidate_id": candidate_id,
+                "activation_time": activation_at,
+                "recovery_release_id": bootstrap_candidate_id,
+                "preview_manifest_id": preview["manifest_id"],
+                "idempotency_key": "t09-audit-http-approve",
+                "expected_governance_revision": _governance_revision(server),
+            },
+            approver_headers(),
+        )
+        assert status == 200, approval
+        _post_command(
+            server,
+            "schedule",
+            {
+                "approval_binding_id": approval["approval_binding_id"],
+                "activation_at": activation_at,
+                "idempotency_key": "t09-audit-http-schedule",
+                "expected_governance_revision": _governance_revision(server),
+            },
+            admin_headers(),
+        )
+        _wait_for_active_generation(server, 2)
+        status, hold = _command(
+            server,
+            "impose_hold",
+            {
+                "reason_code": "S09_TEST_HOLD",
+                "hold_scope": "open_cycle",
+                "idempotency_key": "t09-audit-http-hold",
+                "expected_governance_revision": _governance_revision(server),
+            },
+            operator_headers(),
+        )
+        assert status == 200, hold
+        hold_id = hold["hold_id"]
+
+        status, auditor_ws = _json(
+            server, "GET", workspace_path, headers=auditor_auth_headers()
+        )
+        assert status == 200, auditor_ws
+        audit_before = auditor_ws["audit_events"]
+        assert audit_before, "auditor workspace must expose security audit refs"
+        actions = [record["action"] for record in audit_before]
+        assert "s08_approve" in actions
+        assert "s08_impose_hold" in actions
+        hold_audit = next(
+            record
+            for record in audit_before
+            if record["action"] == "s08_impose_hold"
+        )
+        assert hold_audit["event_id"].startswith("audit_")
+        assert hold_audit["hold_id"] == hold_id
+        assert hold_audit["subject"] == "c-demo-policy-operator"
+        assert hold_audit["role"] == "operator"
+        assert hold_audit["result"] == "accepted"
+        assert hold_audit["reason_code"] == "S09_HOLD_IMPOSED"
+        assert isinstance(hold_audit["event_time"], int)
+        approve_audit = next(
+            record
+            for record in audit_before
+            if record["action"] == "s08_approve"
+        )
+        assert approve_audit["candidate_id"] == candidate_id
+        assert approve_audit["role"] == "approver"
+
+        # The other three roles receive no audit detail.
+        for headers in (admin_headers(), approver_headers(), operator_headers()):
+            status, ws = _json(server, "GET", workspace_path, headers=headers)
+            assert status == 200, ws
+            assert ws["audit_events"] == []
+
+        status, release = _command(
+            server,
+            "recover_hold",
+            {
+                "hold_id": hold_id,
+                "recovery_generation": 2,
+                "idempotency_key": "t09-audit-http-recover",
+                "expected_governance_revision": _governance_revision(server),
+            },
+            approver_headers(),
+        )
+        assert status == 200, release
+        status, auditor_after = _json(
+            server, "GET", workspace_path, headers=auditor_auth_headers()
+        )
+        assert status == 200, auditor_after
+        audit_after = auditor_after["audit_events"]
+        # Every prior audit fact stays byte-equal; recovery appends exactly
+        # one new Security Audit fact with the release reference.
+        assert audit_after[:-1] == audit_before
+        assert len(audit_after) == len(audit_before) + 1
+        recovered = audit_after[-1]
+        assert recovered["action"] == "s08_recover_hold"
+        assert recovered["hold_id"] == hold_id
+        assert recovered["recovery_generation"] == 2
+        assert recovered["reason_code"] == "S09_HOLD_RELEASED"
+        assert recovered["subject"] == "c-demo-policy-approver"
+        assert recovered["role"] == "approver"
 
 
 def test_t09_workspace_identity_boundary_and_closed_schema_over_http(
@@ -1027,3 +1176,96 @@ def test_s09_diagnostic_result_schemas_are_separate_and_closed(
                 item.get("namespace") == namespace
                 for item in (reproduced, reproduced["bundles"][0])
             )
+
+
+def _s09_governance_fact_counts(state_path: Path) -> dict[str, int]:
+    with sqlite3.connect(state_path) as connection:
+        return {
+            "governance": connection.execute(
+                "SELECT COUNT(*) FROM policy_governance_events"
+            ).fetchone()[0],
+            "audit": connection.execute(
+                "SELECT COUNT(*) FROM audit_events"
+            ).fetchone()[0],
+            "outbox": connection.execute(
+                "SELECT COUNT(*) FROM outbox"
+            ).fetchone()[0],
+            "idempotency": connection.execute(
+                "SELECT COUNT(*) FROM idempotency"
+            ).fetchone()[0],
+        }
+
+
+_ALIAS_CREDENTIALS = {
+    "admin": ADMIN_CREDENTIAL,
+    "approver": APPROVER_CREDENTIAL,
+    "operator": OPERATOR_CREDENTIAL,
+}
+_ALIAS_SUBJECTS = {
+    "admin": "c-demo-policy-admin",
+    "approver": "c-demo-policy-approver",
+    "operator": "c-demo-policy-operator",
+}
+
+
+@pytest.mark.parametrize("other_role", ("admin", "approver", "operator"))
+@pytest.mark.parametrize("alias", ("credential", "subject"))
+def test_t09_auditor_alias_disables_governance_scope(
+    tmp_path: Path, other_role: str, alias: str
+) -> None:
+    """P-5 fail-closed over the real HTTP seam: when the Auditor identity
+    aliases any S08 registered identity (Admin, Approver or the activation
+    Operator) in credential or subject, the whole T09 governance scope is
+    disabled before authorization — the workspace query, the React shell
+    and the Operator command all fail closed with 503, no
+    Governance/audit/outbox/idempotency fact is appended, and the unaffected
+    S08 three-role surface plus S01 health stay live."""
+    state_path = tmp_path / f"alias-{other_role}-{alias}.sqlite3"
+    env = {
+        "TASK4_S01_TEST_FIXTURE_ROOT": str(ROOT / "fixtures" / "applications"),
+        "TASK4_S01_TEST_STATE_PATH": str(state_path),
+    }
+    if alias == "credential":
+        env["TASK4_S01_AUDITOR_CREDENTIAL"] = _ALIAS_CREDENTIALS[other_role]
+    else:
+        env["TASK4_S01_AUDITOR_SUBJECT"] = _ALIAS_SUBJECTS[other_role]
+    with s08_test_loopback(env) as server:
+        # Baseline after the governed bootstrap: the aliased configuration
+        # must not append a single Governance/audit/outbox/idempotency fact.
+        baseline = _s09_governance_fact_counts(state_path)
+        # The aliased bearer must never resolve to the Operator mutation
+        # role; the governance scope is closed before any authorization.
+        for path in (
+            "/controlled/s09/api/queries/workspace",
+            "/controlled/s09/react",
+        ):
+            response = server.request("GET", path, headers=auditor_auth_headers())
+            assert response.status == 503, f"{path}: {response.status}"
+            assert response.json()["detail"]["error"] == "S08_UNAVAILABLE"
+        denied = server.request(
+            "POST",
+            "/controlled/s09/api/commands/impose_hold",
+            body={
+                "reason_code": "ALIAS_TEST",
+                "hold_scope": "open_cycle",
+                "idempotency_key": f"alias-{other_role}-{alias}-hold-1",
+                "expected_governance_revision": 0,
+            },
+            headers=auditor_auth_headers(),
+        )
+        assert denied.status == 503
+        assert denied.json()["detail"]["error"] == "S08_UNAVAILABLE"
+        # The retained S08 three-role surface and the S01 health endpoint
+        # stay live; only the governed T09 scope is disabled.
+        status, _ = _json(
+            server,
+            "GET",
+            "/controlled/s08/api/queries/status",
+            headers=admin_headers(),
+        )
+        assert status == 200
+        health = server.request("GET", "/api/health")
+        assert health.status == 200
+    # No Governance, audit, outbox, or idempotency fact was appended by the
+    # failed-closed requests beyond the startup bootstrap baseline.
+    assert _s09_governance_fact_counts(state_path) == baseline

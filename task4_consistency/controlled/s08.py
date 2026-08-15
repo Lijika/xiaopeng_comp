@@ -7366,6 +7366,7 @@ class PolicyGovernanceService:
                 "recovery_anchor": None,
                 "holds": hold_union,
                 "events": [],
+                "audit_events": [],
             }
             if active is not None:
                 workspace["active_release"] = {
@@ -7413,6 +7414,39 @@ class PolicyGovernanceService:
                 for event in events
                 if event.get("scope") == principal.scope
             ]
+            if principal.role == "auditor":
+                # P-3: the minimized Auditor-only read of the append-only
+                # Security Audit records, under the same lock as every other
+                # workspace fact.  Governance events stay the release-history
+                # view; no client or HTTP adapter ever writes audit state.
+                workspace["audit_events"] = [
+                    {
+                        "event_id": record["event_id"],
+                        "action": record["action"],
+                        "subject": record["subject"],
+                        "role": record["role"],
+                        "result": record["result"],
+                        "reason_code": record.get("reason_code"),
+                        "event_time": record.get("event_time"),
+                        "event_sequence": record.get("event_sequence"),
+                        "candidate_id": record.get("candidate_id"),
+                        "hold_id": record.get("hold_id"),
+                        "release_candidate_id": record.get(
+                            "release_candidate_id"
+                        ),
+                        "rollback_candidate_id": record.get(
+                            "rollback_candidate_id"
+                        ),
+                        "recovery_generation": record.get(
+                            "recovery_generation"
+                        ),
+                        "governance_event_id": record.get(
+                            "governance_event_id"
+                        ),
+                    }
+                    for record in self._store.audit_events
+                    if record.get("scope") == principal.scope
+                ]
             return workspace
 
     def _validation_outcome(

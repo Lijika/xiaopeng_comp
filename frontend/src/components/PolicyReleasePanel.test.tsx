@@ -228,6 +228,7 @@ describe("PolicyReleasePanel T08", () => {
     expect(screen.getByTestId("t08-reject-form")).toBeInTheDocument();
 
     await user.type(screen.getByLabelText("生效时间"), "2026-08-10T12:00");
+    await explicitPreview(user);
     await user.click(screen.getByTestId("t08-approve-button"));
     await waitFor(() =>
       expect(screen.getByTestId("t08-action-ok")).toBeInTheDocument(),
@@ -386,6 +387,7 @@ describe("PolicyReleasePanel T08", () => {
       ),
     );
     await user.type(screen.getByLabelText("生效时间"), "2026-08-10T12:00");
+    await explicitPreview(user);
     await user.click(screen.getByTestId("t08-approve-button"));
     await waitFor(() =>
       expect(screen.getByTestId("t08-conflict")).toHaveTextContent(
@@ -409,8 +411,9 @@ describe("PolicyReleasePanel T08", () => {
       ),
     );
     await waitFor(() =>
-      expect(screen.getByTestId("t08-approve-button")).toBeEnabled(),
+      expect(screen.getByTestId("t08-preview-button")).toBeEnabled(),
     );
+    await explicitPreview(user);
     await user.click(screen.getByTestId("t08-approve-button"));
     await waitFor(() => expect(approvePosts).toBe(2));
     const posts = fetchMockCalls("approve").map((call) => JSON.parse(call.body));
@@ -418,6 +421,81 @@ describe("PolicyReleasePanel T08", () => {
     // The stale preview was discarded on the conflict; the fresh preview
     // after the refetch fences the new approval on its returned revision.
     expect(posts[1].expected_governance_revision).toBe(5);
+  });
+
+  it("approval stays disabled until an accepted preview is visibly rendered and no approval POST can precede it", async () => {
+    const user = userEvent.setup();
+    let approvePosts = 0;
+    const router = fetchRouter({
+      [`GET ${WORKSPACE_PATH}`]: () =>
+        new Response(
+          JSON.stringify(
+            workspacePayload("in_review", "approver", ["approve", "reject"]),
+          ),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      "POST /controlled/s09/api/commands/preview_impact": () =>
+        new Response(
+          JSON.stringify({
+            status: "accepted",
+            phase: "preview",
+            manifest_id: "preview_sha256_1111111111111111111111111111111111111111111111111111111111111111",
+            digest: "1".repeat(64),
+            scope: "C-DEMO/demo",
+            oracle_version: "s09-impact-oracle/1",
+            level: 1,
+            expanded_to_full_scope: false,
+            member_count: 1,
+            partition_counts: {"open_cycle": 1},
+            zero_hit_proof: false,
+            target_generation: 2,
+            governance_revision: 4,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      "POST /controlled/s08/api/commands/approve": () => {
+        approvePosts += 1;
+        return new Response(
+          JSON.stringify({
+            status: "accepted",
+            candidate_id: CANDIDATE,
+            approval_binding_id: "approval_sha256_binding",
+            approval_binding_digest: "binding-digest",
+            validation_bundle_id: "bundle_1",
+            validation_bundle_digest: "bundle-digest",
+            author_subject: "c-demo-policy-admin",
+            approver_subject: "c-demo-policy-approver",
+            activation_time: 1786000000,
+            recovery_release_id: "candidate_t08bootstrap00000000000000000",
+            governance_revision: 4,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    });
+    renderPanel(CANDIDATE);
+    await waitFor(() =>
+      expect(screen.getByTestId("t08-approve-form")).toBeInTheDocument(),
+    );
+    // Approval is fenced before any accepted preview DTO is rendered: no
+    // approval POST can ever precede an explicit preview (P-1).
+    expect(screen.getByTestId("t08-approve-button")).toBeDisabled();
+    await user.click(screen.getByTestId("t08-approve-button"));
+    expect(approvePosts).toBe(0);
+    expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(
+      0,
+    );
+    // The explicit preview renders the server DTO with live status
+    // semantics (S-4) and unlocks approval.
+    await user.click(screen.getByTestId("t08-preview-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("t08-preview")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("t08-preview")).toHaveAttribute("role", "status");
+    await user.type(screen.getByLabelText("生效时间"), "2026-08-10T12:00");
+    expect(screen.getByTestId("t08-approve-button")).toBeEnabled();
+    await user.click(screen.getByTestId("t08-approve-button"));
+    await waitFor(() => expect(approvePosts).toBe(1));
   });
 
   it("renders explicit forbidden, not-found and unavailable states", async () => {
@@ -557,6 +635,16 @@ function fetchMockCalls(action: string): Array<{ path: string; body: string }> {
   return calls;
 }
 
+/** The explicit preview step every approval requires (P-1): approval stays
+ * disabled until an accepted preview DTO is visibly rendered, so tests that
+ * approve must first run the independent preview button. */
+async function explicitPreview(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByTestId("t08-preview-button"));
+  await waitFor(() =>
+    expect(screen.getByTestId("t08-preview")).toBeInTheDocument(),
+  );
+}
+
 describe("PolicyReleasePanel T08 review findings", () => {
   it("renders an explicit invalid state for a 422 command rejection", async () => {
     const user = userEvent.setup();
@@ -600,6 +688,7 @@ describe("PolicyReleasePanel T08 review findings", () => {
       ),
     );
     await user.type(screen.getByLabelText("生效时间"), "2026-08-10T12:00");
+    await explicitPreview(user);
     await user.click(screen.getByTestId("t08-approve-button"));
     await waitFor(() =>
       expect(screen.getByTestId("t08-action-error")).toHaveTextContent(
@@ -738,6 +827,7 @@ describe("PolicyReleasePanel T08 review findings", () => {
       ),
     );
     await user.type(screen.getByLabelText("生效时间"), "2026-08-10T12:00");
+    await explicitPreview(user);
     await user.click(screen.getByTestId("t08-approve-button"));
     // Unknown transport outcome: the panel locks every other action and the
     // only re-send is the explicit byte-identical retry on the same key.
@@ -1065,6 +1155,7 @@ describe("PolicyReleasePanel T08 review findings", () => {
         expect(screen.getByTestId("t08-approve-form")).toBeInTheDocument(),
       );
       await user.type(screen.getByLabelText("生效时间"), "2026-08-10T12:00");
+      await explicitPreview(user);
       await user.click(screen.getByTestId("t08-approve-button"));
       await waitFor(() =>
         expect(screen.getByTestId("t08-action-ok")).toBeInTheDocument(),
@@ -1150,6 +1241,7 @@ describe("PolicyReleasePanel T08 review findings", () => {
       expect(screen.getByTestId("t08-approve-form")).toBeInTheDocument(),
     );
     await user.type(screen.getByLabelText("生效时间"), "2026-08-10T12:00");
+    await explicitPreview(user);
     await user.click(screen.getByTestId("t08-approve-button"));
     await waitFor(() =>
       expect(screen.getByTestId("t08-action-error")).toHaveTextContent(
@@ -1224,6 +1316,7 @@ describe("PolicyReleasePanel T08 review findings", () => {
       expect(screen.getByTestId("t08-approve-form")).toBeInTheDocument(),
     );
     await user.type(screen.getByLabelText("生效时间"), "2026-08-10T12:00");
+    await explicitPreview(user);
     await user.click(screen.getByTestId("t08-approve-button"));
     await waitFor(() =>
       expect(screen.getByTestId("t08-action-error")).toHaveTextContent(
@@ -1299,6 +1392,7 @@ describe("PolicyReleasePanel T08 review findings", () => {
       expect(screen.getByTestId("t08-approve-form")).toBeInTheDocument(),
     );
     await user.type(screen.getByLabelText("生效时间"), "2026-08-10T12:00");
+    await explicitPreview(user);
     await user.click(screen.getByTestId("t08-approve-button"));
     await waitFor(() =>
       expect(screen.getByTestId("t08-action-error")).toHaveTextContent(
@@ -1320,13 +1414,16 @@ describe("PolicyReleasePanel T08 review findings", () => {
     // releases the latch and applies the accepted result.
     await user.click(screen.getByTestId("t08-command-retry"));
     await waitFor(() =>
-      expect(screen.getByTestId("t08-approve-button")).toBeEnabled(),
+      expect(screen.queryByTestId("t08-command-unknown")).not.toBeInTheDocument(),
     );
-    expect(screen.queryByTestId("t08-command-unknown")).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByTestId("t08-preview-button")).toBeEnabled(),
+    );
     const posts = fetchMockCalls("approve");
     expect(posts).toHaveLength(2);
     expect(posts[1].body).toBe(posts[0].body);
     // The next explicit command mints a fresh identity, never the settled key.
+    await explicitPreview(user);
     await user.click(screen.getByTestId("t08-approve-button"));
     await waitFor(() => expect(fetchMockCalls("approve")).toHaveLength(3));
     const after = fetchMockCalls("approve");
@@ -1403,6 +1500,7 @@ describe("PolicyReleasePanel T08 review findings", () => {
       expect(screen.getByTestId("t08-approve-form")).toBeInTheDocument(),
     );
     await user.type(screen.getByLabelText("生效时间"), "2026-08-10T12:00");
+    await explicitPreview(user);
     await user.click(screen.getByTestId("t08-approve-button"));
     await waitFor(() =>
       expect(screen.getByTestId("t08-command-retry")).toBeEnabled(),
@@ -1425,8 +1523,9 @@ describe("PolicyReleasePanel T08 review findings", () => {
       ),
     );
     await waitFor(() =>
-      expect(screen.getByTestId("t08-approve-button")).toBeEnabled(),
+      expect(screen.getByTestId("t08-preview-button")).toBeEnabled(),
     );
+    await explicitPreview(user);
     await user.click(screen.getByTestId("t08-approve-button"));
     await waitFor(() => expect(approvePosts).toBe(3));
     const posts = fetchMockCalls("approve").map((call) => JSON.parse(call.body));
@@ -1487,6 +1586,7 @@ describe("PolicyReleasePanel T08 review findings", () => {
       expect(screen.getByTestId("t08-approve-form")).toBeInTheDocument(),
     );
     await user.type(screen.getByLabelText("生效时间"), "2026-08-10T12:00");
+    await explicitPreview(user);
     await user.click(screen.getByTestId("t08-approve-button"));
     await waitFor(() =>
       expect(screen.getByTestId("t08-action-error")).toHaveTextContent(
@@ -1972,6 +2072,7 @@ describe("PolicyReleasePanel T08 review findings", () => {
       expect(screen.getByTestId("t08-approve-form")).toBeInTheDocument(),
     );
     await user.type(screen.getByLabelText("生效时间"), "2026-08-10T12:00");
+    await explicitPreview(user);
     await user.click(screen.getByTestId("t08-approve-button"));
     await waitFor(() =>
       expect(screen.getByTestId("t08-command-unknown")).toBeInTheDocument(),
@@ -2311,7 +2412,7 @@ describe("PolicyReleasePanel T08 review findings", () => {
       expect(screen.getByTestId("t08-approve-form")).toBeInTheDocument(),
     );
     await user.type(screen.getByLabelText("生效时间"), "2026-08-10T12:00");
-    await user.click(screen.getByTestId("t08-approve-button"));
+    await user.click(screen.getByTestId("t08-preview-button"));
     await waitFor(() =>
       expect(screen.getByTestId("t08-conflict")).toHaveTextContent(
         "stale governance revision",
@@ -2340,9 +2441,11 @@ describe("PolicyReleasePanel T08 review findings", () => {
       ),
     );
     await waitFor(() =>
-      expect(screen.getByTestId("t08-approve-button")).toBeEnabled(),
+      expect(screen.getByTestId("t08-preview-button")).toBeEnabled(),
     );
-    // The next approval previews afresh and binds the new preview revision.
+    // A fresh explicit preview is required before the next approval and
+    // binds the new preview revision.
+    await explicitPreview(user);
     await user.click(screen.getByTestId("t08-approve-button"));
     await waitFor(() => expect(previewPosts).toBe(2));
     await waitFor(() =>
@@ -2382,7 +2485,7 @@ describe("PolicyReleasePanel T08 review findings", () => {
       expect(screen.getByTestId("t08-approve-form")).toBeInTheDocument(),
     );
     await user.type(screen.getByLabelText("生效时间"), "2026-08-10T12:00");
-    await user.click(screen.getByTestId("t08-approve-button"));
+    await user.click(screen.getByTestId("t08-preview-button"));
     await waitFor(() =>
       expect(screen.getByTestId("t08-action-error")).toHaveTextContent(
         "无权限执行此操作",
@@ -2421,7 +2524,7 @@ describe("PolicyReleasePanel T08 review findings", () => {
       expect(screen.getByTestId("t08-approve-form")).toBeInTheDocument(),
     );
     await user.type(screen.getByLabelText("生效时间"), "2026-08-10T12:00");
-    await user.click(screen.getByTestId("t08-approve-button"));
+    await user.click(screen.getByTestId("t08-preview-button"));
     await waitFor(() =>
       expect(screen.getByTestId("t08-action-error")).toHaveTextContent(
         "治理服务暂不可用",
@@ -2478,7 +2581,7 @@ describe("PolicyReleasePanel T08 review findings", () => {
       expect(screen.getByTestId("t08-approve-form")).toBeInTheDocument(),
     );
     await user.type(screen.getByLabelText("生效时间"), "2026-08-10T12:00");
-    await user.click(screen.getByTestId("t08-approve-button"));
+    await user.click(screen.getByTestId("t08-preview-button"));
     await waitFor(() =>
       expect(screen.getByTestId("t08-command-unknown")).toBeInTheDocument(),
     );
@@ -2501,7 +2604,12 @@ describe("PolicyReleasePanel T08 review findings", () => {
     );
     expect(new Set(previewKeys).size).toBe(1);
 
-    // The accepted preview feeds exactly one approval with a fresh key.
+    // The accepted preview still requires the explicit approval click;
+    // the approval binds the exact preview with a fresh key.
+    await waitFor(() =>
+      expect(screen.getByTestId("t08-preview")).toBeInTheDocument(),
+    );
+    await user.click(screen.getByTestId("t08-approve-button"));
     await waitFor(() =>
       expect(screen.getByTestId("t08-action-ok")).toBeInTheDocument(),
     );
@@ -2566,6 +2674,7 @@ describe("GovernanceWorkspacePanel T09", () => {
       },
       holds: [],
       events: [],
+      audit_events: [],
       ...overrides,
     };
   }
@@ -2577,6 +2686,31 @@ describe("GovernanceWorkspacePanel T09", () => {
   }
 
   const WORKSPACE_PATH9 = "/controlled/s09/api/queries/workspace";
+
+  it("renders the initial loading surface with live status semantics until the workspace lands", async () => {
+    let resolveWorkspace: ((response: Response) => void) | undefined;
+    const pending = new Promise<Response>((resolve) => {
+      resolveWorkspace = resolve;
+    });
+    fetchRouter({
+      [`GET ${WORKSPACE_PATH9}`]: () => pending,
+    });
+    renderGovernance();
+    await waitFor(() =>
+      expect(screen.getByTestId("t09-loading")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("t09-loading")).toHaveAttribute("role", "status");
+    resolveWorkspace?.(
+      new Response(
+        JSON.stringify(workspacePayload9("auditor", [])),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("t09-workspace")).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId("t09-loading")).not.toBeInTheDocument();
+  });
 
   it("operator imposes a scoped hold with the exact reason and scope and the server hold renders with its criterion", async () => {
     const user = userEvent.setup();
@@ -2731,6 +2865,78 @@ describe("GovernanceWorkspacePanel T09", () => {
     expect(second.idempotency_key).not.toBe(
       (posts[0].body as Record<string, unknown>).idempotency_key,
     );
+  });
+
+  it("a 409 followed by a failed authoritative refetch renders a reload control and keeps commands fenced until a successful reload", async () => {
+    const user = userEvent.setup();
+    let workspaceRequests = 0;
+    let holdPosts = 0;
+    const router = fetchRouter({
+      [`GET ${WORKSPACE_PATH9}`]: () => {
+        workspaceRequests += 1;
+        if (workspaceRequests >= 2 && workspaceRequests <= 4) {
+          // The conflict refetch plus its transient retries all fail
+          // closed; only the explicit reload succeeds.
+          return new Response(
+            JSON.stringify({
+              detail: { error: "S08_UNAVAILABLE", message: "temporarily down" },
+            }),
+            { status: 503, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response(
+          JSON.stringify(
+            workspacePayload9("operator", ["impose_hold"], {
+              governance_revision: workspaceRequests >= 5 ? 4 : 3,
+            }),
+          ),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+      "POST /controlled/s09/api/commands/impose_hold": () => {
+        holdPosts += 1;
+        return new Response(
+          JSON.stringify({
+            detail: { error: "S08_CONFLICT", message: "stale revision" },
+          }),
+          { status: 409, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    });
+    renderGovernance();
+    await waitFor(() =>
+      expect(screen.getByTestId("t09-impose-form")).toBeInTheDocument(),
+    );
+    await user.type(screen.getByLabelText("冻结原因码"), "S09_TEST_HOLD");
+    await user.click(screen.getByTestId("t09-impose-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("t09-conflict")).toHaveTextContent(
+        "stale revision",
+      ),
+    );
+    // The failed authoritative refetch (plus its transient retries) renders
+    // the explicit reload control (P-2): the healthy cached workspace facts
+    // stay visible and every command remains fenced on the stale revision.
+    await waitFor(
+      () => expect(screen.getByTestId("t09-conflict-reload")).toBeInTheDocument(),
+      { timeout: 8_000 },
+    );
+    expect(screen.getByTestId("t09-workspace")).toBeInTheDocument();
+    expect(screen.getByTestId("t09-impose-button")).toBeDisabled();
+    await user.click(screen.getByTestId("t09-impose-button"));
+    expect(holdPosts).toBe(1);
+    // The explicit reload succeeds, settles the old command identity and
+    // re-fences the next command on the new server revision.
+    await user.click(screen.getByTestId("t09-conflict-reload-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("t09-impose-button")).toBeEnabled(),
+    );
+    await user.click(screen.getByTestId("t09-impose-button"));
+    await waitFor(() => expect(holdPosts).toBe(2));
+    const posts = router.calls.filter((call) => call.method === "POST");
+    expect(
+      (posts[1].body as Record<string, unknown>).expected_governance_revision,
+    ).toBe(4);
   });
 
   it("renders no mutation surface for a role without actions", async () => {
@@ -2889,6 +3095,101 @@ describe("GovernanceWorkspacePanel T09", () => {
     unmount();
   }, 30_000);
 
+  it.each([403, 404, 500, 503])(
+    "reconciliation %i keeps the healthy workspace and distinguishes the state",
+    async (status) => {
+      fetchRouter({
+        [`GET ${WORKSPACE_PATH9}`]: () =>
+          new Response(
+            JSON.stringify(workspacePayload9("auditor", [])),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+        "GET /controlled/s01/api/queries/impact-dispositions/reconciliation": () =>
+          new Response(
+            JSON.stringify({
+              detail: { error: `ERR_${status}`, message: "reconciliation" },
+            }),
+            { status, headers: { "Content-Type": "application/json" } },
+          ),
+      });
+      renderGovernance();
+      await waitFor(() =>
+        expect(screen.getByTestId("t09-workspace")).toBeInTheDocument(),
+      );
+      const expected =
+        status === 403
+          ? "t09-recon-forbidden"
+          : status === 404
+            ? "t09-recon-pending"
+            : "t09-recon-unavailable";
+      // Transient statuses are retried by the shared query policy; the
+      // closed state appears once the retries are spent.
+      await waitFor(
+        () => expect(screen.getByTestId(expected)).toBeInTheDocument(),
+        { timeout: 8_000 },
+      );
+      // The healthy workspace facts stay visible beside the reconciliation
+      // state; a reload is offered for every transient state but never for
+      // the deterministic 403 denial.
+      expect(screen.getByTestId("t09-role")).toHaveTextContent("auditor");
+      expect(screen.getByTestId("t09-revision")).toHaveTextContent("3");
+      const reload = screen.queryByTestId("t09-recon-reload");
+      if (status === 403) {
+        expect(reload).not.toBeInTheDocument();
+      } else {
+        expect(reload).toBeInTheDocument();
+      }
+    },
+  );
+
+  it("renders the minimized Security Audit records only for the auditor role", async () => {
+    const AUDIT_RECORD = {
+      event_id: "audit_t09http000000000000000000000000001",
+      action: "s08_impose_hold",
+      subject: "c-demo-policy-operator",
+      role: "operator",
+      result: "accepted",
+      reason_code: "S09_HOLD_IMPOSED",
+      event_time: 1786000000,
+      hold_id: "governance_hold0000000000000000001",
+    };
+    fetchRouter({
+      [`GET ${WORKSPACE_PATH9}`]: () =>
+        new Response(
+          JSON.stringify(
+            workspacePayload9("auditor", [], {
+              audit_events: [AUDIT_RECORD],
+            }),
+          ),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    renderGovernance();
+    await waitFor(() =>
+      expect(screen.getByTestId("t09-audit")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("t09-audit-record")).toHaveTextContent(
+      "s08_impose_hold · c-demo-policy-operator · operator · accepted · S09_HOLD_IMPOSED · 冻结 governance_hold0000000000000000001",
+    );
+  });
+
+  it("never renders an audit section for non-auditor roles", async () => {
+    fetchRouter({
+      [`GET ${WORKSPACE_PATH9}`]: () =>
+        new Response(
+          JSON.stringify(
+            workspacePayload9("operator", ["impose_hold"]),
+          ),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    renderGovernance();
+    await waitFor(() =>
+      expect(screen.getByTestId("t09-role")).toHaveTextContent("operator"),
+    );
+    expect(screen.queryByTestId("t09-audit")).not.toBeInTheDocument();
+  });
+
   it("operator proposes a rollback with the server known-good release and hands the new candidate to the S08 workspace", async () => {
     const user = userEvent.setup();
     let events: unknown[] = [];
@@ -2954,6 +3255,11 @@ describe("GovernanceWorkspacePanel T09", () => {
     await user.click(screen.getByTestId("t09-rollback-button"));
     await waitFor(() =>
       expect(screen.getByTestId("t09-rollback-result")).toBeInTheDocument(),
+    );
+    // The asynchronous compatibility result carries live status semantics.
+    expect(screen.getByTestId("t09-rollback-result")).toHaveAttribute(
+      "role",
+      "status",
     );
     const posts = router.calls.filter((call) => call.method === "POST");
     expect(posts).toHaveLength(1);

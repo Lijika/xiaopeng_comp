@@ -8016,6 +8016,140 @@
         "title": "S09ActiveRelease",
         "type": "object"
       },
+      "S09AuditEventRef": {
+        "additionalProperties": false,
+        "description": "The minimized Auditor-only Security Audit refs: the append-only\nprotected-action facts (actor subject/role, action, result, reason and\nthe hold/release/recovery/candidate references).  Only the registered\nAuditor receives them in the workspace; Governance events remain the\nrelease-history view and no client ever writes audit state.",
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "candidate_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Candidate Id"
+          },
+          "event_id": {
+            "title": "Event Id",
+            "type": "string"
+          },
+          "event_sequence": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Sequence"
+          },
+          "event_time": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Time"
+          },
+          "governance_event_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Governance Event Id"
+          },
+          "hold_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hold Id"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Code"
+          },
+          "recovery_generation": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recovery Generation"
+          },
+          "release_candidate_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Release Candidate Id"
+          },
+          "result": {
+            "title": "Result",
+            "type": "string"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "rollback_candidate_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rollback Candidate Id"
+          },
+          "subject": {
+            "title": "Subject",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "action",
+          "subject",
+          "role",
+          "result"
+        ],
+        "title": "S09AuditEventRef",
+        "type": "object"
+      },
       "S09AuthorityRange": {
         "additionalProperties": false,
         "properties": {
@@ -8264,7 +8398,7 @@
       },
       "S09GovernanceWorkspaceResponse": {
         "additionalProperties": false,
-        "description": "The closed T09 governance workspace: the authoritative governance\nrevision, the authenticated actor role, the server-owned action list,\nthe active release and known-good recovery anchor, the active hold\nunion and the append-only S09 event refs -- one atomic snapshot the\npage renders.  The page never derives a transition, a hold or a\nrecovery option.",
+        "description": "The closed T09 governance workspace: the authoritative governance\nrevision, the authenticated actor role, the server-owned action list,\nthe active release and known-good recovery anchor, the active hold\nunion, the append-only S09 event refs and (for the Auditor only) the\nminimized Security Audit refs -- one atomic snapshot the page renders.\nThe page never derives a transition, a hold or a recovery option.",
         "properties": {
           "actions": {
             "items": {
@@ -8292,6 +8426,13 @@
             ],
             "title": "Actor Role",
             "type": "string"
+          },
+          "audit_events": {
+            "items": {
+              "$ref": "#/components/schemas/S09AuditEventRef"
+            },
+            "title": "Audit Events",
+            "type": "array"
           },
           "capability_gate": {
             "const": "G3",
@@ -8344,7 +8485,8 @@
           "actor_role",
           "actions",
           "holds",
-          "events"
+          "events",
+          "audit_events"
         ],
         "title": "S09GovernanceWorkspaceResponse",
         "type": "object"

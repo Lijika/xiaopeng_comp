@@ -329,6 +329,80 @@ def test_t09_workspace_projection_is_atomic_and_role_owned(
         policy.query_governance_workspace(REPLAY_OPERATOR)
 
 
+def test_t09_workspace_auditor_sees_security_audit_refs_immutable(
+    tmp_path: Path,
+) -> None:
+    """P-3: the minimized Auditor read of the append-only Security Audit
+    records inside the same workspace lock: exact event ids, actor
+    subject/role, action/result/reason and the hold/release/recovery
+    references.  Every other role receives no audit detail, and recovery
+    appends exactly one new audit fact while every earlier fact stays
+    byte-equal."""
+    service, policy = _s09_governed(tmp_path)
+    candidate_id = _s09_candidate_in_review(policy, "t09-audit-svc")
+    _s09_preview_approve_schedule(policy, candidate_id, "t09-audit-svc")
+    activation_at = int(time.time()) + 300
+    assert policy.process_next_policy_job(now=activation_at)["status"] == "complete"
+
+    hold = policy.impose_hold(
+        principal=OPERATOR,
+        reason_code="S09_TEST_HOLD",
+        hold_scope="open_cycle",
+        idempotency_key="t09-audit-hold",
+        expected_governance_revision=governance_revision(policy),
+    )
+    assert service.process_next_policy_impact() == 2
+
+    before = policy.query_governance_workspace(AUDITOR)
+    audit_before = before["audit_events"]
+    assert audit_before, "the auditor workspace must expose security audit refs"
+    actions = [record["action"] for record in audit_before]
+    assert "s08_approve" in actions
+    assert "s08_impose_hold" in actions
+    hold_audit = next(
+        record for record in audit_before if record["action"] == "s08_impose_hold"
+    )
+    assert hold_audit["event_id"].startswith("audit_")
+    assert hold_audit["hold_id"] == hold["hold_id"]
+    assert hold_audit["subject"] == OPERATOR.subject
+    assert hold_audit["role"] == "operator"
+    assert hold_audit["result"] == "accepted"
+    assert hold_audit["reason_code"] == "S09_HOLD_IMPOSED"
+    assert isinstance(hold_audit["event_time"], int)
+    approve_audit = next(
+        record for record in audit_before if record["action"] == "s08_approve"
+    )
+    assert approve_audit["candidate_id"] == candidate_id
+    assert approve_audit["role"] == "approver"
+
+    # Every other role receives no audit detail in its workspace.
+    for principal, role in ((ADMIN, "admin"), (APPROVER, "approver"), (OPERATOR, "operator")):
+        workspace = policy.query_governance_workspace(principal)
+        assert workspace["audit_events"] == [], role
+
+    release = policy.recover_hold(
+        principal=APPROVER,
+        hold_id=hold["hold_id"],
+        recovery_generation=_active_generation(policy) or 1,
+        idempotency_key="t09-audit-recover",
+        expected_governance_revision=governance_revision(policy),
+    )
+    assert release["status"] == "accepted"
+    after = policy.query_governance_workspace(AUDITOR)
+    audit_after = after["audit_events"]
+    # Every prior audit fact stays byte-equal; recovery appends exactly one
+    # new Security Audit fact with the release reference.
+    assert audit_after[:-1] == audit_before
+    assert len(audit_after) == len(audit_before) + 1
+    recovered = audit_after[-1]
+    assert recovered["action"] == "s08_recover_hold"
+    assert recovered["hold_id"] == hold["hold_id"]
+    assert recovered["recovery_generation"] == _active_generation(policy)
+    assert recovered["reason_code"] == "S09_HOLD_RELEASED"
+    assert recovered["subject"] == APPROVER.subject
+    assert recovered["role"] == "approver"
+
+
 def test_final_expansion_outside_envelope_stops_activation_with_zero_delta(
     tmp_path: Path,
 ) -> None:
@@ -2766,15 +2840,6 @@ def test_evidence_dependency_assembly_obligation_survives_hold_release(
 
 
 # ---------------------------------------------------------------- round 2
-
-
-def _route_reviewer() -> S01CommandPrincipal:
-    return S01CommandPrincipal(
-        subject="registered-test-integrator",
-        role="reviewer",
-        scope="C-DEMO",
-        source_id="s01-test-client",
-    )
 
 
 def _route_reviewer() -> S01CommandPrincipal:

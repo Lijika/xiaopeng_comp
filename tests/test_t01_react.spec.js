@@ -96,7 +96,10 @@ async function startServer({ appTarget, ...extraEnv } = {}) {
   child.stderr.on("data", (chunk) => output.push(chunk.toString()));
 
   const baseURL = `http://127.0.0.1:${port}`;
-  const deadline = Date.now() + 8_000;
+  // Readiness window must absorb the first test's chromium cold-start
+  // competing with uvicorn import on a memory-pressured host; the loop
+  // still aborts early if the child exits.
+  const deadline = Date.now() + 30_000;
   let ready = false;
   while (Date.now() < deadline && child.exitCode === null) {
     try {

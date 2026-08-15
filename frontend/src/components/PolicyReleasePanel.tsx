@@ -706,17 +706,18 @@ function WorkspaceActions({
     );
   };
 
-  /** One-click approval: a still-fresh accepted preview DTO is reused, an
-   * absent or conflict-cleared preview is computed first through the same
-   * latch, then the exact preview is bound. */
+  /** Approval requires an accepted preview DTO that has been rendered on
+   * the page: the button stays disabled until one exists (P-1), a 409
+   * clears it, and a fresh explicit preview is the only way to approve
+   * again.  No approval can ever auto-run a preview behind the user's
+   * back. */
   const submitApprove = () => {
     setActionError(null);
     setNotice(null);
-    if (previewDto !== null) {
-      runApprove(previewDto);
+    if (previewDto === null) {
       return;
     }
-    runPreview(runApprove);
+    runApprove(previewDto);
   };
 
   /** Authoritative reconciliation after an unavailable activation poll:
@@ -888,7 +889,7 @@ function WorkspaceActions({
             {previewImpact.isPending ? "影响预览计算中…" : "影响预览"}
           </Button>
           {previewDto !== null && (
-            <div data-testid="t08-preview">
+            <div data-testid="t08-preview" role="status">
               <h3>影响预览（服务端只读）</h3>
               <dl className="facts">
                 <div>
@@ -939,7 +940,12 @@ function WorkspaceActions({
           <Button
             type="submit"
             data-testid="t08-approve-button"
-            disabled={approve.isPending || previewImpact.isPending || locked}
+            disabled={
+              approve.isPending ||
+              previewImpact.isPending ||
+              locked ||
+              previewDto === null
+            }
           >
             {approve.isPending ? "审批中…" : "审批并锁定发布计划"}
           </Button>
@@ -1455,6 +1461,7 @@ export function GovernanceWorkspacePanel() {
   const proposeRollback = useProposeRollback();
   const recoverHold = useRecoverHold();
   const [conflict, setConflict] = useState<string | null>(null);
+  const [conflictReloadFailed, setConflictReloadFailed] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [holdReason, setHoldReason] = useState("");
@@ -1492,10 +1499,32 @@ export function GovernanceWorkspacePanel() {
   const handleConflict = (message: string) => {
     setConflict(message);
     if (message !== "") {
+      setConflictReloadFailed(false);
       void workspaceQuery.refetch().then((result) => {
-        if (result.isSuccess) commandLatch.markFinal();
+        if (result.isSuccess) {
+          commandLatch.markFinal();
+          setConflictReloadFailed(false);
+        } else {
+          // The definitive 409 settled the submitted command; the
+          // authoritative reload failed, so stale commands stay fenced and
+          // the page offers an explicit reload control (P-2).
+          setConflictReloadFailed(true);
+        }
       });
     }
+  };
+
+  /** The only way out of a failed conflict reconciliation (P-2): retry the
+   * authoritative refetch; on success the settled command identity is
+   * released and the next command fences on the fresh server revision. */
+  const retryConflictReload = () => {
+    setActionError(null);
+    void workspaceQuery.refetch().then((result) => {
+      if (result.isSuccess) {
+        commandLatch.markFinal();
+        setConflictReloadFailed(false);
+      }
+    });
   };
 
   const handleError = (error: unknown) => {
@@ -1625,7 +1654,7 @@ export function GovernanceWorkspacePanel() {
   if (workspaceQuery.isLoading || workspaceQuery.data === undefined) {
     if (!workspaceQuery.isError) {
       return (
-        <section className="panel" data-testid="t09-loading">
+        <section className="panel" data-testid="t09-loading" role="status">
           正在加载治理工作区…
         </section>
       );
@@ -1793,13 +1822,47 @@ export function GovernanceWorkspacePanel() {
                     : ""}
                   {event.release_candidate_id !== null &&
                   event.release_candidate_id !== undefined
-                    ? ` · 回滚 ${event.release_candidate_id}`
+                    ? ` · 回滚目标 ${event.release_candidate_id}`
                     : ""}
                 </li>
               ))}
             </ol>
           </div>
         )}
+
+        {workspace.actor_role === "auditor" &&
+          workspace.audit_events.length > 0 && (
+            <div data-testid="t09-audit">
+              <h3>安全审计记录（服务端只读，只追加）</h3>
+              <ol>
+                {workspace.audit_events.map((record) => (
+                  <li key={record.event_id} data-testid="t09-audit-record">
+                    {record.action} · {record.subject} · {record.role} ·{" "}
+                    {record.result}
+                    {record.reason_code !== null &&
+                    record.reason_code !== undefined
+                      ? ` · ${record.reason_code}`
+                      : ""}
+                    {record.hold_id !== null && record.hold_id !== undefined
+                      ? ` · 冻结 ${record.hold_id}`
+                      : ""}
+                    {record.release_candidate_id !== null &&
+                    record.release_candidate_id !== undefined
+                      ? ` · 回滚目标 ${record.release_candidate_id}`
+                      : ""}
+                    {record.rollback_candidate_id !== null &&
+                    record.rollback_candidate_id !== undefined
+                      ? ` · 新回滚候选 ${record.rollback_candidate_id}`
+                      : ""}
+                    {record.recovery_generation !== null &&
+                    record.recovery_generation !== undefined
+                      ? ` · 恢复代次 ${record.recovery_generation}`
+                      : ""}
+                  </li>
+                ))}
+              </ol>
+            </div>
+          )}
 
         {actions.has("impose_hold") && (
           <form
@@ -1879,7 +1942,7 @@ export function GovernanceWorkspacePanel() {
               {proposeRollback.isPending ? "校验中…" : "提出兼容回滚"}
             </Button>
             {rollbackResult !== null && (
-              <div data-testid="t09-rollback-result">
+              <div data-testid="t09-rollback-result" role="status">
                 <p data-testid="t09-rollback-compatibility">
                   {rollbackResult.compatibility.compatible
                     ? "回滚兼容：可恢复"
@@ -1958,18 +2021,37 @@ export function GovernanceWorkspacePanel() {
               <p
                 data-testid={
                   reconciliation.error instanceof HttpError &&
-                  reconciliation.error.status === 503
-                    ? "t09-recon-unavailable"
-                    : "t09-recon-forbidden"
+                  reconciliation.error.status === 403
+                    ? "t09-recon-forbidden"
+                    : reconciliation.error instanceof HttpError &&
+                        reconciliation.error.status === 404
+                      ? "t09-recon-pending"
+                      : "t09-recon-unavailable"
                 }
                 role="alert"
               >
                 {reconciliation.error instanceof HttpError &&
-                reconciliation.error.status === 503
-                  ? "对账明细暂不可用"
-                  : "无权访问对账明细"}
+                reconciliation.error.status === 403
+                  ? "无权访问对账明细"
+                  : reconciliation.error instanceof HttpError &&
+                      reconciliation.error.status === 404
+                    ? "对账投影尚未生成，请稍后刷新"
+                    : "对账明细暂不可用"}
               </p>
             )}
+            {reconciliation.data === undefined &&
+              reconciliation.isError &&
+              !(
+                reconciliation.error instanceof HttpError &&
+                reconciliation.error.status === 403
+              ) && (
+                <Button
+                  data-testid="t09-recon-reload"
+                  onClick={() => void reconciliation.refetch()}
+                >
+                  重新加载对账明细
+                </Button>
+              )}
             {reconciliation.data !== undefined && (
               <>
                 <dl className="facts">
@@ -2011,6 +2093,17 @@ export function GovernanceWorkspacePanel() {
           <p data-testid="t09-conflict" role="alert">
             状态已变化：{conflict}
           </p>
+        )}
+        {conflictReloadFailed && (
+          <div data-testid="t09-conflict-reload" role="alert">
+            <p>权威状态刷新失败：命令已保持冻结，请重新加载最新状态</p>
+            <Button
+              data-testid="t09-conflict-reload-button"
+              onClick={retryConflictReload}
+            >
+              重新加载权威状态
+            </Button>
+          </div>
         )}
         {notice !== null && (
           <p data-testid="t09-action-ok" role="status">

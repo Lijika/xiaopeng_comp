@@ -4685,6 +4685,44 @@ export interface components {
             /** Validation Bundle Id */
             validation_bundle_id?: string | null;
         };
+        /**
+         * S09AuditEventRef
+         * @description The minimized Auditor-only Security Audit refs: the append-only
+         *     protected-action facts (actor subject/role, action, result, reason and
+         *     the hold/release/recovery/candidate references).  Only the registered
+         *     Auditor receives them in the workspace; Governance events remain the
+         *     release-history view and no client ever writes audit state.
+         */
+        S09AuditEventRef: {
+            /** Action */
+            action: string;
+            /** Candidate Id */
+            candidate_id?: string | null;
+            /** Event Id */
+            event_id: string;
+            /** Event Sequence */
+            event_sequence?: number | null;
+            /** Event Time */
+            event_time?: number | null;
+            /** Governance Event Id */
+            governance_event_id?: string | null;
+            /** Hold Id */
+            hold_id?: string | null;
+            /** Reason Code */
+            reason_code?: string | null;
+            /** Recovery Generation */
+            recovery_generation?: number | null;
+            /** Release Candidate Id */
+            release_candidate_id?: string | null;
+            /** Result */
+            result: string;
+            /** Role */
+            role: string;
+            /** Rollback Candidate Id */
+            rollback_candidate_id?: string | null;
+            /** Subject */
+            subject: string;
+        };
         /** S09AuthorityRange */
         S09AuthorityRange: {
             /** Maximum */
@@ -4804,9 +4842,9 @@ export interface components {
          * @description The closed T09 governance workspace: the authoritative governance
          *     revision, the authenticated actor role, the server-owned action list,
          *     the active release and known-good recovery anchor, the active hold
-         *     union and the append-only S09 event refs -- one atomic snapshot the
-         *     page renders.  The page never derives a transition, a hold or a
-         *     recovery option.
+         *     union, the append-only S09 event refs and (for the Auditor only) the
+         *     minimized Security Audit refs -- one atomic snapshot the page renders.
+         *     The page never derives a transition, a hold or a recovery option.
          */
         S09GovernanceWorkspaceResponse: {
             /** Actions */
@@ -4817,6 +4855,8 @@ export interface components {
              * @enum {string}
              */
             actor_role: "admin" | "approver" | "operator" | "auditor";
+            /** Audit Events */
+            audit_events: components["schemas"]["S09AuditEventRef"][];
             /**
              * Capability Gate
              * @constant

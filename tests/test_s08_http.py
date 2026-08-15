@@ -2160,15 +2160,19 @@ def _s09_identity_request() -> Any:
         ("replay_operator", "CREDENTIAL", "ADMIN"),
         ("replay_operator", "CREDENTIAL", "APPROVER"),
         ("replay_operator", "CREDENTIAL", "OPERATOR"),
+        ("replay_operator", "CREDENTIAL", "AUDITOR"),
         ("replay_operator", "SUBJECT", "ADMIN"),
         ("replay_operator", "SUBJECT", "APPROVER"),
         ("replay_operator", "SUBJECT", "OPERATOR"),
+        ("replay_operator", "SUBJECT", "AUDITOR"),
         ("simulation_operator", "CREDENTIAL", "ADMIN"),
         ("simulation_operator", "CREDENTIAL", "APPROVER"),
         ("simulation_operator", "CREDENTIAL", "OPERATOR"),
+        ("simulation_operator", "CREDENTIAL", "AUDITOR"),
         ("simulation_operator", "SUBJECT", "ADMIN"),
         ("simulation_operator", "SUBJECT", "APPROVER"),
         ("simulation_operator", "SUBJECT", "OPERATOR"),
+        ("simulation_operator", "SUBJECT", "AUDITOR"),
         ("replay_operator", "CREDENTIAL", "SIMULATION"),
         ("simulation_operator", "SUBJECT", "REPLAY"),
     ],
@@ -2177,8 +2181,8 @@ def test_s09_diagnostic_identity_aliases_fail_closed(
     monkeypatch: pytest.MonkeyPatch, role: str, attr: str, other: str
 ) -> None:
     """R6/ST-3/SP-6: any replay/simulation credential or subject aliasing
-    another controlled identity makes diagnostic authorization fail closed
-    at configuration/authorization time."""
+    another controlled identity (including the Auditor) makes diagnostic
+    authorization fail closed at configuration/authorization time."""
     from fastapi import HTTPException
 
     import task4_consistency.web.app as app_module
@@ -2191,6 +2195,8 @@ def test_s09_diagnostic_identity_aliases_fail_closed(
         "S08_APPROVER_SUBJECT": "approver-subject",
         "S08_OPERATOR_CREDENTIAL": "operator-cred",
         "S08_OPERATOR_SUBJECT": "operator-subject",
+        "S01_AUDITOR_CREDENTIAL": "auditor-cred",
+        "S01_AUDITOR_SUBJECT": "auditor-subject",
         "S09_REPLAY_CREDENTIAL": "replay-cred",
         "S09_REPLAY_SUBJECT": "replay-subject",
         "S09_SIMULATION_CREDENTIAL": "simulation-cred",
@@ -2198,13 +2204,19 @@ def test_s09_diagnostic_identity_aliases_fail_closed(
     }
     for name, value in values.items():
         monkeypatch.setattr(app_module, name, value)
+    # Any non-empty presented credential matches, so the only thing that can
+    # reject an aliased bearer is the configuration gate itself.
     monkeypatch.setattr(
         app_module,
         "_s01_has_credential",
-        lambda request, credential: credential == "presented-secret",
+        lambda request, credential: bool(credential),
     )
     s09_prefix = "S09_REPLAY" if role == "replay_operator" else "S09_SIMULATION"
-    other_prefix = "S08" if other in {"ADMIN", "APPROVER", "OPERATOR"} else "S09"
+    other_prefix = (
+        "S01"
+        if other == "AUDITOR"
+        else ("S08" if other in {"ADMIN", "APPROVER", "OPERATOR"} else "S09")
+    )
     monkeypatch.setattr(app_module, f"{s09_prefix}_{attr}", values[f"{other_prefix}_{other}_{attr}"])
     with pytest.raises(HTTPException) as error:
         http_module._s08_require_role(_s09_identity_request(), role)
@@ -2238,6 +2250,8 @@ def test_s09_missing_diagnostic_identity_fails_closed(
         "S08_APPROVER_SUBJECT": "approver-subject",
         "S08_OPERATOR_CREDENTIAL": "operator-cred",
         "S08_OPERATOR_SUBJECT": "operator-subject",
+        "S01_AUDITOR_CREDENTIAL": "auditor-cred",
+        "S01_AUDITOR_SUBJECT": "auditor-subject",
         "S09_REPLAY_CREDENTIAL": "replay-cred",
         "S09_REPLAY_SUBJECT": "replay-subject",
         "S09_SIMULATION_CREDENTIAL": "simulation-cred",
@@ -2282,6 +2296,8 @@ def test_s09_distinct_diagnostic_identities_authorize_and_stay_mutually_unusable
         "S08_APPROVER_SUBJECT": "approver-subject",
         "S08_OPERATOR_CREDENTIAL": "operator-cred",
         "S08_OPERATOR_SUBJECT": "operator-subject",
+        "S01_AUDITOR_CREDENTIAL": "auditor-cred",
+        "S01_AUDITOR_SUBJECT": "auditor-subject",
         "S09_REPLAY_CREDENTIAL": "replay-cred",
         "S09_REPLAY_SUBJECT": "replay-subject",
         "S09_SIMULATION_CREDENTIAL": "simulation-cred",

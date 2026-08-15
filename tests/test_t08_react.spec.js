@@ -424,6 +424,13 @@ for (const viewport of VIEWPORTS) {
         ),
       ).toBe("生效时间");
       await activationInput.fill(activationLocal);
+      // Approval requires the explicit preview first (P-1): the preview
+      // button runs the impact computation and the accepted DTO renders
+      // before the keyboard-only approval.
+      const previewButton = approver.getByTestId("t08-preview-button");
+      await previewButton.focus();
+      await approver.keyboard.press("Enter");
+      await expect(approver.getByTestId("t08-preview")).toBeVisible();
       const approveButton = approver.getByTestId("t08-approve-button");
       await approveButton.focus();
       expect(
@@ -791,6 +798,9 @@ test("T08 production terminal: an activation diagnostic failure keeps the prior 
       "in_review",
     );
     await approver.getByLabel("生效时间").fill(nextActivationMinute());
+    // The approve action requires the explicit preview first (P-1).
+    await approver.getByTestId("t08-preview-button").click();
+    await expect(approver.getByTestId("t08-preview")).toBeVisible();
     await approver.getByTestId("t08-approve-button").click();
     await expect(approver.getByTestId("t08-workspace-status")).toHaveText(
       "approved",
@@ -897,9 +907,9 @@ test("T08 production terminal: an activation diagnostic failure keeps the prior 
 });
 
 /** Waits until Lifecycle has consumed the imposed hold: the application has
- * runs and none of them is current (the hold frame is in force).  A
- * transient S01_INTERNAL_ERROR 500 during the transition window is treated
- * as the pre-existing backend's temporary authority state and retried. */
+ * runs and none of them is current (the hold frame is in force).  Every
+ * authority read must succeed: an unexpected non-2xx history response fails
+ * the tracer immediately instead of passing with an unrecorded failure. */
 async function waitForNoCurrentRun(reviewer, baseURL, applicationId) {
   const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
@@ -908,10 +918,6 @@ async function waitForNoCurrentRun(reviewer, baseURL, applicationId) {
         applicationId,
       )}/history`,
     );
-    if (response.status() === 500 || response.status() === 503) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      continue;
-    }
     expect(response.ok()).toBeTruthy();
     const body = await response.json();
     const runs = body.runs || [];
@@ -924,9 +930,9 @@ async function waitForNoCurrentRun(reviewer, baseURL, applicationId) {
 }
 
 /** Waits until the operational re-evaluation under a target active
- * generation produced a current complete run (recovery recheck).  A
- * transient S01_INTERNAL_ERROR 500 during the recheck transition is treated
- * as the pre-existing backend's temporary authority state and retried. */
+ * generation produced a current complete run (recovery recheck).  Every
+ * authority read must succeed; an unexpected non-2xx history response fails
+ * the tracer immediately. */
 async function waitForCurrentGeneration(reviewer, baseURL, applicationId, generation) {
   const deadline = Date.now() + 90_000;
   while (Date.now() < deadline) {
@@ -935,10 +941,6 @@ async function waitForCurrentGeneration(reviewer, baseURL, applicationId, genera
         applicationId,
       )}/history`,
     );
-    if (response.status() === 500 || response.status() === 503) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      continue;
-    }
     expect(response.ok()).toBeTruthy();
     const body = await response.json();
     const run = (body.runs || []).find(
@@ -971,20 +973,22 @@ function stableRunFacts(runs) {
   }));
 }
 
-/** The authoritative release facts from the workspace and the S08 audit
- * seams (the same ledger, two closed responses). */
-async function fetchReleaseFacts(admin, baseURL) {
-  const workspaceResponse = await admin.request.get(
+/** The authoritative release facts from the Auditor's workspace read: the
+ * append-only Governance event refs and the minimized Security Audit refs
+ * come from one closed response under the Auditor identity (P-3); the
+ * /queries/events endpoint stays the release-history view and is never
+ * relabeled as audit. */
+async function fetchReleaseFacts(request, baseURL) {
+  const workspaceResponse = await request.get(
     `${baseURL}/controlled/s09/api/queries/workspace`,
+    { headers: { Authorization: `Bearer ${AUDITOR_CREDENTIAL}` } },
   );
   expect(workspaceResponse.ok()).toBeTruthy();
   const workspace = await workspaceResponse.json();
-  const auditResponse = await admin.request.get(
-    `${baseURL}/controlled/s08/api/queries/events`,
-  );
-  expect(auditResponse.ok()).toBeTruthy();
-  const audit = await auditResponse.json();
-  return { workspaceEvents: workspace.events, auditEvents: audit.events };
+  return {
+    workspaceEvents: workspace.events,
+    auditEvents: workspace.audit_events,
+  };
 }
 
 for (const viewport of VIEWPORTS) {
@@ -1068,7 +1072,32 @@ for (const viewport of VIEWPORTS) {
         "in_review",
       );
       await approver.getByLabel("生效时间").fill(nextActivationMinuteShort());
+      // Approval requires an explicit preview first (P-1): the preview
+      // button runs the server impact computation, the accepted DTO renders
+      // its manifest/digest/scope/counts/expansion/generation, and only
+      // then does the keyboard-only approval become available.
+      const previewButton = approver.getByTestId("t08-preview-button");
+      await previewButton.focus();
+      await approver.keyboard.press("Enter");
+      await expect(approver.getByTestId("t08-preview")).toBeVisible();
+      await expect(approver.getByTestId("t08-preview")).toHaveAttribute(
+        "role",
+        "status",
+      );
+      await expect(approver.getByTestId("t08-preview-manifest")).not.toHaveText(
+        "",
+      );
+      await expect(approver.getByTestId("t08-preview-members")).toHaveText(
+        /\d+/,
+      );
+      await expect(approver.getByTestId("t08-preview-expansion")).toHaveText(
+        /未扩张|已扩张到完整范围/,
+      );
+      await expect(approver.getByTestId("t08-preview-generation")).toHaveText(
+        /\d+/,
+      );
       const approveButton = approver.getByTestId("t08-approve-button");
+      await expect(approveButton).toBeEnabled();
       await approveButton.focus();
       await approver.keyboard.press("Enter");
       await expect(approver.getByTestId("t08-action-ok")).toBeVisible();
@@ -1176,6 +1205,22 @@ for (const viewport of VIEWPORTS) {
         "expires",
       );
 
+      // ---- Server-declared legacy fallback (P-4): the React shell
+      // metadata exposes the legacy entry; open it and reuse the T01
+      // legacy smoke assertion shape ----
+      const legacyFallback = await operator.evaluate(() => {
+        const meta = document.querySelector('meta[name="app-legacy-fallback"]');
+        return meta ? meta.getAttribute("content") : null;
+      });
+      expect(legacyFallback).toBe("/controlled/s01");
+      const legacyPage = await resources.demoContext.newPage();
+      const legacyResponse = await legacyPage.goto(
+        `${server.baseURL}${legacyFallback}`,
+        { waitUntil: "networkidle" },
+      );
+      expect(legacyResponse.status()).toBe(200);
+      await legacyPage.close();
+
       // The hold is consumed: the affected application's old run is no
       // longer current (stale/recheck fact, server-owned).
       await waitForNoCurrentRun(
@@ -1207,14 +1252,12 @@ for (const viewport of VIEWPORTS) {
         "rollback_proposed",
       );
 
-      // ---- Admin: continue the rollback candidate through the existing S08
-      // workspace (the legacy-fallback href opens it) ----
-      await admin.goto(
-        `${server.baseURL}${S08_URL}?candidate=${encodeURIComponent(
-          rollbackCandidateId,
-        )}`,
-        { waitUntil: "networkidle" },
-      );
+      // ---- Admin: continue the rollback candidate through the retained
+      // /controlled/s08/react route, navigating the exact href the page
+      // served (S-3) ----
+      await admin.goto(new URL(rollbackHref, server.baseURL).href, {
+        waitUntil: "networkidle",
+      });
       await expect(admin.getByTestId("t08-workspace-status")).toHaveText(
         "validated",
       );
@@ -1235,6 +1278,11 @@ for (const viewport of VIEWPORTS) {
         "in_review",
       );
       await approver.getByLabel("生效时间").fill(nextActivationMinuteShort());
+      // The rollback approval also requires the explicit preview first.
+      const rollbackPreviewButton = approver.getByTestId("t08-preview-button");
+      await rollbackPreviewButton.focus();
+      await approver.keyboard.press("Enter");
+      await expect(approver.getByTestId("t08-preview")).toBeVisible();
       await approver.getByTestId("t08-approve-button").focus();
       await approver.keyboard.press("Enter");
       await expect(approver.getByTestId("t08-action-ok")).toBeVisible();
@@ -1258,7 +1306,7 @@ for (const viewport of VIEWPORTS) {
       await waitForWorkspaceActive(admin);
 
       // ---- Release facts before the explicit recovery ----
-      const beforeFacts = await fetchReleaseFacts(admin, server.baseURL);
+      const beforeFacts = await fetchReleaseFacts(admin.request, server.baseURL);
       const beforeHistoryResponse = await reviewer.request.get(
         `${server.baseURL}/controlled/s01/api/queries/applications/${encodeURIComponent(
           accepted.application_id,
@@ -1290,7 +1338,7 @@ for (const viewport of VIEWPORTS) {
       // ---- Release facts after the explicit recovery: immutable prior and
       // failed facts, one new recovery fact with its own identity ----
       await approver.reload({ waitUntil: "networkidle" });
-      const afterFacts = await fetchReleaseFacts(admin, server.baseURL);
+      const afterFacts = await fetchReleaseFacts(admin.request, server.baseURL);
       expect(
         JSON.stringify(
           afterFacts.workspaceEvents.slice(0, beforeFacts.workspaceEvents.length),
@@ -1301,6 +1349,17 @@ for (const viewport of VIEWPORTS) {
           afterFacts.auditEvents.slice(0, beforeFacts.auditEvents.length),
         ),
       ).toBe(JSON.stringify(beforeFacts.auditEvents));
+      // Recovery appends exactly one new Security Audit fact with the
+      // release reference; nothing prior is rewritten (P-3).
+      const recoveryAudits = afterFacts.auditEvents.filter(
+        (record) => record.action === "s08_recover_hold",
+      );
+      expect(recoveryAudits).toHaveLength(1);
+      expect(recoveryAudits[0].hold_id).toBeTruthy();
+      expect(recoveryAudits[0].recovery_generation).toBe(3);
+      expect(afterFacts.auditEvents.length).toBe(
+        beforeFacts.auditEvents.length + 1,
+      );
       const recoveryFacts = afterFacts.workspaceEvents.filter(
         (event) => event.kind === "hold_released",
       );

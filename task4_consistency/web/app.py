@@ -134,6 +134,14 @@ S08_MIGRATION_ADMIN_SUBJECT = (
     os.environ.get("TASK4_S08_MIGRATION_ADMIN_SUBJECT", "").strip()
     or "c-demo-migration-admin"
 )
+# The Auditor identity is loaded beside the governance identities so every
+# T09 controlled role can be checked for mutual uniqueness at configuration
+# time (P-5): an Auditor aliasing any other controlled credential or subject
+# disables the governed scope before authorization.
+S01_AUDITOR_CREDENTIAL = os.environ.get(
+    "TASK4_S01_AUDITOR_CREDENTIAL", ""
+).strip()
+S01_AUDITOR_SUBJECT = os.environ.get("TASK4_S01_AUDITOR_SUBJECT", "").strip()
 S08_CONFIGURED = bool(
     S08_ADMIN_CREDENTIAL
     and S08_ADMIN_SUBJECT
@@ -159,15 +167,44 @@ S08_CONFIGURED = bool(
     == 3
 )
 
+# The T09 governance scope gate: the four workspace roles (admin, approver,
+# operator, auditor) must each carry their own credential and subject.  Any
+# alias or missing identity disables the whole governed scope before
+# authorization; S08 command authorization is unaffected and gated by
+# ``S08_CONFIGURED`` alone.
+S09_GOVERNANCE_CONFIGURED = bool(
+    S08_CONFIGURED
+    and S01_AUDITOR_CREDENTIAL
+    and S01_AUDITOR_SUBJECT
+    and len(
+        {
+            S08_ADMIN_CREDENTIAL,
+            S08_APPROVER_CREDENTIAL,
+            S08_OPERATOR_CREDENTIAL,
+            S01_AUDITOR_CREDENTIAL,
+        }
+    )
+    == 4
+    and len(
+        {
+            S08_ADMIN_SUBJECT,
+            S08_APPROVER_SUBJECT,
+            S08_OPERATOR_SUBJECT,
+            S01_AUDITOR_SUBJECT,
+        }
+    )
+    == 4
+)
+
 
 def _s09_diagnostic_configuration_valid() -> bool:
     """The S09 configuration gate for replay/simulation identities.
 
     Every replay and simulation credential/subject must be present and all
-    five controlled identities (admin, approver, activation operator,
-    replay operator, simulation operator) must be mutually unique in both
-    credentials and subjects.  Missing or aliased S09 configuration makes
-    diagnostic authorization fail closed; it never changes S08 command
+    six controlled identities (admin, approver, activation operator, the
+    Auditor, replay operator, simulation operator) must be mutually unique
+    in both credentials and subjects.  Missing or aliased S09 configuration
+    makes diagnostic authorization fail closed; it never changes S08 command
     authorization, which is gated by ``S08_CONFIGURED`` alone."""
     return bool(
         S09_REPLAY_CREDENTIAL
@@ -179,21 +216,23 @@ def _s09_diagnostic_configuration_valid() -> bool:
                 S08_ADMIN_CREDENTIAL,
                 S08_APPROVER_CREDENTIAL,
                 S08_OPERATOR_CREDENTIAL,
+                S01_AUDITOR_CREDENTIAL,
                 S09_REPLAY_CREDENTIAL,
                 S09_SIMULATION_CREDENTIAL,
             }
         )
-        == 5
+        == 6
         and len(
             {
                 S08_ADMIN_SUBJECT,
                 S08_APPROVER_SUBJECT,
                 S08_OPERATOR_SUBJECT,
+                S01_AUDITOR_SUBJECT,
                 S09_REPLAY_SUBJECT,
                 S09_SIMULATION_SUBJECT,
             }
         )
-        == 5
+        == 6
     )
 S08_SERVICE: PolicyGovernanceService | None = None
 S08_DEFAULT_KB_PATH = ROOT / "configs" / "kb" / "entity_kb.json"
@@ -296,8 +335,9 @@ S01_DEMO_CREDENTIAL = os.environ.get("TASK4_S01_DEMO_CREDENTIAL", "").strip()
 S01_DEMO_SUBJECT = os.environ.get("TASK4_S01_DEMO_SUBJECT", "").strip()
 S01_OPERATOR_CREDENTIAL = os.environ.get("TASK4_S01_OPERATOR_CREDENTIAL", "").strip()
 S01_OPERATOR_SUBJECT = os.environ.get("TASK4_S01_OPERATOR_SUBJECT", "").strip()
-S01_AUDITOR_CREDENTIAL = os.environ.get("TASK4_S01_AUDITOR_CREDENTIAL", "").strip()
-S01_AUDITOR_SUBJECT = os.environ.get("TASK4_S01_AUDITOR_SUBJECT", "").strip()
+# ``S01_AUDITOR_CREDENTIAL`` / ``S01_AUDITOR_SUBJECT`` are loaded beside the
+# governance identities above (P-5) so the T09 scope gate can verify the
+# Auditor against every other controlled identity at configuration time.
 S02_SESSION_COOKIE = "s02_session"
 S02_SESSION_TTL_SECONDS = 15 * 60
 S02_MAX_COMMAND_BYTES = 256 * 1024
