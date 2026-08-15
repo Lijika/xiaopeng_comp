@@ -170,40 +170,34 @@ S08_CONFIGURED = bool(
 def _s09_identities_configuration_valid() -> bool:
     """The single six-identity T09 configuration gate (F-SPEC-1).
 
-    Every replay and simulation credential/subject must be present and all
-    six controlled identities (admin, approver, activation operator, the
-    Auditor, replay operator, simulation operator) must be mutually unique
-    in both credentials and subjects.  Missing or aliased configuration
-    disables the whole governed T09 scope (workspace, React shell, mutation
-    and diagnostic commands) before authorization; it never changes S08
-    command authorization, which is gated by ``S08_CONFIGURED`` alone."""
+    Every credential and subject must be present, and all six controlled
+    identities (admin, approver, activation operator, the Auditor, replay
+    operator, simulation operator) must be mutually unique in both fields.
+    Missing or aliased configuration disables the whole governed T09 scope
+    (workspace, React shell, mutation and diagnostic commands) before
+    authorization; it never changes S08 command authorization, which is
+    gated by ``S08_CONFIGURED`` alone."""
+    credentials = (
+        S08_ADMIN_CREDENTIAL,
+        S08_APPROVER_CREDENTIAL,
+        S08_OPERATOR_CREDENTIAL,
+        S01_AUDITOR_CREDENTIAL,
+        S09_REPLAY_CREDENTIAL,
+        S09_SIMULATION_CREDENTIAL,
+    )
+    subjects = (
+        S08_ADMIN_SUBJECT,
+        S08_APPROVER_SUBJECT,
+        S08_OPERATOR_SUBJECT,
+        S01_AUDITOR_SUBJECT,
+        S09_REPLAY_SUBJECT,
+        S09_SIMULATION_SUBJECT,
+    )
     return bool(
-        S09_REPLAY_CREDENTIAL
-        and S09_REPLAY_SUBJECT
-        and S09_SIMULATION_CREDENTIAL
-        and S09_SIMULATION_SUBJECT
-        and len(
-            {
-                S08_ADMIN_CREDENTIAL,
-                S08_APPROVER_CREDENTIAL,
-                S08_OPERATOR_CREDENTIAL,
-                S01_AUDITOR_CREDENTIAL,
-                S09_REPLAY_CREDENTIAL,
-                S09_SIMULATION_CREDENTIAL,
-            }
-        )
-        == 6
-        and len(
-            {
-                S08_ADMIN_SUBJECT,
-                S08_APPROVER_SUBJECT,
-                S08_OPERATOR_SUBJECT,
-                S01_AUDITOR_SUBJECT,
-                S09_REPLAY_SUBJECT,
-                S09_SIMULATION_SUBJECT,
-            }
-        )
-        == 6
+        all(credentials)
+        and all(subjects)
+        and len(set(credentials)) == 6
+        and len(set(subjects)) == 6
     )
 
 

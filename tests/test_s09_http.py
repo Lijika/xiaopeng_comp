@@ -1218,10 +1218,10 @@ _ALIAS_SUBJECTS = {
 
 
 @pytest.mark.parametrize(
-    "aliased,other,alias",
+    "identity,other,attribute",
     [
-        (aliased, other, alias)
-        for aliased in ("replay", "simulation")
+        (identity, other, attribute)
+        for identity in ("replay", "simulation")
         for other in (
             "admin",
             "approver",
@@ -1230,37 +1230,54 @@ _ALIAS_SUBJECTS = {
             "replay",
             "simulation",
         )
-        for alias in ("credential", "subject")
-        if other != aliased
+        for attribute in ("credential", "subject")
+        if other != identity
+    ]
+    + [
+        (identity, None, attribute)
+        for identity in (
+            "admin",
+            "approver",
+            "operator",
+            "auditor",
+            "replay",
+            "simulation",
+        )
+        for attribute in ("credential", "subject")
     ],
 )
-def test_t09_replay_simulation_alias_disables_governance_scope(
-    tmp_path: Path, aliased: str, other: str, alias: str
+def test_t09_identity_alias_or_missing_disables_governance_scope(
+    tmp_path: Path, identity: str, other: str | None, attribute: str
 ) -> None:
-    """F-SPEC-1 fail-closed over the real HTTP seam: when a Replay or
-    Simulation identity aliases any other T09 controlled identity (Admin,
-    Approver, activation Operator, Auditor or the other diagnostic role) in
-    credential or subject, the whole governed scope is disabled before
-    authorization — the workspace, the React shell and every mutation
-    command fail closed with 503, the Auditor Security Audit projection is
-    unreachable, replay/simulation commands keep their stable 403, no
-    Governance/audit/outbox/idempotency fact is appended, and the unaffected
-    S08 three-role surface plus S01 health stay live."""
-    state_path = tmp_path / f"alias-{aliased}-{other}-{alias}.sqlite3"
+    """F-R3-1 fail-closed over the real HTTP seam: all six T09 identities
+    must be present and mutually unique before any governed access."""
+    case_id = f"{identity}-{other or 'missing'}-{attribute}"
+    state_path = tmp_path / f"{case_id}.sqlite3"
     env = {
         "TASK4_S01_TEST_FIXTURE_ROOT": str(ROOT / "fixtures" / "applications"),
         "TASK4_S01_TEST_STATE_PATH": str(state_path),
     }
-    if alias == "credential":
-        env[f"TASK4_S09_{aliased.upper()}_CREDENTIAL"] = _ALIAS_CREDENTIALS[other]
-    else:
-        env[f"TASK4_S09_{aliased.upper()}_SUBJECT"] = _ALIAS_SUBJECTS[other]
+    prefix = (
+        "S01"
+        if identity == "auditor"
+        else "S08"
+        if identity in {"admin", "approver", "operator"}
+        else "S09"
+    )
+    env[f"TASK4_{prefix}_{identity.upper()}_{attribute.upper()}"] = (
+        ""
+        if other is None
+        else (
+            _ALIAS_CREDENTIALS[other]
+            if attribute == "credential"
+            else _ALIAS_SUBJECTS[other]
+        )
+    )
     with s08_test_loopback(env) as server:
-        # Baseline after the governed bootstrap: the aliased configuration
-        # must not append a single Governance/audit/outbox/idempotency fact.
+        # Baseline after startup: the invalid configuration must not append
+        # Governance/audit/outbox/idempotency facts through denied requests.
         baseline = _s09_governance_fact_counts(state_path)
-        # The aliased bearer must never resolve into the governed surface;
-        # the governance scope is closed before any authorization.
+        # The governance scope is closed before any authorization.
         for path in (
             "/controlled/s09/api/queries/workspace",
             "/controlled/s09/react",
@@ -1284,7 +1301,7 @@ def test_t09_replay_simulation_alias_disables_governance_scope(
                 {
                     "reason_code": "ALIAS_TEST",
                     "hold_scope": "open_cycle",
-                    "idempotency_key": f"alias-{aliased}-{other}-{alias}-hold-1",
+                    "idempotency_key": f"{case_id}-hold-1",
                     "expected_governance_revision": 0,
                 },
                 operator_headers(),
@@ -1294,7 +1311,7 @@ def test_t09_replay_simulation_alias_disables_governance_scope(
                 {
                     "release_candidate_id": "unused-candidate",
                     "reason_code": "ALIAS_TEST",
-                    "idempotency_key": f"alias-{aliased}-{other}-{alias}-rollback-1",
+                    "idempotency_key": f"{case_id}-rollback-1",
                     "expected_governance_revision": 0,
                 },
                 operator_headers(),
@@ -1304,7 +1321,7 @@ def test_t09_replay_simulation_alias_disables_governance_scope(
                 {
                     "hold_id": "unused-hold",
                     "recovery_generation": 1,
-                    "idempotency_key": f"alias-{aliased}-{other}-{alias}-recover-1",
+                    "idempotency_key": f"{case_id}-recover-1",
                     "expected_governance_revision": 0,
                 },
                 approver_headers(),
@@ -1330,22 +1347,26 @@ def test_t09_replay_simulation_alias_disables_governance_scope(
                 body={
                     "release_candidate_id": "unused-candidate",
                     "application_id": "unused-application",
-                    "idempotency_key": f"alias-{aliased}-{other}-{alias}-{name}-1",
+                    "idempotency_key": f"{case_id}-{name}-1",
                     "expected_governance_revision": 0,
                 },
                 headers=headers,
             )
             assert denied.status == 403, f"{name}: {denied.status}"
             assert denied.json()["detail"]["error"] == "S08_FORBIDDEN"
-        # The retained S08 three-role surface and the S01 health endpoint
-        # stay live; only the governed T09 scope is disabled.
-        status, _ = _json(
+        # Missing S08 roles close S08 through its existing gate. Missing
+        # Auditor/diagnostic identities and S09 aliases leave S08 available.
+        status, s08_result = _json(
             server,
             "GET",
             "/controlled/s08/api/queries/status",
             headers=admin_headers(),
         )
-        assert status == 200
+        if other is None and identity in {"admin", "approver", "operator"}:
+            assert status == 503
+            assert s08_result["detail"]["error"] == "S08_UNAVAILABLE"
+        else:
+            assert status == 200
         health = server.request("GET", "/api/health")
         assert health.status == 200
     # No Governance, audit, outbox, or idempotency fact was appended by the
