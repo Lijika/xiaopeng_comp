@@ -26,12 +26,22 @@ import {
   useSubmitAttachmentVersion,
   useSubmitVerification,
   useSupplementRequest,
+  usePreviewImpact,
+  useS09Workspace,
+  useImposeHold,
+  useImpactReconciliation,
+  useProposeRollback,
+  useRecoverHold,
   type ClaimCommand,
   type CorrectionCommand,
   type FencedCommand,
   type RevealCommand,
   type S08ApproveCommand,
   type S08ImportCommand,
+  type S09PreviewCommand,
+  type S09ImposeHoldCommand,
+  type S09ProposeRollbackCommand,
+  type S09RecoverHoldCommand,
   type SubmitCommand,
   type VerifyRecoveryCommand,
 } from "./hooks";
@@ -1374,7 +1384,7 @@ describe("shared evidence-revision convergence predicate (T04)", () => {
   });
 });
 
-describe("S08 governed policy hooks (T08)", () => {
+describe("governed policy hooks (S08 T08 / S09 T09)", () => {
   const CANDIDATE = "candidate_t08hooks000000000000000000";
   const WORKSPACE_PATH = `/controlled/s08/api/queries/candidate/${CANDIDATE}`;
   const APPROVE_PATH = "/controlled/s08/api/commands/approve";
@@ -1389,6 +1399,39 @@ describe("S08 governed policy hooks (T08)", () => {
       actor_role: "approver",
       actions,
       events: [],
+    };
+  }
+
+  function governanceWorkspacePayload(overrides: Record<string, unknown> = {}) {
+    return {
+      track: "C-DEMO",
+      capability_gate: "G3",
+      scope: "C-DEMO/demo",
+      governance_revision: 3,
+      actor_role: "operator",
+      actions: ["impose_hold"],
+      active_release: {
+        active_generation: 2,
+        candidate_id: "candidate_t09release00000000000000000",
+        manifest_id: "manifest_2",
+        manifest_digest: "2".repeat(64),
+        activation_event_id: "governance_act2",
+        approval_binding_id: "approval_sha256_b",
+        validation_bundle_id: "bundle_2",
+        validation_bundle_digest: "bundle-digest-2",
+        recovery_release_id: "candidate_t08bootstrap00000000000000000",
+        activated_at: 1786000000,
+        bootstrap: false,
+        final_impact_digest: "f".repeat(64),
+        final_impact_manifest_id: "manifest_final",
+        final_impact_member_count: 1,
+      },
+      recovery_anchor: {
+        release_candidate_id: "candidate_t08bootstrap00000000000000000",
+      },
+      holds: [],
+      events: [],
+      ...overrides,
     };
   }
 
@@ -1635,5 +1678,329 @@ describe("S08 governed policy hooks (T08)", () => {
       idempotency_key: string;
       expected_governance_revision: number;
     }>();
+  });
+
+  it("binds every S09 command body to the generated OpenAPI request schemas", () => {
+    type PreviewBody = S09PreviewCommand;
+    expectTypeOf<PreviewBody>().toMatchTypeOf<{
+      candidate_id: string;
+      idempotency_key: string;
+      expected_governance_revision: number;
+    }>();
+  });
+
+  it("usePreviewImpact sends the closed preview command and never invalidates the S08 workspace", async () => {
+    let workspaceRequests = 0;
+    const router = fetchRouter({
+      "POST /controlled/s09/api/commands/preview_impact": () =>
+        new Response(
+          JSON.stringify({
+            status: "accepted",
+            phase: "preview",
+            manifest_id:
+              "preview_sha256_1111111111111111111111111111111111111111111111111111111111111111",
+            digest: "1".repeat(64),
+            scope: "C-DEMO/demo",
+            oracle_version: "s09-impact-oracle/1",
+            level: 1,
+            expanded_to_full_scope: false,
+            member_count: 1,
+            partition_counts: { open_cycle: 1 },
+            zero_hit_proof: false,
+            target_generation: 2,
+            governance_revision: 4,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      [`GET ${WORKSPACE_PATH}`]: () => {
+        workspaceRequests += 1;
+        return new Response(
+          JSON.stringify(workspacePayload("in_review", ["approve", "reject"])),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    });
+    const client = createQueryClient();
+    const { result } = renderHook(
+      () => ({
+        preview: usePreviewImpact(),
+        workspace: useCandidateWorkspace(CANDIDATE),
+      }),
+      { wrapper: wrap(client) },
+    );
+    await waitFor(() => expect(result.current.workspace.isSuccess).toBe(true));
+    const before = workspaceRequests;
+    result.current.preview.mutate({
+      candidate_id: CANDIDATE,
+      idempotency_key: "t09-preview-1",
+      expected_governance_revision: 3,
+    });
+    await waitFor(() => expect(result.current.preview.isSuccess).toBe(true));
+    expect(result.current.preview.data?.governance_revision).toBe(4);
+    // The preview returns the fresh revision the approval must fence on; it
+    // must not invalidate the S08 workspace (whose revision is stale for the
+    // approval anyway) -- the workspace refetch count is untouched.
+    expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(1);
+    expect(workspaceRequests).toBe(before);
+  });
+
+  it("fetches the T09 governance workspace and never retries an existence-hiding 404", async () => {
+    let requests = 0;
+    const router = fetchRouter({
+      "GET /controlled/s09/api/queries/workspace": () => {
+        requests += 1;
+        return new Response(
+          JSON.stringify({
+            detail: { error: "S08_NOT_FOUND", message: "hidden" },
+          }),
+          { status: 404, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    });
+    const { result } = renderHook(() => useS09Workspace(), {
+      wrapper: wrap(createQueryClient()),
+    });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(requests).toBe(1);
+    expect(router.calls.filter((call) => call.method === "GET")).toHaveLength(1);
+  });
+
+  it("impose_hold sends the closed reason/scope command, never retries and invalidates the S09 workspace", async () => {
+    let workspaceRequests = 0;
+    const router = fetchRouter({
+      "POST /controlled/s09/api/commands/impose_hold": () =>
+        new Response(
+          JSON.stringify({
+            status: "accepted",
+            hold_id: "governance_hold0000000000000000001",
+            hold_scope: "open_cycle",
+            reason_code: "S09_TEST_HOLD",
+            recovery_criterion_id: "s09-hold-recovery-criterion/1",
+            recovery_criterion_digest: "c".repeat(64),
+            governance_event_id: "governance_event0000000000000000001",
+            governance_revision: 4,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      "GET /controlled/s09/api/queries/workspace": () => {
+        workspaceRequests += 1;
+        return new Response(
+          JSON.stringify(
+            governanceWorkspacePayload({ governance_revision: 4 }),
+          ),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    });
+    const client = createQueryClient();
+    const { result } = renderHook(
+      () => ({
+        impose: useImposeHold(),
+        workspace: useS09Workspace(),
+      }),
+      { wrapper: wrap(client) },
+    );
+    await waitFor(() => expect(result.current.workspace.isSuccess).toBe(true));
+    const before = workspaceRequests;
+    result.current.impose.mutate({
+      reason_code: "S09_TEST_HOLD",
+      hold_scope: "open_cycle",
+      idempotency_key: "t09-hold-1",
+      expected_governance_revision: 3,
+    });
+    await waitFor(() => expect(result.current.impose.isSuccess).toBe(true));
+    expect(result.current.impose.data?.hold_scope).toBe("open_cycle");
+    expect(result.current.impose.data?.recovery_criterion_digest).toBe(
+      "c".repeat(64),
+    );
+    const post = router.calls.find(
+      (call) => call.method === "POST",
+    ) as { body: unknown };
+    const body = post.body as Record<string, unknown>;
+    expect(body.reason_code).toBe("S09_TEST_HOLD");
+    expect(body.hold_scope).toBe("open_cycle");
+    expect(body.idempotency_key).toBe("t09-hold-1");
+    expect(body.expected_governance_revision).toBe(3);
+    await waitFor(() => expect(workspaceRequests).toBeGreaterThan(before));
+  });
+
+  it("fetches the auditor reconciliation for the exact final impact digest", async () => {
+    const digest = "f".repeat(64);
+    let seenUrl = "";
+    const router = fetchRouter({
+      "GET /controlled/s01/api/queries/impact-dispositions/reconciliation": (
+        url,
+      ) => {
+        seenUrl = String(url);
+        return new Response(
+          JSON.stringify({
+            final_impact_digest: digest,
+            member_count: 1,
+            unconsumed_count: 0,
+            outstanding_count: 0,
+            projection_watermark: 5,
+            members: [
+              {
+                application_id: "app_t09recon000000000000000000",
+                cycle: 1,
+                partition: "open_cycle",
+                disposition: "applied",
+                target_generation: 2,
+                reevaluation_job_id: "job_t09recon000000000000000000",
+                reevaluation_job_count: 1,
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    });
+    const { result } = renderHook(
+      () => useImpactReconciliation(digest),
+      { wrapper: wrap(createQueryClient()) },
+    );
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(seenUrl).toContain(`final_impact_digest=${encodeURIComponent(digest)}`);
+    expect(result.current.data?.members[0].disposition).toBe("applied");
+    expect(result.current.data?.unconsumed_count).toBe(0);
+    expect(
+      router.calls.filter((call) => call.method === "GET"),
+    ).toHaveLength(1);
+  });
+
+  it("binds every S09 hold/rollback/recovery command body to the generated OpenAPI request schemas", () => {
+    type ImposeBody = S09ImposeHoldCommand;
+    expectTypeOf<ImposeBody>().toMatchTypeOf<{
+      reason_code: string;
+      hold_scope: string;
+      idempotency_key: string;
+      expected_governance_revision: number;
+    }>();
+    type RollbackBody = S09ProposeRollbackCommand;
+    expectTypeOf<RollbackBody>().toMatchTypeOf<{
+      release_candidate_id: string;
+      reason_code: string;
+      idempotency_key: string;
+      expected_governance_revision: number;
+    }>();
+    type RecoverBody = S09RecoverHoldCommand;
+    expectTypeOf<RecoverBody>().toMatchTypeOf<{
+      hold_id: string;
+      recovery_generation: number;
+      idempotency_key: string;
+      expected_governance_revision: number;
+    }>();
+  });
+
+  it("propose_rollback sends the known-good release and reason, never retries and invalidates the S09 workspace", async () => {
+    let workspaceRequests = 0;
+    const router = fetchRouter({
+      "POST /controlled/s09/api/commands/propose_rollback": () =>
+        new Response(
+          JSON.stringify({
+            status: "accepted",
+            candidate_id: "candidate_t09rollback00000000000000000",
+            manifest_id: "manifest_rollback",
+            manifest_digest: "3".repeat(64),
+            validation_bundle_id: "bundle_rollback",
+            validation_bundle_digest: "bundle-digest-rollback",
+            rollback_target_id: "candidate_t08bootstrap00000000000000000",
+            compatibility: {
+              compatible: true,
+              reason_code: "S09_ROLLBACK_COMPATIBLE",
+            },
+            governance_revision: 4,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      "GET /controlled/s09/api/queries/workspace": () => {
+        workspaceRequests += 1;
+        return new Response(
+          JSON.stringify(
+            governanceWorkspacePayload({ governance_revision: 4 }),
+          ),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    });
+    const client = createQueryClient();
+    const { result } = renderHook(
+      () => ({
+        rollback: useProposeRollback(),
+        workspace: useS09Workspace(),
+      }),
+      { wrapper: wrap(client) },
+    );
+    await waitFor(() => expect(result.current.workspace.isSuccess).toBe(true));
+    const before = workspaceRequests;
+    result.current.rollback.mutate({
+      release_candidate_id: "candidate_t08bootstrap00000000000000000",
+      reason_code: "S09_TEST_ROLLBACK",
+      idempotency_key: "t09-rollback-1",
+      expected_governance_revision: 3,
+    });
+    await waitFor(() => expect(result.current.rollback.isSuccess).toBe(true));
+    expect(result.current.rollback.data?.compatibility.compatible).toBe(true);
+    const post = router.calls.find(
+      (call) => call.method === "POST",
+    ) as { body: unknown };
+    const body = post.body as Record<string, unknown>;
+    expect(body.release_candidate_id).toBe(
+      "candidate_t08bootstrap00000000000000000",
+    );
+    expect(body.reason_code).toBe("S09_TEST_ROLLBACK");
+    expect(body.idempotency_key).toBe("t09-rollback-1");
+    await waitFor(() => expect(workspaceRequests).toBeGreaterThan(before));
+  });
+
+  it("recover_hold sends the exact hold identity and active generation, never retries and invalidates the S09 workspace", async () => {
+    let workspaceRequests = 0;
+    const router = fetchRouter({
+      "POST /controlled/s09/api/commands/recover_hold": () =>
+        new Response(
+          JSON.stringify({
+            status: "accepted",
+            hold_id: "governance_hold0000000000000000001",
+            hold_released_event_id: "governance_event0000000000000000002",
+            recovery_generation: 2,
+            governance_revision: 4,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      "GET /controlled/s09/api/queries/workspace": () => {
+        workspaceRequests += 1;
+        return new Response(
+          JSON.stringify(
+            governanceWorkspacePayload({ governance_revision: 4 }),
+          ),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    });
+    const client = createQueryClient();
+    const { result } = renderHook(
+      () => ({
+        recover: useRecoverHold(),
+        workspace: useS09Workspace(),
+      }),
+      { wrapper: wrap(client) },
+    );
+    await waitFor(() => expect(result.current.workspace.isSuccess).toBe(true));
+    const before = workspaceRequests;
+    result.current.recover.mutate({
+      hold_id: "governance_hold0000000000000000001",
+      recovery_generation: 2,
+      idempotency_key: "t09-recover-1",
+      expected_governance_revision: 3,
+    });
+    await waitFor(() => expect(result.current.recover.isSuccess).toBe(true));
+    expect(result.current.recover.data?.recovery_generation).toBe(2);
+    const post = router.calls.find(
+      (call) => call.method === "POST",
+    ) as { body: unknown };
+    const body = post.body as Record<string, unknown>;
+    expect(body.hold_id).toBe("governance_hold0000000000000000001");
+    expect(body.recovery_generation).toBe(2);
+    await waitFor(() => expect(workspaceRequests).toBeGreaterThan(before));
   });
 });

@@ -1241,6 +1241,11 @@ class ControlledScenarioService:
                 now=now,
                 blocked_by_hold=True,
             )
+            # The stale/route marking above is the pre-hold frame; the
+            # authority-consistent Unprocessable frame (route
+            # ``unprocessable``) is restored so the read paths never see the
+            # (Unprocessable, pending_check) pair as an authority failure.
+            app["route"] = "unprocessable"
             return
         hit_reasons = {
             str(reason) for reason in member.get("hit_reasons") or ()
@@ -1356,13 +1361,6 @@ class ControlledScenarioService:
                 # stable non-current frame instead of an unreconstructible
                 # authority failure.
                 old_run_id = app.get("current_run_id")
-                app["current_run_id"] = None
-                app["current_evidence_snapshot_id"] = None
-                app["current_evidence_snapshot_digest"] = None
-                app["route"] = "unprocessable"
-                app["evidence_ready"] = False
-                app["projection_pending"] = False
-                app["projection_visible"] = False
                 if old_run_id:
                     staged.lifecycle_events.append(
                         {
@@ -1381,6 +1379,20 @@ class ControlledScenarioService:
                             "hold_id": hold_id,
                         }
                     )
+            # The authority-consistent Unprocessable frame is enforced for
+            # every covered application, whether it just transitioned or was
+            # already held: an impact disposition can re-enter a held member
+            # through Assembly (route ``pending_check``) between the
+            # transition and this consumption, and the read paths treat any
+            # other (phase, route) pair as an authority failure.  The phase/
+            # route invariant is restored here unconditionally.
+            app["current_run_id"] = None
+            app["current_evidence_snapshot_id"] = None
+            app["current_evidence_snapshot_digest"] = None
+            app["route"] = "unprocessable"
+            app["evidence_ready"] = False
+            app["projection_pending"] = False
+            app["projection_visible"] = False
 
     def _consume_hold_released(
         self,
@@ -5913,11 +5925,16 @@ class ControlledScenarioService:
         if not isinstance(application, dict):
             raise RuntimeError("projection application authority is unavailable")
         visibility_scope = self._application_visibility_scope(application_id)
+        # Auxiliary S09 facts (impact dispositions, hold invalidations,
+        # release consumptions) share the revision of their parent
+        # transition and must not participate in the contiguous transition
+        # chain -- exactly as the state-authority view treats them.
         lifecycle = sorted(
             (
                 event
                 for event in self._store.lifecycle_events
                 if event.get("application_id") == application_id
+                and not event.get("auxiliary")
             ),
             key=lambda event: int(event["revision"]),
         )

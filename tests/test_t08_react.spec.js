@@ -10,9 +10,11 @@ const ROOT = path.resolve(__dirname, "..");
 const PYTHON = path.join(ROOT, ".venv", "bin", "python");
 const S08_URL = "/controlled/s08/react";
 const S01_URL = "/controlled/s01/react";
+const S09_URL = "/controlled/s09/react";
 const ADMIN_CREDENTIAL = "s08-registered-admin-test-credential";
 const APPROVER_CREDENTIAL = "s08-registered-approver-test-credential";
 const OPERATOR_CREDENTIAL = "s08-registered-operator-test-credential";
+const AUDITOR_CREDENTIAL = "s01-registered-auditor-test-credential";
 const DEMO_CREDENTIAL = "s01-registered-demo-test-credential";
 const SCENARIO = "app_uncertain_ocr_noise.json";
 const SOURCE_BUNDLE_ID = "c-demo-legacy-baseline/1";
@@ -87,6 +89,8 @@ async function startServer(extraEnv = {}) {
         TASK4_S08_APPROVER_SUBJECT: "t08-browser-policy-approver",
         TASK4_S08_OPERATOR_CREDENTIAL: OPERATOR_CREDENTIAL,
         TASK4_S08_OPERATOR_SUBJECT: "t08-browser-policy-operator",
+        TASK4_S01_AUDITOR_CREDENTIAL: AUDITOR_CREDENTIAL,
+        TASK4_S01_AUDITOR_SUBJECT: "t09-browser-auditor",
         ...extraEnv,
       },
       stdio: ["ignore", "pipe", "pipe"],
@@ -94,6 +98,12 @@ async function startServer(extraEnv = {}) {
   );
   child.stdout.on("data", (chunk) => output.push(chunk.toString()));
   child.stderr.on("data", (chunk) => output.push(chunk.toString()));
+  // The server's own log lands next to the state file so a failing tracer
+  // can be diagnosed from the real uvicorn traceback.
+  const logStream = fs.createWriteStream(`${statePath}.log`, { flags: "a" });
+  child.stdout.on("data", (chunk) => logStream.write(chunk));
+  child.stderr.on("data", (chunk) => logStream.write(chunk));
+  child.on("exit", () => logStream.end());
 
   const baseURL = `http://127.0.0.1:${port}`;
   // Readiness window must absorb the first test's chromium cold-start
@@ -125,10 +135,11 @@ async function startServer(extraEnv = {}) {
 }
 
 /** Removes exactly this server's owned SQLite state and its -wal/-shm
- * siblings; every artifact is attempted even if one removal rejects. */
+ * siblings plus the captured server log; every artifact is attempted even
+ * if one removal rejects. */
 function cleanupStatePath(statePath) {
   let firstError;
-  for (const suffix of ["", "-wal", "-shm"]) {
+  for (const suffix of ["", "-wal", "-shm", ".log"]) {
     try {
       fs.rmSync(`${statePath}${suffix}`, { force: true });
     } catch (error) {
@@ -208,6 +219,18 @@ function trackS08Posts(page, posts) {
   });
 }
 
+/** Records every governed S09 command POST (impact preview, hold, rollback,
+ * recovery) with its decoded body; kept separate so the retained T08 request
+ * discipline assertions stay byte-identical. */
+function trackS09Posts(page, posts) {
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (request.method() === "POST" && url.pathname.includes("/s09/api/commands/")) {
+      posts.push({ url: url.pathname, body: request.postDataJSON() });
+    }
+  });
+}
+
 function pad(value) {
   return String(value).padStart(2, "0");
 }
@@ -220,6 +243,37 @@ function nextActivationMinute() {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(
     d.getHours(),
   )}:${pad(d.getMinutes())}`;
+}
+
+/** The earliest activation minute at least 30s in the future: the panel's
+ * bounded activation poll (80 x 1.5s = 120s) must comfortably cover the
+ * worst-case 90s wait, so the T09 tracer never outlives the poll budget. */
+function nextActivationMinuteShort() {
+  const minutes = Math.floor((Date.now() + 30_000) / 60_000) + 1;
+  const d = new Date(minutes * 60_000);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(
+    d.getHours(),
+  )}:${pad(d.getMinutes())}`;
+}
+
+/** Waits for the candidate workspace status to become active through the
+ * UI, and reloads the page once if the panel's bounded poll ended first
+ * (the poll ceiling is 120s while the server activation may be up to 90s
+ * away plus worker time; the reload is the documented manual-refresh path
+ * the panel itself surfaces). */
+async function waitForWorkspaceActive(page, timeoutMs = 240_000) {
+  try {
+    await expect(page.getByTestId("t08-workspace-status")).toHaveText(
+      "active",
+      { timeout: timeoutMs },
+    );
+  } catch {
+    await page.reload({ waitUntil: "networkidle" });
+    await expect(page.getByTestId("t08-workspace-status")).toHaveText(
+      "active",
+      { timeout: timeoutMs },
+    );
+  }
 }
 
 async function waitForCompleteRun(reviewer, baseURL, applicationId) {
@@ -841,3 +895,603 @@ test("T08 production terminal: an activation diagnostic failure keeps the prior 
     }
   }
 });
+
+/** Waits until Lifecycle has consumed the imposed hold: the application has
+ * runs and none of them is current (the hold frame is in force).  A
+ * transient S01_INTERNAL_ERROR 500 during the transition window is treated
+ * as the pre-existing backend's temporary authority state and retried. */
+async function waitForNoCurrentRun(reviewer, baseURL, applicationId) {
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    const response = await reviewer.request.get(
+      `${baseURL}/controlled/s01/api/queries/applications/${encodeURIComponent(
+        applicationId,
+      )}/history`,
+    );
+    if (response.status() === 500 || response.status() === 503) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      continue;
+    }
+    expect(response.ok()).toBeTruthy();
+    const body = await response.json();
+    const runs = body.runs || [];
+    if (runs.length > 0 && !runs.some((run) => run.current === true)) {
+      return body;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`current run never became non-current for ${applicationId}`);
+}
+
+/** Waits until the operational re-evaluation under a target active
+ * generation produced a current complete run (recovery recheck).  A
+ * transient S01_INTERNAL_ERROR 500 during the recheck transition is treated
+ * as the pre-existing backend's temporary authority state and retried. */
+async function waitForCurrentGeneration(reviewer, baseURL, applicationId, generation) {
+  const deadline = Date.now() + 90_000;
+  while (Date.now() < deadline) {
+    const response = await reviewer.request.get(
+      `${baseURL}/controlled/s01/api/queries/applications/${encodeURIComponent(
+        applicationId,
+      )}/history`,
+    );
+    if (response.status() === 500 || response.status() === 503) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      continue;
+    }
+    expect(response.ok()).toBeTruthy();
+    const body = await response.json();
+    const run = (body.runs || []).find(
+      (candidate) =>
+        candidate.current === true &&
+        candidate.status === "complete" &&
+        candidate.active_generation === generation,
+    );
+    if (run !== undefined) return body;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(
+    `generation ${generation} run never became current for ${applicationId}`,
+  );
+}
+
+/** The immutable run facts the recovery evidence compares: the derived
+ * ``currentness_reason`` legitimately evolves as the recheck completes, so
+ * deep equality is asserted on the stable pinned release facts only. */
+function stableRunFacts(runs) {
+  return runs.map((run) => ({
+    run_id: run.run_id,
+    status: run.status,
+    cycle: run.cycle,
+    active_generation: run.active_generation,
+    candidate_id: run.candidate_id,
+    release_id: run.release_id,
+    release_digest: run.release_digest,
+    activation_event_id: run.activation_event_id,
+  }));
+}
+
+/** The authoritative release facts from the workspace and the S08 audit
+ * seams (the same ledger, two closed responses). */
+async function fetchReleaseFacts(admin, baseURL) {
+  const workspaceResponse = await admin.request.get(
+    `${baseURL}/controlled/s09/api/queries/workspace`,
+  );
+  expect(workspaceResponse.ok()).toBeTruthy();
+  const workspace = await workspaceResponse.json();
+  const auditResponse = await admin.request.get(
+    `${baseURL}/controlled/s08/api/queries/events`,
+  );
+  expect(auditResponse.ok()).toBeTruthy();
+  const audit = await auditResponse.json();
+  return { workspaceEvents: workspace.events, auditEvents: audit.events };
+}
+
+for (const viewport of VIEWPORTS) {
+  test(`T09 production tracer (${viewport.label}): impact, scoped hold, compatible rollback activation and explicit recovery across five roles`, async ({
+    browser,
+  }) => {
+    test.setTimeout(600_000);
+    const resources = {};
+    let failure;
+    try {
+      resources.server = await startServer();
+      const server = resources.server;
+
+      // The bootstrap (prior) release is the recorded known-good anchor.
+      resources.adminContext = await browser.newContext({
+        viewport,
+        extraHTTPHeaders: { Authorization: `Bearer ${ADMIN_CREDENTIAL}` },
+      });
+      const admin = await resources.adminContext.newPage();
+      const adminDiag = trackPageDiagnostics(admin);
+      const adminPosts = [];
+      trackS08Posts(admin, adminPosts);
+
+      const bootstrapQuery = await admin.request.get(
+        `${server.baseURL}/controlled/s08/api/queries/active?scope=${encodeURIComponent(
+          S08_SCOPE,
+        )}`,
+      );
+      expect(bootstrapQuery.ok()).toBeTruthy();
+      const bootstrap = await bootstrapQuery.json();
+      expect(bootstrap.status).toBe("active");
+      const bootstrapCandidateId = bootstrap.candidate_id;
+
+      // ---- Rule Administrator: the existing T08 smoke path to review ----
+      const shellResponse = await admin.goto(`${server.baseURL}${S08_URL}`, {
+        waitUntil: "networkidle",
+      });
+      expect(shellResponse.status()).toBe(200);
+      await admin.getByLabel("来源包标识").fill(SOURCE_BUNDLE_ID);
+      await admin.getByTestId("t08-import-button").click();
+      await expect(admin.getByTestId("t08-draft-editor")).toBeVisible();
+      await admin.getByLabel("适用范围").fill(S08_SCOPE);
+      await admin.getByLabel("来源").fill(SOURCE_BUNDLE_ID);
+      await admin.getByLabel("变更原因").fill("T09 browser tracer");
+      await admin.getByLabel("生效起始").fill("2000-01-01T00:00");
+      await admin.getByTestId("t08-revise-button").click();
+      await expect(admin.getByTestId("t08-revise-ok")).toBeVisible();
+      await admin.getByTestId("t08-freeze-button").click();
+      await admin.waitForURL(/[?&]candidate=/);
+      const changedCandidateId = new URL(admin.url()).searchParams.get(
+        "candidate",
+      );
+      await admin.getByTestId("t08-validate-button").click();
+      await expect(admin.getByTestId("t08-workspace-status")).toHaveText(
+        "validated",
+        { timeout: 90_000 },
+      );
+      await admin.getByTestId("t08-submit-button").click();
+      await expect(admin.getByTestId("t08-workspace-status")).toHaveText(
+        "in_review",
+        { timeout: 30_000 },
+      );
+
+      // ---- Independent Policy Approver: approve the changed release ----
+      resources.approverContext = await browser.newContext({
+        viewport,
+        extraHTTPHeaders: { Authorization: `Bearer ${APPROVER_CREDENTIAL}` },
+      });
+      const approver = await resources.approverContext.newPage();
+      const approverDiag = trackPageDiagnostics(approver);
+      const approverPosts = [];
+      trackS09Posts(approver, approverPosts);
+
+      await approver.goto(
+        `${server.baseURL}${S08_URL}?candidate=${encodeURIComponent(
+          changedCandidateId,
+        )}`,
+        { waitUntil: "networkidle" },
+      );
+      await expect(approver.getByTestId("t08-workspace-status")).toHaveText(
+        "in_review",
+      );
+      await approver.getByLabel("生效时间").fill(nextActivationMinuteShort());
+      const approveButton = approver.getByTestId("t08-approve-button");
+      await approveButton.focus();
+      await approver.keyboard.press("Enter");
+      await expect(approver.getByTestId("t08-action-ok")).toBeVisible();
+      await expect(approver.getByTestId("t08-workspace-status")).toHaveText(
+        "approved",
+        { timeout: 30_000 },
+      );
+
+      // ---- Admin: schedule and wait for the changed release activation ----
+      await admin.reload({ waitUntil: "networkidle" });
+      await expect(admin.getByTestId("t08-workspace-status")).toHaveText(
+        "approved",
+      );
+      await expect(admin.getByTestId("t08-binding-time")).not.toHaveText("—");
+      await admin.getByTestId("t08-schedule-button").focus();
+      await admin.keyboard.press("Enter");
+      await expect(admin.getByTestId("t08-workspace-status")).toHaveText(
+        "scheduled",
+        { timeout: 30_000 },
+      );
+      await waitForWorkspaceActive(admin);
+
+      // ---- An affected application completes a current run under the
+      // changed (later failed) release ----
+      resources.demoContext = await browser.newContext({
+        viewport,
+        extraHTTPHeaders: { Authorization: `Bearer ${DEMO_CREDENTIAL}` },
+      });
+      const reviewer = await resources.demoContext.newPage();
+      const reviewerDiag = trackPageDiagnostics(reviewer);
+      const s01Shell = await reviewer.goto(`${server.baseURL}${S01_URL}`, {
+        waitUntil: "networkidle",
+      });
+      expect(s01Shell.status()).toBe(200);
+      const admission = await reviewer.request.post(
+        `${server.baseURL}/controlled/s01/api/commands/submit`,
+        {
+          data: {
+            scenario_id: SCENARIO,
+            idempotency_key: "t09-react-admission-1",
+          },
+        },
+      );
+      expect(admission.ok()).toBeTruthy();
+      const accepted = await admission.json();
+      const failedRun = await waitForCompleteRun(
+        reviewer,
+        server.baseURL,
+        accepted.application_id,
+      );
+      expect(failedRun.active_generation).toBe(2);
+      expect(failedRun.candidate_id).toBe(changedCandidateId);
+
+      // ---- Operator: impose a scoped, non-expiring safety hold ----
+      resources.operatorContext = await browser.newContext({
+        viewport,
+        extraHTTPHeaders: { Authorization: `Bearer ${OPERATOR_CREDENTIAL}` },
+      });
+      const operator = await resources.operatorContext.newPage();
+      const operatorDiag = trackPageDiagnostics(operator);
+      const operatorPosts = [];
+      trackS09Posts(operator, operatorPosts);
+
+      const s09Shell = await operator.goto(`${server.baseURL}${S09_URL}`, {
+        waitUntil: "networkidle",
+      });
+      expect(s09Shell.status()).toBe(200);
+      expect(s09Shell.headers()["cache-control"]).toContain("no-store");
+      await expect(operator.getByTestId("s09-boundary-track")).toHaveText(
+        "C-DEMO",
+      );
+      await expect(operator.getByTestId("s09-boundary-gate")).toHaveText(
+        "S09",
+      );
+      await expect(operator.getByTestId("t09-role")).toHaveText("operator");
+      await expect(operator.getByTestId("t09-active-release")).toContainText(
+        "代次 2",
+      );
+      await expect(operator.getByTestId("t09-recovery-anchor")).toHaveText(
+        bootstrapCandidateId,
+      );
+      await expect(operator.getByTestId("t09-holds-empty")).toBeVisible();
+
+      await operator.getByLabel("冻结原因码").fill("S09_TEST_HOLD");
+      await operator.getByTestId("t09-impose-button").focus();
+      expect(
+        await operator.evaluate(() =>
+          document.activeElement?.getAttribute("data-testid"),
+        ),
+      ).toBe("t09-impose-button");
+      await operator.keyboard.press("Enter");
+      await expect(operator.getByTestId("t09-action-ok")).toBeVisible();
+      await expect(operator.getByTestId("t09-hold")).toBeVisible();
+      await expect(operator.getByTestId("t09-hold-scope")).toHaveText(
+        "open_cycle",
+      );
+      await expect(operator.getByTestId("t09-hold-reason")).toHaveText(
+        "S09_TEST_HOLD",
+      );
+      await expect(operator.getByTestId("t09-hold-criterion")).toHaveText(
+        "s09-hold-recovery/1",
+      );
+      // The hold never auto-expires: no expiry surface exists on the page.
+      expect(await operator.getByTestId("t09-hold").innerText()).not.toContain(
+        "expires",
+      );
+
+      // The hold is consumed: the affected application's old run is no
+      // longer current (stale/recheck fact, server-owned).
+      await waitForNoCurrentRun(
+        reviewer,
+        server.baseURL,
+        accepted.application_id,
+      );
+
+      // ---- Operator: compatible rollback through the known-good release ----
+      expect(
+        await operator.getByLabel("回滚发布标识").inputValue(),
+      ).toBe(bootstrapCandidateId);
+      await operator.getByLabel("回滚原因码").fill("S09_TEST_ROLLBACK");
+      await operator.getByTestId("t09-rollback-button").focus();
+      await operator.keyboard.press("Enter");
+      await expect(operator.getByTestId("t09-rollback-result")).toBeVisible();
+      await expect(operator.getByTestId("t09-rollback-compatibility")).toContainText(
+        "S09_ROLLBACK_COMPATIBLE",
+      );
+      const rollbackHref = await operator
+        .getByTestId("t09-rollback-link")
+        .getAttribute("href");
+      const rollbackCandidateId = new URL(
+        rollbackHref,
+        server.baseURL,
+      ).searchParams.get("candidate");
+      expect(rollbackCandidateId).toBeTruthy();
+      await expect(operator.getByTestId("t09-events")).toContainText(
+        "rollback_proposed",
+      );
+
+      // ---- Admin: continue the rollback candidate through the existing S08
+      // workspace (the legacy-fallback href opens it) ----
+      await admin.goto(
+        `${server.baseURL}${S08_URL}?candidate=${encodeURIComponent(
+          rollbackCandidateId,
+        )}`,
+        { waitUntil: "networkidle" },
+      );
+      await expect(admin.getByTestId("t08-workspace-status")).toHaveText(
+        "validated",
+      );
+      await admin.getByTestId("t08-submit-button").click();
+      await expect(admin.getByTestId("t08-workspace-status")).toHaveText(
+        "in_review",
+        { timeout: 30_000 },
+      );
+
+      // ---- Independent Policy Approver: approve the rollback candidate ----
+      await approver.goto(
+        `${server.baseURL}${S08_URL}?candidate=${encodeURIComponent(
+          rollbackCandidateId,
+        )}`,
+        { waitUntil: "networkidle" },
+      );
+      await expect(approver.getByTestId("t08-workspace-status")).toHaveText(
+        "in_review",
+      );
+      await approver.getByLabel("生效时间").fill(nextActivationMinuteShort());
+      await approver.getByTestId("t08-approve-button").focus();
+      await approver.keyboard.press("Enter");
+      await expect(approver.getByTestId("t08-action-ok")).toBeVisible();
+      await expect(approver.getByTestId("t08-workspace-status")).toHaveText(
+        "approved",
+        { timeout: 30_000 },
+      );
+
+      // ---- Admin: schedule the rollback release and wait for activation ----
+      await admin.reload({ waitUntil: "networkidle" });
+      await expect(admin.getByTestId("t08-workspace-status")).toHaveText(
+        "approved",
+      );
+      await expect(admin.getByTestId("t08-binding-time")).not.toHaveText("—");
+      await admin.getByTestId("t08-schedule-button").focus();
+      await admin.keyboard.press("Enter");
+      await expect(admin.getByTestId("t08-workspace-status")).toHaveText(
+        "scheduled",
+        { timeout: 30_000 },
+      );
+      await waitForWorkspaceActive(admin);
+
+      // ---- Release facts before the explicit recovery ----
+      const beforeFacts = await fetchReleaseFacts(admin, server.baseURL);
+      const beforeHistoryResponse = await reviewer.request.get(
+        `${server.baseURL}/controlled/s01/api/queries/applications/${encodeURIComponent(
+          accepted.application_id,
+        )}/history`,
+      );
+      expect(beforeHistoryResponse.ok()).toBeTruthy();
+      const beforeHistory = await beforeHistoryResponse.json();
+      const beforeActivated = beforeFacts.workspaceEvents.filter(
+        (event) => event.kind === "activated",
+      );
+      expect(beforeActivated.map((event) => event.active_generation)).toEqual([
+        1, 2, 3,
+      ]);
+
+      // ---- Independent Policy Approver: explicit hold recovery ----
+      await approver.goto(`${server.baseURL}${S09_URL}`, {
+        waitUntil: "networkidle",
+      });
+      await expect(approver.getByTestId("t09-role")).toHaveText("approver");
+      await expect(approver.getByTestId("t09-recover-form")).toBeVisible();
+      expect(await approver.getByLabel("恢复代次").inputValue()).toBe("3");
+      await approver.getByTestId("t09-recover-button").focus();
+      await approver.keyboard.press("Enter");
+      await expect(approver.getByTestId("t09-action-ok")).toBeVisible();
+      await expect(approver.getByTestId("t09-holds-empty")).toBeVisible({
+        timeout: 30_000,
+      });
+
+      // ---- Release facts after the explicit recovery: immutable prior and
+      // failed facts, one new recovery fact with its own identity ----
+      await approver.reload({ waitUntil: "networkidle" });
+      const afterFacts = await fetchReleaseFacts(admin, server.baseURL);
+      expect(
+        JSON.stringify(
+          afterFacts.workspaceEvents.slice(0, beforeFacts.workspaceEvents.length),
+        ),
+      ).toBe(JSON.stringify(beforeFacts.workspaceEvents));
+      expect(
+        JSON.stringify(
+          afterFacts.auditEvents.slice(0, beforeFacts.auditEvents.length),
+        ),
+      ).toBe(JSON.stringify(beforeFacts.auditEvents));
+      const recoveryFacts = afterFacts.workspaceEvents.filter(
+        (event) => event.kind === "hold_released",
+      );
+      expect(recoveryFacts).toHaveLength(1);
+      const recoveryFact = recoveryFacts[0];
+      expect(recoveryFact.event_id).toBeTruthy();
+      expect(recoveryFact.recovery_generation).toBe(3);
+      expect(recoveryFact.revision).toBeGreaterThan(
+        beforeFacts.workspaceEvents.length,
+      );
+      // The recovery fact is the only new event: append-only, nothing
+      // rewritten.
+      expect(afterFacts.workspaceEvents.length).toBe(
+        beforeFacts.workspaceEvents.length + 1,
+      );
+
+      // ---- Reviewer: the old run stays non-current and the recovery
+      // generation run becomes current with the release pinned ----
+      const afterHistory = await waitForCurrentGeneration(
+        reviewer,
+        server.baseURL,
+        accepted.application_id,
+        3,
+      );
+      // The immutable run facts are preserved exactly; only the derived
+      // currentness fields evolve as the recheck lands.
+      expect(
+        JSON.stringify(
+          stableRunFacts(afterHistory.runs.slice(0, beforeHistory.runs.length)),
+        ),
+      ).toBe(JSON.stringify(stableRunFacts(beforeHistory.runs)));
+      const currentRuns = afterHistory.runs.filter(
+        (run) => run.current === true,
+      );
+      expect(currentRuns).toHaveLength(1);
+      expect(currentRuns[0].active_generation).toBe(3);
+      // The recovery run pins the rollback candidate -- the compatible
+      // known-good release re-activated as a NEW server fact with its own
+      // identity -- never the original bootstrap candidate id.
+      expect(currentRuns[0].candidate_id).toBe(rollbackCandidateId);
+      expect(currentRuns[0].status).toBe("complete");
+
+      // The Reviewer UI opens the successor work from the server queue and
+      // renders the server-owned history: old run non-current, recovery run
+      // current, both release pins visible.
+      const manualItem = await waitForManualItem(
+        reviewer,
+        server.baseURL,
+        accepted.application_id,
+      );
+      await reviewer.reload({ waitUntil: "networkidle" });
+      const queueLink = reviewer.getByRole("link", {
+        name: new RegExp(manualItem.work_item_id),
+      });
+      await expect(queueLink).toBeVisible();
+      await queueLink.click();
+      await expect(
+        reviewer.getByTestId("review-history-run").first(),
+      ).toBeVisible();
+      const historyTexts = await reviewer
+        .getByTestId("review-history-run")
+        .allInnerTexts();
+      const historyJoined = historyTexts.join("\n");
+      expect(historyJoined).toContain(changedCandidateId);
+      expect(historyJoined).toContain(rollbackCandidateId);
+      expect(historyJoined).toContain("3");
+
+      // ---- Auditor: the reconciliation shows the affected member and its
+      // reevaluation receipts ----
+      resources.auditorContext = await browser.newContext({
+        viewport,
+        extraHTTPHeaders: { Authorization: `Bearer ${AUDITOR_CREDENTIAL}` },
+      });
+      const auditor = await resources.auditorContext.newPage();
+      const auditorDiag = trackPageDiagnostics(auditor);
+      await auditor.goto(`${server.baseURL}${S09_URL}`, {
+        waitUntil: "networkidle",
+      });
+      await expect(auditor.getByTestId("t09-role")).toHaveText("auditor");
+      await expect(auditor.getByTestId("t09-recon")).toBeVisible({
+        timeout: 30_000,
+      });
+      await expect(auditor.getByTestId("t09-recon-members")).toContainText(
+        accepted.application_id,
+        { timeout: 60_000 },
+      );
+      await expect(auditor.getByTestId("t09-recon-members")).toContainText(
+        "applied",
+      );
+
+      // ---- Command discipline: exact one-shot sequences, unique keys ----
+      const operatorActions = operatorPosts.map((post) =>
+        post.url.split("/").pop(),
+      );
+      expect(operatorActions).toEqual(["impose_hold", "propose_rollback"]);
+      const operatorKeys = operatorPosts.map(
+        (post) => post.body.idempotency_key,
+      );
+      expect(new Set(operatorKeys).size).toBe(2);
+      expect(operatorPosts[0].body.hold_scope).toBe("open_cycle");
+      expect(operatorPosts[0].body.reason_code).toBe("S09_TEST_HOLD");
+      expect(operatorPosts[1].body.release_candidate_id).toBe(
+        bootstrapCandidateId,
+      );
+      expect(operatorPosts[1].body.reason_code).toBe("S09_TEST_ROLLBACK");
+      const approverActions = approverPosts.map((post) =>
+        post.url.split("/").pop(),
+      );
+      // The S09 tracker sees the two impact previews (the approvals
+      // themselves live on the retained /s08/ router) and the recovery.
+      expect(approverActions).toEqual([
+        "preview_impact",
+        "preview_impact",
+        "recover_hold",
+      ]);
+      expect(approverPosts[2].body.recovery_generation).toBe(3);
+      const adminActions = adminPosts.map((post) =>
+        post.url.split("/").pop(),
+      );
+      expect(adminActions).toEqual([
+        "import_legacy",
+        "revise_draft",
+        "freeze_candidate",
+        "request_validation",
+        "submit_review",
+        "schedule",
+        "submit_review",
+        "schedule",
+      ]);
+      const allKeys = [
+        ...operatorKeys,
+        ...approverPosts.map((post) => post.body.idempotency_key),
+        ...adminPosts.map((post) => post.body.idempotency_key),
+      ];
+      expect(new Set(allKeys).size).toBe(allKeys.length);
+
+      // ---- Diagnostics: zero page/console/network errors ----
+      for (const [name, diag] of [
+        ["admin", adminDiag],
+        ["approver", approverDiag],
+        ["operator", operatorDiag],
+        ["reviewer", reviewerDiag],
+        ["auditor", auditorDiag],
+      ]) {
+        expect(diag.browserErrors, `${name} page errors`).toEqual([]);
+        expect(diag.consoleErrors, `${name} console errors`).toEqual([]);
+        expect(diag.networkErrors, `${name} network failures`).toEqual([]);
+      }
+
+      // ---- No authoritative data in browser storage; no overflow ----
+      for (const page of [admin, approver, operator, reviewer, auditor]) {
+        expect(await page.evaluate(() => localStorage.length)).toBe(0);
+        expect(await page.evaluate(() => sessionStorage.length)).toBe(0);
+        expect(await assertNoOverflow(page)).toBe(true);
+      }
+    } catch (error) {
+      failure = error;
+      // Preserve the exact server state for offline diagnosis of the
+      // reviewer's transient S01_INTERNAL_ERROR history response.
+      if (resources.server) {
+        try {
+          fs.copyFileSync(
+            resources.server.statePath,
+            `/tmp/xiaopeng-t09-failed-${Date.now()}.sqlite3`,
+          );
+        } catch {
+          // Best-effort state preservation.
+        }
+      }
+      throw error;
+    } finally {
+      for (const name of [
+        "auditorContext",
+        "demoContext",
+        "operatorContext",
+        "approverContext",
+        "adminContext",
+      ]) {
+        try {
+          if (resources[name]) await resources[name].close();
+        } catch {
+          // Best-effort context close after a failure.
+        }
+      }
+      if (resources.server) {
+        try {
+          await stopServer(resources.server);
+        } catch (error) {
+          if (failure === undefined) throw error;
+        }
+      }
+    }
+  });
+}

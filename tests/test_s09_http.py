@@ -662,6 +662,262 @@ def test_s09_diagnostic_identities_are_isolated_over_http(tmp_path: Path) -> Non
         assert status == 403
 
 
+def test_t09_workspace_four_role_reads_over_http(tmp_path: Path) -> None:
+    """The closed T09 governance workspace over the real HTTP seam: four
+    roles read one atomic projection with the same governance revision and
+    their own server-owned actions; the active release, the recorded
+    known-good recovery anchor, the active hold union and the append-only
+    S09 event refs are rendered exactly from the ledger."""
+    state_path = tmp_path / "target.sqlite3"
+    env = {
+        "TASK4_S01_TEST_FIXTURE_ROOT": str(ROOT / "fixtures" / "applications"),
+        "TASK4_S01_TEST_STATE_PATH": str(state_path),
+    }
+    with s08_test_loopback(env) as server:
+        bootstrap = _json(
+            server,
+            "GET",
+            f"/controlled/s08/api/queries/active?scope={S08_SCOPE}",
+            headers=admin_headers(),
+        )[1]
+        bootstrap_candidate_id = bootstrap["candidate_id"]
+
+        # Four roles read the same atomic revision with their own actions.
+        revision = None
+        for headers, role, actions in (
+            (admin_headers(), "admin", []),
+            (approver_headers(), "approver", []),
+            (operator_headers(), "operator", ["impose_hold"]),
+            (auditor_auth_headers(), "auditor", []),
+        ):
+            status, workspace = _json(
+                server,
+                "GET",
+                "/controlled/s09/api/queries/workspace",
+                headers=headers,
+            )
+            assert status == 200, f"{role} workspace: {workspace}"
+            assert workspace["track"] == "C-DEMO"
+            assert workspace["capability_gate"] == "G3"
+            assert workspace["scope"] == S08_SCOPE
+            assert workspace["actor_role"] == role
+            assert workspace["actions"] == actions
+            if revision is None:
+                revision = workspace["governance_revision"]
+            assert workspace["governance_revision"] == revision
+            assert workspace["active_release"]["active_generation"] == 1
+            assert workspace["active_release"]["bootstrap"] is True
+            # The bootstrap release records itself as its known-good
+            # recovery anchor.
+            assert workspace["recovery_anchor"] == {
+                "release_candidate_id": bootstrap_candidate_id
+            }
+            assert workspace["holds"] == []
+
+        # A changed release activates with the bootstrap recorded as the
+        # known-good recovery anchor.
+        candidate_id = _new_candidate_in_review(server)
+        activation_at = int(time.time()) + 5
+        status, preview = _command(
+            server,
+            "preview_impact",
+            {
+                "candidate_id": candidate_id,
+                "idempotency_key": "t09-ws-preview",
+                "expected_governance_revision": _governance_revision(server),
+            },
+            admin_headers(),
+        )
+        assert status == 200, preview
+        status, approval = _command(
+            server,
+            "approve",
+            {
+                "candidate_id": candidate_id,
+                "activation_time": activation_at,
+                "recovery_release_id": bootstrap_candidate_id,
+                "preview_manifest_id": preview["manifest_id"],
+                "idempotency_key": "t09-ws-approve",
+                "expected_governance_revision": _governance_revision(server),
+            },
+            approver_headers(),
+        )
+        assert status == 200, approval
+        _post_command(
+            server,
+            "schedule",
+            {
+                "approval_binding_id": approval["approval_binding_id"],
+                "activation_at": activation_at,
+                "idempotency_key": "t09-ws-schedule",
+                "expected_governance_revision": _governance_revision(server),
+            },
+            admin_headers(),
+        )
+        _wait_for_active_generation(server, 2)
+
+        status, workspace = _json(
+            server,
+            "GET",
+            "/controlled/s09/api/queries/workspace",
+            headers=admin_headers(),
+        )
+        assert status == 200, workspace
+        active = workspace["active_release"]
+        assert active["active_generation"] == 2
+        assert active["candidate_id"] == candidate_id
+        assert active["recovery_release_id"] == bootstrap_candidate_id
+        assert active["final_impact_digest"]
+        assert len(active["final_impact_digest"]) == 64
+        assert workspace["recovery_anchor"] == {
+            "release_candidate_id": bootstrap_candidate_id
+        }
+        event_kinds = [event["kind"] for event in workspace["events"]]
+        for kind in ("impact_previewed", "approved", "activated"):
+            assert kind in event_kinds, workspace["events"]
+        preview_event = next(
+            event
+            for event in workspace["events"]
+            if event["kind"] == "impact_previewed"
+        )
+        assert preview_event["manifest_id"] == preview["manifest_id"]
+        activated_event = next(
+            event
+            for event in reversed(workspace["events"])
+            if event["kind"] == "activated"
+        )
+        assert activated_event["active_generation"] == 2
+        assert activated_event["activation_event_id"]
+        assert [event["revision"] for event in workspace["events"]] == sorted(
+            event["revision"] for event in workspace["events"]
+        )
+
+        # A scoped hold is rendered with exact scope/reason/actor/criterion
+        # and re-derives the role actions; it never auto-expires.
+        status, hold = _command(
+            server,
+            "impose_hold",
+            {
+                "reason_code": "S09_TEST_HOLD",
+                "hold_scope": "open_cycle",
+                "idempotency_key": "t09-ws-hold",
+                "expected_governance_revision": _governance_revision(server),
+            },
+            operator_headers(),
+        )
+        assert status == 200, hold
+        hold_id = hold["hold_id"]
+        status, operator_ws = _json(
+            server,
+            "GET",
+            "/controlled/s09/api/queries/workspace",
+            headers=operator_headers(),
+        )
+        assert status == 200, operator_ws
+        assert operator_ws["actions"] == ["impose_hold", "propose_rollback"]
+        assert [item["hold_id"] for item in operator_ws["holds"]] == [hold_id]
+        rendered = operator_ws["holds"][0]
+        assert rendered["reason_code"] == "S09_TEST_HOLD"
+        assert rendered["hold_scope"] == "open_cycle"
+        assert rendered["imposed_by"] == "c-demo-policy-operator"
+        assert rendered["recovery_criterion_id"]
+        assert rendered["recovery_criterion_digest"]
+        assert rendered["event_id"]
+        assert "expires_at" not in rendered
+        assert "stopped_at" not in rendered
+        status, approver_ws = _json(
+            server,
+            "GET",
+            "/controlled/s09/api/queries/workspace",
+            headers=approver_headers(),
+        )
+        assert status == 200, approver_ws
+        assert approver_ws["actions"] == ["recover_hold"]
+        assert (
+            approver_ws["governance_revision"]
+            == operator_ws["governance_revision"]
+        )
+        hold_event = next(
+            event
+            for event in approver_ws["events"]
+            if event["kind"] == "hold_imposed"
+        )
+        assert hold_event["hold_id"] == hold_id
+
+
+def test_t09_workspace_identity_boundary_and_closed_schema_over_http(
+    tmp_path: Path,
+) -> None:
+    """T09 identity boundary over the real HTTP seam: an unregistered
+    identity gets a stable 403 on the query and the React shell (before any
+    build check), a missing governance authority is a closed 503, and the
+    OpenAPI document exposes the closed workspace DTOs."""
+    state_path = tmp_path / "target.sqlite3"
+    env = {
+        "TASK4_S01_TEST_FIXTURE_ROOT": str(ROOT / "fixtures" / "applications"),
+        "TASK4_S01_TEST_STATE_PATH": str(state_path),
+    }
+    with s08_test_loopback(env) as server:
+        status, denied = _json(
+            server,
+            "GET",
+            "/controlled/s09/api/queries/workspace",
+            headers={"Authorization": "Bearer unknown-credential"},
+        )
+        assert status == 403
+        assert denied["detail"]["error"] == "S08_FORBIDDEN"
+        response = server.request(
+            "GET",
+            "/controlled/s09/react",
+            headers={"Authorization": "Bearer unknown-credential"},
+        )
+        assert response.status == 403
+        assert response.json()["detail"]["error"] == "S08_FORBIDDEN"
+        status, spec = _json(
+            server, "GET", "/openapi.json", headers=admin_headers()
+        )
+        assert status == 200
+        workspace_path = spec["paths"]["/controlled/s09/api/queries/workspace"]
+        assert "get" in workspace_path
+        schema = spec["components"]["schemas"]["S09GovernanceWorkspaceResponse"]
+        assert schema["additionalProperties"] is False
+        assert {
+            "track",
+            "capability_gate",
+            "scope",
+            "governance_revision",
+            "actor_role",
+            "actions",
+        } <= set(schema["required"])
+        assert "holds" in schema["properties"]
+        assert "events" in schema["properties"]
+        ref_schema = spec["components"]["schemas"]["S09WorkspaceEventRef"]
+        assert ref_schema["additionalProperties"] is False
+    with s08_test_loopback(
+        {
+            **env,
+            # Missing governance authority: without the complete S08
+            # identities the scope stays closed, S08_SERVICE is never
+            # created, and the T09 workspace fails closed 503 before any
+            # read.
+            "TASK4_S08_ADMIN_CREDENTIAL": "",
+            "TASK4_S08_ADMIN_SUBJECT": "",
+            "TASK4_S08_APPROVER_CREDENTIAL": "",
+            "TASK4_S08_APPROVER_SUBJECT": "",
+            "TASK4_S08_OPERATOR_CREDENTIAL": "",
+            "TASK4_S08_OPERATOR_SUBJECT": "",
+        }
+    ) as server:
+        status, unavailable = _json(
+            server,
+            "GET",
+            "/controlled/s09/api/queries/workspace",
+            headers=admin_headers(),
+        )
+        assert status == 503
+        assert unavailable["detail"]["error"] == "S08_UNAVAILABLE"
+
+
 def test_s09_diagnostic_result_schemas_are_separate_and_closed(
     tmp_path: Path,
 ) -> None:

@@ -1210,6 +1210,86 @@ class S08ActivationOutcome(BaseModel):
     active_generation: int | None = None
 
 
+# --- T09 / Issue #43: governance workspace DTOs ------------------------------
+
+class S09ActiveRelease(BaseModel):
+    """The server-owned active governed release projection: generation,
+    release/activation identities, bound evidence references, the recorded
+    recovery release and the final-impact facts.  Never derived by the
+    browser."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    active_generation: int | None = None
+    candidate_id: str | None = None
+    manifest_id: str | None = None
+    manifest_digest: str | None = None
+    activation_event_id: str | None = None
+    approval_binding_id: str | None = None
+    validation_bundle_id: str | None = None
+    validation_bundle_digest: str | None = None
+    recovery_release_id: str | None = None
+    activated_at: int | None = None
+    bootstrap: bool = False
+    final_impact_digest: str | None = None
+    final_impact_manifest_id: str | None = None
+    final_impact_member_count: int | None = None
+
+
+class S09RecoveryAnchor(BaseModel):
+    """The recorded known-good release identity: the exact release the
+    current active was approved with as its recovery fallback.  The rollback
+    form's only prefill option."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    release_candidate_id: str
+
+
+class S09WorkspaceEventRef(BaseModel):
+    """One append-only governance event reference in the T09 workspace: the
+    shared immutable identity fields plus the S09 hold/rollback/impact/
+    activation/recovery references the page renders."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str
+    revision: int
+    kind: str
+    actor: S08EventActor
+    trusted_time: int
+    reason_code: str | None = None
+    candidate_id: str | None = None
+    manifest_id: str | None = None
+    activation_event_id: str | None = None
+    active_generation: int | None = None
+    hold_id: str | None = None
+    release_candidate_id: str | None = None
+    recovery_generation: int | None = None
+
+
+class S09GovernanceWorkspaceResponse(BaseModel):
+    """The closed T09 governance workspace: the authoritative governance
+    revision, the authenticated actor role, the server-owned action list,
+    the active release and known-good recovery anchor, the active hold
+    union and the append-only S09 event refs -- one atomic snapshot the
+    page renders.  The page never derives a transition, a hold or a
+    recovery option."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    track: Literal["C-DEMO"]
+    capability_gate: Literal["G3"]
+    scope: str
+    governance_revision: int
+    actor_role: Literal["admin", "approver", "operator", "auditor"]
+    actions: list[str]
+    active_release: S09ActiveRelease | None = None
+    recovery_anchor: S09RecoveryAnchor | None = None
+    holds: list[S09HoldRef]
+    events: list[S09WorkspaceEventRef]
+
+
 def _s08_command(
     request: Request,
     response: Response,
@@ -1670,6 +1750,38 @@ def _s08_require_read_role(request: Request) -> PolicyPrincipal:
     )
 
 
+def _s09_require_read_role(request: Request) -> PolicyPrincipal:
+    """The T09 read surface for the four governance workspace roles: the
+    Rule Administrator, the Policy Approver, the activation Operator and
+    the Auditor each read the atomic workspace under their own identity.
+    Every other identity fails closed with the stable 403."""
+    module = _s08_app_module(request)
+    credentials = {
+        "admin": (module.S08_ADMIN_CREDENTIAL, module.S08_ADMIN_SUBJECT),
+        "approver": (module.S08_APPROVER_CREDENTIAL, module.S08_APPROVER_SUBJECT),
+        "operator": (module.S08_OPERATOR_CREDENTIAL, module.S08_OPERATOR_SUBJECT),
+        "auditor": (
+            getattr(module, "S01_AUDITOR_CREDENTIAL", ""),
+            getattr(module, "S01_AUDITOR_SUBJECT", ""),
+        ),
+    }
+    for role, (credential, subject) in credentials.items():
+        if subject and module._s01_has_credential(request, credential):
+            return PolicyPrincipal(
+                subject=subject,
+                role=role,
+                scope=S08_SCOPE,
+                source_id="s08-web-bearer",
+            )
+    raise HTTPException(
+        403,
+        detail={
+            "error": "S08_FORBIDDEN",
+            "message": "Registered S08 identity required",
+        },
+    )
+
+
 @s08_router.get(
     "/controlled/s08/api/queries/candidate/{candidate_id}",
     response_model=S08CandidateWorkspaceResponse,
@@ -1725,6 +1837,65 @@ def controlled_s08_react_page(request: Request) -> HTMLResponse:
             },
         )
     _s08_service(request)
+    response = HTMLResponse(index_html)
+    module._s01_disable_cache(response)
+    return response
+
+
+@s09_router.get(
+    "/controlled/s09/api/queries/workspace",
+    response_model=S09GovernanceWorkspaceResponse,
+    response_model_exclude_none=True,
+    responses=_S08_ERROR_RESPONSES,
+)
+def s09_query_workspace(request: Request, response: Response) -> dict[str, Any]:
+    """The closed T09 governance workspace.
+
+    The service builds the whole snapshot atomically under one lock: the
+    authoritative governance revision (from the governance ledger), the
+    authenticated actor role, the server-owned action list (role + ledger
+    state only), the active release and the recorded known-good recovery
+    anchor, the active hold union and the append-only S09 event refs.  This
+    adapter only maps that snapshot into the closed DTO and owns no
+    transition rules.
+    """
+    module = _s08_app_module(request)
+    module._s01_disable_cache(response)
+    # Authority availability is checked before identity: a missing governance
+    # authority is a closed 503 for every caller, never a misleading 403.
+    service = _s08_service(request)
+    principal = _s09_require_read_role(request)
+    try:
+        return service.query_governance_workspace(principal)
+    except (
+        PolicyInvalidTransition,
+        PolicyConflict,
+        PolicyNotFound,
+        PolicyUnavailable,
+        RuntimeError,
+    ) as error:
+        raise _s08_rejected(error) from error
+
+
+@s09_router.get("/controlled/s09/react", response_class=HTMLResponse)
+def controlled_s09_react_page(request: Request) -> HTMLResponse:
+    """The T09 governance workspace React shell: the same built artifact as
+    the other controlled shells, served only to a registered T09 identity
+    (admin, approver, operator or auditor) with no-store and no session.  A
+    missing or incomplete build is an explicit closed 503; the S09 API
+    remains the sole authority."""
+    module = _s08_app_module(request)
+    _s08_service(request)
+    _s09_require_read_role(request)
+    index_html = module._react_shell_index_html()
+    if index_html is None:
+        raise HTTPException(
+            503,
+            detail={
+                "error": "S09_REACT_UNAVAILABLE",
+                "message": "Controlled S09 React shell is not built",
+            },
+        )
     response = HTMLResponse(index_html)
     module._s01_disable_cache(response)
     return response

@@ -542,7 +542,7 @@ class PolicyUnavailable(RuntimeError):
 @dataclass(frozen=True)
 class PolicyPrincipal:
     subject: str
-    role: str  # "admin" | "approver" | "operator"
+    role: str  # "admin" | "approver" | "operator" | "auditor" | ...
     scope: str
     source_id: str
 
@@ -561,6 +561,7 @@ def _validate_principal(principal: PolicyPrincipal | None) -> None:
         "admin",
         "approver",
         "operator",
+        "auditor",
         "replay_operator",
         "simulation_operator",
     }:
@@ -7308,6 +7309,110 @@ class PolicyGovernanceService:
             ]
             workspace["validation_outcome"] = self._validation_outcome(state)
             workspace["activation_outcome"] = self._activation_outcome(state)
+            return workspace
+
+    @classmethod
+    def _governance_actions(
+        cls, role: str, hold_union: list[dict[str, Any]]
+    ) -> list[str]:
+        """The server-owned T09 action surface: exactly the command names
+        the backend accepts for this role under the current ledger state.
+        The React panel renders this list and never derives a transition
+        table."""
+        if role == "operator":
+            actions = ["impose_hold"]
+            if hold_union:
+                # The compatible rollback path exists only while a Policy
+                # Safety Hold is in force; without a hold there is nothing
+                # to recover through.
+                actions.append("propose_rollback")
+            return actions
+        if role == "approver":
+            return ["recover_hold"] if hold_union else []
+        return []
+
+    def query_governance_workspace(
+        self, principal: PolicyPrincipal
+    ) -> dict[str, Any]:
+        """The single atomic T09 governance workspace: one lock hold and one
+        store reload builds the authoritative revision, actor role,
+        server-owned actions, active release, recorded recovery anchor,
+        active hold union and the append-only S09 event refs together, so a
+        worker transition can never land between the reads and yield an
+        inconsistent projection.  The HTTP adapter maps this snapshot into
+        the closed DTO and owns no domain transition rules."""
+        _validate_principal(principal)
+        if principal.role not in {"admin", "approver", "operator", "auditor"}:
+            raise PolicyInvalidTransition(
+                "governance workspace is not available to this role"
+            )
+        with self._lock:
+            self._store.reload()
+            events = self._store.policy_governance_events
+            active = self._fold_active_projection(events, principal.scope)
+            hold_union = (
+                copy.deepcopy(active.get("hold_union") or [])
+                if active is not None
+                else []
+            )
+            workspace: dict[str, Any] = {
+                "track": "C-DEMO",
+                "capability_gate": "G3",
+                "scope": principal.scope,
+                "governance_revision": len(events),
+                "actor_role": principal.role,
+                "actions": self._governance_actions(principal.role, hold_union),
+                "active_release": None,
+                "recovery_anchor": None,
+                "holds": hold_union,
+                "events": [],
+            }
+            if active is not None:
+                workspace["active_release"] = {
+                    "active_generation": active["active_generation"],
+                    "candidate_id": active["candidate_id"],
+                    "manifest_id": active["manifest_id"],
+                    "manifest_digest": active["manifest_digest"],
+                    "activation_event_id": active["activation_event_id"],
+                    "approval_binding_id": active["approval_binding_id"],
+                    "validation_bundle_id": active["validation_bundle_id"],
+                    "validation_bundle_digest": active[
+                        "validation_bundle_digest"
+                    ],
+                    "recovery_release_id": active["recovery_release_id"],
+                    "activated_at": active["activated_at"],
+                    "bootstrap": bool(active.get("bootstrap")),
+                    "final_impact_digest": active.get("final_impact_digest"),
+                    "final_impact_manifest_id": active.get(
+                        "final_impact_manifest_id"
+                    ),
+                    "final_impact_member_count": active.get(
+                        "final_impact_member_count"
+                    ),
+                }
+                if active.get("recovery_release_id"):
+                    workspace["recovery_anchor"] = {
+                        "release_candidate_id": active["recovery_release_id"]
+                    }
+            workspace["events"] = [
+                {
+                    "event_id": event["event_id"],
+                    "revision": event["revision"],
+                    "kind": event["kind"],
+                    "actor": event["actor"],
+                    "trusted_time": event["trusted_time"],
+                    "reason_code": event.get("reason_code"),
+                    "candidate_id": event.get("candidate_id"),
+                    "manifest_id": event.get("manifest_id"),
+                    "activation_event_id": event.get("activation_event_id"),
+                    "active_generation": event.get("active_generation"),
+                    "hold_id": event.get("hold_id"),
+                    "release_candidate_id": event.get("release_candidate_id"),
+                    "recovery_generation": event.get("recovery_generation"),
+                }
+                for event in events
+                if event.get("scope") == principal.scope
+            ]
             return workspace
 
     def _validation_outcome(

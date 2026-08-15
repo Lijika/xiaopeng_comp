@@ -5,7 +5,9 @@ import AttachmentVersionPanel from "./components/AttachmentVersionPanel";
 import BusinessExceptionApproverPanel from "./components/BusinessExceptionApproverPanel";
 import DemoBatchSummaryPanel from "./components/DemoBatchSummaryPanel";
 import DemoCheckPanel from "./components/DemoCheckPanel";
-import PolicyReleasePanel from "./components/PolicyReleasePanel";
+import PolicyReleasePanel, {
+  GovernanceWorkspacePanel,
+} from "./components/PolicyReleasePanel";
 import QueuePanel from "./components/QueuePanel";
 import RecoveryWorkPanel from "./components/RecoveryWorkPanel";
 import ReviewWorkPanel from "./components/ReviewWorkPanel";
@@ -29,6 +31,9 @@ function isExceptionApproverShell(): boolean {
 }
 function isS08Shell(): boolean {
   return window.location.pathname.startsWith("/controlled/s08");
+}
+function isS09Shell(): boolean {
+  return window.location.pathname.startsWith("/controlled/s09");
 }
 
 /** The T06/T07 competition demo shell: only the closed synthetic facade
@@ -126,6 +131,30 @@ function PolicyReleaseShell() {
   );
 }
 
+/** The T09 governance workspace shell mounted only for
+ * ``/controlled/s09/react``: the four governance roles (admin, approver,
+ * operator, auditor) read the atomic workspace under their own identity;
+ * the workspace query remains the sole authorization/existence authority
+ * and no S01/S02/S05 read beyond the auditor reconciliation can fire here. */
+function GovernanceWorkspaceShell() {
+  return (
+    <div className="mx-auto max-w-4xl px-4 py-6">
+      <header className="app-header">
+        <h1>治理影响与安全冻结工作台</h1>
+        <span className="boundary track" data-testid="s09-boundary-track">
+          C-DEMO
+        </span>
+        <span className="boundary" data-testid="s09-boundary-gate">
+          S09
+        </span>
+      </header>
+      <main>
+        <GovernanceWorkspacePanel />
+      </main>
+    </div>
+  );
+}
+
 /** The Reviewer workbench owns every S01 read; it is never mounted on the
  * Integrator shell, so no S01 query can fire there. */
 function ReviewerWorkbench() {
@@ -196,6 +225,9 @@ export default function App() {
   }
   if (isS08Shell()) {
     return <PolicyReleaseShell />;
+  }
+  if (isS09Shell()) {
+    return <GovernanceWorkspaceShell />;
   }
   return <ReviewerWorkbench />;
 }

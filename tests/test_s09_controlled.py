@@ -76,6 +76,13 @@ SIMULATION_OPERATOR = PolicyPrincipal(
     source_id="s08-test",
 )
 
+AUDITOR = PolicyPrincipal(
+    subject="c-demo-test-auditor",
+    role="auditor",
+    scope=S08_SCOPE,
+    source_id="s08-test",
+)
+
 INTEGRATOR = S01CommandPrincipal(
     subject="registered-test-integrator",
     role="integrator",
@@ -228,6 +235,98 @@ def _active_generation(policy: PolicyGovernanceService) -> int | None:
 
 def _latest_final_digest(policy: PolicyGovernanceService) -> str | None:
     return policy.query_active(ADMIN)["final_impact_digest"]
+
+
+def test_t09_workspace_projection_is_atomic_and_role_owned(
+    tmp_path: Path,
+) -> None:
+    """The one-lock T09 governance workspace projection: four roles read the
+    same ledger revision with their own server-owned actions; the active
+    release and recorded recovery anchor follow the append-only ledger; the
+    active hold union re-derives operator/approver actions and the event
+    refs carry the S09 hold/impact/activation identities."""
+    service, policy = _s09_governed(tmp_path)
+    bootstrap = policy.query_active(ADMIN)
+    bootstrap_candidate_id = bootstrap["candidate_id"]
+
+    for principal, role, actions in (
+        (ADMIN, "admin", []),
+        (APPROVER, "approver", []),
+        (OPERATOR, "operator", ["impose_hold"]),
+        (AUDITOR, "auditor", []),
+    ):
+        workspace = policy.query_governance_workspace(principal)
+        assert workspace["track"] == "C-DEMO"
+        assert workspace["capability_gate"] == "G3"
+        assert workspace["actor_role"] == role
+        assert workspace["actions"] == actions
+        assert workspace["governance_revision"] == governance_revision(policy)
+        assert workspace["active_release"]["active_generation"] == 1
+        # The bootstrap release records itself as its known-good anchor.
+        assert workspace["recovery_anchor"] == {
+            "release_candidate_id": bootstrap_candidate_id
+        }
+        assert workspace["holds"] == []
+
+    candidate_id = _s09_candidate_in_review(policy, "t09-ws-svc")
+    _s09_preview_approve_schedule(policy, candidate_id, "t09-ws-svc")
+    activation_at = int(time.time()) + 300
+    result = policy.process_next_policy_job(now=activation_at)
+    assert result["status"] == "complete", result
+    assert _active_generation(policy) == 2
+
+    workspace = policy.query_governance_workspace(ADMIN)
+    active = workspace["active_release"]
+    assert active["active_generation"] == 2
+    assert active["candidate_id"] == candidate_id
+    assert active["recovery_release_id"] == bootstrap_candidate_id
+    assert workspace["recovery_anchor"] == {
+        "release_candidate_id": bootstrap_candidate_id
+    }
+    assert active["final_impact_digest"]
+    kinds = [event["kind"] for event in workspace["events"]]
+    assert "impact_previewed" in kinds
+    assert "approved" in kinds
+    assert "activated" in kinds
+    assert [event["revision"] for event in workspace["events"]] == sorted(
+        event["revision"] for event in workspace["events"]
+    )
+
+    hold = policy.impose_hold(
+        principal=OPERATOR,
+        reason_code="S09_TEST_HOLD",
+        hold_scope="open_cycle",
+        idempotency_key="t09-ws-svc-hold",
+        expected_governance_revision=governance_revision(policy),
+    )
+    operator_ws = policy.query_governance_workspace(OPERATOR)
+    assert operator_ws["actions"] == ["impose_hold", "propose_rollback"]
+    rendered = operator_ws["holds"][0]
+    assert rendered["hold_id"] == hold["hold_id"]
+    assert rendered["reason_code"] == "S09_TEST_HOLD"
+    assert rendered["hold_scope"] == "open_cycle"
+    assert rendered["imposed_by"] == OPERATOR.subject
+    assert rendered["recovery_criterion_id"]
+    assert rendered["recovery_criterion_digest"]
+    assert isinstance(rendered["authority_revision"], int)
+    assert rendered["authority_revision"] >= 1
+    approver_ws = policy.query_governance_workspace(APPROVER)
+    assert approver_ws["actions"] == ["recover_hold"]
+    assert (
+        approver_ws["governance_revision"] == operator_ws["governance_revision"]
+    )
+    hold_event = next(
+        event
+        for event in approver_ws["events"]
+        if event["kind"] == "hold_imposed"
+    )
+    assert hold_event["hold_id"] == hold["hold_id"]
+    assert hold_event["actor"]["subject"] == OPERATOR.subject
+
+    # The four-role surface stays closed at the service seam too: a
+    # diagnostic identity can never read the T09 workspace.
+    with pytest.raises(PolicyInvalidTransition):
+        policy.query_governance_workspace(REPLAY_OPERATOR)
 
 
 def test_final_expansion_outside_envelope_stops_activation_with_zero_delta(
@@ -2675,6 +2774,193 @@ def _route_reviewer() -> S01CommandPrincipal:
         role="reviewer",
         scope="C-DEMO",
         source_id="s01-test-client",
+    )
+
+
+def _route_reviewer() -> S01CommandPrincipal:
+    return S01CommandPrincipal(
+        subject="registered-test-integrator",
+        role="reviewer",
+        scope="C-DEMO",
+        source_id="s01-test-client",
+    )
+
+
+def test_hold_frame_keeps_authority_consistent_route_for_covered_application(
+    tmp_path: Path,
+) -> None:
+    """A covered application always carries the authority-consistent
+    Unprocessable frame while a hold is in force: the route is
+    ``unprocessable`` (never a stale ``pending_check`` a late impact
+    disposition can leave behind), the Reviewer history read stays
+    available, and a second composable hold re-enforces the same frame."""
+    service, policy = _s09_governed(tmp_path)
+    application_id, _ = _s01_submit_and_run(service, "s09-hold-frame-1")
+    hold = policy.impose_hold(
+        principal=OPERATOR,
+        reason_code="S09_TEST_HOLD",
+        hold_scope="open_cycle",
+        idempotency_key="s09-hold-frame-1",
+        expected_governance_revision=governance_revision(policy),
+    )
+    assert hold["status"] == "accepted"
+    assert service.process_next_policy_impact() == 1
+    app = service._store.applications[application_id]
+    assert app["phase"] == "Unprocessable"
+    assert app["route"] == "unprocessable"
+    view = service.application_history_view(
+        principal=_route_reviewer(), application_id=application_id
+    )
+    assert not any(run["current"] for run in view["runs"])
+    # A second composable hold re-enforces the same authority frame.
+    policy.impose_hold(
+        principal=OPERATOR,
+        reason_code="S09_TEST_HOLD_2",
+        hold_scope="open_cycle",
+        idempotency_key="s09-hold-frame-2",
+        expected_governance_revision=governance_revision(policy),
+    )
+    assert service.process_next_policy_impact() == 1
+    app = service._store.applications[application_id]
+    assert app["phase"] == "Unprocessable"
+    assert app["route"] == "unprocessable"
+    view = service.application_history_view(
+        principal=_route_reviewer(), application_id=application_id
+    )
+    assert not any(run["current"] for run in view["runs"])
+
+
+def test_impact_disposition_under_hold_keeps_authority_consistent_route(
+    tmp_path: Path,
+) -> None:
+    """An impact disposition consumed while a hold is in force (the
+    blocked-by-hold frame, e.g. the rollback activation's final impact)
+    must restore the Unprocessable route instead of leaving the
+    (Unprocessable, pending_check) pair the read paths reject as an
+    authority failure."""
+    service, policy = _s09_governed(tmp_path)
+    known_good = policy.query_active(ADMIN)["candidate_id"]
+    candidate_a = _s09_candidate_in_review(policy, "s09-hold-impact-a")
+    _, _, _, activation_at = _s09_preview_approve_schedule(
+        policy, candidate_a, "s09-hold-impact-a"
+    )
+    result = policy.process_next_policy_job(now=activation_at)
+    assert result["status"] == "complete", result
+    assert _active_generation(policy) == 2
+    assert service.process_next_policy_impact() == 1
+    application_id, _ = _s01_submit_and_run(service, "s09-hold-impact-1")
+    hold = policy.impose_hold(
+        principal=OPERATOR,
+        reason_code="S09_TEST_HOLD",
+        hold_scope="open_cycle",
+        idempotency_key="s09-hold-impact-hold",
+        expected_governance_revision=governance_revision(policy),
+    )
+    assert service.process_next_policy_impact() == 1
+    # The rollback activation publishes a new final impact while the hold is
+    # in force; its disposition for the covered member is blocked by the
+    # hold and must never break the Unprocessable frame.
+    rollback = policy.propose_rollback(
+        principal=OPERATOR,
+        release_candidate_id=known_good,
+        reason_code="S09_TEST_ROLLBACK",
+        idempotency_key="s09-hold-impact-rb",
+        expected_governance_revision=governance_revision(policy),
+    )
+    assert rollback["compatibility"]["compatible"] is True
+    rb = rollback["candidate_id"]
+    policy.submit_review(
+        principal=ADMIN,
+        candidate_id=rb,
+        idempotency_key="s09-hold-impact-rb-review",
+        expected_governance_revision=governance_revision(policy),
+    )
+    preview = policy.preview_impact(
+        principal=ADMIN,
+        candidate_id=rb,
+        idempotency_key="s09-hold-impact-rb-preview",
+        expected_governance_revision=governance_revision(policy),
+    )
+    approval = policy.approve(
+        principal=APPROVER,
+        candidate_id=rb,
+        activation_time=activation_at + 1,
+        recovery_release_id=known_good,
+        preview_manifest_id=preview["manifest_id"],
+        idempotency_key="s09-hold-impact-rb-approve",
+        expected_governance_revision=governance_revision(policy),
+    )
+    policy.schedule(
+        principal=ADMIN,
+        approval_binding_id=approval["approval_binding_id"],
+        activation_at=activation_at + 1,
+        idempotency_key="s09-hold-impact-rb-schedule",
+        expected_governance_revision=governance_revision(policy),
+    )
+    result = policy.process_next_policy_job(now=activation_at + 2)
+    assert result["status"] == "complete", result
+    assert _active_generation(policy) == 3
+    assert service.process_next_policy_impact() == 1
+    app = service._store.applications[application_id]
+    assert app["phase"] == "Unprocessable"
+    assert app["route"] == "unprocessable"
+    view = service.application_history_view(
+        principal=_route_reviewer(), application_id=application_id
+    )
+    assert not any(run["current"] for run in view["runs"])
+    # The separate recovery still completes normally.
+    released = policy.recover_hold(
+        principal=APPROVER,
+        hold_id=hold["hold_id"],
+        recovery_generation=3,
+        idempotency_key="s09-hold-impact-recover",
+        expected_governance_revision=governance_revision(policy),
+    )
+    assert released["status"] == "accepted"
+
+
+def test_projection_authority_ignores_auxiliary_lifecycle_facts(
+    tmp_path: Path,
+) -> None:
+    """Auxiliary S09 lifecycle facts (hold invalidation, release
+    consumption) share the revision of their parent transition; the queue
+    projection must exclude them from the contiguous chain so
+    ``refresh_projection`` keeps publishing after a hold/recovery cycle."""
+    service, policy = _s09_governed(tmp_path)
+    application_id, _ = _s01_submit_and_run(service, "s09-proj-aux-1")
+    hold = policy.impose_hold(
+        principal=OPERATOR,
+        reason_code="S09_TEST_HOLD",
+        hold_scope="open_cycle",
+        idempotency_key="s09-proj-aux-hold",
+        expected_governance_revision=governance_revision(policy),
+    )
+    assert service.process_next_policy_impact() == 1
+    released = policy.recover_hold(
+        principal=APPROVER,
+        hold_id=hold["hold_id"],
+        recovery_generation=1,
+        idempotency_key="s09-proj-aux-recover",
+        expected_governance_revision=governance_revision(policy),
+    )
+    assert released["status"] == "accepted"
+    assert service.process_next_policy_impact() == 1
+    for _ in range(30):
+        outcome = service.process_next_job()
+        if outcome.status == "complete":
+            break
+    # The auxiliary facts are present in the lifecycle chain; the projection
+    # must still publish (previously raised
+    # "projection lifecycle authority is not contiguous").
+    result = service.refresh_projection()
+    assert isinstance(result, dict)
+    queue = service.queue_view(
+        role="reviewer",
+        scope="C-DEMO",
+        subject="registered-test-integrator",
+    )
+    assert any(
+        item["application_id"] == application_id for item in queue["items"]
     )
 
 

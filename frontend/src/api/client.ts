@@ -62,6 +62,14 @@ export type S08ScheduleResponse = components["schemas"]["S08ScheduleResponse"];
 export type S08CancelResponse = components["schemas"]["S08CancelResponse"];
 export type S08StatusResponse = components["schemas"]["S08StatusResponse"];
 export type S09PreviewResponse = components["schemas"]["S09PreviewResponse"];
+export type S09GovernanceWorkspaceResponse =
+  components["schemas"]["S09GovernanceWorkspaceResponse"];
+export type S09ImposeHoldResponse = components["schemas"]["S09ImposeHoldResponse"];
+export type S09ProposeRollbackResponse =
+  components["schemas"]["S09ProposeRollbackResponse"];
+export type S09RecoverHoldResponse = components["schemas"]["S09RecoverHoldResponse"];
+export type S09ImpactDispositionsResponse =
+  components["schemas"]["S09ImpactDispositionsResponse"];
 
 /** A structured server rejection; never invents identifiers or evidence. */
 export class HttpError extends Error {

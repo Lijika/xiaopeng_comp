@@ -7860,6 +7860,162 @@
         "title": "S08ValidatorIdentity",
         "type": "object"
       },
+      "S09ActiveRelease": {
+        "additionalProperties": false,
+        "description": "The server-owned active governed release projection: generation,\nrelease/activation identities, bound evidence references, the recorded\nrecovery release and the final-impact facts.  Never derived by the\nbrowser.",
+        "properties": {
+          "activated_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Activated At"
+          },
+          "activation_event_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Activation Event Id"
+          },
+          "active_generation": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Generation"
+          },
+          "approval_binding_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approval Binding Id"
+          },
+          "bootstrap": {
+            "default": false,
+            "title": "Bootstrap",
+            "type": "boolean"
+          },
+          "candidate_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Candidate Id"
+          },
+          "final_impact_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Final Impact Digest"
+          },
+          "final_impact_manifest_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Final Impact Manifest Id"
+          },
+          "final_impact_member_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Final Impact Member Count"
+          },
+          "manifest_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manifest Digest"
+          },
+          "manifest_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manifest Id"
+          },
+          "recovery_release_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recovery Release Id"
+          },
+          "validation_bundle_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Validation Bundle Digest"
+          },
+          "validation_bundle_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Validation Bundle Id"
+          }
+        },
+        "title": "S09ActiveRelease",
+        "type": "object"
+      },
       "S09AuthorityRange": {
         "additionalProperties": false,
         "properties": {
@@ -8104,6 +8260,93 @@
           "manifest_digest"
         ],
         "title": "S09EnvelopeRef",
+        "type": "object"
+      },
+      "S09GovernanceWorkspaceResponse": {
+        "additionalProperties": false,
+        "description": "The closed T09 governance workspace: the authoritative governance\nrevision, the authenticated actor role, the server-owned action list,\nthe active release and known-good recovery anchor, the active hold\nunion and the append-only S09 event refs -- one atomic snapshot the\npage renders.  The page never derives a transition, a hold or a\nrecovery option.",
+        "properties": {
+          "actions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Actions",
+            "type": "array"
+          },
+          "active_release": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/S09ActiveRelease"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "actor_role": {
+            "enum": [
+              "admin",
+              "approver",
+              "operator",
+              "auditor"
+            ],
+            "title": "Actor Role",
+            "type": "string"
+          },
+          "capability_gate": {
+            "const": "G3",
+            "title": "Capability Gate",
+            "type": "string"
+          },
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/S09WorkspaceEventRef"
+            },
+            "title": "Events",
+            "type": "array"
+          },
+          "governance_revision": {
+            "title": "Governance Revision",
+            "type": "integer"
+          },
+          "holds": {
+            "items": {
+              "$ref": "#/components/schemas/S09HoldRef"
+            },
+            "title": "Holds",
+            "type": "array"
+          },
+          "recovery_anchor": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/S09RecoveryAnchor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          },
+          "track": {
+            "const": "C-DEMO",
+            "title": "Track",
+            "type": "string"
+          }
+        },
+        "required": [
+          "track",
+          "capability_gate",
+          "scope",
+          "governance_revision",
+          "actor_role",
+          "actions",
+          "holds",
+          "events"
+        ],
+        "title": "S09GovernanceWorkspaceResponse",
         "type": "object"
       },
       "S09HoldRef": {
@@ -8818,6 +9061,21 @@
         "title": "S09RecoverHoldResponse",
         "type": "object"
       },
+      "S09RecoveryAnchor": {
+        "additionalProperties": false,
+        "description": "The recorded known-good release identity: the exact release the\ncurrent active was approved with as its recovery fallback.  The rollback\nform's only prefill option.",
+        "properties": {
+          "release_candidate_id": {
+            "title": "Release Candidate Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "release_candidate_id"
+        ],
+        "title": "S09RecoveryAnchor",
+        "type": "object"
+      },
       "S09ReplayBody": {
         "additionalProperties": false,
         "description": "The closed reproduction-replay command: one exact governed release\nover one fixed evidence snapshot for one explicit application.  A\nseparate replay identity; an omitted application never enumerates.",
@@ -9354,6 +9612,128 @@
           "governance_revision"
         ],
         "title": "S09SimulationResponse",
+        "type": "object"
+      },
+      "S09WorkspaceEventRef": {
+        "additionalProperties": false,
+        "description": "One append-only governance event reference in the T09 workspace: the\nshared immutable identity fields plus the S09 hold/rollback/impact/\nactivation/recovery references the page renders.",
+        "properties": {
+          "activation_event_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Activation Event Id"
+          },
+          "active_generation": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Generation"
+          },
+          "actor": {
+            "$ref": "#/components/schemas/S08EventActor"
+          },
+          "candidate_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Candidate Id"
+          },
+          "event_id": {
+            "title": "Event Id",
+            "type": "string"
+          },
+          "hold_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hold Id"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "manifest_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manifest Id"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Code"
+          },
+          "recovery_generation": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recovery Generation"
+          },
+          "release_candidate_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Release Candidate Id"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "trusted_time": {
+            "title": "Trusted Time",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "event_id",
+          "revision",
+          "kind",
+          "actor",
+          "trusted_time"
+        ],
+        "title": "S09WorkspaceEventRef",
         "type": "object"
       },
       "T05BusinessExceptionOperationsResult": {
@@ -16694,6 +17074,94 @@
           }
         },
         "summary": "S09 Simulate"
+      }
+    },
+    "/controlled/s09/api/queries/workspace": {
+      "get": {
+        "description": "The closed T09 governance workspace.\n\nThe service builds the whole snapshot atomically under one lock: the\nauthoritative governance revision (from the governance ledger), the\nauthenticated actor role, the server-owned action list (role + ledger\nstate only), the active release and the recorded known-good recovery\nanchor, the active hold union and the append-only S09 event refs.  This\nadapter only maps that snapshot into the closed DTO and owns no\ntransition rules.",
+        "operationId": "s09_query_workspace_controlled_s09_api_queries_workspace_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S09GovernanceWorkspaceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ValidationErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S08ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "S09 Query Workspace"
+      }
+    },
+    "/controlled/s09/react": {
+      "get": {
+        "description": "The T09 governance workspace React shell: the same built artifact as\nthe other controlled shells, served only to a registered T09 identity\n(admin, approver, operator or auditor) with no-store and no session.  A\nmissing or incomplete build is an explicit closed 503; the S09 API\nremains the sole authority.",
+        "operationId": "controlled_s09_react_page_controlled_s09_react_get",
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Controlled S09 React Page"
       }
     },
     "/demo/react": {

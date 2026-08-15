@@ -33,7 +33,12 @@ import {
   type S08ScheduleResponse,
   type S08StatusResponse,
   type S08SubmitReviewResponse,
+  type S09GovernanceWorkspaceResponse,
+  type S09ImposeHoldResponse,
+  type S09ImpactDispositionsResponse,
   type S09PreviewResponse,
+  type S09ProposeRollbackResponse,
+  type S09RecoverHoldResponse,
   type SubmitResult,
   type VerifyRecoveryResult,
   type WorkspaceResponse,
@@ -96,6 +101,9 @@ export const EXCEPTION_VIEW_KEY = (requestId: string) =>
 export const S08_CANDIDATE_KEY = (candidateId: string) =>
   ["s08", "candidate-workspace", candidateId] as const;
 export const S08_STATUS_KEY = ["s08", "status"] as const;
+export const S09_WORKSPACE_KEY = ["s09", "workspace"] as const;
+export const S09_RECONCILIATION_KEY = (digest: string) =>
+  ["s09", "reconciliation", digest] as const;
 
 /** The fixed governed scope of the C-DEMO workspace (server-owned fact, not
  * an input; the draft metadata editor repeats it for the published record). */
@@ -644,6 +652,9 @@ export type S09PreviewCommand = paths["/controlled/s09/api/commands/preview_impa
 export type S08RejectCommand = paths["/controlled/s08/api/commands/reject"]["post"]["requestBody"]["content"]["application/json"];
 export type S08ScheduleCommand = paths["/controlled/s08/api/commands/schedule"]["post"]["requestBody"]["content"]["application/json"];
 export type S08CancelCommand = paths["/controlled/s08/api/commands/cancel"]["post"]["requestBody"]["content"]["application/json"];
+export type S09ImposeHoldCommand = paths["/controlled/s09/api/commands/impose_hold"]["post"]["requestBody"]["content"]["application/json"];
+export type S09ProposeRollbackCommand = paths["/controlled/s09/api/commands/propose_rollback"]["post"]["requestBody"]["content"]["application/json"];
+export type S09RecoverHoldCommand = paths["/controlled/s09/api/commands/recover_hold"]["post"]["requestBody"]["content"]["application/json"];
 
 /**
  * The authoritative S08 governance revision for the draft workflow.  The
@@ -895,4 +906,89 @@ export function useS08StatusPoll(
     queryClient,
   ]);
   return outcome;
+}
+
+/**
+ * The authoritative T09 governance workspace read.  The server owns the
+ * actor role, the action list, the active release, the recovery anchor, the
+ * active hold union and the governance revision; the panel never derives a
+ * transition or a hold.  Existence-hiding 404 and other client errors are
+ * never retried; only transient server statuses are.
+ */
+export function useS09Workspace(): UseQueryResult<S09GovernanceWorkspaceResponse> {
+  return useQuery({
+    queryKey: S09_WORKSPACE_KEY,
+    queryFn: () =>
+      request<S09GovernanceWorkspaceResponse>(
+        "/controlled/s09/api/queries/workspace",
+      ),
+    retry: retryPolicy,
+  });
+}
+
+/**
+ * The T09 command hooks share the review-command shape: a retry:false POST
+ * through the thin same-origin adapter whose acceptance invalidates the
+ * server-owned S09 queries (the workspace first of all).  No optimistic
+ * transition is ever applied, and the panel supplies the latest
+ * authoritative ``expected_governance_revision`` from the workspace.
+ */
+function useS09CommandMutation<TResult, TCommand>(
+  path: string,
+): UseMutationResult<TResult, Error, TCommand> {
+  return useReviewCommandMutation<TResult, TCommand>(path, ["s09"]);
+}
+
+export function useImposeHold(): UseMutationResult<
+  S09ImposeHoldResponse,
+  Error,
+  S09ImposeHoldCommand
+> {
+  return useS09CommandMutation<S09ImposeHoldResponse, S09ImposeHoldCommand>(
+    "/controlled/s09/api/commands/impose_hold",
+  );
+}
+
+export function useProposeRollback(): UseMutationResult<
+  S09ProposeRollbackResponse,
+  Error,
+  S09ProposeRollbackCommand
+> {
+  return useS09CommandMutation<
+    S09ProposeRollbackResponse,
+    S09ProposeRollbackCommand
+  >("/controlled/s09/api/commands/propose_rollback");
+}
+
+export function useRecoverHold(): UseMutationResult<
+  S09RecoverHoldResponse,
+  Error,
+  S09RecoverHoldCommand
+> {
+  return useS09CommandMutation<S09RecoverHoldResponse, S09RecoverHoldCommand>(
+    "/controlled/s09/api/commands/recover_hold",
+  );
+}
+
+/**
+ * The Auditor's per-member impact-disposition receipts for one final impact
+ * digest.  Only the registered auditor identity can read this route; the
+ * panel enables it exactly for the auditor role and an active final impact.
+ * The route is owned by the S01 Lifecycle reconciliation contract — S09 only
+ * gates it to the auditor read surface; the S01 authority stays untouched.
+ * Existence-hiding 404 and other client errors are never retried; only
+ * transient server statuses are.
+ */
+export function useImpactReconciliation(
+  digest: string | null,
+): UseQueryResult<S09ImpactDispositionsResponse> {
+  return useQuery({
+    queryKey: S09_RECONCILIATION_KEY(digest ?? ""),
+    enabled: digest !== null,
+    queryFn: () =>
+      request<S09ImpactDispositionsResponse>(
+        `/controlled/s01/api/queries/impact-dispositions/reconciliation?final_impact_digest=${encodeURIComponent(digest ?? "")}`,
+      ),
+    retry: retryPolicy,
+  });
 }

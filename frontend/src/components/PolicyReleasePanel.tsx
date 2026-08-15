@@ -4,18 +4,25 @@ import {
   HttpError,
   isDefinitiveS08Rejection,
   type S08CandidateWorkspaceResponse,
+  type S09PreviewResponse,
+  type S09ProposeRollbackResponse,
 } from "../api/client";
 import {
   useApproveCandidate,
   useCancelCandidate,
   useCandidateWorkspace,
   useFreezeCandidate,
+  useImpactReconciliation,
+  useImposeHold,
   useImportLegacy,
+  useProposeRollback,
   useRejectCandidate,
+  useRecoverHold,
   useRequestValidation,
   useReviseDraft,
   useS08Status,
   useS08StatusPoll,
+  useS09Workspace,
   useScheduleActivation,
   useSubmitReview,
   type S08ApproveCommand,
@@ -28,6 +35,10 @@ import {
   type S08SubmitReviewCommand,
   type S08ValidationCommand,
   usePreviewImpact,
+  type S09ImposeHoldCommand,
+  type S09PreviewCommand,
+  type S09ProposeRollbackCommand,
+  type S09RecoverHoldCommand,
 } from "../api/hooks";
 import { Button } from "./ui/button";
 
@@ -571,7 +582,11 @@ function WorkspaceActions({
     "none" | "unavailable" | "timed_out"
   >("none");
   const [notice, setNotice] = useState<string | null>(null);
-  const [previewing, setPreviewing] = useState(false);
+  /** The last accepted server impact preview for this workspace: the only
+   * source of the exact ``preview_manifest_id`` and the revision the
+   * approval fences on.  Cleared on any conflict and on acceptance, so a
+   * stale preview can never feed a later approval. */
+  const [previewDto, setPreviewDto] = useState<S09PreviewResponse | null>(null);
 
   const validate = useRequestValidation();
   const submitReview = useSubmitReview();
@@ -590,6 +605,9 @@ function WorkspaceActions({
   const handleError = (error: unknown) => {
     if (isDefinitiveS08Rejection(error)) {
       if (error instanceof HttpError && error.status === 409) {
+        // A conflict proves the ledger moved: any accepted preview is stale
+        // for the next command and must be recomputed after the refetch.
+        setPreviewDto(null);
         onConflict(rejectionText(error));
         return;
       }
@@ -645,6 +663,60 @@ function WorkspaceActions({
       },
       onError: handleError,
     });
+  };
+
+  /** Run the immutable impact preview through the shared command latch and
+   * hand the accepted server DTO to ``previewDone``.  The preview is its own
+   * complete command: a definitive acceptance marks the latch final and the
+   * approval then starts a fresh locked command. */
+  const runPreview = (previewDone: (preview: S09PreviewResponse) => void) => {
+    run<S09PreviewCommand>(
+      previewImpact,
+      "preview_impact",
+      { candidate_id: workspace.candidate_id },
+      (result) => {
+        const preview = result as S09PreviewResponse;
+        setPreviewDto(preview);
+        previewDone(preview);
+      },
+    );
+  };
+
+  /** The approval binds the exact server previewed manifest and fences on
+   * the revision that preview returned (the preview appended one immutable
+   * fact); it never re-derives a digest or a revision. */
+  const runApprove = (preview: S09PreviewResponse) => {
+    run<S08ApproveCommand>(
+      approve,
+      "approve",
+      {
+        candidate_id: workspace.candidate_id,
+        activation_time: epochSeconds(activationTime),
+        recovery_release_id: recoveryReleaseId,
+        preview_manifest_id: preview.manifest_id,
+      },
+      () => {
+        setNotice("已审批并锁定发布计划");
+        // The preview fact is consumed by the approval; the workspace
+        // refetch lands the new revision, and the next approval must
+        // preview afresh.
+        setPreviewDto(null);
+      },
+      preview.governance_revision,
+    );
+  };
+
+  /** One-click approval: a still-fresh accepted preview DTO is reused, an
+   * absent or conflict-cleared preview is computed first through the same
+   * latch, then the exact preview is bound. */
+  const submitApprove = () => {
+    setActionError(null);
+    setNotice(null);
+    if (previewDto !== null) {
+      runApprove(previewDto);
+      return;
+    }
+    runPreview(runApprove);
   };
 
   /** Authoritative reconciliation after an unavailable activation poll:
@@ -780,59 +852,7 @@ function WorkspaceActions({
           data-testid="t08-approve-form"
           onSubmit={(event) => {
             event.preventDefault();
-            setActionError(null);
-            setNotice(null);
-            // S09: every approval binds the immutable impact preview.  The
-            // server owns the conservative impact computation; the panel
-            // previews first (a read-only computation that never touches
-            // the command latch) and passes the exact manifest identity
-            // into the approval command, which the latch protects.
-            setPreviewing(true);
-            previewImpact.mutate(
-              {
-                candidate_id: workspace.candidate_id,
-                idempotency_key: crypto.randomUUID(),
-                expected_governance_revision: revision,
-              },
-              {
-                onSuccess: (result) => {
-                  setPreviewing(false);
-                  const preview = result as
-                    | {
-                        status?: string;
-                        manifest_id?: string;
-                        governance_revision?: number;
-                      }
-                    | undefined;
-                  if (!preview?.manifest_id) {
-                    setActionError("影响预览不可用：服务器未返回预览清单");
-                    return;
-                  }
-                  // The preview itself advances the governance revision
-                  // (one immutable impact_previewed fact), so the approval
-                  // fences on the preview's fresh revision, never the
-                  // pre-preview workspace revision.
-                  run<S08ApproveCommand>(
-                    approve,
-                    "approve",
-                    {
-                      candidate_id: workspace.candidate_id,
-                      activation_time: epochSeconds(activationTime),
-                      recovery_release_id: recoveryReleaseId,
-                      preview_manifest_id: preview.manifest_id,
-                    },
-                    () => setNotice("已审批并锁定发布计划"),
-                    typeof preview.governance_revision === "number"
-                      ? preview.governance_revision
-                      : revision,
-                  );
-                },
-                onError: (error) => {
-                  setPreviewing(false);
-                  setActionError(commandRejectionText(error));
-                },
-              },
-            );
+            submitApprove();
           }}
         >
           <label>
@@ -860,15 +880,68 @@ function WorkspaceActions({
             />
           </label>
           <Button
+            type="button"
+            data-testid="t08-preview-button"
+            onClick={() => runPreview(() => {})}
+            disabled={previewImpact.isPending || locked}
+          >
+            {previewImpact.isPending ? "影响预览计算中…" : "影响预览"}
+          </Button>
+          {previewDto !== null && (
+            <div data-testid="t08-preview">
+              <h3>影响预览（服务端只读）</h3>
+              <dl className="facts">
+                <div>
+                  <dt>清单标识</dt>
+                  <dd data-testid="t08-preview-manifest">
+                    {previewDto.manifest_id}
+                  </dd>
+                </div>
+                <div>
+                  <dt>摘要</dt>
+                  <dd>{previewDto.digest}</dd>
+                </div>
+                <div>
+                  <dt>范围</dt>
+                  <dd>{previewDto.scope}</dd>
+                </div>
+                <div>
+                  <dt>成员数</dt>
+                  <dd data-testid="t08-preview-members">
+                    {previewDto.member_count}
+                  </dd>
+                </div>
+                <div>
+                  <dt>分区</dt>
+                  <dd>
+                    {Object.entries(previewDto.partition_counts)
+                      .map(([name, count]) => `${name}: ${count}`)
+                      .join("，")}
+                  </dd>
+                </div>
+                <div>
+                  <dt>扩张标记</dt>
+                  <dd data-testid="t08-preview-expansion">
+                    {previewDto.expanded_to_full_scope
+                      ? "已扩张到完整范围"
+                      : "未扩张"}
+                  </dd>
+                </div>
+                <div>
+                  <dt>目标代次</dt>
+                  <dd data-testid="t08-preview-generation">
+                    {previewDto.target_generation}
+                  </dd>
+                </div>
+              </dl>
+            </div>
+          )}
+          <Button
             type="submit"
             data-testid="t08-approve-button"
-            disabled={approve.isPending || previewing || locked}
+            disabled={approve.isPending || previewImpact.isPending || locked}
           >
-            {previewing
-              ? "影响预览计算中…"
-              : approve.isPending
-                ? "审批中…"
-                : "审批并锁定发布计划"}
+            {approve.isPending ? "审批中…" : "审批并锁定发布计划"}
           </Button>
         </form>
       )}
@@ -1351,6 +1424,616 @@ export default function PolicyReleasePanel({
             重试上一命令
           </Button>
           <Button data-testid="t08-command-reconcile" onClick={refresh}>
+            刷新权威状态
+          </Button>
+        </div>
+      )}
+    </>
+  );
+}
+
+/**
+ * The T09 governance workspace: one atomic server projection rendered for
+ * the four governance roles.  The server owns the actor role, the action
+ * list, the active release, the known-good recovery anchor, the active hold
+ * union and the append-only event refs; this panel renders exactly those
+ * facts, imposes scoped safety holds through the same command-latch
+ * discipline as the T08 surface, and shows the Auditor the per-member
+ * impact reconciliation for the active final impact.  FastAPI remains the
+ * sole authority; the panel never derives a transition, a hold or a
+ * recovery option, and protected mutations use ``retry: false`` with an
+ * unknown result retaining the byte-identical locked command.
+ */
+export function GovernanceWorkspacePanel() {
+  const commandLatch = useCommandLatch();
+  const reconcileRef = useRef<(() => Promise<number>) | null>(null);
+  const attemptRef = useRef<AttemptRecord | null>(null);
+  const latch = commandLatch.latch;
+  const locked = latch !== null && latch.outcome !== "final";
+  const workspaceQuery = useS09Workspace();
+  const imposeHold = useImposeHold();
+  const proposeRollback = useProposeRollback();
+  const recoverHold = useRecoverHold();
+  const [conflict, setConflict] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [holdReason, setHoldReason] = useState("");
+  const [holdScope, setHoldScope] = useState("open_cycle");
+  const [rollbackReason, setRollbackReason] = useState("");
+  const [rollbackRelease, setRollbackRelease] = useState("");
+  const [rollbackResult, setRollbackResult] =
+    useState<S09ProposeRollbackResponse | null>(null);
+  const [recoverHoldId, setRecoverHoldId] = useState("");
+  const [recoverGeneration, setRecoverGeneration] = useState("");
+
+  // The Auditor's reconciliation read is enabled only for the auditor role
+  // and an active final impact digest; the hook itself stays mounted so the
+  // hook order never varies.
+  const workspaceData = workspaceQuery.data;
+  const finalDigest =
+    workspaceData?.active_release?.final_impact_digest ?? null;
+  const reconciliation = useImpactReconciliation(
+    workspaceData?.actor_role === "auditor" ? finalDigest : null,
+  );
+
+  // The panel's authoritative reconciliation refetches the workspace.
+  useEffect(() => {
+    reconcileRef.current = async () => {
+      const result = await workspaceQuery.refetch();
+      return (
+        result.data?.governance_revision ??
+        workspaceQuery.data?.governance_revision ??
+        0
+      );
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceQuery]);
+
+  const handleConflict = (message: string) => {
+    setConflict(message);
+    if (message !== "") {
+      void workspaceQuery.refetch().then((result) => {
+        if (result.isSuccess) commandLatch.markFinal();
+      });
+    }
+  };
+
+  const handleError = (error: unknown) => {
+    if (isDefinitiveS08Rejection(error)) {
+      if (error instanceof HttpError && error.status === 409) {
+        // A conflict proves the ledger moved: any accepted hold, rollback
+        // verdict or recovery is stale and must be recomputed after the
+        // authoritative refetch.
+        setRollbackResult(null);
+        handleConflict(rejectionText(error));
+        return;
+      }
+      commandLatch.markFinal();
+    } else {
+      commandLatch.markUnknown();
+    }
+    if (error instanceof HttpError && error.status === 422) {
+      setActionError("命令无效：请检查输入后重试");
+      return;
+    }
+    setActionError(commandRejectionText(error));
+  };
+
+  const run = <TCommand extends Record<string, unknown>>(
+    mutation: {
+      mutate: (
+        command: TCommand,
+        callbacks?: {
+          onSuccess?: (result: unknown) => void;
+          onError?: (error: unknown) => void;
+        },
+      ) => void;
+      isPending: boolean;
+    },
+    action: string,
+    command: Omit<
+      TCommand,
+      "idempotency_key" | "expected_governance_revision"
+    >,
+    onSuccess?: (result: unknown) => void,
+    revisionOverride?: number,
+  ) => {
+    setConflict(null);
+    setActionError(null);
+    setNotice(null);
+    const revision = workspaceQuery.data?.governance_revision ?? 0;
+    const lockedBody = commandLatch.lock(
+      action,
+      command,
+      revisionOverride ?? revision,
+    );
+    if (lockedBody === null) return;
+    attemptRef.current = {
+      send: (body, callbacks) =>
+        mutation.mutate(JSON.parse(body) as TCommand, callbacks),
+      onSuccess,
+      onError: handleError,
+    };
+    mutation.mutate(JSON.parse(lockedBody.body) as TCommand, {
+      onSuccess: (result: unknown) => {
+        commandLatch.markFinal();
+        onSuccess?.(result);
+      },
+      onError: handleError,
+    });
+  };
+
+  /** The only re-send while the latch is unknown: the exact locked bytes on
+   * the exact locked key, replayed through the mutation that sent them. */
+  const retry = () => {
+    const lockedLatch = commandLatch.latch;
+    const attempt = attemptRef.current;
+    if (lockedLatch === null || attempt === null) return;
+    commandLatch.markInFlight();
+    attempt.send(lockedLatch.body, {
+      onSuccess: (result: unknown) => {
+        commandLatch.markFinal();
+        attempt.onSuccess?.(result);
+      },
+      onError: (error: unknown) => {
+        if (
+          isDefinitiveS08Rejection(error) &&
+          !(error instanceof HttpError && error.status === 409)
+        ) {
+          commandLatch.markFinal();
+        } else if (!isDefinitiveS08Rejection(error)) {
+          commandLatch.markUnknown();
+        }
+        attempt.onError?.(error);
+      },
+    });
+  };
+
+  /** Display-only authoritative refresh: never releases the command latch. */
+  const refresh = () => {
+    if (reconcileRef.current === null) return;
+    void reconcileRef.current();
+  };
+
+  const submitImposeHold = () => {
+    run<S09ImposeHoldCommand>(
+      imposeHold,
+      "impose_hold",
+      { reason_code: holdReason, hold_scope: holdScope },
+      () => setNotice("已施加安全冻结"),
+    );
+  };
+
+  const submitProposeRollback = () => {
+    run<S09ProposeRollbackCommand>(
+      proposeRollback,
+      "propose_rollback",
+      { release_candidate_id: rollbackReleaseValue, reason_code: rollbackReason },
+      (result) => setRollbackResult(result as S09ProposeRollbackResponse),
+    );
+  };
+
+  const submitRecoverHold = () => {
+    run<S09RecoverHoldCommand>(
+      recoverHold,
+      "recover_hold",
+      { hold_id: recoverHoldIdValue, recovery_generation: Number(recoverGenerationValue) },
+      () => setNotice("已确认恢复并释放安全冻结"),
+    );
+  };
+
+  if (workspaceQuery.isLoading || workspaceQuery.data === undefined) {
+    if (!workspaceQuery.isError) {
+      return (
+        <section className="panel" data-testid="t09-loading">
+          正在加载治理工作区…
+        </section>
+      );
+    }
+    const error = workspaceQuery.error;
+    if (error instanceof HttpError && error.status === 403) {
+      return (
+        <section className="panel" data-testid="t09-forbidden" role="alert">
+          {rejectionText(error)}
+        </section>
+      );
+    }
+    if (error instanceof HttpError && error.status === 404) {
+      return (
+        <section className="panel" data-testid="t09-not-found" role="alert">
+          治理工作区不可访问
+        </section>
+      );
+    }
+    if (
+      error instanceof HttpError &&
+      error.status === 503 &&
+      isDefinitiveS08Rejection(error)
+    ) {
+      return (
+        <section className="panel" data-testid="t09-unavailable" role="alert">
+          治理服务暂不可用
+        </section>
+      );
+    }
+    if (error instanceof HttpError && error.status === 422) {
+      return (
+        <section className="panel" data-testid="t09-invalid" role="alert">
+          请求无效：请刷新后重试
+        </section>
+      );
+    }
+    return (
+      <section className="panel" data-testid="t09-error" role="alert">
+        {rejectionText(error)}
+      </section>
+    );
+  }
+
+  const workspace = workspaceQuery.data;
+  const actions = new Set(workspace.actions ?? []);
+  const active = workspace.active_release ?? null;
+  const recoveryRelease =
+    workspace.recovery_anchor?.release_candidate_id ?? "";
+  // The rollback form's only prefill is the server-recorded known-good
+  // recovery anchor; an explicit user entry wins.
+  const rollbackReleaseValue =
+    rollbackRelease === "" ? recoveryRelease : rollbackRelease;
+  const recoverHoldIdValue =
+    recoverHoldId === "" ? (workspace.holds[0]?.hold_id ?? "") : recoverHoldId;
+  const recoverGenerationValue =
+    recoverGeneration === ""
+      ? String(active?.active_generation ?? "")
+      : recoverGeneration;
+
+  return (
+    <>
+      <section className="panel" data-testid="t09-workspace">
+        <h2>治理影响与安全冻结工作区</h2>
+        <dl className="facts">
+          <div>
+            <dt>当前角色</dt>
+            <dd data-testid="t09-role">{workspace.actor_role}</dd>
+          </div>
+          <div>
+            <dt>治理修订号</dt>
+            <dd data-testid="t09-revision">{workspace.governance_revision}</dd>
+          </div>
+          <div>
+            <dt>作用域</dt>
+            <dd>{workspace.scope}</dd>
+          </div>
+          <div>
+            <dt>服务器授权动作</dt>
+            <dd data-testid="t09-action-list">
+              {workspace.actions.length === 0
+                ? "—"
+                : workspace.actions.join("，")}
+            </dd>
+          </div>
+          <div>
+            <dt>当前活跃发布</dt>
+            <dd data-testid="t09-active-release">
+              {active === null
+                ? "—"
+                : `${active.candidate_id} / ${active.manifest_digest} / 代次 ${active.active_generation}`}
+            </dd>
+          </div>
+          <div>
+            <dt>已知良好恢复锚点</dt>
+            <dd data-testid="t09-recovery-anchor">
+              {workspace.recovery_anchor === null ||
+              workspace.recovery_anchor === undefined
+                ? "—"
+                : workspace.recovery_anchor.release_candidate_id}
+            </dd>
+          </div>
+        </dl>
+
+        <div data-testid="t09-holds">
+          <h3>安全冻结（服务端只读）</h3>
+          {workspace.holds.length === 0 ? (
+            <p data-testid="t09-holds-empty">当前无生效安全冻结</p>
+          ) : (
+            <ul>
+              {workspace.holds.map((hold) => (
+                <li key={hold.hold_id} data-testid="t09-hold">
+                  <dl className="facts">
+                    <div>
+                      <dt>范围</dt>
+                      <dd data-testid="t09-hold-scope">{hold.hold_scope}</dd>
+                    </div>
+                    <div>
+                      <dt>原因</dt>
+                      <dd data-testid="t09-hold-reason">{hold.reason_code}</dd>
+                    </div>
+                    <div>
+                      <dt>施加者</dt>
+                      <dd data-testid="t09-hold-actor">{hold.imposed_by}</dd>
+                    </div>
+                    <div>
+                      <dt>恢复判定</dt>
+                      <dd data-testid="t09-hold-criterion">
+                        {hold.recovery_criterion_id ?? "—"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>判定摘要</dt>
+                      <dd>{hold.recovery_criterion_digest ?? "—"}</dd>
+                    </div>
+                    <div>
+                      <dt>权威修订</dt>
+                      <dd data-testid="t09-hold-authority-revision">
+                        {hold.authority_revision ?? "—"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>状态</dt>
+                      <dd data-testid="t09-hold-status">
+                        生效中，持续至显式恢复
+                      </dd>
+                    </div>
+                  </dl>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        {workspace.events.length > 0 && (
+          <div data-testid="t09-events">
+            <h3>治理事件（服务端只读，只追加）</h3>
+            <ol>
+              {workspace.events.map((event) => (
+                <li key={event.event_id} data-testid="t09-event">
+                  {event.kind} · {event.actor.subject} ·{" "}
+                  {event.reason_code ?? "—"} · 修订 {event.revision}
+                  {event.hold_id !== null && event.hold_id !== undefined
+                    ? ` · 冻结 ${event.hold_id}`
+                    : ""}
+                  {event.release_candidate_id !== null &&
+                  event.release_candidate_id !== undefined
+                    ? ` · 回滚 ${event.release_candidate_id}`
+                    : ""}
+                </li>
+              ))}
+            </ol>
+          </div>
+        )}
+
+        {actions.has("impose_hold") && (
+          <form
+            data-testid="t09-impose-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              submitImposeHold();
+            }}
+          >
+            <label>
+              冻结原因码
+              <input
+                value={holdReason}
+                onChange={(event) => {
+                  setHoldReason(event.target.value);
+                }}
+                required
+                disabled={locked}
+              />
+            </label>
+            <label>
+              冻结范围
+              <input
+                value={holdScope}
+                onChange={(event) => {
+                  setHoldScope(event.target.value);
+                }}
+                required
+                disabled={locked}
+              />
+            </label>
+            <Button
+              type="submit"
+              data-testid="t09-impose-button"
+              disabled={imposeHold.isPending || locked}
+            >
+              {imposeHold.isPending ? "冻结中…" : "施加安全冻结"}
+            </Button>
+          </form>
+        )}
+
+        {actions.has("propose_rollback") && (
+          <form
+            data-testid="t09-rollback-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              submitProposeRollback();
+            }}
+          >
+            <label>
+              回滚发布标识
+              <input
+                value={rollbackReleaseValue}
+                onChange={(event) => {
+                  setRollbackRelease(event.target.value);
+                }}
+                required
+                disabled={locked}
+              />
+            </label>
+            <label>
+              回滚原因码
+              <input
+                value={rollbackReason}
+                onChange={(event) => {
+                  setRollbackReason(event.target.value);
+                }}
+                required
+                disabled={locked}
+              />
+            </label>
+            <Button
+              type="submit"
+              data-testid="t09-rollback-button"
+              disabled={proposeRollback.isPending || locked}
+            >
+              {proposeRollback.isPending ? "校验中…" : "提出兼容回滚"}
+            </Button>
+            {rollbackResult !== null && (
+              <div data-testid="t09-rollback-result">
+                <p data-testid="t09-rollback-compatibility">
+                  {rollbackResult.compatibility.compatible
+                    ? "回滚兼容：可恢复"
+                    : "回滚不兼容"}{" "}
+                  · {rollbackResult.compatibility.reason_code}
+                </p>
+                <p data-testid="t09-rollback-candidate">
+                  新回滚候选：{rollbackResult.candidate_id}
+                </p>
+                {rollbackResult.compatibility.compatible && (
+                  <a
+                    data-testid="t09-rollback-link"
+                    href={`/controlled/s08/react?candidate=${encodeURIComponent(
+                      rollbackResult.candidate_id,
+                    )}`}
+                  >
+                    在策略发布工作台继续审批回滚候选
+                  </a>
+                )}
+              </div>
+            )}
+          </form>
+        )}
+
+        {actions.has("recover_hold") && (
+          <form
+            data-testid="t09-recover-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              submitRecoverHold();
+            }}
+          >
+            <label>
+              冻结标识
+              <input
+                value={recoverHoldIdValue}
+                onChange={(event) => {
+                  setRecoverHoldId(event.target.value);
+                }}
+                required
+                disabled={locked}
+              />
+            </label>
+            <label>
+              恢复代次
+              <input
+                type="number"
+                value={recoverGenerationValue}
+                onChange={(event) => {
+                  setRecoverGeneration(event.target.value);
+                }}
+                required
+                readOnly
+                disabled={locked}
+              />
+            </label>
+            <Button
+              type="submit"
+              data-testid="t09-recover-button"
+              disabled={recoverHold.isPending || locked}
+            >
+              {recoverHold.isPending ? "恢复中…" : "确认恢复（释放冻结）"}
+            </Button>
+          </form>
+        )}
+
+        {workspace.actor_role === "auditor" && finalDigest !== null && (
+          <section className="panel" data-testid="t09-recon">
+            <h3>影响对账（审计明细）</h3>
+            {reconciliation.isLoading && (
+              <p data-testid="t09-recon-loading" role="status">
+                对账明细加载中…
+              </p>
+            )}
+            {reconciliation.data === undefined && reconciliation.isError && (
+              <p
+                data-testid={
+                  reconciliation.error instanceof HttpError &&
+                  reconciliation.error.status === 503
+                    ? "t09-recon-unavailable"
+                    : "t09-recon-forbidden"
+                }
+                role="alert"
+              >
+                {reconciliation.error instanceof HttpError &&
+                reconciliation.error.status === 503
+                  ? "对账明细暂不可用"
+                  : "无权访问对账明细"}
+              </p>
+            )}
+            {reconciliation.data !== undefined && (
+              <>
+                <dl className="facts">
+                  <div>
+                    <dt>成员数</dt>
+                    <dd>{reconciliation.data.member_count}</dd>
+                  </div>
+                  <div>
+                    <dt>未消费</dt>
+                    <dd>{reconciliation.data.unconsumed_count}</dd>
+                  </div>
+                </dl>
+                {(reconciliation.data.unconsumed_count > 0 ||
+                  reconciliation.data.members.some(
+                    (member) => member.disposition === "outstanding",
+                  )) && (
+                  <p data-testid="t09-recon-partial" role="alert">
+                    存在未消费或待处理的影响处置：恢复前必须全部对账完成
+                  </p>
+                )}
+                <ul data-testid="t09-recon-members">
+                  {reconciliation.data.members.map((member) => (
+                    <li
+                      key={`${member.application_id}:${member.cycle}`}
+                    >
+                      {member.application_id} · {member.partition} ·{" "}
+                      {member.disposition} · 目标代次{" "}
+                      {member.target_generation} · 重评任务{" "}
+                      {member.reevaluation_job_count}
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+          </section>
+        )}
+
+        {conflict !== null && (
+          <p data-testid="t09-conflict" role="alert">
+            状态已变化：{conflict}
+          </p>
+        )}
+        {notice !== null && (
+          <p data-testid="t09-action-ok" role="status">
+            {notice}
+          </p>
+        )}
+        {actionError !== null && (
+          <p data-testid="t09-action-error" role="alert">
+            {actionError}
+          </p>
+        )}
+      </section>
+      {latch !== null && latch.outcome === "unknown" && (
+        <div data-testid="t09-command-unknown" role="alert">
+          <p>结果未知：网络未确认，重试将使用同一幂等键</p>
+          <Button
+            data-testid="t09-command-retry"
+            onClick={retry}
+            disabled={attemptRef.current === null}
+          >
+            重试上一命令
+          </Button>
+          <Button data-testid="t09-command-reconcile" onClick={refresh}>
             刷新权威状态
           </Button>
         </div>

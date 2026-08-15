@@ -5,7 +5,9 @@ import type { ReactNode } from "react";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
-import PolicyReleasePanel from "./PolicyReleasePanel";
+import PolicyReleasePanel, {
+  GovernanceWorkspacePanel,
+} from "./PolicyReleasePanel";
 import { createQueryClient, fetchRouter } from "../test-utils";
 
 function wrap(client: QueryClient) {
@@ -182,6 +184,7 @@ describe("PolicyReleasePanel T08", () => {
             partition_counts: {"open_cycle": 1},
             zero_hit_proof: false,
             target_generation: 2,
+            governance_revision: 4,
           }),
           { status: 200, headers: { "Content-Type": "application/json" } },
         ),
@@ -232,7 +235,7 @@ describe("PolicyReleasePanel T08", () => {
 
     const posts = router.calls.filter((call) => call.method === "POST");
     // The approval first previews the immutable impact, then binds its
-    // exact manifest identity.
+    // exact manifest identity and the preview's returned revision.
     expect(posts).toHaveLength(2);
     expect(posts[0].url).toBe("/controlled/s09/api/commands/preview_impact");
     expect((posts[0].body as Record<string, unknown>).candidate_id).toBe(
@@ -244,7 +247,10 @@ describe("PolicyReleasePanel T08", () => {
     expect(body.preview_manifest_id).toBe(
       "preview_sha256_1111111111111111111111111111111111111111111111111111111111111111",
     );
-    expect(body.expected_governance_revision).toBe(3);
+    // The approval fences on the revision the preview itself returned (the
+    // preview appends one immutable fact), never the pre-preview workspace
+    // revision.
+    expect(body.expected_governance_revision).toBe(4);
     expect(body.recovery_release_id).toBe(
       "candidate_t08bootstrap00000000000000000",
     );
@@ -358,6 +364,7 @@ describe("PolicyReleasePanel T08", () => {
             partition_counts: {"open_cycle": 1},
             zero_hit_proof: false,
             target_generation: 2,
+            governance_revision: 5,
           }),
           { status: 200, headers: { "Content-Type": "application/json" } },
         ),
@@ -408,7 +415,9 @@ describe("PolicyReleasePanel T08", () => {
     await waitFor(() => expect(approvePosts).toBe(2));
     const posts = fetchMockCalls("approve").map((call) => JSON.parse(call.body));
     expect(posts[1].idempotency_key).not.toBe(posts[0].idempotency_key);
-    expect(posts[1].expected_governance_revision).toBe(4);
+    // The stale preview was discarded on the conflict; the fresh preview
+    // after the refetch fences the new approval on its returned revision.
+    expect(posts[1].expected_governance_revision).toBe(5);
   });
 
   it("renders explicit forbidden, not-found and unavailable states", async () => {
@@ -2127,4 +2136,1074 @@ describe("PolicyReleasePanel T08 review findings", () => {
     },
     30_000,
   );
+
+  function previewPayload(overrides: Record<string, unknown> = {}) {
+    return {
+      status: "accepted",
+      phase: "preview",
+      manifest_id:
+        "preview_sha256_2222222222222222222222222222222222222222222222222222222222222222",
+      digest: "2".repeat(64),
+      scope: "C-DEMO/demo",
+      oracle_version: "s09-impact-oracle/1",
+      level: 1,
+      expanded_to_full_scope: false,
+      member_count: 1,
+      partition_counts: { open_cycle: 1 },
+      zero_hit_proof: false,
+      target_generation: 2,
+      governance_revision: 5,
+      ...overrides,
+    };
+  }
+
+  it("approver previews impact explicitly, renders the full server DTO and approval binds the exact preview revision", async () => {
+    const user = userEvent.setup();
+    const router = fetchRouter({
+      [`GET ${WORKSPACE_PATH}`]: () =>
+        new Response(
+          JSON.stringify(
+            workspacePayload("in_review", "approver", ["approve", "reject"]),
+          ),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      "POST /controlled/s09/api/commands/preview_impact": () =>
+        new Response(
+          JSON.stringify(
+            previewPayload({
+              expanded_to_full_scope: true,
+              member_count: 3,
+              partition_counts: { open_cycle: 2, verification_completed: 1 },
+            }),
+          ),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      "POST /controlled/s08/api/commands/approve": () =>
+        new Response(
+          JSON.stringify({
+            status: "accepted",
+            candidate_id: CANDIDATE,
+            approval_binding_id: "approval_sha256_binding",
+            approval_binding_digest: "binding-digest",
+            validation_bundle_id: "bundle_1",
+            validation_bundle_digest: "bundle-digest",
+            author_subject: "c-demo-policy-admin",
+            approver_subject: "c-demo-policy-approver",
+            activation_time: 1786000000,
+            recovery_release_id: "candidate_t08bootstrap00000000000000000",
+            governance_revision: 6,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    renderPanel(CANDIDATE);
+    await waitFor(() =>
+      expect(screen.getByTestId("t08-approve-form")).toBeInTheDocument(),
+    );
+
+    // The independent explicit preview button renders the complete server
+    // DTO and sends no approval.
+    await user.click(screen.getByTestId("t08-preview-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("t08-preview")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("t08-preview-manifest")).toHaveTextContent(
+      "preview_sha256_2222222222222222222222222222222222222222222222222222222222222222",
+    );
+    expect(screen.getByTestId("t08-preview-members")).toHaveTextContent("3");
+    expect(screen.getByTestId("t08-preview-expansion")).toHaveTextContent(
+      "已扩张到完整范围",
+    );
+    expect(screen.getByTestId("t08-preview-generation")).toHaveTextContent("2");
+    let previewPosts = router.calls.filter(
+      (call) =>
+        call.method === "POST" && call.url.includes("preview_impact"),
+    );
+    expect(previewPosts).toHaveLength(1);
+    expect(
+      router.calls.filter(
+        (call) => call.method === "POST" && call.url.endsWith("/approve"),
+      ),
+    ).toHaveLength(0);
+
+    // The approval reuses the exact previewed manifest and fences on the
+    // revision the preview returned; zero duplicate preview POSTs.
+    await user.type(screen.getByLabelText("生效时间"), "2026-08-10T12:00");
+    await user.click(screen.getByTestId("t08-approve-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("t08-action-ok")).toBeInTheDocument(),
+    );
+    previewPosts = router.calls.filter(
+      (call) =>
+        call.method === "POST" && call.url.includes("preview_impact"),
+    );
+    expect(previewPosts).toHaveLength(1);
+    const approveBodies = router.calls.filter(
+      (call) =>
+        call.method === "POST" && call.url.endsWith("/approve"),
+    );
+    expect(approveBodies).toHaveLength(1);
+    const approveBody = approveBodies[0].body as Record<string, unknown>;
+    expect(approveBody.preview_manifest_id).toBe(
+      "preview_sha256_2222222222222222222222222222222222222222222222222222222222222222",
+    );
+    expect(approveBody.expected_governance_revision).toBe(5);
+    const previewKey = (
+      previewPosts[0].body as Record<string, unknown>
+    ).idempotency_key;
+    expect(approveBody.idempotency_key).not.toBe(previewKey);
+  });
+
+  it("a 409 on the preview surfaces the conflict, refetches and requires a fresh preview", async () => {
+    const user = userEvent.setup();
+    let previewPosts = 0;
+    let workspaceRequests = 0;
+    let resolveRefetch: ((response: Response) => void) | undefined;
+    const pendingRefetch = new Promise<Response>((resolve) => {
+      resolveRefetch = resolve;
+    });
+    const router = fetchRouter({
+      [`GET ${WORKSPACE_PATH}`]: () => {
+        workspaceRequests += 1;
+        if (workspaceRequests === 2) return pendingRefetch;
+        return new Response(
+          JSON.stringify(
+            workspacePayload("in_review", "approver", ["approve", "reject"]),
+          ),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+      "POST /controlled/s09/api/commands/preview_impact": () => {
+        previewPosts += 1;
+        if (previewPosts === 1) {
+          return new Response(
+            JSON.stringify({
+              detail: { error: "S08_CONFLICT", message: "stale governance revision" },
+            }),
+            { status: 409, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response(JSON.stringify(previewPayload()), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+      "POST /controlled/s08/api/commands/approve": () =>
+        new Response(
+          JSON.stringify({
+            status: "accepted",
+            candidate_id: CANDIDATE,
+            approval_binding_id: "approval_sha256_binding",
+            approval_binding_digest: "binding-digest",
+            validation_bundle_id: "bundle_1",
+            validation_bundle_digest: "bundle-digest",
+            author_subject: "c-demo-policy-admin",
+            approver_subject: "c-demo-policy-approver",
+            activation_time: 1786000000,
+            recovery_release_id: "candidate_t08bootstrap00000000000000000",
+            governance_revision: 6,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    renderPanel(CANDIDATE);
+    await waitFor(() =>
+      expect(screen.getByTestId("t08-approve-form")).toBeInTheDocument(),
+    );
+    await user.type(screen.getByLabelText("生效时间"), "2026-08-10T12:00");
+    await user.click(screen.getByTestId("t08-approve-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("t08-conflict")).toHaveTextContent(
+        "stale governance revision",
+      ),
+    );
+    // The stale preview was never approved: no approval POST and the
+    // latched surface stays locked until the authoritative refetch lands.
+    expect(
+      router.calls.filter(
+        (call) => call.method === "POST" && call.url.endsWith("/approve"),
+      ),
+    ).toHaveLength(0);
+    expect(screen.getByTestId("t08-approve-button")).toBeDisabled();
+    expect(previewPosts).toBe(1);
+    await user.click(screen.getByTestId("t08-approve-button"));
+    expect(previewPosts).toBe(1);
+
+    resolveRefetch?.(
+      new Response(
+        JSON.stringify(
+          workspacePayload("in_review", "approver", ["approve", "reject"], {
+            governance_revision: 4,
+          }),
+        ),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("t08-approve-button")).toBeEnabled(),
+    );
+    // The next approval previews afresh and binds the new preview revision.
+    await user.click(screen.getByTestId("t08-approve-button"));
+    await waitFor(() => expect(previewPosts).toBe(2));
+    await waitFor(() =>
+      expect(screen.getByTestId("t08-action-ok")).toBeInTheDocument(),
+    );
+    const approveBodies = router.calls.filter(
+      (call) =>
+        call.method === "POST" && call.url.endsWith("/approve"),
+    );
+    expect(approveBodies).toHaveLength(1);
+    expect(
+      (approveBodies[0].body as Record<string, unknown>)
+        .expected_governance_revision,
+    ).toBe(5);
+  });
+
+  it("renders an explicit forbidden state for the preview with zero approval POSTs", async () => {
+    const user = userEvent.setup();
+    const router = fetchRouter({
+      [`GET ${WORKSPACE_PATH}`]: () =>
+        new Response(
+          JSON.stringify(
+            workspacePayload("in_review", "approver", ["approve", "reject"]),
+          ),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      "POST /controlled/s09/api/commands/preview_impact": () =>
+        new Response(
+          JSON.stringify({
+            detail: { error: "S08_FORBIDDEN", message: "identity required" },
+          }),
+          { status: 403, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    renderPanel(CANDIDATE);
+    await waitFor(() =>
+      expect(screen.getByTestId("t08-approve-form")).toBeInTheDocument(),
+    );
+    await user.type(screen.getByLabelText("生效时间"), "2026-08-10T12:00");
+    await user.click(screen.getByTestId("t08-approve-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("t08-action-error")).toHaveTextContent(
+        "无权限执行此操作",
+      ),
+    );
+    expect(
+      router.calls.filter(
+        (call) => call.method === "POST" && call.url.endsWith("/approve"),
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("renders an explicit unavailable state for the preview with zero approval POSTs", async () => {
+    const user = userEvent.setup();
+    const router = fetchRouter({
+      [`GET ${WORKSPACE_PATH}`]: () =>
+        new Response(
+          JSON.stringify(
+            workspacePayload("in_review", "approver", ["approve", "reject"]),
+          ),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      "POST /controlled/s09/api/commands/preview_impact": () =>
+        new Response(
+          JSON.stringify({
+            detail: {
+              error: "S08_UNAVAILABLE",
+              message: "Governance authority is unavailable",
+            },
+          }),
+          { status: 503, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    renderPanel(CANDIDATE);
+    await waitFor(() =>
+      expect(screen.getByTestId("t08-approve-form")).toBeInTheDocument(),
+    );
+    await user.type(screen.getByLabelText("生效时间"), "2026-08-10T12:00");
+    await user.click(screen.getByTestId("t08-approve-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("t08-action-error")).toHaveTextContent(
+        "治理服务暂不可用",
+      ),
+    );
+    expect(
+      router.calls.filter(
+        (call) => call.method === "POST" && call.url.endsWith("/approve"),
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("retains the same idempotency key for an unknown preview result and replays byte-identical bytes", async () => {
+    const user = userEvent.setup();
+    let previewAttempts = 0;
+    const router = fetchRouter({
+      [`GET ${WORKSPACE_PATH}`]: () =>
+        new Response(
+          JSON.stringify(
+            workspacePayload("in_review", "approver", ["approve", "reject"]),
+          ),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      "POST /controlled/s09/api/commands/preview_impact": () => {
+        previewAttempts += 1;
+        if (previewAttempts === 1) {
+          return Promise.reject(new TypeError("network down"));
+        }
+        return new Response(JSON.stringify(previewPayload()), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+      "POST /controlled/s08/api/commands/approve": () =>
+        new Response(
+          JSON.stringify({
+            status: "accepted",
+            candidate_id: CANDIDATE,
+            approval_binding_id: "approval_sha256_binding",
+            approval_binding_digest: "binding-digest",
+            validation_bundle_id: "bundle_1",
+            validation_bundle_digest: "bundle-digest",
+            author_subject: "c-demo-policy-admin",
+            approver_subject: "c-demo-policy-approver",
+            activation_time: 1786000000,
+            recovery_release_id: "candidate_t08bootstrap00000000000000000",
+            governance_revision: 6,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    renderPanel(CANDIDATE);
+    await waitFor(() =>
+      expect(screen.getByTestId("t08-approve-form")).toBeInTheDocument(),
+    );
+    await user.type(screen.getByLabelText("生效时间"), "2026-08-10T12:00");
+    await user.click(screen.getByTestId("t08-approve-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("t08-command-unknown")).toBeInTheDocument(),
+    );
+    const previewCalls = () =>
+      router.calls.filter(
+        (call) =>
+          call.method === "POST" && call.url.includes("preview_impact"),
+      );
+    expect(previewCalls()).toHaveLength(1);
+
+    // The exact retry replays the same key and identical serialized bytes.
+    await user.click(screen.getByTestId("t08-command-retry"));
+    await waitFor(() => expect(previewCalls()).toHaveLength(2));
+    const [first, second] = previewCalls().map((call) =>
+      JSON.stringify(call.body),
+    );
+    expect(second).toBe(first);
+    const previewKeys = previewCalls().map(
+      (call) => (call.body as Record<string, unknown>).idempotency_key,
+    );
+    expect(new Set(previewKeys).size).toBe(1);
+
+    // The accepted preview feeds exactly one approval with a fresh key.
+    await waitFor(() =>
+      expect(screen.getByTestId("t08-action-ok")).toBeInTheDocument(),
+    );
+    const approveBodies = router.calls.filter(
+      (call) =>
+        call.method === "POST" && call.url.endsWith("/approve"),
+    );
+    expect(approveBodies).toHaveLength(1);
+    const approveBody = approveBodies[0].body as Record<string, unknown>;
+    expect(approveBody.preview_manifest_id).toBe(
+      "preview_sha256_2222222222222222222222222222222222222222222222222222222222222222",
+    );
+    expect(approveBody.expected_governance_revision).toBe(5);
+  });
+});
+
+describe("GovernanceWorkspacePanel T09", () => {
+  const HOLD = {
+    hold_id: "governance_hold0000000000000000001",
+    event_id: "governance_event0000000000000000001",
+    reason_code: "S09_TEST_HOLD",
+    scope: "C-DEMO/demo",
+    hold_scope: "open_cycle",
+    imposed_by: "c-demo-policy-operator",
+    imposed_at: 1786000000,
+    authority_revision: 3,
+    evidence_digest: null,
+    recovery_criterion_id: "s09-hold-recovery-criterion/1",
+    recovery_criterion_digest: "c".repeat(64),
+  };
+
+  function workspacePayload9(
+    role: "admin" | "approver" | "operator" | "auditor",
+    actions: string[],
+    overrides: Record<string, unknown> = {},
+  ) {
+    return {
+      track: "C-DEMO",
+      capability_gate: "G3",
+      scope: "C-DEMO/demo",
+      governance_revision: 3,
+      actor_role: role,
+      actions,
+      active_release: {
+        active_generation: 2,
+        candidate_id: "candidate_t09release00000000000000000",
+        manifest_id: "manifest_2",
+        manifest_digest: "2".repeat(64),
+        activation_event_id: "governance_act2",
+        approval_binding_id: "approval_sha256_b",
+        validation_bundle_id: "bundle_2",
+        validation_bundle_digest: "bundle-digest-2",
+        recovery_release_id: "candidate_t08bootstrap00000000000000000",
+        activated_at: 1786000000,
+        bootstrap: false,
+        final_impact_digest: "f".repeat(64),
+        final_impact_manifest_id: "manifest_final",
+        final_impact_member_count: 1,
+      },
+      recovery_anchor: {
+        release_candidate_id: "candidate_t08bootstrap00000000000000000",
+      },
+      holds: [],
+      events: [],
+      ...overrides,
+    };
+  }
+
+  function renderGovernance() {
+    return render(<GovernanceWorkspacePanel />, {
+      wrapper: wrap(createQueryClient()),
+    });
+  }
+
+  const WORKSPACE_PATH9 = "/controlled/s09/api/queries/workspace";
+
+  it("operator imposes a scoped hold with the exact reason and scope and the server hold renders with its criterion", async () => {
+    const user = userEvent.setup();
+    let holds: unknown[] = [];
+    const router = fetchRouter({
+      [`GET ${WORKSPACE_PATH9}`]: () =>
+        new Response(
+          JSON.stringify(
+            workspacePayload9(
+              "operator",
+              ["impose_hold", "propose_rollback"],
+              { holds },
+            ),
+          ),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      "POST /controlled/s09/api/commands/impose_hold": () =>
+        new Response(
+          JSON.stringify({
+            status: "accepted",
+            hold_id: HOLD.hold_id,
+            hold_scope: HOLD.hold_scope,
+            reason_code: HOLD.reason_code,
+            recovery_criterion_id: HOLD.recovery_criterion_id,
+            recovery_criterion_digest: HOLD.recovery_criterion_digest,
+            governance_event_id: HOLD.event_id,
+            governance_revision: 4,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    renderGovernance();
+    await waitFor(() =>
+      expect(screen.getByTestId("t09-impose-form")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("t09-role")).toHaveTextContent("operator");
+    expect(screen.getByTestId("t09-holds-empty")).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("冻结原因码"), "S09_TEST_HOLD");
+    // The scope input is prefilled with the served open-cycle scope; the
+    // submit carries it untouched.
+    // The server hold fact is published by the command; the workspace
+    // refetch after acceptance must observe it.
+    holds = [HOLD];
+    await user.click(screen.getByTestId("t09-impose-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("t09-action-ok")).toBeInTheDocument(),
+    );
+    const posts = router.calls.filter((call) => call.method === "POST");
+    expect(posts).toHaveLength(1);
+    const body = posts[0].body as Record<string, unknown>;
+    expect(body.reason_code).toBe("S09_TEST_HOLD");
+    expect(body.hold_scope).toBe("open_cycle");
+    expect(body.expected_governance_revision).toBe(3);
+    expect(typeof body.idempotency_key).toBe("string");
+
+    // The authoritative refetch renders the server hold: exact scope,
+    // reason, actor and the fixed recovery criterion.
+    await waitFor(() =>
+      expect(screen.getByTestId("t09-hold")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("t09-hold-scope")).toHaveTextContent("open_cycle");
+    expect(screen.getByTestId("t09-hold-reason")).toHaveTextContent(
+      "S09_TEST_HOLD",
+    );
+    expect(screen.getByTestId("t09-hold-actor")).toHaveTextContent(
+      "c-demo-policy-operator",
+    );
+    expect(screen.getByTestId("t09-hold-criterion")).toHaveTextContent(
+      "s09-hold-recovery-criterion/1",
+    );
+    // The hold renders the authority revision it fences on and its
+    // explicit non-expiring state: active until an explicit recovery.
+    expect(screen.getByTestId("t09-hold-authority-revision")).toHaveTextContent(
+      "3",
+    );
+    expect(screen.getByTestId("t09-hold-status")).toHaveTextContent(
+      "持续至显式恢复",
+    );
+    expect(
+      screen.queryByTestId("t09-holds-empty"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("a stale 409 on the hold surfaces the conflict and re-fences on the refetched revision", async () => {
+    const user = userEvent.setup();
+    let workspaceRequests = 0;
+    let holdPosts = 0;
+    let resolveRefetch: ((response: Response) => void) | undefined;
+    const pendingRefetch = new Promise<Response>((resolve) => {
+      resolveRefetch = resolve;
+    });
+    const router = fetchRouter({
+      [`GET ${WORKSPACE_PATH9}`]: () => {
+        workspaceRequests += 1;
+        if (workspaceRequests === 2) return pendingRefetch;
+        return new Response(
+          JSON.stringify(
+            workspacePayload9("operator", ["impose_hold"], {
+              governance_revision: workspaceRequests === 1 ? 3 : 4,
+            }),
+          ),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+      "POST /controlled/s09/api/commands/impose_hold": () => {
+        holdPosts += 1;
+        return new Response(
+          JSON.stringify({
+            detail: { error: "S08_CONFLICT", message: "stale revision" },
+          }),
+          { status: 409, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    });
+    renderGovernance();
+    await waitFor(() =>
+      expect(screen.getByTestId("t09-impose-form")).toBeInTheDocument(),
+    );
+    await user.type(screen.getByLabelText("冻结原因码"), "S09_TEST_HOLD");
+    await user.click(screen.getByTestId("t09-impose-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("t09-conflict")).toHaveTextContent(
+        "stale revision",
+      ),
+    );
+    expect(holdPosts).toBe(1);
+    // The latch stays locked until the authoritative refetch lands: the
+    // button is disabled and a click sends nothing.
+    expect(screen.getByTestId("t09-impose-button")).toBeDisabled();
+    await user.click(screen.getByTestId("t09-impose-button"));
+    expect(holdPosts).toBe(1);
+
+    resolveRefetch?.(
+      new Response(
+        JSON.stringify(
+          workspacePayload9("operator", ["impose_hold"], {
+            governance_revision: 4,
+          }),
+        ),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("t09-impose-button")).toBeEnabled(),
+    );
+    await user.click(screen.getByTestId("t09-impose-button"));
+    await waitFor(() => expect(holdPosts).toBe(2));
+    const posts = router.calls.filter((call) => call.method === "POST");
+    const second = posts[1].body as Record<string, unknown>;
+    expect(second.expected_governance_revision).toBe(4);
+    expect(second.idempotency_key).not.toBe(
+      (posts[0].body as Record<string, unknown>).idempotency_key,
+    );
+  });
+
+  it("renders no mutation surface for a role without actions", async () => {
+    fetchRouter({
+      [`GET ${WORKSPACE_PATH9}`]: () =>
+        new Response(
+          JSON.stringify(workspacePayload9("admin", [])),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    renderGovernance();
+    await waitFor(() =>
+      expect(screen.getByTestId("t09-role")).toHaveTextContent("admin"),
+    );
+    expect(screen.queryByTestId("t09-impose-form")).not.toBeInTheDocument();
+    expect(screen.getByTestId("t09-action-list")).toHaveTextContent("—");
+  });
+
+  it("approver under an active hold sees the server recovery action and the hold criterion", async () => {
+    fetchRouter({
+      [`GET ${WORKSPACE_PATH9}`]: () =>
+        new Response(
+          JSON.stringify(
+            workspacePayload9("approver", ["recover_hold"], {
+              holds: [HOLD],
+            }),
+          ),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    renderGovernance();
+    await waitFor(() =>
+      expect(screen.getByTestId("t09-role")).toHaveTextContent("approver"),
+    );
+    expect(screen.getByTestId("t09-action-list")).toHaveTextContent(
+      "recover_hold",
+    );
+    expect(screen.getByTestId("t09-hold")).toBeInTheDocument();
+    expect(screen.getByTestId("t09-hold-criterion")).toHaveTextContent(
+      "s09-hold-recovery-criterion/1",
+    );
+    expect(screen.queryByTestId("t09-impose-form")).not.toBeInTheDocument();
+  });
+
+  it("auditor sees the reconciliation members and the partial disposition state", async () => {
+    fetchRouter({
+      [`GET ${WORKSPACE_PATH9}`]: () =>
+        new Response(
+          JSON.stringify(workspacePayload9("auditor", [])),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      "GET /controlled/s01/api/queries/impact-dispositions/reconciliation": () =>
+        new Response(
+          JSON.stringify({
+            final_impact_digest: "f".repeat(64),
+            member_count: 2,
+            unconsumed_count: 1,
+            outstanding_count: 1,
+            projection_watermark: 5,
+            members: [
+              {
+                application_id: "app_t09recon000000000000000000",
+                cycle: 1,
+                partition: "open_cycle",
+                disposition: "applied",
+                target_generation: 2,
+                reevaluation_job_id: "job_t09recon000000000000000000",
+                reevaluation_job_count: 1,
+              },
+              {
+                application_id: "app_t09recon000000000000000001",
+                cycle: 1,
+                partition: "open_cycle",
+                disposition: "outstanding",
+                target_generation: 2,
+                reevaluation_job_id: null,
+                reevaluation_job_count: 0,
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    renderGovernance();
+    await waitFor(
+      () => expect(screen.getByTestId("t09-recon-members")).toBeInTheDocument(),
+      { timeout: 8_000 },
+    );
+    expect(screen.getByTestId("t09-recon-members")).toHaveTextContent(
+      "app_t09recon000000000000000000",
+    );
+    expect(screen.getByTestId("t09-recon-members")).toHaveTextContent(
+      "outstanding",
+    );
+    // A partial reconciliation is an explicit limitation, never hidden.
+    expect(screen.getByTestId("t09-recon-partial")).toHaveTextContent(
+      "存在未消费",
+    );
+  });
+
+  it("renders explicit unavailable states for the workspace and the reconciliation separately", async () => {
+    // Workspace authority unavailable.
+    fetchRouter({
+      [`GET ${WORKSPACE_PATH9}`]: () =>
+        new Response(
+          JSON.stringify({
+            detail: {
+              error: "S08_UNAVAILABLE",
+              message: "Governance authority is unavailable",
+            },
+          }),
+          { status: 503, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    const firstView = renderGovernance();
+    await waitFor(
+      () => expect(screen.getByTestId("t09-unavailable")).toBeInTheDocument(),
+      // The shared query policy retries transient 503s twice with backoff;
+      // the closed unavailable state appears once the retries are spent.
+      { timeout: 8_000 },
+    );
+    firstView.unmount();
+
+    // Workspace healthy but the reconciliation projection is unavailable.
+    const { unmount } = render(
+      <GovernanceWorkspacePanel />,
+      { wrapper: wrap(createQueryClient()) },
+    );
+    fetchRouter({
+      [`GET ${WORKSPACE_PATH9}`]: () =>
+        new Response(
+          JSON.stringify(workspacePayload9("auditor", [])),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      "GET /controlled/s01/api/queries/impact-dispositions/reconciliation": () =>
+        new Response(
+          JSON.stringify({
+            detail: {
+              error: "S01_UNAVAILABLE",
+              message: "Controlled S01 is unavailable",
+            },
+          }),
+          { status: 503, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    await waitFor(
+      () =>
+        expect(
+          screen.getByTestId("t09-recon-unavailable"),
+        ).toBeInTheDocument(),
+      { timeout: 8_000 },
+    );
+    expect(
+      screen.queryByTestId("t09-unavailable"),
+    ).not.toBeInTheDocument();
+    unmount();
+  }, 30_000);
+
+  it("operator proposes a rollback with the server known-good release and hands the new candidate to the S08 workspace", async () => {
+    const user = userEvent.setup();
+    let events: unknown[] = [];
+    const router = fetchRouter({
+      [`GET ${WORKSPACE_PATH9}`]: () =>
+        new Response(
+          JSON.stringify(
+            workspacePayload9(
+              "operator",
+              ["impose_hold", "propose_rollback"],
+              { holds: [HOLD], events },
+            ),
+          ),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      "POST /controlled/s09/api/commands/propose_rollback": () =>
+        new Response(
+          JSON.stringify({
+            status: "accepted",
+            candidate_id: "candidate_t09rollback00000000000000000",
+            manifest_id: "manifest_rollback",
+            manifest_digest: "3".repeat(64),
+            validation_bundle_id: "bundle_rollback",
+            validation_bundle_digest: "bundle-digest-rollback",
+            rollback_target_id: "candidate_t08bootstrap00000000000000000",
+            compatibility: {
+              compatible: true,
+              reason_code: "S09_ROLLBACK_COMPATIBLE",
+            },
+            governance_revision: 4,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    renderGovernance();
+    await waitFor(() =>
+      expect(screen.getByTestId("t09-rollback-form")).toBeInTheDocument(),
+    );
+    // The release input is prefilled with the server's recorded known-good
+    // recovery anchor; the submit carries it untouched.
+    expect(
+      (screen.getByLabelText("回滚发布标识") as HTMLInputElement).value,
+    ).toBe("candidate_t08bootstrap00000000000000000");
+    await user.type(screen.getByLabelText("回滚原因码"), "S09_TEST_ROLLBACK");
+    // The rollback command appends the immutable rollback_proposed fact;
+    // the workspace refetch after acceptance must observe it.
+    events = [
+      {
+        event_id: "governance_event0000000000000000009",
+        revision: 9,
+        kind: "rollback_proposed",
+        actor: { subject: "c-demo-policy-operator", role: "operator" },
+        trusted_time: 1786000000,
+        reason_code: "S09_ROLLBACK_PROPOSED",
+        candidate_id: null,
+        manifest_id: "manifest_rollback",
+        activation_event_id: null,
+        active_generation: null,
+        hold_id: null,
+        release_candidate_id: "candidate_t08bootstrap00000000000000000",
+      },
+    ];
+    await user.click(screen.getByTestId("t09-rollback-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("t09-rollback-result")).toBeInTheDocument(),
+    );
+    const posts = router.calls.filter((call) => call.method === "POST");
+    expect(posts).toHaveLength(1);
+    const body = posts[0].body as Record<string, unknown>;
+    expect(body.release_candidate_id).toBe(
+      "candidate_t08bootstrap00000000000000000",
+    );
+    expect(body.reason_code).toBe("S09_TEST_ROLLBACK");
+    expect(body.expected_governance_revision).toBe(3);
+    // The compatibility verdict and the new candidate render; the handoff
+    // link opens the existing S08 candidate workspace.
+    expect(screen.getByTestId("t09-rollback-compatibility")).toHaveTextContent(
+      "兼容",
+    );
+    expect(screen.getByTestId("t09-rollback-candidate")).toHaveTextContent(
+      "candidate_t09rollback00000000000000000",
+    );
+    const link = screen.getByTestId(
+      "t09-rollback-link",
+    ) as HTMLAnchorElement;
+    expect(link.getAttribute("href")).toBe(
+      "/controlled/s08/react?candidate=candidate_t09rollback00000000000000000",
+    );
+    // The append-only ledger renders the rollback_proposed event ref with
+    // the exact release identity.
+    await waitFor(() =>
+      expect(screen.getByTestId("t09-events")).toHaveTextContent(
+        "rollback_proposed",
+      ),
+    );
+    expect(screen.getByTestId("t09-events")).toHaveTextContent(
+      "candidate_t08bootstrap00000000000000000",
+    );
+  });
+
+  it("an incompatible rollback verdict renders explicitly and keeps the hold", async () => {
+    const user = userEvent.setup();
+    fetchRouter({
+      [`GET ${WORKSPACE_PATH9}`]: () =>
+        new Response(
+          JSON.stringify(
+            workspacePayload9(
+              "operator",
+              ["impose_hold", "propose_rollback"],
+              { holds: [HOLD] },
+            ),
+          ),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      "POST /controlled/s09/api/commands/propose_rollback": () =>
+        new Response(
+          JSON.stringify({
+            status: "accepted",
+            candidate_id: "candidate_t09rollback00000000000000000",
+            manifest_id: "manifest_rollback",
+            manifest_digest: "3".repeat(64),
+            validation_bundle_id: "bundle_rollback",
+            validation_bundle_digest: "bundle-digest-rollback",
+            rollback_target_id: "candidate_t08bootstrap00000000000000000",
+            compatibility: {
+              compatible: false,
+              reason_code: "ROLLBACK_INCOMPATIBLE_VALIDATION",
+            },
+            governance_revision: 4,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    renderGovernance();
+    await waitFor(() =>
+      expect(screen.getByTestId("t09-rollback-form")).toBeInTheDocument(),
+    );
+    await user.type(screen.getByLabelText("回滚原因码"), "S09_TEST_ROLLBACK");
+    await user.click(screen.getByTestId("t09-rollback-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("t09-rollback-result")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("t09-rollback-compatibility")).toHaveTextContent(
+      "不兼容",
+    );
+    expect(screen.getByTestId("t09-rollback-compatibility")).toHaveTextContent(
+      "ROLLBACK_INCOMPATIBLE_VALIDATION",
+    );
+    // No handoff for an incompatible rollback: only a governed forward fix.
+    expect(screen.queryByTestId("t09-rollback-link")).not.toBeInTheDocument();
+    // The hold stays in force and visible.
+    expect(screen.getByTestId("t09-hold")).toBeInTheDocument();
+  });
+
+  it("approver recovers the hold with the exact active generation", async () => {
+    const user = userEvent.setup();
+    let holds: unknown[] = [HOLD];
+    const router = fetchRouter({
+      [`GET ${WORKSPACE_PATH9}`]: () =>
+        new Response(
+          JSON.stringify(
+            workspacePayload9("approver", ["recover_hold"], { holds }),
+          ),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      "POST /controlled/s09/api/commands/recover_hold": () =>
+        new Response(
+          JSON.stringify({
+            status: "accepted",
+            hold_id: HOLD.hold_id,
+            hold_released_event_id: "governance_event0000000000000000002",
+            recovery_generation: 2,
+            governance_revision: 4,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    renderGovernance();
+    await waitFor(() =>
+      expect(screen.getByTestId("t09-recover-form")).toBeInTheDocument(),
+    );
+    // The generation is prefilled with the server's current active
+    // generation and is read-only — recovery always uses the server's
+    // current active generation, never a user-chosen one.
+    expect(
+      (screen.getByLabelText("恢复代次") as HTMLInputElement).value,
+    ).toBe("2");
+    expect(
+      (screen.getByLabelText("恢复代次") as HTMLInputElement).readOnly,
+    ).toBe(true);
+    // The recovery command appends the release fact; the workspace refetch
+    // after acceptance must observe the released hold union.
+    holds = [];
+    await user.click(screen.getByTestId("t09-recover-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("t09-action-ok")).toBeInTheDocument(),
+    );
+    const posts = router.calls.filter((call) => call.method === "POST");
+    expect(posts).toHaveLength(1);
+    const body = posts[0].body as Record<string, unknown>;
+    expect(body.hold_id).toBe(HOLD.hold_id);
+    expect(body.recovery_generation).toBe(2);
+    expect(body.expected_governance_revision).toBe(3);
+
+    // The authoritative refetch renders the released hold union.
+    await waitFor(() =>
+      expect(screen.getByTestId("t09-holds-empty")).toBeInTheDocument(),
+    );
+  });
+
+  it("renders the immutable append-only event refs with the S09 identities", async () => {
+    fetchRouter({
+      [`GET ${WORKSPACE_PATH9}`]: () =>
+        new Response(
+          JSON.stringify(
+            workspacePayload9("admin", [], {
+              events: [
+                {
+                  event_id: "governance_event0000000000000000001",
+                  revision: 1,
+                  kind: "activated",
+                  actor: { subject: "c-demo-policy-admin", role: "admin" },
+                  trusted_time: 1786000000,
+                  reason_code: "S08_ACTIVATED",
+                  candidate_id: "candidate_t08bootstrap00000000000000000",
+                  manifest_id: "manifest_bootstrap",
+                  activation_event_id: "governance_event0000000000000000001",
+                  active_generation: 1,
+                  hold_id: null,
+                  release_candidate_id: null,
+                },
+                {
+                  event_id: "governance_event0000000000000000005",
+                  revision: 5,
+                  kind: "impact_previewed",
+                  actor: { subject: "c-demo-policy-admin", role: "admin" },
+                  trusted_time: 1786000000,
+                  reason_code: "S09_IMPACT_PREVIEWED",
+                  candidate_id: "candidate_t09release00000000000000000",
+                  manifest_id: "manifest_2",
+                  activation_event_id: null,
+                  active_generation: null,
+                  hold_id: null,
+                  release_candidate_id: null,
+                },
+                {
+                  event_id: "governance_event0000000000000000006",
+                  revision: 6,
+                  kind: "hold_imposed",
+                  actor: { subject: "c-demo-policy-operator", role: "operator" },
+                  trusted_time: 1786000000,
+                  reason_code: "S09_HOLD_IMPOSED",
+                  candidate_id: null,
+                  manifest_id: null,
+                  activation_event_id: null,
+                  active_generation: null,
+                  hold_id: HOLD.hold_id,
+                  release_candidate_id: null,
+                },
+                {
+                  event_id: "governance_event0000000000000000007",
+                  revision: 7,
+                  kind: "hold_released",
+                  actor: { subject: "c-demo-policy-approver", role: "approver" },
+                  trusted_time: 1786000000,
+                  reason_code: "S09_HOLD_RELEASED",
+                  candidate_id: null,
+                  manifest_id: null,
+                  activation_event_id: null,
+                  active_generation: null,
+                  hold_id: HOLD.hold_id,
+                  release_candidate_id: null,
+                },
+                {
+                  event_id: "governance_event0000000000000000008",
+                  revision: 8,
+                  kind: "rollback_proposed",
+                  actor: { subject: "c-demo-policy-operator", role: "operator" },
+                  trusted_time: 1786000000,
+                  reason_code: "S09_ROLLBACK_PROPOSED",
+                  candidate_id: null,
+                  manifest_id: "manifest_rollback",
+                  activation_event_id: null,
+                  active_generation: null,
+                  hold_id: null,
+                  release_candidate_id: "candidate_t08bootstrap00000000000000000",
+                },
+              ],
+            }),
+          ),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    renderGovernance();
+    await waitFor(() =>
+      expect(screen.getByTestId("t09-events")).toBeInTheDocument(),
+    );
+    const events = screen.getByTestId("t09-events");
+    expect(events).toHaveTextContent("activated");
+    expect(events).toHaveTextContent("impact_previewed");
+    expect(events).toHaveTextContent("hold_imposed");
+    expect(events).toHaveTextContent("hold_released");
+    expect(events).toHaveTextContent("rollback_proposed");
+    expect(events).toHaveTextContent(HOLD.hold_id);
+    expect(events).toHaveTextContent(
+      "candidate_t08bootstrap00000000000000000",
+    );
+    expect(events).toHaveTextContent("c-demo-policy-operator");
+    // Append-only identity: revisions are rendered in ascending order.
+    const revisionTexts = Array.from(
+      document.querySelectorAll('[data-testid="t09-event"]'),
+    ).map((node) => node.textContent ?? "");
+    const revisions = revisionTexts.map((text) =>
+      Number(text.match(/修订 (\d+)/)?.[1]),
+    );
+    expect(revisions).toEqual([...revisions].sort((a, b) => a - b));
+  });
 });

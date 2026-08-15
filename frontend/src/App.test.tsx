@@ -1072,6 +1072,52 @@ describe("governed policy-release shell (T08)", () => {
     );
   });
 
+  it("mounts the S09 governance workspace shell on /controlled/s09/react and never issues S01/S02/S05 reads", async () => {
+    const router = fetchRouter({
+      "GET /controlled/s09/api/queries/workspace": () =>
+        new Response(
+          JSON.stringify({
+            track: "C-DEMO",
+            capability_gate: "G3",
+            scope: "C-DEMO/demo",
+            governance_revision: 3,
+            actor_role: "operator",
+            actions: ["impose_hold"],
+            active_release: null,
+            recovery_anchor: null,
+            holds: [],
+            events: [],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    window.history.pushState(null, "", "/controlled/s09/react");
+    renderWithQuery(<App />);
+    await waitFor(() =>
+      expect(screen.getByTestId("t09-workspace")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("s09-boundary-track")).toHaveTextContent(
+      "C-DEMO",
+    );
+    expect(screen.getByTestId("s09-boundary-gate")).toHaveTextContent("S09");
+    expect(screen.queryByTestId("queue-panel")).not.toBeInTheDocument();
+    expect(
+      router.calls.filter((call) => call.url.includes("/controlled/s01/")),
+    ).toHaveLength(0);
+    expect(
+      router.calls.filter((call) => call.url.includes("/controlled/s02/")),
+    ).toHaveLength(0);
+    expect(
+      router.calls.filter((call) => call.url.includes("/controlled/s05/")),
+    ).toHaveLength(0);
+    expect(
+      router.calls.filter((call) => call.url.includes("/controlled/s08/")),
+    ).toHaveLength(0);
+    expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(
+      0,
+    );
+  });
+
   it("mounts the candidate workspace from the non-sensitive URL navigation state and never issues S01 reads", async () => {
     const router = fetchRouter({
       [`GET /controlled/s08/api/queries/candidate/${CANDIDATE}`]: () =>

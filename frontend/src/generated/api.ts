@@ -1847,6 +1847,58 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/controlled/s09/api/queries/workspace": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * S09 Query Workspace
+         * @description The closed T09 governance workspace.
+         *
+         *     The service builds the whole snapshot atomically under one lock: the
+         *     authoritative governance revision (from the governance ledger), the
+         *     authenticated actor role, the server-owned action list (role + ledger
+         *     state only), the active release and the recorded known-good recovery
+         *     anchor, the active hold union and the append-only S09 event refs.  This
+         *     adapter only maps that snapshot into the closed DTO and owns no
+         *     transition rules.
+         */
+        get: operations["s09_query_workspace_controlled_s09_api_queries_workspace_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s09/react": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Controlled S09 React Page
+         * @description The T09 governance workspace React shell: the same built artifact as
+         *     the other controlled shells, served only to a registered T09 identity
+         *     (admin, approver, operator or auditor) with no-store and no session.  A
+         *     missing or incomplete build is an explicit closed 503; the S09 API
+         *     remains the sole authority.
+         */
+        get: operations["controlled_s09_react_page_controlled_s09_react_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/demo/react": {
         parameters: {
             query?: never;
@@ -4593,6 +4645,46 @@ export interface components {
             /** Suite */
             suite: string;
         };
+        /**
+         * S09ActiveRelease
+         * @description The server-owned active governed release projection: generation,
+         *     release/activation identities, bound evidence references, the recorded
+         *     recovery release and the final-impact facts.  Never derived by the
+         *     browser.
+         */
+        S09ActiveRelease: {
+            /** Activated At */
+            activated_at?: number | null;
+            /** Activation Event Id */
+            activation_event_id?: string | null;
+            /** Active Generation */
+            active_generation?: number | null;
+            /** Approval Binding Id */
+            approval_binding_id?: string | null;
+            /**
+             * Bootstrap
+             * @default false
+             */
+            bootstrap: boolean;
+            /** Candidate Id */
+            candidate_id?: string | null;
+            /** Final Impact Digest */
+            final_impact_digest?: string | null;
+            /** Final Impact Manifest Id */
+            final_impact_manifest_id?: string | null;
+            /** Final Impact Member Count */
+            final_impact_member_count?: number | null;
+            /** Manifest Digest */
+            manifest_digest?: string | null;
+            /** Manifest Id */
+            manifest_id?: string | null;
+            /** Recovery Release Id */
+            recovery_release_id?: string | null;
+            /** Validation Bundle Digest */
+            validation_bundle_digest?: string | null;
+            /** Validation Bundle Id */
+            validation_bundle_id?: string | null;
+        };
         /** S09AuthorityRange */
         S09AuthorityRange: {
             /** Maximum */
@@ -4706,6 +4798,44 @@ export interface components {
             candidate_id: string;
             /** Manifest Digest */
             manifest_digest: string;
+        };
+        /**
+         * S09GovernanceWorkspaceResponse
+         * @description The closed T09 governance workspace: the authoritative governance
+         *     revision, the authenticated actor role, the server-owned action list,
+         *     the active release and known-good recovery anchor, the active hold
+         *     union and the append-only S09 event refs -- one atomic snapshot the
+         *     page renders.  The page never derives a transition, a hold or a
+         *     recovery option.
+         */
+        S09GovernanceWorkspaceResponse: {
+            /** Actions */
+            actions: string[];
+            active_release?: components["schemas"]["S09ActiveRelease"] | null;
+            /**
+             * Actor Role
+             * @enum {string}
+             */
+            actor_role: "admin" | "approver" | "operator" | "auditor";
+            /**
+             * Capability Gate
+             * @constant
+             */
+            capability_gate: "G3";
+            /** Events */
+            events: components["schemas"]["S09WorkspaceEventRef"][];
+            /** Governance Revision */
+            governance_revision: number;
+            /** Holds */
+            holds: components["schemas"]["S09HoldRef"][];
+            recovery_anchor?: components["schemas"]["S09RecoveryAnchor"] | null;
+            /** Scope */
+            scope: string;
+            /**
+             * Track
+             * @constant
+             */
+            track: "C-DEMO";
         };
         /**
          * S09HoldRef
@@ -5029,6 +5159,16 @@ export interface components {
             status: "accepted";
         };
         /**
+         * S09RecoveryAnchor
+         * @description The recorded known-good release identity: the exact release the
+         *     current active was approved with as its recovery fallback.  The rollback
+         *     form's only prefill option.
+         */
+        S09RecoveryAnchor: {
+            /** Release Candidate Id */
+            release_candidate_id: string;
+        };
+        /**
          * S09ReplayBody
          * @description The closed reproduction-replay command: one exact governed release
          *     over one fixed evidence snapshot for one explicit application.  A
@@ -5230,6 +5370,39 @@ export interface components {
              * @constant
              */
             status: "accepted";
+        };
+        /**
+         * S09WorkspaceEventRef
+         * @description One append-only governance event reference in the T09 workspace: the
+         *     shared immutable identity fields plus the S09 hold/rollback/impact/
+         *     activation/recovery references the page renders.
+         */
+        S09WorkspaceEventRef: {
+            /** Activation Event Id */
+            activation_event_id?: string | null;
+            /** Active Generation */
+            active_generation?: number | null;
+            actor: components["schemas"]["S08EventActor"];
+            /** Candidate Id */
+            candidate_id?: string | null;
+            /** Event Id */
+            event_id: string;
+            /** Hold Id */
+            hold_id?: string | null;
+            /** Kind */
+            kind: string;
+            /** Manifest Id */
+            manifest_id?: string | null;
+            /** Reason Code */
+            reason_code?: string | null;
+            /** Recovery Generation */
+            recovery_generation?: number | null;
+            /** Release Candidate Id */
+            release_candidate_id?: string | null;
+            /** Revision */
+            revision: number;
+            /** Trusted Time */
+            trusted_time: number;
         };
         /** T05BusinessExceptionOperationsResult */
         T05BusinessExceptionOperationsResult: {
@@ -10642,6 +10815,91 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+        };
+    };
+    s09_query_workspace_controlled_s09_api_queries_workspace_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S09GovernanceWorkspaceResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ValidationErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S08ErrorResponse"];
+                };
+            };
+        };
+    };
+    controlled_s09_react_page_controlled_s09_react_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
                 };
             };
         };
