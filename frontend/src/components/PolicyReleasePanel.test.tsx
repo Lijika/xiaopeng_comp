@@ -3821,14 +3821,26 @@ describe("GovernanceWorkspacePanel T09", () => {
           { timeout: 8_000 },
         );
         if (status === 403 || status === 404) {
-          // The stale detail is hidden for the deterministic 403/404 states
-          // and no reload is offered for the 403 denial.
+          // Deterministic 403/404 states hide stale protected detail.
           expect(
             screen.queryByTestId("t09-recon-members"),
           ).not.toBeInTheDocument();
-          expect(
-            screen.queryByTestId("t09-recon-reload"),
-          ).not.toBeInTheDocument();
+          if (status === 403) {
+            expect(
+              screen.queryByTestId("t09-recon-reload"),
+            ).not.toBeInTheDocument();
+          } else {
+            // A pending projection remains recoverable through an explicit
+            // refetch; success restores only the fresh server DTO.
+            failRefetch = false;
+            fireEvent.click(screen.getByTestId("t09-recon-reload"));
+            await waitFor(() =>
+              expect(
+                screen.queryByTestId("t09-recon-pending"),
+              ).not.toBeInTheDocument(),
+            );
+            expect(screen.getByTestId("t09-recon-members")).toBeInTheDocument();
+          }
         } else {
           // Transient failures keep the last-known detail but label it.
           expect(screen.getByTestId("t09-recon-stale")).toBeInTheDocument();

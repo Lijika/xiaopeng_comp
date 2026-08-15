@@ -2092,9 +2092,17 @@ export function GovernanceWorkspacePanel() {
             {reconRefetchFailed &&
               reconRefetchError instanceof HttpError &&
               reconRefetchError.status === 404 && (
-                <p data-testid="t09-recon-pending" role="alert">
-                  对账投影尚未生成，请稍后刷新
-                </p>
+                <>
+                  <p data-testid="t09-recon-pending" role="alert">
+                    对账投影尚未生成，请稍后刷新
+                  </p>
+                  <Button
+                    data-testid="t09-recon-reload"
+                    onClick={() => void reconciliation.refetch()}
+                  >
+                    重新加载对账明细
+                  </Button>
+                </>
               )}
             {reconRefetchFailed && !reconDetailHidden && (
               <>
