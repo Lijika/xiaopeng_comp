@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# T10 installed-release qualification harness (Issue #44).
+# T10 installed-release qualification harness (Issue #44, R1 fix).
 #
 # Single temporary-root release gate for the installed FastAPI Web release:
 #  1. SHA256 manifest over source inputs (configs/ fixtures/ data/)
@@ -17,17 +17,30 @@
 #     contracts) with PYTHONSAFEPATH=1 and PYTHONPATH=<site>:<repo>
 #  9. real Python-only uvicorn from the installed package, PID/argv logged,
 #     /api/health probed
-# 10. `npm run test:e2e -- --list` collection count (recorded; expected
-#     "66 tests in 12 files")
+# 10. Playwright collection gate: `npm run test:e2e -- --list` must parse to
+#     exactly "66 tests in 12 files"; any other or unparsable value fails
 # 11. full Playwright matrix from the same installed-import environment (specs
 #     spawn their own uvicorn children)
-# 12. preserve the run's Playwright artifacts under $LOG_DIR
-# 13. re-verify the source-input manifest, then the EXIT trap removes the
-#     temporary root and stops the server
+# 12. unconditional (EXIT trap): preserve Playwright artifacts on success
+#     and failure.  Freshness boundary: step 10 clears the fixed output
+#     directory before collection, so preserved artifacts belong to this
+#     run; a failure before the boundary records "playwright never started".
+#     Then stop the owned uvicorn; remove the exact temporary root
+# 13. unconditional (EXIT trap): rebuild the sorted source-input manifest and
+#     compare complete before/after (detects changed/removed/added files
+#     under configs/ fixtures/ data/), then print the PASS/FAIL verdict and
+#     the numeric HARNESS_EXIT marker
+#
+# The EXIT trap preserves the original command status: any failure records
+# the failing step (HARNESS_FAILED_STEP) and exact exit status (HARNESS_EXIT)
+# in $LOG, still runs steps 12-13, and exits with the preserved status.
+#
+# The release root is always created directly under /tmp (ticket contract);
+# deletion targets only the exact generated directory (safety prefix
+# /tmp/t10-installed-release.*).
 #
 # All evidence goes to $LOG_DIR (default /tmp/codex/ticket-44-kimi-evidence)
 # as lane-c-harness-*.log; Playwright artifacts are copied alongside.
-# Any failure exits non-zero with the failing step visible in the log.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -44,21 +57,122 @@ fi
 LOG_DIR="${LOG_DIR:-/tmp/codex/ticket-44-kimi-evidence}"
 mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/lane-c-harness-$(date +%Y%m%d-%H%M%S).log"
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/t10-installed-release.XXXXXX")"
+# Release root directly under /tmp, regardless of TMPDIR (ticket contract).
+TMP="$(mktemp -d /tmp/t10-installed-release.XXXXXX)"
 SERVER_PID=""
+PLAYWRIGHT_OUT="/tmp/xiaopeng-task4-s01-playwright-artifacts"
+PLAYWRIGHT_STARTED=0
+CURRENT_STEP="startup"
+FAILED_STEP=""
+STATUS=0
+SOURCE_INPUT_CHANGED=0
 
-step() { printf '\n== %s ==\n' "$1" | tee -a "$LOG"; }
+step() { CURRENT_STEP="$1"; printf '\n== %s ==\n' "$1" | tee -a "$LOG"; }
 
-cleanup() {
-  if [[ -n "$SERVER_PID" ]]; then
-    kill "$SERVER_PID" 2>/dev/null || true
-    wait "$SERVER_PID" 2>/dev/null || true
-  fi
-  if [[ -n "$TMP" && "$TMP" == /tmp/* ]]; then
-    rm -rf "$TMP"
-  fi
+record_failure() {
+  # Runs only from the ERR trap; bash suppresses errexit while a trap is
+  # executing, so this body cannot recurse and must NOT touch set -e.
+  local status=$?
+  if [[ -z "$FAILED_STEP" ]]; then FAILED_STEP="$CURRENT_STEP"; fi
+  echo "ERROR: step '${FAILED_STEP}' failed with exit status ${status}" | tee -a "$LOG"
 }
-trap cleanup EXIT
+trap record_failure ERR
+
+finalize() {
+  # Preserve the original command status first; this trap must never
+  # recurse or change the exit code it is about to report.
+  local status=$?
+  set +e
+  trap - EXIT ERR INT TERM HUP
+  STATUS="$status"
+
+  # 12/13. Preserve this run's browser artifacts.  Freshness is established
+  # at the Playwright boundary: step 10 clears the fixed output directory
+  # before collection, so anything found later belongs to this run.  When
+  # Playwright never started (failure before the boundary), that is
+  # recorded explicitly and no stale directory is copied.  Runs on success
+  # and failure when artifacts exist.
+  step "12/13 preserve Playwright artifacts (unconditional)"
+  if [[ "$PLAYWRIGHT_STARTED" -eq 1 && -d "$PLAYWRIGHT_OUT" && -n "$(ls -A "$PLAYWRIGHT_OUT" 2>/dev/null)" ]]; then
+    ARTIFACT_DIR="$LOG_DIR/lane-c-harness-playwright-artifacts-$(date +%Y%m%d-%H%M%S)"
+    cp -a "$PLAYWRIGHT_OUT" "$ARTIFACT_DIR"
+    echo "playwright artifacts copied (from this run's boundary): $ARTIFACT_DIR" | tee -a "$LOG"
+  elif [[ "$PLAYWRIGHT_STARTED" -eq 1 ]]; then
+    echo "playwright started but produced no artifacts" | tee -a "$LOG"
+  else
+    echo "playwright never started; no artifacts to preserve" | tee -a "$LOG"
+  fi
+
+  # 13/13. Unconditional source conservation: rebuild the sorted
+  # before/after manifests and compare completely (catches changed,
+  # removed, and newly added files under configs/ fixtures/ data/).
+  step "13/13 source-input conservation (unconditional)"
+  if [[ -f "$TMP/source-input.sha256" ]]; then
+    FINAL_MANIFEST="$TMP/source-input.final.sha256"
+    (cd "$ROOT" && find configs fixtures data -type f -print0 \
+      | sort -z | xargs -0 sha256sum) > "$FINAL_MANIFEST" 2>/dev/null
+    if diff -u "$TMP/source-input.sha256" "$FINAL_MANIFEST" >/dev/null 2>&1; then
+      echo "source-input manifests identical ($(wc -l < "$FINAL_MANIFEST") files)" | tee -a "$LOG"
+    else
+      echo "ERROR: source inputs changed/removed/added under configs fixtures data" | tee -a "$LOG"
+      diff -u "$TMP/source-input.sha256" "$FINAL_MANIFEST" | tee -a "$LOG"
+      SOURCE_INPUT_CHANGED=1
+      [[ -z "$FAILED_STEP" ]] && FAILED_STEP="source-input conservation"
+      [[ "$STATUS" -eq 0 ]] && STATUS=1
+    fi
+  else
+    echo "no initial manifest; conservation skipped (before step 1)" | tee -a "$LOG"
+  fi
+
+  # Stop the owned uvicorn process.
+  if [[ -n "$SERVER_PID" ]]; then
+    kill "$SERVER_PID" 2>/dev/null
+    wait "$SERVER_PID" 2>/dev/null
+    echo "stopped owned uvicorn pid=$SERVER_PID" | tee -a "$LOG"
+  fi
+
+  # Remove exactly the harness-created temporary root (safety prefix).
+  if [[ -n "$TMP" && "$TMP" == /tmp/t10-installed-release.* ]]; then
+    rm -rf "$TMP"
+    if [[ ! -e "$TMP" ]]; then
+      echo "removed temporary root: $TMP" | tee -a "$LOG"
+    else
+      echo "ERROR: failed to remove temporary root: $TMP" | tee -a "$LOG"
+      STATUS=1
+    fi
+  fi
+
+  if [[ "$STATUS" -ne 0 ]]; then
+    FAILED_STEP="${FAILED_STEP:-$CURRENT_STEP}"
+  else
+    FAILED_STEP="none"
+  fi
+  if [[ "$STATUS" -eq 0 && "$SOURCE_INPUT_CHANGED" -eq 0 ]]; then
+    echo "INSTALLED RELEASE QUALIFICATION PASS (log: $LOG)" | tee -a "$LOG"
+  else
+    echo "INSTALLED RELEASE QUALIFICATION FAIL" | tee -a "$LOG"
+  fi
+  echo "HARNESS_FAILED_STEP=${FAILED_STEP}" | tee -a "$LOG"
+  echo "HARNESS_EXIT=$STATUS" | tee -a "$LOG"
+  exit "$STATUS"
+}
+trap finalize EXIT
+
+# Termination signals (INT/TERM/HUP) must preserve the signal status
+# (128+signum) through the same unconditional finalize path instead of
+# dying mid-cleanup.  While the script waits on a foreground child the
+# trap is deferred until the child exits; the child receives the same
+# signal from the process group, so both die together and the preserved
+# status stays non-zero.
+handle_signal() {
+  local name="$1" num="$2"
+  echo "ERROR: harness terminated by signal $name ($num)" | tee -a "$LOG"
+  [[ -z "$FAILED_STEP" ]] && FAILED_STEP="terminated by signal $name"
+  exit "$((128 + num))"
+}
+trap 'handle_signal INT 2' INT
+trap 'handle_signal TERM 15' TERM
+trap 'handle_signal HUP 1' HUP
 
 echo "== T10 installed Web release qualification ==" | tee -a "$LOG"
 echo "root: $ROOT" | tee -a "$LOG"
@@ -96,7 +210,7 @@ mapfile -t SDISTS < <(ls "$TMP"/dist/*.tar.gz 2>/dev/null || true)
 mapfile -t WHEELS < <(ls "$TMP"/dist/*.whl 2>/dev/null || true)
 if [[ "${#SDISTS[@]}" -ne 1 || "${#WHEELS[@]}" -ne 1 ]]; then
   echo "ERROR: expected exactly one .tar.gz and one .whl in $TMP/dist" | tee -a "$LOG"
-  ls -la "$TMP/dist" | tee -a "$LOG"
+  find "$TMP/dist" -maxdepth 1 -mindepth 1 -printf '%f\n' | sort | tee -a "$LOG"
   exit 1
 fi
 SDIST="${SDISTS[0]}"
@@ -203,33 +317,29 @@ if [[ "$health_ok" -ne 1 ]]; then
 fi
 echo "health OK" | tee -a "$LOG"
 
-# 10. Playwright collection count (recorded, not a gate: the current specs
-#     collect "66 tests in 12 files"; a different count is reported verbatim
-#     so the integrator can reconcile it) and the full matrix from the
-#     installed-import environment. Each spec spawns its own uvicorn child,
-#     which inherits PYTHONSAFEPATH/PYTHONPATH and therefore imports
-#     task4_consistency from <site>.
-step "10/13 playwright collection (expected 66 tests in 12 files)"
-npm run test:e2e -- --list 2>&1 | tee -a "$LOG"
-collected="$(grep -oE '[0-9]+ tests? in [0-9]+ files?' "$LOG" | tail -1 || true)"
-echo "collected: ${collected:-unknown}" | tee -a "$LOG"
+# 10. Playwright collection gate: the parsed `--list` output must equal the
+#     frozen matrix exactly; any other or unparsable value fails here so a
+#     removed spec cannot silently shrink coverage.
+step "10/13 playwright collection gate (must equal '66 tests in 12 files')"
+# Freshness boundary: clear the fixed output directory before collection so
+# that any artifacts preserved in step 12 provably belong to this run.
+PLAYWRIGHT_STARTED=1
+rm -rf "$PLAYWRIGHT_OUT"
+mkdir -p "$PLAYWRIGHT_OUT"
+list_output="$(npm run test:e2e -- --list 2>&1 | tee -a "$LOG")"
+collected="$(printf '%s\n' "$list_output" | grep -oE '[0-9]+ tests? in [0-9]+ files?' | tail -1 || true)"
+echo "collected: ${collected:-unparsable}" | tee -a "$LOG"
+if [[ "${collected:-}" != "66 tests in 12 files" ]]; then
+  echo "ERROR: expected '66 tests in 12 files', observed '${collected:-unparsable}'" | tee -a "$LOG"
+  exit 1
+fi
 
+# 11. Full matrix from the installed-import environment. Each spec spawns
+#     its own uvicorn child, which inherits PYTHONSAFEPATH/PYTHONPATH and
+#     therefore imports task4_consistency from <site>.
 step "11/13 full installed Playwright matrix"
 env PYTHONSAFEPATH=1 PYTHONPATH="$TMP/site:$ROOT" TASK4_T10_INSTALLED_ROOT="$TMP/site" \
   npm run test:e2e 2>&1 | tee -a "$LOG"
 
-# 12. Preserve this run's browser artifacts (Playwright clears its fixed
-#     outputDir at the start of each run, so anything left belongs to it).
-PLAYWRIGHT_OUT="/tmp/xiaopeng-task4-s01-playwright-artifacts"
-if [[ -d "$PLAYWRIGHT_OUT" && -n "$(ls -A "$PLAYWRIGHT_OUT" 2>/dev/null)" ]]; then
-  cp -a "$PLAYWRIGHT_OUT" "$LOG_DIR/lane-c-harness-playwright-artifacts-$(date +%Y%m%d-%H%M%S)"
-  echo "playwright artifacts copied to $LOG_DIR" | tee -a "$LOG"
-fi
-
-# 13. Final source-input immutability check, then the EXIT trap removes the
-#     temporary root and stops the server.
-step "12/13 final source-input manifest re-verification"
-(cd "$ROOT" && sha256sum -c "$TMP/source-input.sha256") 2>&1 | tee -a "$LOG"
-
-step "13/13 done"
-echo "INSTALLED RELEASE QUALIFICATION PASS (log: $LOG)" | tee -a "$LOG"
+# Steps 12/13 run unconditionally from the EXIT trap (artifacts,
+# conservation, uvicorn stop, temporary-root removal, verdict).

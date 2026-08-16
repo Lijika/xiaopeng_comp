@@ -4,11 +4,15 @@ fact preservation.
 
 Group 1 -- legacy mutation caller freeze (zero new callers): a test-local
 scanner over the production source tree (task4_consistency/**/*.py,
-task4_consistency/web/static/**/*.js, frontend/src/**/*.{ts,tsx,js,jsx},
-excluding the machine-generated task4_consistency/web/static/react/** and
-frontend/src/generated/**) plus an exact allowlist of the current
-production owners.  The gate lives inside this test file, not in
-production code.
+task4_consistency/web/static/**/*.js, packaged HTML templates under
+task4_consistency/web/templates/** (they carry inline <script> blocks),
+frontend/src/**/*.{ts,tsx,js,jsx}, excluding the machine-generated
+task4_consistency/web/static/react/** and frontend/src/generated/**) plus
+an exact allowlist of the current production owners.  The freeze covers
+per-(path, token) occurrence counts, not a presence bit: a second legacy
+mutation call inside an already-allowed file, or an inline legacy caller
+inside a packaged template, is a new occurrence and fails the gate.  The
+gate lives inside this test file, not in production code.
 
 Group 2 -- installed package provenance/content/cache/security: gated on
 the ``TASK4_T10_INSTALLED_ROOT`` environment variable (set by the release
@@ -94,9 +98,13 @@ def create_t10_test_app() -> Any:
 # Scan roots and their exclusions.  frontend/src/generated/** holds only
 # OpenAPI type declarations (no runtime call behavior) and
 # task4_consistency/web/static/react/** is the machine-generated build.
+# Packaged HTML templates are a scan surface: they carry inline
+# <script> blocks (e.g. s01.html / s02.html) that can execute legacy
+# mutation calls without a separate JS file.
 _SCAN_SPECS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
     ("task4_consistency", (".py",), ("task4_consistency/web/static/react",)),
     ("task4_consistency/web/static", (".js",), ("task4_consistency/web/static/react",)),
+    ("task4_consistency/web/templates", (".html",), ()),
     ("frontend/src", (".ts", ".tsx", ".js", ".jsx"), ("frontend/src/generated",)),
 )
 
@@ -123,29 +131,30 @@ _TOKEN_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
 )
 
-# Exact current production-owner set: HTTP authority definitions in app.py,
-# the retained runtime caller static/app.js, and the KB mutator
-# definitions/wrappers in kb/store.py + kb/__init__.py.
-_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
-    {
-        ("task4_consistency/web/app.py", "api_rules"),
-        ("task4_consistency/web/app.py", "api_rules_reset"),
-        ("task4_consistency/web/app.py", "api_kb"),
-        ("task4_consistency/web/app.py", "kb_delete_path"),
-        ("task4_consistency/web/app.py", "add_alias"),
-        ("task4_consistency/web/app.py", "remove_alias"),
-        ("task4_consistency/web/app.py", "runtime_rules_unlink"),
-        ("task4_consistency/web/app.py", "runtime_rules_replace"),
-        ("task4_consistency/web/static/app.js", "api_rules"),
-        ("task4_consistency/web/static/app.js", "api_rules_reset"),
-        ("task4_consistency/web/static/app.js", "api_kb"),
-        ("task4_consistency/web/static/app.js", "kb_delete_path"),
-        ("task4_consistency/kb/store.py", "add_alias"),
-        ("task4_consistency/kb/store.py", "remove_alias"),
-        ("task4_consistency/kb/__init__.py", "add_alias"),
-        ("task4_consistency/kb/__init__.py", "remove_alias"),
-    }
-)
+# Exact current production-owner set with occurrence counts: HTTP authority
+# definitions in app.py, the retained runtime caller static/app.js, and the
+# KB mutator definitions/wrappers in kb/store.py + kb/__init__.py.  Counts
+# are per-(path, token) matches of the patterns above, verified against the
+# sources at the T10 freeze commit; any count change (or new path/token)
+# means a new legacy mutation caller.
+_ALLOWLIST: dict[tuple[str, str], int] = {
+    ("task4_consistency/web/app.py", "api_rules"): 3,
+    ("task4_consistency/web/app.py", "api_rules_reset"): 1,
+    ("task4_consistency/web/app.py", "api_kb"): 3,
+    ("task4_consistency/web/app.py", "kb_delete_path"): 1,
+    ("task4_consistency/web/app.py", "add_alias"): 1,
+    ("task4_consistency/web/app.py", "remove_alias"): 1,
+    ("task4_consistency/web/app.py", "runtime_rules_unlink"): 2,
+    ("task4_consistency/web/app.py", "runtime_rules_replace"): 2,
+    ("task4_consistency/web/static/app.js", "api_rules"): 3,
+    ("task4_consistency/web/static/app.js", "api_rules_reset"): 1,
+    ("task4_consistency/web/static/app.js", "api_kb"): 3,
+    ("task4_consistency/web/static/app.js", "kb_delete_path"): 1,
+    ("task4_consistency/kb/store.py", "add_alias"): 1,
+    ("task4_consistency/kb/store.py", "remove_alias"): 1,
+    ("task4_consistency/kb/__init__.py", "add_alias"): 5,
+    ("task4_consistency/kb/__init__.py", "remove_alias"): 4,
+}
 
 
 def _scanned_source_files(root: Path) -> list[Path]:
@@ -163,27 +172,42 @@ def _scanned_source_files(root: Path) -> list[Path]:
     return files
 
 
-def _scan_source_tree(root: Path) -> frozenset[tuple[str, str]]:
-    findings: set[tuple[str, str]] = set()
+def _scan_source_tree(root: Path) -> dict[tuple[str, str], int]:
+    """Occurrence-counted legacy mutation callers over the scanned tree.
+
+    Each (relative_path, token) maps to the number of pattern matches in
+    that file, so a second call inside an already-allowed file (or an
+    inline caller inside a packaged template) changes the frozen counts.
+    """
+    findings: dict[tuple[str, str], int] = {}
     for path in _scanned_source_files(root):
         text = path.read_text(encoding="utf-8", errors="replace")
         relative = path.relative_to(root).as_posix()
         for token, pattern in _TOKEN_PATTERNS:
-            if pattern.search(text):
-                findings.add((relative, token))
-    return frozenset(findings)
+            count = len(pattern.findall(text))
+            if count:
+                findings[(relative, token)] = count
+    return findings
 
 
 def test_legacy_mutation_callers_are_frozen_to_exact_production_owners() -> None:
     """Current production source must equal the allowlist exactly.
 
-    Any new production file, React caller, or direct store caller changes
-    the scanned set and fails this gate.
+    Any new production file, React caller, direct store caller, extra
+    occurrence inside an allowed file, or inline template caller changes
+    the scanned counts and fails this gate.
     """
     scanned = _scan_source_tree(ROOT)
     assert scanned == _ALLOWLIST, (
         "legacy rule/KB mutation caller set changed; expected exact allowlist "
-        f"but scanned {(scanned - _ALLOWLIST) or scanned ^ _ALLOWLIST}"
+        "but differences "
+        + repr(
+            {
+                key: (scanned.get(key), _ALLOWLIST.get(key))
+                for key in set(scanned) | set(_ALLOWLIST)
+                if scanned.get(key) != _ALLOWLIST.get(key)
+            }
+        )
     )
 
 
@@ -216,11 +240,68 @@ def test_legacy_mutation_callers_gate_detects_injected_new_react_caller(
     )
 
     scanned = _scan_source_tree(tree)
-    assert ("frontend/src/evil.tsx", "api_rules") in scanned
-    assert scanned == _ALLOWLIST | {
-        ("frontend/src/evil.tsx", "api_rules")
-    }
+    assert scanned[("frontend/src/evil.tsx", "api_rules")] == 1
     assert scanned != _ALLOWLIST, "gate must fail on an injected new caller"
+
+
+def test_legacy_mutation_callers_gate_detects_second_call_in_allowed_js(
+    tmp_path: Path,
+) -> None:
+    """A second legacy mutation call inside an already-allowed file is a
+    new occurrence and must fail the gate (presence-only scanning missed
+    this: one (path, token) bit per file collapsed both calls)."""
+    tree = tmp_path / "injected-extra-call"
+    for relative in (
+        "task4_consistency/web/app.py",
+        "task4_consistency/web/static/app.js",
+        "task4_consistency/kb/store.py",
+        "task4_consistency/kb/__init__.py",
+    ):
+        target = tree / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / relative, target)
+    extra = tree / "task4_consistency" / "web" / "static" / "app.js"
+    extra.write_text(
+        extra.read_text(encoding="utf-8") + '\nvoid fetch("/api/rules");\n',
+        encoding="utf-8",
+    )
+
+    scanned = _scan_source_tree(tree)
+    assert scanned[("task4_consistency/web/static/app.js", "api_rules")] == (
+        _ALLOWLIST[("task4_consistency/web/static/app.js", "api_rules")] + 1
+    )
+    assert scanned != _ALLOWLIST, "gate must fail on an extra allowed-file caller"
+
+
+def test_legacy_mutation_callers_gate_detects_inline_template_caller(
+    tmp_path: Path,
+) -> None:
+    """An inline legacy mutation call inside a packaged production HTML
+    template must be reported with the template path and token.
+
+    Templates carry executable inline <script> blocks, so they are part of
+    the scanned surface even when the baseline count is zero."""
+    tree = tmp_path / "injected-template-caller"
+    for relative in (
+        "task4_consistency/web/app.py",
+        "task4_consistency/web/static/app.js",
+        "task4_consistency/kb/store.py",
+        "task4_consistency/kb/__init__.py",
+        "task4_consistency/web/templates/s01.html",
+    ):
+        target = tree / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / relative, target)
+    template = tree / "task4_consistency" / "web" / "templates" / "s01.html"
+    template.write_text(
+        template.read_text(encoding="utf-8")
+        + '\n<script>void fetch("/api/rules");</script>\n',
+        encoding="utf-8",
+    )
+
+    scanned = _scan_source_tree(tree)
+    assert scanned[("task4_consistency/web/templates/s01.html", "api_rules")] == 1
+    assert scanned != _ALLOWLIST, "gate must fail on an injected template caller"
 
 
 # --- Group 2: installed package provenance / content / cache / security -----

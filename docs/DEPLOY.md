@@ -104,20 +104,28 @@ bash scripts/run_web.sh
 
 ### 5.2 已安装发布版（production）
 
-发布部署运行已安装 wheel 内的 FastAPI 应用：**无 Node、无 `--reload`**。构建与安装：
+发布部署运行已安装 wheel 内的 FastAPI 应用：**无 Node、无 `--reload`**。release 解释器在 `cd` 之前定义并供给一次，构建 / 安装 / 启动全程使用同一绝对路径：
 
 ```bash
-# 1) production React build（关闭 sourcemap，写入 task4_consistency/web/static/react/）
+# 1) 供给 release 解释器（一次性）：在 cd 之前完成；
+#    RELEASE_PY 为绝对路径，之后不再依赖当前目录
+mkdir -p /opt/task4
+python3 -m venv /opt/task4/.venv
+export RELEASE_PY=/opt/task4/.venv/bin/python
+"$RELEASE_PY" -m pip install build
+
+cd /opt/task4
+# 2) production React build（关闭 sourcemap，写入 task4_consistency/web/static/react/）
 npm run build
 
-# 2) PEP 517：生成一个 sdist 与一个 wheel（默认隔离流程，
+# 3) PEP 517：生成一个 sdist 与一个 wheel（默认隔离流程，
 #    构建依赖按 pyproject.toml [build-system].requires 自动准备）
-.venv/bin/python -m build --outdir dist/
+"$RELEASE_PY" -m build --outdir dist/
 
-# 3) 安装 wheel 到独立安装根（--no-deps：依赖由宿主环境提供）
-.venv/bin/pip install --no-deps --target /opt/task4/site dist/task4_consistency-0.1.0-py3-none-any.whl
+# 4) 安装 wheel 到独立安装根（--no-deps：依赖由宿主环境提供）
+"$RELEASE_PY" -m pip install --no-deps --target /opt/task4/site dist/task4_consistency-0.1.0-py3-none-any.whl
 
-# 4) 把 operator inputs 复制到安装根：installed 应用按 __file__ 推导 ROOT=安装根，
+# 5) 把 operator inputs 复制到安装根：installed 应用按 __file__ 推导 ROOT=安装根，
 #    configs/fixtures/data 必须与包同根
 cp -a configs fixtures data /opt/task4/site/
 mkdir -p /opt/task4/site/var
@@ -127,13 +135,14 @@ mkdir -p /opt/task4/site/var
 
 ```bash
 cd /opt/task4
+export RELEASE_PY=/opt/task4/.venv/bin/python
 export TASK4_S01_STATE_PATH=/opt/task4/site/var/s01.sqlite3
 PYTHONSAFEPATH=1 PYTHONPATH=/opt/task4/site \
-  .venv/bin/python -P -m uvicorn task4_consistency.web.app:app \
+  "$RELEASE_PY" -P -m uvicorn task4_consistency.web.app:app \
   --host 127.0.0.1 --port 8765
 ```
 
-发布资格门禁（安装包导入来源、wheel 内容、聚焦 release 测试、真实 uvicorn 健康检查、完整浏览器矩阵）由 `scripts/test_installed_web_release.sh` 执行。
+`RELEASE_PY` 指向 `.venv/bin/python` 绝对路径，与 release harness 的 qualified interpreter 契约一致（`$ROOT/.venv/bin/python`）。发布资格门禁（安装包导入来源、wheel 内容、聚焦 release 测试、真实 uvicorn 健康检查、完整浏览器矩阵）由 `scripts/test_installed_web_release.sh` 执行。
 
 ### 5.3 React 路由与 legacy 回退矩阵
 
@@ -190,7 +199,7 @@ curl -s -H "Authorization: Bearer change-me" http://127.0.0.1:8765/api/fixtures
 - 事件含：`rules_save` / `rules_reset` / `kb_add` / `kb_delete` / `auth_denied` / `rules_auto_heal`
 - 生产建议轮转该文件并限制目录权限
 
-**安全提示：** 无 `TASK4_WEB_TOKEN` 时服务为**开放 demo**，仅内网/本机；生产务必设置 token、HTTPS、限制监听地址。规则保存失败会回滚；损坏的 `runtime_rules.yaml` 会被隔离为 `*.yaml.bad` 并回退默认包。
+**安全提示：** 无 `TASK4_WEB_TOKEN` 时服务为**开放 demo**，仅内网/本机；`TASK4_WEB_TOKEN` 仅控制 open demo API。生产发布请使用受控路由（`/controlled/s01|s02|s05|s08|s09/*`），其访问由各场景注册身份与受控部署前置保障，不受 `TASK4_WEB_TOKEN` 影响；同时启用 HTTPS、限制监听地址。规则保存失败会回滚；损坏的 `runtime_rules.yaml` 会被隔离为 `*.yaml.bad` 并回退默认包。
 
 ## 6. 健康检查清单
 
