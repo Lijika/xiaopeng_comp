@@ -22,9 +22,10 @@
 # 11. full Playwright matrix from the same installed-import environment (specs
 #     spawn their own uvicorn children)
 # 12. unconditional (EXIT trap): preserve Playwright artifacts on success
-#     and failure.  Freshness boundary: step 10 clears the fixed output
-#     directory before collection, so preserved artifacts belong to this
-#     run; a failure before the boundary records "playwright never started".
+#     and failure.  The Playwright output directory is run-specific inside
+#     the unique harness root; the ownership marker is set only after that
+#     directory is initialized, so preserved artifacts belong to this run;
+#     a failure before the boundary records "playwright never started".
 #     Then stop the owned uvicorn; remove the exact temporary root
 # 13. unconditional (EXIT trap): rebuild the sorted source-input manifest and
 #     compare complete before/after (detects changed/removed/added files
@@ -60,7 +61,9 @@ LOG="$LOG_DIR/lane-c-harness-$(date +%Y%m%d-%H%M%S).log"
 # Release root directly under /tmp, regardless of TMPDIR (ticket contract).
 TMP="$(mktemp -d /tmp/t10-installed-release.XXXXXX)"
 SERVER_PID=""
-PLAYWRIGHT_OUT="/tmp/xiaopeng-task4-s01-playwright-artifacts"
+# Run-specific Playwright output directory inside the unique harness root;
+# the fixed global directory previously caused cross-run interference.
+PLAYWRIGHT_OUT="$TMP/playwright-output"
 PLAYWRIGHT_STARTED=0
 CURRENT_STEP="startup"
 FAILED_STEP=""
@@ -85,18 +88,33 @@ finalize() {
   set +e
   trap - EXIT ERR INT TERM HUP
   STATUS="$status"
+  # Capture the entry step before steps 12/13 update CURRENT_STEP, so every
+  # exit path -- including deliberate `exit 1` branches that bypass the ERR
+  # trap -- reports the step it was in when it left.
+  ENTRY_STEP="$CURRENT_STEP"
 
-  # 12/13. Preserve this run's browser artifacts.  Freshness is established
-  # at the Playwright boundary: step 10 clears the fixed output directory
-  # before collection, so anything found later belongs to this run.  When
-  # Playwright never started (failure before the boundary), that is
-  # recorded explicitly and no stale directory is copied.  Runs on success
-  # and failure when artifacts exist.
+  # 12/13. Preserve this run's browser artifacts.  The output directory is
+  # run-specific inside the unique harness root and the ownership marker is
+  # set only after it is initialized, so anything found later belongs to
+  # this run.  When Playwright never started (failure before the boundary),
+  # that is recorded explicitly and no stale directory is copied.  A copy
+  # failure is decisive on an otherwise successful run (nonzero STATUS with
+  # the artifact-preservation step) and secondary evidence behind an
+  # earlier primary failure.
   step "12/13 preserve Playwright artifacts (unconditional)"
   if [[ "$PLAYWRIGHT_STARTED" -eq 1 && -d "$PLAYWRIGHT_OUT" && -n "$(ls -A "$PLAYWRIGHT_OUT" 2>/dev/null)" ]]; then
     ARTIFACT_DIR="$LOG_DIR/lane-c-harness-playwright-artifacts-$(date +%Y%m%d-%H%M%S)"
-    cp -a "$PLAYWRIGHT_OUT" "$ARTIFACT_DIR"
-    echo "playwright artifacts copied (from this run's boundary): $ARTIFACT_DIR" | tee -a "$LOG"
+    if cp -a "$PLAYWRIGHT_OUT" "$ARTIFACT_DIR"; then
+      echo "playwright artifacts copied (run-owned): $ARTIFACT_DIR" | tee -a "$LOG"
+    else
+      echo "ERROR: failed to preserve playwright artifacts from $PLAYWRIGHT_OUT" | tee -a "$LOG"
+      if [[ "$STATUS" -eq 0 ]]; then
+        STATUS=1
+        FAILED_STEP="12/13 preserve Playwright artifacts (unconditional)"
+      else
+        echo "secondary evidence: artifact preservation failed after primary step '${FAILED_STEP:-unknown}'" | tee -a "$LOG"
+      fi
+    fi
   elif [[ "$PLAYWRIGHT_STARTED" -eq 1 ]]; then
     echo "playwright started but produced no artifacts" | tee -a "$LOG"
   else
@@ -143,7 +161,7 @@ finalize() {
   fi
 
   if [[ "$STATUS" -ne 0 ]]; then
-    FAILED_STEP="${FAILED_STEP:-$CURRENT_STEP}"
+    FAILED_STEP="${FAILED_STEP:-$ENTRY_STEP}"
   else
     FAILED_STEP="none"
   fi
@@ -321,12 +339,13 @@ echo "health OK" | tee -a "$LOG"
 #     frozen matrix exactly; any other or unparsable value fails here so a
 #     removed spec cannot silently shrink coverage.
 step "10/13 playwright collection gate (must equal '66 tests in 12 files')"
-# Freshness boundary: clear the fixed output directory before collection so
-# that any artifacts preserved in step 12 provably belong to this run.
-PLAYWRIGHT_STARTED=1
+# Freshness boundary: clear the run-specific output directory before
+# collection so that any artifacts preserved in step 12 provably belong to
+# this run; the ownership marker is set only after initialization succeeds.
 rm -rf "$PLAYWRIGHT_OUT"
 mkdir -p "$PLAYWRIGHT_OUT"
-list_output="$(npm run test:e2e -- --list 2>&1 | tee -a "$LOG")"
+PLAYWRIGHT_STARTED=1
+list_output="$(npm run test:e2e -- --list --output "$PLAYWRIGHT_OUT" 2>&1 | tee -a "$LOG")"
 collected="$(printf '%s\n' "$list_output" | grep -oE '[0-9]+ tests? in [0-9]+ files?' | tail -1 || true)"
 echo "collected: ${collected:-unparsable}" | tee -a "$LOG"
 if [[ "${collected:-}" != "66 tests in 12 files" ]]; then
@@ -339,7 +358,7 @@ fi
 #     therefore imports task4_consistency from <site>.
 step "11/13 full installed Playwright matrix"
 env PYTHONSAFEPATH=1 PYTHONPATH="$TMP/site:$ROOT" TASK4_T10_INSTALLED_ROOT="$TMP/site" \
-  npm run test:e2e 2>&1 | tee -a "$LOG"
+  npm run test:e2e -- --output "$PLAYWRIGHT_OUT" 2>&1 | tee -a "$LOG"
 
 # Steps 12/13 run unconditionally from the EXIT trap (artifacts,
 # conservation, uvicorn stop, temporary-root removal, verdict).

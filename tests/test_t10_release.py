@@ -190,14 +190,216 @@ def _scan_source_tree(root: Path) -> dict[tuple[str, str], int]:
     return findings
 
 
-def test_legacy_mutation_callers_are_frozen_to_exact_production_owners() -> None:
-    """Current production source must equal the allowlist exactly.
+# --- Group 1b: semantic mutation-caller freeze (R2) --------------------------
+#
+# Raw endpoint token counts cannot bind a call site to its HTTP method, so
+# the gate additionally inventories actual mutating call signatures:
+# (relative_path, canonical legacy endpoint family, mutating method) ->
+# occurrence count.  GET reads are not mutations and are not inventoried;
+# POST/PUT/PATCH/DELETE are.  Route definitions (@app.<method> decorators)
+# are authority signatures; fetch/api call sites with an explicit method
+# field are caller signatures.  Caller URLs are normalized: a statically
+# equivalent concatenation ('/api/' + 'rules') equals '/api/rules', and the
+# dynamic /api/kb/<seg>/<seg> family is detected by its static prefix.
+_MUTATION_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
-    Any new production file, React caller, direct store caller, extra
-    occurrence inside an allowed file, or inline template caller changes
-    the scanned counts and fails this gate.
+_ROUTE_DEFINITION_RE = re.compile(
+    r"@app\.(get|post|put|patch|delete)\(\s*['\"]([^'\"]+)['\"]"
+)
+_CALL_START_RE = re.compile(r"\b([\w.$]+)\s*\(")
+_METHOD_FIELD_RE = re.compile(r"\bmethod\s*:\s*['\"]([A-Za-z]+)['\"]")
+
+_MUTATION_ALLOWLIST: dict[tuple[str, str, str], int] = {
+    # app.py route definitions (authority signatures)
+    ("task4_consistency/web/app.py", "rules", "PUT"): 1,
+    ("task4_consistency/web/app.py", "rules_reset", "POST"): 1,
+    ("task4_consistency/web/app.py", "kb", "POST"): 1,
+    ("task4_consistency/web/app.py", "kb_delete", "DELETE"): 1,
+    # static/app.js call sites (caller signatures)
+    ("task4_consistency/web/static/app.js", "rules", "PUT"): 2,
+    ("task4_consistency/web/static/app.js", "rules_reset", "POST"): 1,
+    ("task4_consistency/web/static/app.js", "kb", "POST"): 1,
+    ("task4_consistency/web/static/app.js", "kb_delete", "DELETE"): 1,
+}
+
+
+def _js_unescape(body: str, quote: str) -> str:
+    """Minimal JS string escape decoding for legacy endpoint URLs."""
+    out: list[str] = []
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if ch == "\\" and i + 1 < len(body):
+            nxt = body[i + 1]
+            if nxt in {quote, "\\", "/"}:
+                out.append(nxt)
+                i += 2
+                continue
+            if nxt == "n":
+                out.append("\n")
+                i += 2
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _literal_value(segment: str) -> str | None:
+    """Static value of one quoted string / backtick template literal with no
+    interpolation; None when the segment is not a literal or is dynamic."""
+    seg = segment.strip()
+    if len(seg) < 2 or seg[0] not in "'\"`":
+        return None
+    quote = seg[0]
+    body = seg[1:-1]
+    if quote == "`":
+        if "${" in body:
+            return None
+        return body
+    return _js_unescape(body, quote)
+
+
+def _call_end(text: str, open_index: int) -> int:
+    """Index of the ')' that closes the call opened at open_index; -1 when
+    unbalanced.  String literals and nested calls are tracked."""
+    depth = 0
+    in_str: str | None = None
+    i = open_index
+    while i < len(text):
+        ch = text[i]
+        if in_str is not None:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == in_str:
+                in_str = None
+            i += 1
+            continue
+        if ch in "'\"`":
+            in_str = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
+def _first_argument(call_body: str) -> str | None:
+    """Static value of the first call argument when it is a string literal
+    or a concatenation of string literals ('/api/' + 'rules'); None when it
+    is dynamic or not a string."""
+    depth = 0
+    in_str: str | None = None
+    i = 0
+    while i < len(call_body):
+        ch = call_body[i]
+        if in_str is not None:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == in_str:
+                in_str = None
+            i += 1
+            continue
+        if ch in "'\"`":
+            in_str = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            if depth == 0:
+                break
+            depth -= 1
+        elif ch == "," and depth == 0:
+            break
+        i += 1
+    parts = re.split(r"\s*\+\s*", call_body[:i].strip())
+    values: list[str] = []
+    for part in parts:
+        value = _literal_value(part)
+        if value is None:
+            return None
+        values.append(value)
+    return "".join(values)
+
+
+def _legacy_family(url_value: str | None, raw_arg: str) -> str | None:
+    """Canonical legacy endpoint family of a call/route URL argument, or
+    None when it targets no legacy family."""
+    if url_value is not None:
+        if url_value == "/api/rules/reset":
+            return "rules_reset"
+        if url_value == "/api/rules":
+            return "rules"
+        if url_value == "/api/kb":
+            return "kb"
+        if url_value.startswith("/api/kb/") and "/" in url_value[len("/api/kb/") :]:
+            return "kb_delete"
+        return None
+    # Dynamic first argument: only the /api/kb/<seg>/<seg> family is
+    # detectable by its static prefix (templates and concatenations).
+    raw = raw_arg.strip()
+    if (
+        raw.startswith('"/api/kb/')
+        or raw.startswith("'/api/kb/")
+        or raw.startswith("`/api/kb/")
+    ):
+        return "kb_delete"
+    return None
+
+
+def _scan_mutation_calls(root: Path) -> dict[tuple[str, str, str], int]:
+    """Semantic inventory of legacy HTTP mutation callers: each
+    (relative_path, canonical endpoint family, mutating method) maps to the
+    number of call sites.  Route definitions are counted from their
+    @app.<method> decorators; callers are counted when their first argument
+    normalizes to a legacy family (literal, static concatenation, or the
+    dynamic /api/kb prefix) and they bind an explicit mutating method.
+    """
+    findings: dict[tuple[str, str, str], int] = {}
+    for path in _scanned_source_files(root):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        relative = path.relative_to(root).as_posix()
+        for method, url in _ROUTE_DEFINITION_RE.findall(text):
+            family = _legacy_family(url, url)
+            if family is None or method.upper() not in _MUTATION_METHODS:
+                continue
+            key = (relative, family, method.upper())
+            findings[key] = findings.get(key, 0) + 1
+        for match in _CALL_START_RE.finditer(text):
+            end = _call_end(text, match.end() - 1)
+            if end < 0:
+                continue
+            body = text[match.end() : end]
+            family = _legacy_family(_first_argument(body), body)
+            if family is None:
+                continue
+            method_match = _METHOD_FIELD_RE.search(body)
+            if not method_match:
+                continue
+            method = method_match.group(1).upper()
+            if method not in _MUTATION_METHODS:
+                continue
+            key = (relative, family, method)
+            findings[key] = findings.get(key, 0) + 1
+    return findings
+
+
+def test_legacy_mutation_callers_are_frozen_to_exact_production_owners() -> None:
+    """Current production source must equal the allowlists exactly.
+
+    Two complementary freezes: the raw endpoint/store token counts
+    (supplementary diagnostics) and the semantic mutation-caller inventory
+    that binds each call site to a canonical legacy endpoint family and a
+    mutating HTTP method.  Any new production file, React caller, direct
+    store caller, extra occurrence inside an allowed file, inline template
+    caller, or method/URL change to an existing legacy caller changes the
+    scanned counts and fails this gate.
     """
     scanned = _scan_source_tree(ROOT)
+    mutations = _scan_mutation_calls(ROOT)
     assert scanned == _ALLOWLIST, (
         "legacy rule/KB mutation caller set changed; expected exact allowlist "
         "but differences "
@@ -208,6 +410,94 @@ def test_legacy_mutation_callers_are_frozen_to_exact_production_owners() -> None
                 if scanned.get(key) != _ALLOWLIST.get(key)
             }
         )
+    )
+    assert mutations == _MUTATION_ALLOWLIST, (
+        "legacy mutation caller signatures changed (path, endpoint, method); "
+        "expected exact allowlist but differences "
+        + repr(
+            {
+                key: (mutations.get(key), _MUTATION_ALLOWLIST.get(key))
+                for key in set(mutations) | set(_MUTATION_ALLOWLIST)
+                if mutations.get(key) != _MUTATION_ALLOWLIST.get(key)
+            }
+        )
+    )
+
+
+def test_legacy_mutation_callers_gate_detects_method_change_with_same_token_count(
+    tmp_path: Path,
+) -> None:
+    """A GET -> POST change on an existing /api/kb call keeps the raw
+    endpoint token count identical but adds a mutating caller signature and
+    must fail the gate (endpoint-text equality cannot bind a call to its
+    HTTP method)."""
+    tree = tmp_path / "injected-method-change"
+    for relative in (
+        "task4_consistency/web/app.py",
+        "task4_consistency/web/static/app.js",
+        "task4_consistency/kb/store.py",
+        "task4_consistency/kb/__init__.py",
+    ):
+        target = tree / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / relative, target)
+    app_js = tree / "task4_consistency" / "web" / "static" / "app.js"
+    changed = app_js.read_text(encoding="utf-8").replace(
+        'const kb = await api("/api/kb");',
+        'const kb = await api("/api/kb", { method: "POST", body: "{}" });',
+        1,
+    )
+    assert 'api("/api/kb", { method: "POST"' in changed
+    app_js.write_text(changed, encoding="utf-8")
+
+    scanned = _scan_source_tree(tree)
+    mutations = _scan_mutation_calls(tree)
+    token_key = ("task4_consistency/web/static/app.js", "api_kb")
+    assert scanned[token_key] == _ALLOWLIST[token_key], (
+        "probe premise: endpoint token count must be unchanged by the method flip"
+    )
+    mutation_key = ("task4_consistency/web/static/app.js", "kb", "POST")
+    assert mutations[mutation_key] == _MUTATION_ALLOWLIST[mutation_key] + 1
+    assert mutations != _MUTATION_ALLOWLIST, (
+        "gate must fail on a GET->POST method change with same token count"
+    )
+
+
+def test_legacy_mutation_callers_gate_detects_concatenated_url_put_caller(
+    tmp_path: Path,
+) -> None:
+    """A reachable PUT caller using a statically equivalent concatenated
+    '/api/' + 'rules' URL is a new mutating caller signature and must fail
+    the gate even though no literal '/api/rules' token appears."""
+    tree = tmp_path / "injected-concatenated-put"
+    for relative in (
+        "task4_consistency/web/app.py",
+        "task4_consistency/web/static/app.js",
+        "task4_consistency/kb/store.py",
+        "task4_consistency/kb/__init__.py",
+    ):
+        target = tree / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / relative, target)
+    app_js = tree / "task4_consistency" / "web" / "static" / "app.js"
+    app_js.write_text(
+        app_js.read_text(encoding="utf-8")
+        + '\nfunction bootRulesPut(): void {\n'
+        + '  void fetch("/api/" + "rules", { method: "PUT", body: "{}" });\n'
+        + "}\n",
+        encoding="utf-8",
+    )
+
+    scanned = _scan_source_tree(tree)
+    mutations = _scan_mutation_calls(tree)
+    token_key = ("task4_consistency/web/static/app.js", "api_rules")
+    assert scanned[token_key] == _ALLOWLIST[token_key], (
+        "probe premise: concatenated URL must not change the endpoint token count"
+    )
+    mutation_key = ("task4_consistency/web/static/app.js", "rules", "PUT")
+    assert mutations[mutation_key] == _MUTATION_ALLOWLIST[mutation_key] + 1
+    assert mutations != _MUTATION_ALLOWLIST, (
+        "gate must fail on a concatenated-URL PUT caller"
     )
 
 

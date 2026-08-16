@@ -104,7 +104,7 @@ bash scripts/run_web.sh
 
 ### 5.2 已安装发布版（production）
 
-发布部署运行已安装 wheel 内的 FastAPI 应用：**无 Node、无 `--reload`**。release 解释器在 `cd` 之前定义并供给一次，构建 / 安装 / 启动全程使用同一绝对路径：
+发布部署运行已安装 wheel 内的 FastAPI 应用：**无 Node、无 `--reload`**。前置条件：`/opt/task4` 必须是**完整源码检出**（含 `package.json`、`pyproject.toml`、`task4_consistency/`、`configs/`、`fixtures/`、`data/`）。release 解释器在 `cd` 之前定义并供给一次，构建 / 安装 / 验证 / 启动全程使用同一绝对路径：
 
 ```bash
 # 1) 供给 release 解释器（一次性）：在 cd 之前完成；
@@ -115,20 +115,34 @@ export RELEASE_PY=/opt/task4/.venv/bin/python
 "$RELEASE_PY" -m pip install build
 
 cd /opt/task4
-# 2) production React build（关闭 sourcemap，写入 task4_consistency/web/static/react/）
+# 2) production React build（关闭 sourcemap，写入 task4_consistency/web/static/react/）；
+#    先按 package-lock.json 精确重建依赖。npm run build 内的 check:generated
+#    用 .venv/bin/python 重新导出 OpenAPI（import task4_consistency.web.app），
+#    构建期因此需要源码可导入 + Web 依赖（editable 安装）；运行期验证仍以
+#    /opt/task4/site 优先（PYTHONPATH），不导入检出包
+npm ci
+"$RELEASE_PY" -m pip install -e ".[web]"
 npm run build
 
 # 3) PEP 517：生成一个 sdist 与一个 wheel（默认隔离流程，
 #    构建依赖按 pyproject.toml [build-system].requires 自动准备）
 "$RELEASE_PY" -m build --outdir dist/
 
-# 4) 安装 wheel 到独立安装根（--no-deps：依赖由宿主环境提供）
-"$RELEASE_PY" -m pip install --no-deps --target /opt/task4/site dist/task4_consistency-0.1.0-py3-none-any.whl
+# 4) 安装 wheel 与其 Web 运行时依赖到独立安装根：extras 语法使
+#    fastapi / uvicorn[standard] / python-multipart / httpx 与基础
+#    PyYAML 一并落入 /opt/task4/site，import 验证时不导入检出包
+"$RELEASE_PY" -m pip install --target /opt/task4/site \
+  "task4_consistency[web] @ file:///opt/task4/dist/task4_consistency-0.1.0-py3-none-any.whl"
 
 # 5) 把 operator inputs 复制到安装根：installed 应用按 __file__ 推导 ROOT=安装根，
 #    configs/fixtures/data 必须与包同根
 cp -a configs fixtures data /opt/task4/site/
 mkdir -p /opt/task4/site/var
+
+# 6) 验证（copy-paste）：imports 必须从 /opt/task4/site 解析，
+#    且包含 task4_consistency / fastapi / uvicorn / yaml
+PYTHONSAFEPATH=1 PYTHONPATH=/opt/task4/site \
+  "$RELEASE_PY" -c "import task4_consistency, fastapi, uvicorn, yaml; print('imports OK:', task4_consistency.__file__)"
 ```
 
 启动（FastAPI-only；`-P` / `PYTHONSAFEPATH=1` 防止当前目录混入包路径，`PYTHONPATH` 指向安装根）：
@@ -140,6 +154,8 @@ export TASK4_S01_STATE_PATH=/opt/task4/site/var/s01.sqlite3
 PYTHONSAFEPATH=1 PYTHONPATH=/opt/task4/site \
   "$RELEASE_PY" -P -m uvicorn task4_consistency.web.app:app \
   --host 127.0.0.1 --port 8765
+# 健康检查（另开终端）：
+curl -s http://127.0.0.1:8765/api/health
 ```
 
 `RELEASE_PY` 指向 `.venv/bin/python` 绝对路径，与 release harness 的 qualified interpreter 契约一致（`$ROOT/.venv/bin/python`）。发布资格门禁（安装包导入来源、wheel 内容、聚焦 release 测试、真实 uvicorn 健康检查、完整浏览器矩阵）由 `scripts/test_installed_web_release.sh` 执行。
