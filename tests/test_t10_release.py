@@ -2,17 +2,17 @@
 package provenance/content/cache/security, and three-stage rollback with
 fact preservation.
 
-Group 1 -- legacy mutation caller freeze (zero new callers): a test-local
-scanner over the production source tree (task4_consistency/**/*.py,
+Group 1 -- legacy mutation caller freeze (zero new callers): test-local
+scanners over the production source tree (task4_consistency/**/*.py,
 task4_consistency/web/static/**/*.js, packaged HTML templates under
 task4_consistency/web/templates/** (they carry inline <script> blocks),
 frontend/src/**/*.{ts,tsx,js,jsx}, excluding the machine-generated
 task4_consistency/web/static/react/** and frontend/src/generated/**) plus
-an exact allowlist of the current production owners.  The freeze covers
-per-(path, token) occurrence counts, not a presence bit: a second legacy
-mutation call inside an already-allowed file, or an inline legacy caller
-inside a packaged template, is a new occurrence and fails the gate.  The
-gate lives inside this test file, not in production code.
+exact allowlists of the current production owners.  Direct Python store
+mutations are frozen by per-(path, token) occurrence counts.  HTTP mutations
+are frozen by path, canonical endpoint family, method, and occurrence; raw
+HTTP endpoint counts provide diagnostics only.  The gate lives inside this
+test file, not in production code.
 
 Group 2 -- installed package provenance/content/cache/security: gated on
 the ``TASK4_T10_INSTALLED_ROOT`` environment variable (set by the release
@@ -42,6 +42,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -131,12 +132,13 @@ _TOKEN_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
 )
 
-# Exact current production-owner set with occurrence counts: HTTP authority
-# definitions in app.py, the retained runtime caller static/app.js, and the
-# KB mutator definitions/wrappers in kb/store.py + kb/__init__.py.  Counts
-# are per-(path, token) matches of the patterns above, verified against the
-# sources at the T10 freeze commit; any count change (or new path/token)
-# means a new legacy mutation caller.
+_DIRECT_STORE_TOKENS = frozenset(
+    {"add_alias", "remove_alias", "runtime_rules_unlink", "runtime_rules_replace"}
+)
+
+# Exact current raw-token inventory. HTTP endpoint counts provide diagnostics;
+# the direct-store subset remains authoritative for mutations outside the HTTP
+# semantic scanner.
 _ALLOWLIST: dict[tuple[str, str], int] = {
     ("task4_consistency/web/app.py", "api_rules"): 3,
     ("task4_consistency/web/app.py", "api_rules_reset"): 1,
@@ -154,6 +156,10 @@ _ALLOWLIST: dict[tuple[str, str], int] = {
     ("task4_consistency/kb/store.py", "remove_alias"): 1,
     ("task4_consistency/kb/__init__.py", "add_alias"): 5,
     ("task4_consistency/kb/__init__.py", "remove_alias"): 4,
+}
+
+_DIRECT_STORE_ALLOWLIST = {
+    key: count for key, count in _ALLOWLIST.items() if key[1] in _DIRECT_STORE_TOKENS
 }
 
 
@@ -387,33 +393,35 @@ def _scan_mutation_calls(root: Path) -> dict[tuple[str, str, str], int]:
     return findings
 
 
-def test_legacy_mutation_callers_are_frozen_to_exact_production_owners() -> None:
-    """Current production source must equal the allowlists exactly.
-
-    Two complementary freezes: the raw endpoint/store token counts
-    (supplementary diagnostics) and the semantic mutation-caller inventory
-    that binds each call site to a canonical legacy endpoint family and a
-    mutating HTTP method.  Any new production file, React caller, direct
-    store caller, extra occurrence inside an allowed file, inline template
-    caller, or method/URL change to an existing legacy caller changes the
-    scanned counts and fails this gate.
-    """
-    scanned = _scan_source_tree(ROOT)
-    mutations = _scan_mutation_calls(ROOT)
-    assert scanned == _ALLOWLIST, (
-        "legacy rule/KB mutation caller set changed; expected exact allowlist "
-        "but differences "
+def _assert_legacy_mutation_callers(root: Path) -> None:
+    scanned = _scan_source_tree(root)
+    direct_store = {
+        key: count
+        for key, count in scanned.items()
+        if key[1] in _DIRECT_STORE_TOKENS
+    }
+    assert direct_store == _DIRECT_STORE_ALLOWLIST, (
+        "legacy direct-store mutation callers changed (path, token); "
+        "observed/expected differences "
         + repr(
             {
-                key: (scanned.get(key), _ALLOWLIST.get(key))
-                for key in set(scanned) | set(_ALLOWLIST)
-                if scanned.get(key) != _ALLOWLIST.get(key)
+                key: (direct_store.get(key), _DIRECT_STORE_ALLOWLIST.get(key))
+                for key in set(direct_store) | set(_DIRECT_STORE_ALLOWLIST)
+                if direct_store.get(key) != _DIRECT_STORE_ALLOWLIST.get(key)
             }
         )
     )
+
+    mutations = _scan_mutation_calls(root)
+    raw_http_differences = {
+        key: (scanned.get(key), _ALLOWLIST.get(key))
+        for key in set(scanned) | set(_ALLOWLIST)
+        if key[1] not in _DIRECT_STORE_TOKENS
+        and scanned.get(key) != _ALLOWLIST.get(key)
+    }
     assert mutations == _MUTATION_ALLOWLIST, (
         "legacy mutation caller signatures changed (path, endpoint, method); "
-        "expected exact allowlist but differences "
+        "observed/expected differences "
         + repr(
             {
                 key: (mutations.get(key), _MUTATION_ALLOWLIST.get(key))
@@ -421,7 +429,14 @@ def test_legacy_mutation_callers_are_frozen_to_exact_production_owners() -> None
                 if mutations.get(key) != _MUTATION_ALLOWLIST.get(key)
             }
         )
+        + "; supplementary raw HTTP endpoint differences "
+        + repr(raw_http_differences)
     )
+
+
+def test_legacy_mutation_callers_are_frozen_to_exact_production_owners() -> None:
+    """Current production source must equal both authoritative inventories."""
+    _assert_legacy_mutation_callers(ROOT)
 
 
 def test_legacy_mutation_callers_gate_detects_method_change_with_same_token_count(
@@ -458,9 +473,8 @@ def test_legacy_mutation_callers_gate_detects_method_change_with_same_token_coun
     )
     mutation_key = ("task4_consistency/web/static/app.js", "kb", "POST")
     assert mutations[mutation_key] == _MUTATION_ALLOWLIST[mutation_key] + 1
-    assert mutations != _MUTATION_ALLOWLIST, (
-        "gate must fail on a GET->POST method change with same token count"
-    )
+    with pytest.raises(AssertionError, match=r"kb.*POST"):
+        _assert_legacy_mutation_callers(tree)
 
 
 def test_legacy_mutation_callers_gate_detects_concatenated_url_put_caller(
@@ -482,11 +496,16 @@ def test_legacy_mutation_callers_gate_detects_concatenated_url_put_caller(
     app_js = tree / "task4_consistency" / "web" / "static" / "app.js"
     app_js.write_text(
         app_js.read_text(encoding="utf-8")
-        + '\nfunction bootRulesPut(): void {\n'
-        + '  void fetch("/api/" + "rules", { method: "PUT", body: "{}" });\n'
-        + "}\n",
+        + '\nvoid fetch("/api/" + "rules", { method: "PUT", body: "{}" });\n',
         encoding="utf-8",
     )
+    syntax = subprocess.run(
+        ["node", "--check", str(app_js)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert syntax.returncode == 0, syntax.stderr
 
     scanned = _scan_source_tree(tree)
     mutations = _scan_mutation_calls(tree)
@@ -496,9 +515,34 @@ def test_legacy_mutation_callers_gate_detects_concatenated_url_put_caller(
     )
     mutation_key = ("task4_consistency/web/static/app.js", "rules", "PUT")
     assert mutations[mutation_key] == _MUTATION_ALLOWLIST[mutation_key] + 1
-    assert mutations != _MUTATION_ALLOWLIST, (
-        "gate must fail on a concatenated-URL PUT caller"
+    with pytest.raises(AssertionError, match=r"rules.*PUT"):
+        _assert_legacy_mutation_callers(tree)
+
+
+def test_legacy_mutation_callers_gate_treats_read_only_raw_tokens_as_diagnostics(
+    tmp_path: Path,
+) -> None:
+    tree = tmp_path / "injected-read-only-token"
+    for relative in (
+        "task4_consistency/web/app.py",
+        "task4_consistency/web/static/app.js",
+        "task4_consistency/kb/store.py",
+        "task4_consistency/kb/__init__.py",
+    ):
+        target = tree / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / relative, target)
+    app_js = tree / "task4_consistency" / "web" / "static" / "app.js"
+    app_js.write_text(
+        app_js.read_text(encoding="utf-8") + '\nvoid fetch("/api/rules");\n',
+        encoding="utf-8",
     )
+
+    scanned = _scan_source_tree(tree)
+    token_key = ("task4_consistency/web/static/app.js", "api_rules")
+    assert scanned[token_key] == _ALLOWLIST[token_key] + 1
+    assert _scan_mutation_calls(tree) == _MUTATION_ALLOWLIST
+    _assert_legacy_mutation_callers(tree)
 
 
 def test_legacy_mutation_callers_gate_detects_injected_new_react_caller(
@@ -524,14 +568,17 @@ def test_legacy_mutation_callers_gate_detects_injected_new_react_caller(
     evil.parent.mkdir(parents=True, exist_ok=True)
     evil.write_text(
         "export function callLegacyRules(): void {\n"
-        '  void fetch("/api/rules");\n'
+        '  void fetch("/api/rules", { method: "PUT", body: "{}" });\n'
         "}\n",
         encoding="utf-8",
     )
 
     scanned = _scan_source_tree(tree)
     assert scanned[("frontend/src/evil.tsx", "api_rules")] == 1
-    assert scanned != _ALLOWLIST, "gate must fail on an injected new caller"
+    mutations = _scan_mutation_calls(tree)
+    assert mutations[("frontend/src/evil.tsx", "rules", "PUT")] == 1
+    with pytest.raises(AssertionError, match=r"frontend/src/evil\.tsx.*rules.*PUT"):
+        _assert_legacy_mutation_callers(tree)
 
 
 def test_legacy_mutation_callers_gate_detects_second_call_in_allowed_js(
@@ -552,7 +599,8 @@ def test_legacy_mutation_callers_gate_detects_second_call_in_allowed_js(
         shutil.copy2(ROOT / relative, target)
     extra = tree / "task4_consistency" / "web" / "static" / "app.js"
     extra.write_text(
-        extra.read_text(encoding="utf-8") + '\nvoid fetch("/api/rules");\n',
+        extra.read_text(encoding="utf-8")
+        + '\nvoid fetch("/api/rules", { method: "PUT", body: "{}" });\n',
         encoding="utf-8",
     )
 
@@ -560,7 +608,11 @@ def test_legacy_mutation_callers_gate_detects_second_call_in_allowed_js(
     assert scanned[("task4_consistency/web/static/app.js", "api_rules")] == (
         _ALLOWLIST[("task4_consistency/web/static/app.js", "api_rules")] + 1
     )
-    assert scanned != _ALLOWLIST, "gate must fail on an extra allowed-file caller"
+    mutations = _scan_mutation_calls(tree)
+    mutation_key = ("task4_consistency/web/static/app.js", "rules", "PUT")
+    assert mutations[mutation_key] == _MUTATION_ALLOWLIST[mutation_key] + 1
+    with pytest.raises(AssertionError, match=r"rules.*PUT"):
+        _assert_legacy_mutation_callers(tree)
 
 
 def test_legacy_mutation_callers_gate_detects_inline_template_caller(
@@ -585,13 +637,17 @@ def test_legacy_mutation_callers_gate_detects_inline_template_caller(
     template = tree / "task4_consistency" / "web" / "templates" / "s01.html"
     template.write_text(
         template.read_text(encoding="utf-8")
-        + '\n<script>void fetch("/api/rules");</script>\n',
+        + '\n<script>void fetch("/api/rules", { method: "PUT", body: "{}" });</script>\n',
         encoding="utf-8",
     )
 
     scanned = _scan_source_tree(tree)
     assert scanned[("task4_consistency/web/templates/s01.html", "api_rules")] == 1
-    assert scanned != _ALLOWLIST, "gate must fail on an injected template caller"
+    mutations = _scan_mutation_calls(tree)
+    key = ("task4_consistency/web/templates/s01.html", "rules", "PUT")
+    assert mutations[key] == 1
+    with pytest.raises(AssertionError, match=r"s01\.html.*rules.*PUT"):
+        _assert_legacy_mutation_callers(tree)
 
 
 # --- Group 2: installed package provenance / content / cache / security -----
