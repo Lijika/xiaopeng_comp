@@ -1179,7 +1179,11 @@ def test_unauthenticated_recovery_reads_and_commands_are_hidden_typed_404(
         assert blocked["recovery_work_id"] not in hidden_command.text
 
 
-def test_react_shell_falls_back_to_legacy_for_partial_builds(tmp_path: Path) -> None:
+def test_react_shell_rejects_partial_builds_and_legacy_route_stays(
+    tmp_path: Path,
+) -> None:
+    """Every incomplete React build yields the stable S01 503 with a
+    minimized no-store body while the legacy route stays available."""
     state_path = tmp_path / "t01-partial.sqlite3"
     legacy_marker = "一致性审核工作台 · C-DEMO"
     outside_asset = tmp_path / "outside.css"
@@ -1370,12 +1374,34 @@ def test_react_shell_falls_back_to_legacy_for_partial_builds(tmp_path: Path) -> 
                 headers=demo_auth_headers(),
                 use_session=False,
             )
-            assert shell.status == 200, (case_name, shell.text)
-            assert legacy_marker in shell.text, case_name
-            assert "index-MISSING" not in shell.text, case_name
-            assert "outside.css" not in shell.text, case_name
-            assert shell.headers["cache-control"] == "no-store"
-            assert "set-cookie" in shell.headers
+            assert shell.status == 503, (case_name, shell.status, shell.text)
+            assert shell.json() == {
+                "detail": {
+                    "error": "S01_REACT_UNAVAILABLE",
+                    "message": "Controlled S01 React shell is not built",
+                }
+            }, case_name
+            assert shell.headers["cache-control"] == "no-store", case_name
+            assert str(react_dir) not in shell.text, case_name
+            assert legacy_marker not in shell.text, case_name
+
+    # The legacy route stays independently available (200, no-store) even
+    # when the React build is partial; one request after the matrix keeps
+    # every partial case lightweight.
+    with UvicornLoopback(
+        env,
+        app_target="tests.test_t01_http:create_t01_test_app",
+        app_factory=True,
+    ) as server:
+        legacy = server.request(
+            "GET",
+            "/controlled/s01",
+            headers=demo_auth_headers(),
+            use_session=False,
+        )
+        assert legacy.status == 200, legacy.text
+        assert legacy.headers["cache-control"] == "no-store"
+        assert "set-cookie" in legacy.headers
 
 
 def test_queue_shared_authority_failure_returns_minimized_unavailable(

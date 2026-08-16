@@ -3323,16 +3323,12 @@ def controlled_s01_react_page(request: Request) -> HTMLResponse:
     _s01_service()
     index_html = _react_shell_index_html()
     if index_html is None:
-        if not S01_REACT_INDEX.is_file() or not S01_TEMPLATE.is_file():
-            raise HTTPException(
-                503,
-                detail={
-                    "error": "S01_REACT_UNAVAILABLE",
-                    "message": "Controlled S01 React shell is not built",
-                },
-            )
-        return _controlled_s01_shell_response(
-            request, S01_TEMPLATE.read_text(encoding="utf-8")
+        raise HTTPException(
+            503,
+            detail={
+                "error": "S01_REACT_UNAVAILABLE",
+                "message": "Controlled S01 React shell is not built",
+            },
         )
     return _controlled_s01_shell_response(request, index_html)
 
