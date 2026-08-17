@@ -1372,8 +1372,8 @@ export interface paths {
          * Controlled S02 React Page
          * @description The Integrator React shell: same built artifact as the Reviewer shell,
          *     issuing only the existing S02 session.  A missing or incomplete build is
-         *     an explicit 503; the legacy ``/controlled/s02`` page remains the
-         *     fallback URL.
+         *     an explicit 503.  The canonical route uses this build; deployment-only
+         *     rollback is owned by the immediately prior artifact.
          */
         get: operations["controlled_s02_react_page_controlled_s02_react_get"];
         put?: never;

@@ -20,6 +20,7 @@ Structure:
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
@@ -35,6 +36,7 @@ from task4_consistency.web.observation import (
     LIFECYCLE_RECORD_FIELDS,
     REQUEST_RECORD_FIELDS,
     TRAFFIC_CLASSES,
+    UNREGISTERED_PATH_FAMILY,
     UNKNOWN_CLASS,
     AcceptanceReport,
     FixedClock,
@@ -54,9 +56,10 @@ from task4_consistency.web.observation import (
 
 WINDOW_ID = "win-20260816-01"
 ARTIFACT_SHA = "a" * 64
+PRIOR_ARTIFACT_SHA = "b" * 64
 T0 = datetime(2026, 8, 16, 12, 0, 0, tzinfo=timezone.utc)
 ENV_IDENTITY = {"hostname": "test-host", "python_version": "3.12.0", "platform": "linux-test"}
-FAMILY_TABLE = {**default_family_table(), "/api/fixtures": "/api/fixtures"}
+FAMILY_TABLE = observation_module._canonical_family_contract()
 _ZERO = {cls: 0 for cls in TRAFFIC_CLASSES}
 
 
@@ -71,6 +74,41 @@ def _serialize(records: list[dict]) -> bytes:
     return "".join(json.dumps(r, sort_keys=True) + "\n" for r in records).encode("utf-8")
 
 
+def _release_evidence(elapsed_seconds: float = 19.0) -> dict:
+    node_ids = [
+        "test_t54_prior_artifact.spec.js:11:1 › T54 installed prior artifact serves legacy root, S01, and S02 at both viewports",
+        "test_t01_react.spec.js:702:3 › T01 production tracer (desktop 1280x800)",
+    ]
+    return {
+        "reviewed_commit": "c" * 40,
+        "tracked_tree_clean": True,
+        "current_wheel_sha256": ARTIFACT_SHA,
+        "prior_commit": "d" * 40,
+        "prior_wheel_sha256": PRIOR_ARTIFACT_SHA,
+        "timezone": "CST",
+        "elapsed_seconds": elapsed_seconds,
+        "node_version": "v22.22.2",
+        "npm_version": "10.9.0",
+        "package_identity": "task4-consistency==0.1.0",
+        "network_routes": "2: lo    inet 127.0.0.1/8",
+        "cohort_node_ids": node_ids,
+        "cohort_node_ids_sha256": hashlib.sha256(
+            ("\n".join(node_ids) + "\n").encode("utf-8")
+        ).hexdigest(),
+        "cohort_spec_sha256": {
+            "tests/test_t01_react.spec.js": "e" * 64,
+            "playwright.config.js": "f" * 64,
+        },
+        "viewports": ["1280x800", "390x844"],
+        "accepted_fact_sha256": {
+            "current": "1" * 64,
+            "prior": "1" * 64,
+            "restored": "1" * 64,
+        },
+        "accepted_facts_equal": True,
+    }
+
+
 def _rehash(manifest: dict, raw: bytes | None = None, lifecycle_raw: bytes | None = None) -> dict:
     """A manifest re-sealed over mutated raw evidence: the sealed digest is
     updated so the record-level integrity checks (not the digest check) are
@@ -80,6 +118,7 @@ def _rehash(manifest: dict, raw: bytes | None = None, lifecycle_raw: bytes | Non
         copy["requests_raw_sha256"] = hashlib.sha256(raw).hexdigest()
     if lifecycle_raw is not None:
         copy["lifecycle_raw_sha256"] = hashlib.sha256(lifecycle_raw).hexdigest()
+    copy["manifest_sha256"] = observation_module._manifest_sha256(copy)
     return copy
 
 
@@ -93,6 +132,8 @@ def _seal(
     family_table: dict[str, str] | None = None,
     process_id: str = "p-1",
     process_class: str = "operator-simulated",
+    prior_artifact: dict | None = None,
+    release_evidence: dict | None = None,
 ) -> tuple[dict, bytes, bytes]:
     requests_raw = _serialize(sink.requests)
     lifecycle_raw = _serialize(sink.lifecycle)
@@ -109,6 +150,8 @@ def _seal(
         environment_identity=ENV_IDENTITY,
         cohort=cohort,
         family_table=family_table or FAMILY_TABLE,
+        prior_artifact=prior_artifact,
+        release_evidence=release_evidence,
     )
     return manifest, requests_raw, lifecycle_raw
 
@@ -128,18 +171,23 @@ def _valid_bundle(
         clock, sink,
         window_id=WINDOW_ID, artifact_sha256=ARTIFACT_SHA,
         process_id="p-1", process_class="operator-simulated",
+        artifact_stage="current", family_table=FAMILY_TABLE,
     )
     p2 = ObservationRecorder(
         clock, sink,
         window_id=WINDOW_ID, artifact_sha256=ARTIFACT_SHA,
         process_id="p-2", process_class="release",
+        artifact_stage="current", family_table=FAMILY_TABLE,
     )
     p1.record_lifecycle("start")  # T0
     clock.advance(timedelta(seconds=1))
     p2.record_lifecycle("start")  # T0+1
     clock.advance(timedelta(seconds=1))
     if operator_on_catalog:
-        p1.record_http(method="GET", path="/", response_status=200, matched_route_owner="index")
+        p1.record_http(
+            method="GET", path="/static/app.js", response_status=200,
+            matched_route_owner="StaticFiles",
+        )
     else:
         p1.record_http(
             method="GET", path="/api/fixtures",
@@ -171,24 +219,46 @@ def _valid_bundle(
         clock.advance(timedelta(seconds=1))
         p3 = ObservationRecorder(
             clock, sink,
-            window_id=WINDOW_ID, artifact_sha256=ARTIFACT_SHA,
+            window_id=WINDOW_ID, artifact_sha256=PRIOR_ARTIFACT_SHA,
             process_id="p-3", process_class="rollback-probe",
+            artifact_stage="prior", family_table=FAMILY_TABLE,
         )
         p3.record_lifecycle("start")  # T0+10
+        clock.advance(timedelta(seconds=1))
+        p3.record_http(
+            method="GET", path="/", response_status=200,
+            matched_route_owner="index",
+        )
+        clock.advance(timedelta(seconds=1))
+        p3.record_http(
+            method="GET", path="/controlled/s01", response_status=200,
+            matched_route_owner="controlled_s01_page",
+        )
+        clock.advance(timedelta(seconds=1))
+        p3.record_http(
+            method="GET", path="/controlled/s02", response_status=200,
+            matched_route_owner="controlled_s02_page",
+        )
         clock.advance(timedelta(seconds=1))
         p3.record_http(
             method="DELETE", path="/api/kb/address_aliases/somekey",
             response_status=200, matched_route_owner="kb_delete",
         )
         clock.advance(timedelta(seconds=1))
-        p3.record_lifecycle("end")  # T0+12
+        p3.record_lifecycle("end")  # T0+15
         cohort.append("p-3")
 
     return _seal(
         tmp_path, sink,
         window_start=T0 - timedelta(seconds=1),
-        window_end=T0 + timedelta(seconds=15 if with_rollback_probe else 10),
+        window_end=T0 + timedelta(seconds=18 if with_rollback_probe else 10),
         cohort=tuple(cohort),
+        prior_artifact=(
+            {"wheel_sha256": PRIOR_ARTIFACT_SHA, "commit": "d" * 40}
+            if with_rollback_probe
+            else None
+        ),
+        release_evidence=_release_evidence() if with_rollback_probe else None,
     )
 
 
@@ -260,7 +330,6 @@ def test_valid_bundle_verifies_with_exact_counts(tmp_path: Path) -> None:
         "legacy-mutation-kb-delete",
         "legacy-mutation-kb-reload-post",
     )}
-    entry_counts["legacy-page-root"]["release"] = 1
     entry_counts["legacy-static-app-js"]["release"] = 1
     entry_counts["legacy-mutation-rules-put"]["release"] = 1
     assert verdict.per_entry_counts == entry_counts
@@ -274,7 +343,7 @@ def test_valid_bundle_verifies_with_exact_counts(tmp_path: Path) -> None:
     assert manifest["expected_sequence_range"] == [1, 6]
     assert manifest["window_id"] == WINDOW_ID
     assert manifest["artifact_sha256"] == ARTIFACT_SHA
-    assert manifest["schema_version"] == "1"
+    assert manifest["schema_version"] == "2"
     assert manifest["frozen_cohort_manifest"] == {"processes": ["p-1", "p-2"]}
     assert manifest["prior_artifact_identity"] is None
 
@@ -297,7 +366,7 @@ def test_valid_bundle_canonical_records(tmp_path: Path) -> None:
     assert by_seq[2]["matched_route_owner"] == "unmatched"
     assert by_seq[2]["normalized_path_family"] == DYNAMIC_KB_FAMILY
     assert by_seq[3]["matched_route_owner"] == "index"
-    assert by_seq[3]["legacy_surface_id"] == "legacy-page-root"
+    assert by_seq[3]["legacy_surface_id"] is None
     assert by_seq[4]["legacy_surface_id"] == "legacy-static-app-js"
     assert by_seq[5]["legacy_surface_id"] == "legacy-mutation-rules-put"
     assert by_seq[5]["method"] == "PUT"
@@ -410,6 +479,21 @@ def test_wrong_field_type_invalidates(tmp_path: Path) -> None:
     _expect_invalid(_rehash(manifest, raw=raw2), raw2, lifecycle_raw, "wrong type")
 
 
+def test_unknown_legacy_surface_id_returns_invalid_instead_of_raising(
+    tmp_path: Path,
+) -> None:
+    manifest, raw, lifecycle_raw = _valid_bundle(tmp_path)
+    records = _records(raw)
+    records[0]["legacy_surface_id"] = "legacy-unknown"
+    raw2 = _serialize(records)
+    _expect_invalid(
+        _rehash(manifest, raw=raw2),
+        raw2,
+        lifecycle_raw,
+        "unknown legacy_surface_id",
+    )
+
+
 def test_bytes_appended_after_sealing_invalidates(tmp_path: Path) -> None:
     manifest, raw, lifecycle_raw = _valid_bundle(tmp_path)
     raw2 = raw + b'{"sequence": 99}\n'  # sealed digest not updated -> mismatch
@@ -435,6 +519,106 @@ def test_traffic_class_outside_allowed_values_invalidates(tmp_path: Path) -> Non
     _expect_invalid(
         _rehash(manifest, raw=raw2), raw2, lifecycle_raw,
         "traffic class 'unknown' outside the five allowed values",
+    )
+
+
+def test_manifest_cannot_expand_the_fixed_traffic_vocabulary(tmp_path: Path) -> None:
+    manifest, raw, lifecycle_raw = _valid_bundle(tmp_path)
+    changed = copy.deepcopy(manifest)
+    changed["classification_manifest"]["traffic_classes"].append("unknown")
+    changed["manifest_sha256"] = observation_module._manifest_sha256(changed)
+    _expect_invalid(
+        changed,
+        raw,
+        lifecycle_raw,
+        "traffic classification contract mismatch",
+    )
+
+
+def test_manifest_cannot_remove_a_compiled_catalog_entry(tmp_path: Path) -> None:
+    manifest, raw, lifecycle_raw = _valid_bundle(tmp_path)
+    changed = copy.deepcopy(manifest)
+    del changed["per_entry_counts"]["legacy-page-root"]
+    changed["manifest_sha256"] = observation_module._manifest_sha256(changed)
+    _expect_invalid(
+        changed,
+        raw,
+        lifecycle_raw,
+        "entry-count keys do not match the compiled catalog",
+    )
+
+
+def test_manifest_cannot_remove_a_registered_path_family(tmp_path: Path) -> None:
+    manifest, raw, lifecycle_raw = _valid_bundle(tmp_path)
+    changed = copy.deepcopy(manifest)
+    del changed["path_family_table"]["/api/fixtures"]
+    changed["manifest_sha256"] = observation_module._manifest_sha256(changed)
+    _expect_invalid(
+        changed,
+        raw,
+        lifecycle_raw,
+        "path family table does not match the registered contract",
+    )
+
+
+def test_prior_stage_requires_the_complete_release_evidence_contract(tmp_path: Path) -> None:
+    manifest, raw, lifecycle_raw = _valid_bundle(tmp_path, with_rollback_probe=True)
+    missing_identity = copy.deepcopy(manifest)
+    missing_identity["prior_artifact_identity"] = None
+    missing_identity["manifest_sha256"] = observation_module._manifest_sha256(missing_identity)
+    _expect_invalid(
+        missing_identity,
+        raw,
+        lifecycle_raw,
+        "prior-stage process is missing prior artifact identity",
+    )
+    for field in ("network_routes", "cohort_node_ids", "viewports", "accepted_fact_sha256"):
+        changed = copy.deepcopy(manifest)
+        del changed["release_evidence"][field]
+        changed["manifest_sha256"] = observation_module._manifest_sha256(changed)
+        verdict = verify_bundle(changed, requests_raw=raw, lifecycle_raw=lifecycle_raw)
+        assert not verdict.valid, field
+        assert "release_evidence fields do not match" in (verdict.reason or "")
+
+
+def test_release_evidence_rejects_resealed_semantic_alterations(tmp_path: Path) -> None:
+    manifest, raw, lifecycle_raw = _valid_bundle(tmp_path, with_rollback_probe=True)
+    cases = (
+        ("elapsed_seconds", 20.0, "elapsed_seconds does not match"),
+        ("network_routes", "default via 10.0.0.1 dev eth0", "loopback namespace"),
+        ("viewports", ["1024x768", "390x844"], "viewport contract"),
+        ("package_identity", "tampered-package", "package_identity is missing or malformed"),
+    )
+    for field, value, reason in cases:
+        changed = copy.deepcopy(manifest)
+        changed["release_evidence"][field] = value
+        changed["manifest_sha256"] = observation_module._manifest_sha256(changed)
+        _expect_invalid(changed, raw, lifecycle_raw, reason)
+
+    changed = copy.deepcopy(manifest)
+    changed["release_evidence"]["cohort_node_ids"] = [
+        "tests/test_t01_react.spec.js:702:3 › T01 production tracer"
+    ]
+    node_ids = changed["release_evidence"]["cohort_node_ids"]
+    changed["release_evidence"]["cohort_node_ids_sha256"] = hashlib.sha256(
+        ("\n".join(node_ids) + "\n").encode("utf-8")
+    ).hexdigest()
+    changed["manifest_sha256"] = observation_module._manifest_sha256(changed)
+    _expect_invalid(changed, raw, lifecycle_raw, "omit the prior-artifact browser node")
+
+
+def test_process_stage_is_derived_from_artifact_identity_not_traffic_class(
+    tmp_path: Path,
+) -> None:
+    manifest, raw, lifecycle_raw = _valid_bundle(tmp_path, with_rollback_probe=True)
+    changed = copy.deepcopy(manifest)
+    changed["process_artifacts"]["p-3"]["traffic_class"] = "release"
+    changed["manifest_sha256"] = observation_module._manifest_sha256(changed)
+    _expect_invalid(
+        changed,
+        raw,
+        lifecycle_raw,
+        "record 7 traffic class does not match its process identity",
     )
 
 
@@ -486,7 +670,7 @@ def test_record_artifact_identity_mismatch_invalidates(tmp_path: Path) -> None:
     raw2 = _serialize(records)
     _expect_invalid(
         _rehash(manifest, raw=raw2), raw2, lifecycle_raw,
-        "artifact_sha256 does not match the sealed manifest",
+        "artifact_sha256 does not match its process identity",
     )
 
 
@@ -509,7 +693,7 @@ def test_record_process_without_lifecycle_entry_invalidates(tmp_path: Path) -> N
     raw2 = _serialize(records)
     _expect_invalid(
         _rehash(manifest, raw=raw2), raw2, lifecycle_raw,
-        "record 1 process 'ghost' has no lifecycle entry",
+        "record 1 process 'ghost' has no artifact identity",
     )
 
 
@@ -544,6 +728,7 @@ def test_record_timestamp_outside_sealed_window_invalidates(tmp_path: Path) -> N
         clock, sink,
         window_id=WINDOW_ID, artifact_sha256=ARTIFACT_SHA,
         process_id="p-1", process_class="operator-simulated",
+        family_table=FAMILY_TABLE,
     )
     p1.record_lifecycle("start")  # T0
     clock.advance(timedelta(seconds=15))
@@ -628,7 +813,7 @@ def test_lifecycle_process_outside_frozen_cohort_invalidates(tmp_path: Path) -> 
     _expect_invalid(
         _rehash(manifest, lifecycle_raw=lifecycle_raw2),
         raw, lifecycle_raw2,
-        "not in the frozen cohort",
+        "process has no artifact identity",
     )
 
 
@@ -694,6 +879,7 @@ def test_operator_population_empty_invalidates(tmp_path: Path) -> None:
         clock, sink,
         window_id=WINDOW_ID, artifact_sha256=ARTIFACT_SHA,
         process_id="p-1", process_class="release",  # no operator-simulated records
+        family_table=FAMILY_TABLE,
     )
     p1.record_lifecycle("start")
     clock.advance(timedelta(seconds=1))
@@ -718,21 +904,56 @@ def test_operator_catalog_hit_fails_zero_caller_acceptance_but_stays_valid(tmp_p
     assert verdict.valid, verdict.reason
     assert verdict.acceptance is not None
     assert not verdict.acceptance.zero_caller_ok
-    assert verdict.acceptance.operator_catalog_hits == {"legacy-page-root": 1}
-    assert "legacy-page-root" in verdict.acceptance.reason
+    assert verdict.acceptance.operator_catalog_hits == {"legacy-static-app-js": 1}
+    assert "legacy-static-app-js" in verdict.acceptance.reason
 
 
 def test_rollback_probe_catalog_hits_stay_separate_from_operator_counts(tmp_path: Path) -> None:
     manifest, raw, lifecycle_raw = _valid_bundle(tmp_path, with_rollback_probe=True)
     verdict = verify_bundle(manifest, requests_raw=raw, lifecycle_raw=lifecycle_raw)
     assert verdict.valid, verdict.reason
-    assert verdict.per_traffic_class_counts["rollback-probe"] == 1
+    assert verdict.per_traffic_class_counts["rollback-probe"] == 4
     assert verdict.per_traffic_class_counts["operator-simulated"] == 2
     assert verdict.per_entry_counts["legacy-mutation-kb-delete"]["rollback-probe"] == 1
     assert verdict.acceptance is not None
     assert verdict.acceptance.zero_caller_ok
     assert verdict.acceptance.operator_catalog_hits == {}
-    assert verdict.acceptance.rollback_probe_catalog_hits == {"legacy-mutation-kb-delete": 1}
+    assert verdict.acceptance.rollback_probe_catalog_hits == {
+        "legacy-page-root": 1,
+        "legacy-page-controlled-s01": 1,
+        "legacy-page-controlled-s02": 1,
+        "legacy-mutation-kb-delete": 1,
+    }
+    assert manifest["process_artifacts"]["p-3"] == {
+        "artifact_sha256": PRIOR_ARTIFACT_SHA,
+        "artifact_stage": "prior",
+        "traffic_class": "rollback-probe",
+    }
+
+
+def test_removing_a_prior_legacy_hit_invalidates_even_after_resealing(
+    tmp_path: Path,
+) -> None:
+    manifest, raw, lifecycle_raw = _valid_bundle(tmp_path, with_rollback_probe=True)
+    records = [
+        record
+        for record in _records(raw)
+        if record["legacy_surface_id"] != "legacy-page-root"
+    ]
+    for sequence, record in enumerate(records, 1):
+        record["sequence"] = sequence
+    raw2 = _serialize(records)
+    changed = copy.deepcopy(manifest)
+    changed["expected_sequence_range"] = [1, len(records)]
+    changed["per_traffic_class_counts"]["rollback-probe"] -= 1
+    changed["per_entry_counts"]["legacy-page-root"]["rollback-probe"] = 0
+    changed = _rehash(changed, raw=raw2)
+    _expect_invalid(
+        changed,
+        raw2,
+        lifecycle_raw,
+        "required prior-artifact rollback observation missing for legacy-page-root",
+    )
 
 
 # --- 3. classification ------------------------------------------------------
@@ -821,8 +1042,57 @@ def test_normalize_path_family_never_leaks_query_or_concrete_kb_text() -> None:
     assert normalize_path_family("/") == "/"
     assert normalize_path_family("/static/app.js") == "/static/app.js"
     assert normalize_path_family("/api/fixtures", FAMILY_TABLE) == "/api/fixtures"
-    # An unregistered path normalizes to itself; the verifier rejects it.
-    assert normalize_path_family("/totally/arbitrary/thing") == "/totally/arbitrary/thing"
+    assert normalize_path_family("/totally/arbitrary/thing") == UNREGISTERED_PATH_FAMILY
+
+
+def test_unregistered_request_path_is_replaced_before_durable_serialization() -> None:
+    raw_path = "/private/operator-note/secret-token-123"
+    sink = InMemorySink()
+    recorder = ObservationRecorder(
+        FixedClock(T0),
+        sink,
+        window_id=WINDOW_ID,
+        artifact_sha256=ARTIFACT_SHA,
+        process_id="p-sentinel",
+        process_class="release",
+    )
+    record = recorder.record_http(
+        method="GET",
+        path=raw_path,
+        response_status=404,
+        matched_route_owner="unmatched",
+    )
+    encoded = json.dumps(record, sort_keys=True)
+    assert record["normalized_path_family"] == UNREGISTERED_PATH_FAMILY
+    assert raw_path not in encoded
+    assert "secret-token-123" not in encoded
+
+
+def test_artifact_stage_controls_owner_while_traffic_class_only_classifies() -> None:
+    def record(process_class: str, artifact_stage: str) -> dict:
+        recorder = ObservationRecorder(
+            FixedClock(T0),
+            InMemorySink(),
+            window_id=WINDOW_ID,
+            artifact_sha256=ARTIFACT_SHA,
+            process_id=f"p-{process_class}-{artifact_stage}",
+            process_class=process_class,
+            artifact_stage=artifact_stage,
+        )
+        return recorder.record_http(
+            method="GET",
+            path="/",
+            response_status=200,
+            matched_route_owner="index",
+        )
+
+    current_release = record("release", "current")
+    current_rollback_class = record("rollback-probe", "current")
+    prior_rollback = record("rollback-probe", "prior")
+    assert current_release["legacy_surface_id"] is None
+    assert current_rollback_class["legacy_surface_id"] is None
+    assert prior_rollback["legacy_surface_id"] == "legacy-page-root"
+    assert current_rollback_class["traffic_class"] == "rollback-probe"
 
 
 def test_default_family_table_covers_catalog_and_health() -> None:
@@ -1185,6 +1455,7 @@ def _observation_environment(
     log_dir: Path,
     *,
     process_class: str = "operator-simulated",
+    artifact_stage: str = "current",
     process_id: str = "t54-http-p1",
     window_id: str = "t54-http-window",
 ) -> dict[str, str]:
@@ -1194,6 +1465,7 @@ def _observation_environment(
             "TASK4_OBS_LOG_DIR": str(log_dir),
             "TASK4_OBS_WINDOW_ID": window_id,
             "TASK4_OBS_ARTIFACT_SHA256": ARTIFACT_SHA,
+            "TASK4_OBS_ARTIFACT_STAGE": artifact_stage,
             "TASK4_OBS_PROCESS_CLASS": process_class,
             "TASK4_OBS_PROCESS_ID": process_id,
         }
@@ -1231,9 +1503,8 @@ def load_current_observation_module() -> ModuleType:
 def wrap_prior_artifact_app(prior_app: Any, current_observation: ModuleType) -> Any:
     """Register the current observation middleware around a prior-artifact
     FastAPI app without altering the prior wheel's bytes.  The current
-    catalog is immutable data; the env-driven recorder class
-    (``rollback-probe``) controls React-owner suppression, so the prior
-    artifact's canonical routes resolve to their legacy owners."""
+    catalog is immutable data; the explicit prior artifact stage makes the
+    prior artifact's canonical route owners resolve to legacy entries."""
     recorder = current_observation.recorder_from_env(
         family_table=current_observation.app_family_table(prior_app)
     )
@@ -1398,8 +1669,7 @@ def test_http_observation_is_capture_free_without_observation_environment(
 
 
 def test_http_rollback_probe_records_prior_legacy_owners(tmp_path: Path) -> None:
-    """Under rollback-probe the prior artifact resolves canonical routes to
-    their legacy owners while the operator denominator stays clean."""
+    """Changing only traffic class leaves current-artifact ownership fixed."""
     state_path = tmp_path / "t54-obs-rollback.sqlite3"
     log_dir = tmp_path / "obs-rollback-log"
     env = _observation_environment(
@@ -1421,11 +1691,8 @@ def test_http_rollback_probe_records_prior_legacy_owners(tmp_path: Path) -> None
 
     records = _read_request_records(log_dir)
     by_family = {record["normalized_path_family"]: record for record in records}
-    assert by_family["/"]["legacy_surface_id"] == "legacy-page-root"
-    assert (
-        by_family["/controlled/s01"]["legacy_surface_id"]
-        == "legacy-page-controlled-s01"
-    )
+    assert by_family["/"]["legacy_surface_id"] is None
+    assert by_family["/controlled/s01"]["legacy_surface_id"] is None
     assert by_family["/demo/react"]["legacy_surface_id"] is None
     assert all(
         record["traffic_class"] in ("rollback-probe", "health")
@@ -1443,7 +1710,11 @@ def test_prior_artifact_observer_factory_wraps_without_altering_prior_bytes(
     state_path = tmp_path / "t54-obs-prior.sqlite3"
     log_dir = tmp_path / "obs-prior-log"
     env = _observation_environment(
-        state_path, log_dir, process_class="rollback-probe", process_id="t54-rollback-p1"
+        state_path,
+        log_dir,
+        process_class="rollback-probe",
+        artifact_stage="prior",
+        process_id="t54-rollback-p1",
     )
     with UvicornLoopback(
         env,

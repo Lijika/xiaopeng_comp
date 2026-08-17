@@ -15489,7 +15489,7 @@
     },
     "/controlled/s02/react": {
       "get": {
-        "description": "The Integrator React shell: same built artifact as the Reviewer shell,\nissuing only the existing S02 session.  A missing or incomplete build is\nan explicit 503; the legacy ``/controlled/s02`` page remains the\nfallback URL.",
+        "description": "The Integrator React shell: same built artifact as the Reviewer shell,\nissuing only the existing S02 session.  A missing or incomplete build is\nan explicit 503.  The canonical route uses this build; deployment-only\nrollback is owned by the immediately prior artifact.",
         "operationId": "controlled_s02_react_page_controlled_s02_react_get",
         "responses": {
           "200": {

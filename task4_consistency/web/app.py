@@ -61,7 +61,6 @@ from task4_consistency.rules.critical_guard import (
 from task4_consistency.rules.engine import RuleEngine
 from task4_consistency.rules.loader import load_rules
 
-from task4_consistency.web.legacy_catalog import REACT_OWNED_PATHS
 from task4_consistency.web.observation import (
     ObservationMiddleware,
     app_family_table,
@@ -2806,8 +2805,8 @@ def controlled_s02_page(request: Request) -> HTMLResponse:
 def controlled_s02_react_page(request: Request) -> HTMLResponse:
     """The Integrator React shell: same built artifact as the Reviewer shell,
     issuing only the existing S02 session.  A missing or incomplete build is
-    an explicit 503; the legacy ``/controlled/s02`` page remains the
-    fallback URL."""
+    an explicit 503.  The canonical route uses this build; deployment-only
+    rollback is owned by the immediately prior artifact."""
     _s02_service()
     if not S01_REACT_INDEX.is_file():
         raise HTTPException(
@@ -5836,7 +5835,6 @@ def demo_evaluate_summary() -> DemoEvaluationSummaryResponse:
 # it never silently drops evidence.
 _OBSERVATION_RECORDER = recorder_from_env(
     family_table=app_family_table(app),
-    react_owned_paths=REACT_OWNED_PATHS,
 )
 app.add_middleware(ObservationMiddleware, recorder=_OBSERVATION_RECORDER)
 

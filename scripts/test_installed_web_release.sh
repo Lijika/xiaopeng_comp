@@ -196,6 +196,19 @@ echo "fixed_base: $T54_FIXED_BASE" | tee -a "$LOG"
 node --version 2>&1 | tee -a "$LOG"
 npm --version 2>&1 | tee -a "$LOG"
 
+REVIEWED_COMMIT="$(git rev-parse HEAD)"
+if [[ -n "$(git status --short --untracked-files=no)" ]]; then
+  echo "ERROR: tracked tree must be clean before the commit-bound build" | tee -a "$LOG"
+  exit 1
+fi
+if [[ -n "${T54_REVIEWED_COMMIT:-}" && "$T54_REVIEWED_COMMIT" != "$REVIEWED_COMMIT" ]]; then
+  echo "ERROR: reviewed commit mismatch expected=$T54_REVIEWED_COMMIT actual=$REVIEWED_COMMIT" | tee -a "$LOG"
+  exit 1
+fi
+NODE_VERSION="$(node --version)"
+NPM_VERSION="$(npm --version)"
+echo "reviewed_commit=$REVIEWED_COMMIT tracked_tree_clean=true" | tee -a "$LOG"
+
 # 1. Source-input manifest: deterministic (sorted) SHA256 over configs/,
 #    fixtures/ and data/. Relative paths, verified later from $ROOT.
 step "1/10 source-input SHA256 manifest (configs fixtures data)"
@@ -207,6 +220,10 @@ wc -l "$TMP/source-input.sha256" | tee -a "$LOG"
 #    frontend sources are unchanged).
 step "2/10 npm run build (production React build)"
 npm run build 2>&1 | tee -a "$LOG"
+if [[ -n "$(git status --short --untracked-files=no)" ]]; then
+  echo "ERROR: production build changed tracked bytes from reviewed commit" | tee -a "$LOG"
+  exit 1
+fi
 
 # 3. PEP 517 sdist + wheel (current artifact).
 step "3/10 python -m build (isolated PEP 517 sdist + wheel, current)"
@@ -257,6 +274,9 @@ mkdir -p "$TMP/prior-site"
 cp -a configs fixtures data "$TMP/prior-site/"
 echo "prior_wheel: $PRIOR_WHEEL" | tee -a "$LOG"
 echo "prior_wheel_sha256=$PRIOR_SHA" | tee -a "$LOG"
+PACKAGE_IDENTITY="$(env PYTHONSAFEPATH=1 PYTHONPATH="$TMP/site" "$PY" -P -c \
+  'import importlib.metadata; print("task4-consistency==" + importlib.metadata.version("task4-consistency"))')"
+echo "package_identity=$PACKAGE_IDENTITY" | tee -a "$LOG"
 
 # 6c. S02 registry for the rollback/restoration stages (same inputs).
 step "6c/10 S02 source registry (rollback stages)"
@@ -427,7 +447,11 @@ trap cleanup_window EXIT
 
 # Loopback-only: raise lo and record the namespace route table.
 ip link set lo up
-ip route 2>/dev/null || true
+{
+  ip -o addr show dev lo
+  ip route 2>/dev/null || true
+} > "$TMP/network-routes.txt"
+cat "$TMP/network-routes.txt" >> "$LOG"
 echo "namespace_hostname=$(hostname)" >>"$LOG"
 echo "namespace_tz=$(date +%Z)" >>"$LOG"
 
@@ -650,7 +674,7 @@ CATPY
 THROWAWAY_DIR="$TMP/t54-obs-throwaway"
 mkdir -p "$THROWAWAY_DIR"
 TC_RESULT="$(start_server "$TMP/site" \
-  "TASK4_OBS_LOG_DIR=$THROWAWAY_DIR TASK4_OBS_WINDOW_ID=$WINDOW_ID TASK4_OBS_ARTIFACT_SHA256=$CURRENT_SHA TASK4_OBS_PROCESS_CLASS=release TASK4_OBS_PROCESS_ID=t54-telemetry-selfcheck" \
+  "TASK4_OBS_LOG_DIR=$THROWAWAY_DIR TASK4_OBS_WINDOW_ID=$WINDOW_ID TASK4_OBS_ARTIFACT_SHA256=$CURRENT_SHA TASK4_OBS_ARTIFACT_STAGE=current TASK4_OBS_PROCESS_CLASS=release TASK4_OBS_PROCESS_ID=t54-telemetry-selfcheck" \
   "$STATE_PATH")"
 TC_PID="${TC_RESULT%% *}"
 TC_PORT="${TC_RESULT##* }"
@@ -673,44 +697,48 @@ rm -rf "$THROWAWAY_DIR"
 # --- Window start (only after every precheck passed) -------------------------
 WINDOW_START_UTC="$("$PY" -c 'import datetime; print(datetime.datetime.now(datetime.timezone.utc).isoformat())')"
 WINDOW_TZ="$(date +%Z)"
+printf '%s\n' "$WINDOW_TZ" > "$TMP/window-timezone.txt"
 echo "window_start_utc=$WINDOW_START_UTC tz=$WINDOW_TZ" >>"$LOG"
 
 # Dedicated release server (traffic class release; /api/health -> health).
 REL_RESULT="$(start_server "$TMP/site" \
-  "TASK4_OBS_LOG_DIR=$OBS_DIR TASK4_OBS_WINDOW_ID=$WINDOW_ID TASK4_OBS_ARTIFACT_SHA256=$CURRENT_SHA TASK4_OBS_PROCESS_CLASS=release TASK4_OBS_PROCESS_ID=t54-release" \
+  "TASK4_OBS_LOG_DIR=$OBS_DIR TASK4_OBS_WINDOW_ID=$WINDOW_ID TASK4_OBS_ARTIFACT_SHA256=$CURRENT_SHA TASK4_OBS_ARTIFACT_STAGE=current TASK4_OBS_PROCESS_CLASS=release TASK4_OBS_PROCESS_ID=t54-release" \
   "$STATE_PATH")"
 REL_PID="${REL_RESULT%% *}"
 REL_PORT="${REL_RESULT##* }"
 
 # Frozen Playwright collection gate + full matrix (operator-simulated cohort;
 # every spec child inherits the observation environment).
-step "9/10 window: playwright collection gate (must equal '45 tests in 8 files')"
+step "9/10 window: playwright collection gate (must equal '46 tests in 9 files')"
 rm -rf "$PLAYWRIGHT_OUT"
 mkdir -p "$PLAYWRIGHT_OUT"
 touch "$TMP/t54-playwright-started"
 list_output="$(npm run test:e2e -- --list --output "$PLAYWRIGHT_OUT" 2>&1 | tee -a "$LOG")"
 collected="$(printf '%s\n' "$list_output" | grep -oE '[0-9]+ tests? in [0-9]+ files?' | tail -1 || true)"
 echo "collected: ${collected:-unparsable}" >>"$LOG"
-if [[ "${collected:-}" != "45 tests in 8 files" ]]; then
-  echo "ERROR: expected '45 tests in 8 files', observed '${collected:-unparsable}'" >>"$LOG"
+if [[ "${collected:-}" != "46 tests in 9 files" ]]; then
+  echo "ERROR: expected '46 tests in 9 files', observed '${collected:-unparsable}'" >>"$LOG"
   exit 1
 fi
 npm run test:e2e -- --list | grep -oE '[A-Za-z0-9_.-]+\.spec\.js:[0-9]+:[0-9]+ › .*' \
   | sort > "$TMP/cohort-node-ids.txt"
 sha256sum tests/*.spec.js playwright.config.js > "$TMP/cohort-spec-sha256.txt"
 sha256sum "$TMP/cohort-node-ids.txt" "$TMP/cohort-spec-sha256.txt" >>"$LOG"
+cp "$TMP/cohort-node-ids.txt" "$LOG_DIR/cohort-node-ids.txt"
+cp "$TMP/cohort-spec-sha256.txt" "$LOG_DIR/cohort-spec-sha256.txt"
 
 step "9/10 window: full installed Playwright matrix (operator-simulated)"
 env PYTHONSAFEPATH=1 PYTHONPATH="$TMP/site:$ROOT" TASK4_T10_INSTALLED_ROOT="$TMP/site" \
   TASK4_OBS_LOG_DIR="$OBS_DIR" TASK4_OBS_WINDOW_ID="$WINDOW_ID" \
-  TASK4_OBS_ARTIFACT_SHA256="$CURRENT_SHA" TASK4_OBS_PROCESS_CLASS="operator-simulated" \
+  TASK4_OBS_ARTIFACT_SHA256="$CURRENT_SHA" TASK4_OBS_ARTIFACT_STAGE="current" \
+  TASK4_OBS_PROCESS_CLASS="operator-simulated" \
   npm run test:e2e -- --output "$PLAYWRIGHT_OUT" 2>&1 >>"$LOG"
 
 # Playwright-probe population: one dedicated current-artifact process with
 # explicit canonical-shell probes under playwright-probe.
 step "9/10 window: playwright-probe population"
 PROBE_RESULT="$(start_server "$TMP/site" \
-  "TASK4_OBS_LOG_DIR=$OBS_DIR TASK4_OBS_WINDOW_ID=$WINDOW_ID TASK4_OBS_ARTIFACT_SHA256=$CURRENT_SHA TASK4_OBS_PROCESS_CLASS=playwright-probe TASK4_OBS_PROCESS_ID=t54-playwright-probe" \
+  "TASK4_OBS_LOG_DIR=$OBS_DIR TASK4_OBS_WINDOW_ID=$WINDOW_ID TASK4_OBS_ARTIFACT_SHA256=$CURRENT_SHA TASK4_OBS_ARTIFACT_STAGE=current TASK4_OBS_PROCESS_CLASS=playwright-probe TASK4_OBS_PROCESS_ID=t54-playwright-probe" \
   "$STATE_PATH")"
 PROBE_PID="${PROBE_RESULT%% *}"
 PROBE_PORT="${PROBE_RESULT##* }"
@@ -733,7 +761,7 @@ stop_server "$REL_PID"
 # --- Prior-artifact rollback probe (rollback-probe) --------------------------
 step "9/10 window: prior-artifact rollback probe (rollback-probe)"
 PRIOR_RESULT="$(start_server "$TMP/prior-site" \
-  "TASK4_OBS_LOG_DIR=$OBS_DIR TASK4_OBS_WINDOW_ID=$WINDOW_ID TASK4_OBS_ARTIFACT_SHA256=$CURRENT_SHA TASK4_OBS_PROCESS_CLASS=rollback-probe TASK4_OBS_PROCESS_ID=t54-rollback-prior" \
+  "TASK4_OBS_LOG_DIR=$OBS_DIR TASK4_OBS_WINDOW_ID=$WINDOW_ID TASK4_OBS_ARTIFACT_SHA256=$PRIOR_SHA TASK4_OBS_ARTIFACT_STAGE=prior TASK4_OBS_PROCESS_CLASS=rollback-probe TASK4_OBS_PROCESS_ID=t54-rollback-prior" \
   "$STATE_PATH" "prior_wrapper_app:app" "$TMP")"
 PRIOR_PID="${PRIOR_RESULT%% *}"
 PRIOR_PORT="${PRIOR_RESULT##* }"
@@ -761,8 +789,13 @@ PRIOR_S02_PROBE="$(get_shell "$PRIOR_PORT" "/controlled/s02" "Bearer t54-s02-cre
 echo "prior_s02_probe: $PRIOR_S02_PROBE" >>"$LOG"
 [[ "$PRIOR_S02_PROBE" == 200* ]] || { echo "ERROR: prior s02 must serve the legacy shell" >>"$LOG"; exit 1; }
 HEALTH_PY "$PRIOR_PORT" >/dev/null || { echo "ERROR: prior health failed" >>"$LOG"; exit 1; }
+step "9/10 window: prior-artifact Playwright ownership probe"
+env TASK4_T54_PRIOR_BASE_URL="http://127.0.0.1:$PRIOR_PORT" \
+  "$ROOT/node_modules/.bin/playwright" test tests/test_t54_prior_artifact.spec.js \
+  --output "$PLAYWRIGHT_OUT/prior-artifact" >>"$LOG" 2>&1
 FACT_PRIOR="$(capture_facts "$PRIOR_PORT" "$FACT_APP_ID" "$TMP/fact-cookie.txt")"
 echo "fact_prior=$FACT_PRIOR" >>"$LOG"
+echo "$FACT_PRIOR" > "$TMP/fact-prior.json"
 [[ "$FACT_PRIOR" == "$FACT_CURRENT" ]] || {
   echo "ERROR: accepted facts drifted across current -> prior" >>"$LOG"
   exit 1
@@ -772,7 +805,7 @@ stop_server "$PRIOR_PID"
 # --- Current-artifact restoration (release; stage three of the rehearsal) ----
 step "9/10 window: current artifact restoration (release)"
 RESTORE_RESULT="$(start_server "$TMP/site" \
-  "TASK4_OBS_LOG_DIR=$OBS_DIR TASK4_OBS_WINDOW_ID=$WINDOW_ID TASK4_OBS_ARTIFACT_SHA256=$CURRENT_SHA TASK4_OBS_PROCESS_CLASS=release TASK4_OBS_PROCESS_ID=t54-restore" \
+  "TASK4_OBS_LOG_DIR=$OBS_DIR TASK4_OBS_WINDOW_ID=$WINDOW_ID TASK4_OBS_ARTIFACT_SHA256=$CURRENT_SHA TASK4_OBS_ARTIFACT_STAGE=current TASK4_OBS_PROCESS_CLASS=release TASK4_OBS_PROCESS_ID=t54-restore" \
   "$STATE_PATH")"
 RESTORE_PID="${RESTORE_RESULT%% *}"
 RESTORE_PORT="${RESTORE_RESULT##* }"
@@ -793,6 +826,7 @@ echo "restore_s01_unauthenticated_probe: $RESTORE_403" >>"$LOG"
 # unregistered family and (by design) invalidate the sealed window.
 FACT_RESTORE="$(capture_facts "$RESTORE_PORT" "$FACT_APP_ID" "$TMP/fact-cookie.txt")"
 echo "fact_restore=$FACT_RESTORE" >>"$LOG"
+echo "$FACT_RESTORE" > "$TMP/fact-restored.json"
 [[ "$FACT_RESTORE" == "$FACT_CURRENT" ]] || {
   echo "ERROR: accepted facts drifted across prior -> current" >>"$LOG"
   exit 1
@@ -811,8 +845,10 @@ env PYTHONSAFEPATH=1 PYTHONPATH="$TMP/site:$ROOT" \
   "$PY" -P - "$OBS_DIR" "$BUNDLE_DIR" "$WINDOW_ID" "$CURRENT_SHA" "$PRIOR_SHA" \
   "$WINDOW_START_UTC" "$WINDOW_END_UTC" "$TMP" <<'SEALPY' 2>&1 >>"$LOG"
 import json
+import hashlib
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from task4_consistency.web import observation as obs
@@ -820,6 +856,7 @@ import task4_consistency.web.app as web
 
 obs_dir, bundle_dir, window_id, current_sha, prior_sha = sys.argv[1:6]
 window_start, window_end = sys.argv[6], sys.argv[7]
+tmp_root = Path(sys.argv[8])
 
 requests_raw = (Path(obs_dir) / "requests.jsonl").read_bytes()
 lifecycle_raw = (Path(obs_dir) / "process-lifecycle.jsonl").read_bytes()
@@ -828,9 +865,62 @@ lifecycle = [json.loads(line) for line in lifecycle_raw.decode("utf-8").splitlin
 process_ids = sorted({entry["process_id"] for entry in lifecycle})
 assert process_ids, "no observed processes"
 family_table = obs.app_family_table(web.app)
-# Browser cohort side-effect: the favicon request is recorded but never
-# resolves to a legacy surface.
-family_table["/favicon.ico"] = "/favicon.ico"
+
+node_ids = (tmp_root / "cohort-node-ids.txt").read_text(encoding="utf-8").splitlines()
+spec_hashes = {}
+for line in (tmp_root / "cohort-spec-sha256.txt").read_text(encoding="utf-8").splitlines():
+    digest, path = line.split(maxsplit=1)
+    spec_hashes[path.lstrip(" *")] = digest
+fact_hashes = {
+    stage: hashlib.sha256((tmp_root / filename).read_bytes()).hexdigest()
+    for stage, filename in {
+        "current": "fact-current.json",
+        "prior": "fact-prior.json",
+        "restored": "fact-restored.json",
+    }.items()
+}
+process_artifacts = {}
+for process_id in process_ids:
+    process_records = [
+        record for record in records if record["process_id"] == process_id
+    ]
+    classes = {
+        record["traffic_class"]
+        for record in process_records
+        if record["traffic_class"] != "health"
+    }
+    assert len(classes) <= 1, (process_id, classes)
+    traffic_class = next(iter(classes), "release")
+    stage = "prior" if process_id == "t54-rollback-prior" else "current"
+    process_artifacts[process_id] = {
+        "artifact_sha256": prior_sha if stage == "prior" else current_sha,
+        "artifact_stage": stage,
+        "traffic_class": traffic_class,
+    }
+elapsed_seconds = (
+    datetime.fromisoformat(window_end) - datetime.fromisoformat(window_start)
+).total_seconds()
+release_evidence = {
+    "reviewed_commit": os.environ["REVIEWED_COMMIT"],
+    "tracked_tree_clean": True,
+    "current_wheel_sha256": current_sha,
+    "prior_commit": os.environ["T54_FIXED_BASE"],
+    "prior_wheel_sha256": prior_sha,
+    "timezone": (tmp_root / "window-timezone.txt").read_text(encoding="utf-8").strip(),
+    "elapsed_seconds": elapsed_seconds,
+    "node_version": os.environ["NODE_VERSION"],
+    "npm_version": os.environ["NPM_VERSION"],
+    "package_identity": os.environ["PACKAGE_IDENTITY"],
+    "network_routes": (tmp_root / "network-routes.txt").read_text(encoding="utf-8").strip(),
+    "cohort_node_ids": node_ids,
+    "cohort_node_ids_sha256": hashlib.sha256(
+        ("\n".join(node_ids) + "\n").encode("utf-8")
+    ).hexdigest(),
+    "cohort_spec_sha256": spec_hashes,
+    "viewports": ["1280x800", "390x844"],
+    "accepted_fact_sha256": fact_hashes,
+    "accepted_facts_equal": len(set(fact_hashes.values())) == 1,
+}
 
 manifest = obs.build_bundle(
     bundle_dir,
@@ -845,7 +935,9 @@ manifest = obs.build_bundle(
     environment_identity=obs.default_environment_identity(),
     cohort=process_ids,
     family_table=family_table,
-    prior_artifact={"wheel_sha256": prior_sha},
+    prior_artifact={"wheel_sha256": prior_sha, "commit": os.environ["T54_FIXED_BASE"]},
+    process_artifacts=process_artifacts,
+    release_evidence=release_evidence,
 )
 # Move the sealed bundle to the run-owned evidence dir under the
 # acceptance-command names BEFORE verification, so raw evidence survives
@@ -855,9 +947,8 @@ for name in ("requests.jsonl", "process-lifecycle.jsonl"):
 Path(bundle_dir, "manifest.json").rename(Path(bundle_dir).parent / "window-manifest.json")
 verdict = obs.verify_bundle(Path(bundle_dir).parent / "window-manifest.json")
 if not verdict.valid:
-    allowed = set(family_table.values()) | {obs.DYNAMIC_KB_FAMILY}
     for record in records:
-        if record["normalized_path_family"] not in allowed:
+        if record["normalized_path_family"] == obs.UNREGISTERED_PATH_FAMILY:
             print("UNREGISTERED_FAMILY:", record["method"], record["normalized_path_family"],
                   "owner=", record["matched_route_owner"], "status=", record["response_status"],
                   "class=", record["traffic_class"], flush=True)
@@ -888,6 +979,8 @@ unshare --user --map-root-user --net \
   LOG_DIR="$LOG_DIR" WINDOW_ID="$WINDOW_ID" OBS_DIR="$OBS_DIR" \
   BUNDLE_DIR="$BUNDLE_DIR" STATE_PATH="$STATE_PATH" CURRENT_SHA="$CURRENT_SHA" \
   PRIOR_SHA="$PRIOR_SHA" S02_OBJECT_ROOT="$S02_OBJECT_ROOT" \
+  REVIEWED_COMMIT="$REVIEWED_COMMIT" T54_FIXED_BASE="$T54_FIXED_BASE" \
+  NODE_VERSION="$NODE_VERSION" NPM_VERSION="$NPM_VERSION" PACKAGE_IDENTITY="$PACKAGE_IDENTITY" \
   bash "$TMP/t54-window-body.sh" 2>&1 | tee -a "$LOG"
 WINDOW_EXIT=${PIPESTATUS[0]}
 set -e

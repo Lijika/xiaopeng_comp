@@ -114,6 +114,63 @@ def test_fixed_base_scan_reports_exact_owners_and_zero_canonical_edges() -> None
     assert "/" in CANONICAL_REACT_ROUTES
     assert "/controlled/s01" in CANONICAL_REACT_ROUTES
     assert "/controlled/s02" in CANONICAL_REACT_ROUTES
+    assert all(entry.route_owner_symbol for entry in CONTRACTED_LEGACY_ENTRIES)
+    assert all(item.route_owner_occurrences == 1 for item in report.entries.values())
+
+
+def test_scan_fails_when_declared_route_owner_symbol_is_renamed(tmp_path: Path) -> None:
+    tree = tmp_path / "renamed-route-owner"
+    _copy_production_tree(tree)
+    app = tree / APP_PY
+    app.write_text(
+        app.read_text(encoding="utf-8").replace("def kb_reload()", "def renamed_kb_reload()", 1),
+        encoding="utf-8",
+    )
+    report = scan_legacy_contract(tree)
+    assert not report.completeness_ok
+    assert any(
+        mismatch.entry_id == "legacy-mutation-kb-reload-post"
+        and mismatch.owner_symbol == "kb_reload"
+        and mismatch.observed == 0
+        for mismatch in report.route_owner_mismatches
+    )
+
+
+def test_scan_fails_when_declared_page_route_disappears(tmp_path: Path) -> None:
+    tree = tmp_path / "missing-page-route"
+    _copy_production_tree(tree)
+    app = tree / APP_PY
+    app.write_text(
+        app.read_text(encoding="utf-8").replace(
+            '@app.get("/controlled/s01", response_class=HTMLResponse)',
+            '# removed controlled s01 route',
+            1,
+        ),
+        encoding="utf-8",
+    )
+    report = scan_legacy_contract(tree)
+    assert any(
+        mismatch.entry_id == "legacy-page-controlled-s01"
+        and mismatch.observed == 0
+        for mismatch in report.route_owner_mismatches
+    )
+
+
+def test_scan_fails_when_static_reference_disappears(tmp_path: Path) -> None:
+    tree = tmp_path / "missing-static-reference"
+    _copy_production_tree(tree)
+    template = tree / "task4_consistency/web/templates/index.html"
+    template.write_text(
+        template.read_text(encoding="utf-8").replace("/static/style.css", "/removed.css", 1),
+        encoding="utf-8",
+    )
+    report = scan_legacy_contract(tree)
+    assert any(
+        mismatch.entry_id == "legacy-static-style-css"
+        and mismatch.observed == 0
+        and mismatch.expected == 1
+        for mismatch in report.occurrence_mismatches
+    )
 
 
 def test_scan_detects_uncataloged_legacy_route_when_reload_entry_removed(
@@ -315,3 +372,50 @@ class TestPublicScanAttackMatrix:
             and edge.path == "frontend/src/evil.tsx"
             for edge in report.canonical_source_edges
         ), report.canonical_source_edges
+
+    def test_scan_reports_new_static_asset_caller(self, tmp_path: Path) -> None:
+        tree = tmp_path / "injected-static-caller"
+        _copy_production_tree(tree)
+        evil = tree / "frontend" / "src" / "evil.tsx"
+        evil.parent.mkdir(parents=True, exist_ok=True)
+        evil.write_text('void fetch("/static/app.js");\n', encoding="utf-8")
+        report = scan_legacy_contract(tree)
+        assert any(
+            edge.entry_id == "legacy-static-app-js"
+            and edge.path == "frontend/src/evil.tsx"
+            for edge in report.canonical_source_edges
+        )
+
+    def test_scan_reports_direct_legacy_template_read(self, tmp_path: Path) -> None:
+        tree = tmp_path / "injected-template-read"
+        _copy_production_tree(tree)
+        app = tree / APP_PY
+        app.write_text(
+            app.read_text(encoding="utf-8") + "\ndef injected():\n    return S01_TEMPLATE.read_text()\n",
+            encoding="utf-8",
+        )
+        report = scan_legacy_contract(tree)
+        assert any(
+            edge.entry_id == "legacy-page-controlled-s01" and edge.path == APP_PY
+            for edge in report.canonical_source_edges
+        )
+
+    def test_scan_normalizes_dynamic_path_and_concatenated_method(
+        self, tmp_path: Path
+    ) -> None:
+        tree = tmp_path / "injected-dynamic-delete"
+        _copy_production_tree(tree)
+        evil = tree / "frontend" / "src" / "evil.tsx"
+        evil.parent.mkdir(parents=True, exist_ok=True)
+        evil.write_text(
+            "export function remove(section: string, key: string): void {\n"
+            "  void fetch(`/api/kb/${section}/${key}`, { method: \"DE\" + \"LETE\" });\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        report = scan_legacy_contract(tree)
+        assert any(
+            edge.entry_id == "legacy-mutation-kb-delete"
+            and edge.path == "frontend/src/evil.tsx"
+            for edge in report.canonical_source_edges
+        )

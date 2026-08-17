@@ -191,8 +191,11 @@ curl -s http://127.0.0.1:8765/api/health
 | `TASK4_OBS_LOG_DIR` | 观察日志目录（`requests.jsonl`、`process-lifecycle.jsonl`、`sequence` sidecar） |
 | `TASK4_OBS_WINDOW_ID` | 受控窗口标识（同一窗口所有进程共享） |
 | `TASK4_OBS_ARTIFACT_SHA256` | 被观察制品（当前 wheel）SHA256 |
+| `TASK4_OBS_ARTIFACT_STAGE` | 制品阶段 `current` 或 `prior`；运行时所有权由该阶段和已解析 route owner 决定 |
 | `TASK4_OBS_PROCESS_CLASS` | `operator-simulated` / `release` / `health` / `playwright-probe` / `rollback-probe`；缺失或非法 → `unknown` 并使窗口无效 |
 | `TASK4_OBS_PROCESS_ID` | 进程身份（默认 `os.getpid()`） |
+
+观察 bundle 使用 schema v2。`requests.jsonl` 保持固定十二字段，`process-lifecycle.jsonl` 记录每个进程的 start/end；`window-manifest.json` 以 `process_artifacts` 保存每个进程的 artifact SHA、`current`/`prior` stage 和 traffic class。prior stage 必须同时提供 prior wheel identity、reviewed commit、clean tracked-tree、accepted-fact digest、Node/npm/package identity、loopback route table、冻结 Playwright node/spec digest、两个 viewport 以及窗口起止时间和 elapsed seconds。验证器独立校验固定五类流量词汇、十个 catalog ID、route family、每进程制品身份、原始日志 digest 和 release evidence contract。
 
 证据验证：
 

@@ -49,7 +49,7 @@ import socket
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Mapping, Protocol
+from typing import Any, Iterable, Iterator, Mapping, Protocol
 
 from task4_consistency.web.legacy_catalog import (
     CONTRACTED_LEGACY_ENTRIES,
@@ -93,8 +93,72 @@ LIFECYCLE_EVENTS: tuple[str, ...] = ("start", "end")
 
 UNKNOWN_CLASS = "unknown"
 HEALTH_PATH = "/api/health"
+FAVICON_PATH = "/favicon.ico"
 DYNAMIC_KB_FAMILY = "/api/kb/{section}/{key}"
-BUNDLE_SCHEMA_VERSION = "1"
+UNREGISTERED_PATH_FAMILY = "/unregistered"
+ARTIFACT_STAGES: tuple[str, ...] = ("current", "prior")
+BUNDLE_SCHEMA_VERSION = "2"
+CATALOG_IDS: tuple[str, ...] = tuple(entry.id for entry in CONTRACTED_LEGACY_ENTRIES)
+ENVIRONMENT_IDENTITY_FIELDS: tuple[str, ...] = (
+    "hostname",
+    "python_version",
+    "platform",
+)
+PRIOR_ARTIFACT_FIELDS: tuple[str, ...] = ("wheel_sha256", "commit")
+COHORT_MANIFEST_FIELDS: tuple[str, ...] = ("processes",)
+_ENTRY_BY_ID = {entry.id: entry for entry in CONTRACTED_LEGACY_ENTRIES}
+_RUNTIME_OWNER_BY_ID = {
+    entry.id: "StaticFiles" if entry.kind == "static" else entry.route_owner_symbol
+    for entry in CONTRACTED_LEGACY_ENTRIES
+}
+PROCESS_ARTIFACT_FIELDS: tuple[str, ...] = (
+    "artifact_sha256",
+    "artifact_stage",
+    "traffic_class",
+)
+RELEASE_EVIDENCE_FIELDS: tuple[str, ...] = (
+    "reviewed_commit",
+    "tracked_tree_clean",
+    "current_wheel_sha256",
+    "prior_commit",
+    "prior_wheel_sha256",
+    "timezone",
+    "elapsed_seconds",
+    "node_version",
+    "npm_version",
+    "package_identity",
+    "network_routes",
+    "cohort_node_ids",
+    "cohort_node_ids_sha256",
+    "cohort_spec_sha256",
+    "viewports",
+    "accepted_fact_sha256",
+    "accepted_facts_equal",
+)
+MANIFEST_FIELDS: tuple[str, ...] = (
+    "schema_version",
+    "bundle_id",
+    "window_id",
+    "window_start_utc",
+    "window_end_utc",
+    "artifact_sha256",
+    "process_id",
+    "process_class",
+    "environment_identity",
+    "requests_raw_sha256",
+    "lifecycle_raw_sha256",
+    "expected_sequence_range",
+    "path_family_table",
+    "dynamic_path_family",
+    "frozen_cohort_manifest",
+    "classification_manifest",
+    "per_traffic_class_counts",
+    "per_entry_counts",
+    "prior_artifact_identity",
+    "process_artifacts",
+    "release_evidence",
+    "manifest_sha256",
+)
 
 # --- Clock ------------------------------------------------------------------
 
@@ -239,6 +303,7 @@ def default_family_table() -> dict[str, str]:
             continue
         table[entry.path] = entry.path
     table[HEALTH_PATH] = HEALTH_PATH
+    table[FAVICON_PATH] = FAVICON_PATH
     table["/static/*"] = "/static/*"
     return table
 
@@ -265,8 +330,8 @@ def normalize_path_family(
     route patterns match their family (no concrete path parameter text),
     the dynamic KB delete family becomes ``/api/kb/{section}/{key}``,
     non-catalog static requests collapse to ``/static/*``, and anything
-    unregistered normalizes to itself so the verifier can reject it as a
-    raw arbitrary segment."""
+    unregistered normalizes to one fixed sentinel so durable evidence and
+    verifier diagnostics never contain an arbitrary request path."""
     table = default_family_table() if family_table is None else family_table
     clean = path.split("?", 1)[0].split("#", 1)[0]
     if clean in table:
@@ -280,7 +345,7 @@ def normalize_path_family(
         return DYNAMIC_KB_FAMILY
     if clean.startswith("/static/") and "/static/*" in table:
         return "/static/*"
-    return clean
+    return UNREGISTERED_PATH_FAMILY
 
 
 def _iter_route_paths(routes: Iterable[Any]) -> Iterator[str]:
@@ -313,23 +378,23 @@ def app_family_table(app: Any) -> dict[str, str]:
 def legacy_surface_id_for(
     method: str,
     path: str,
-    process_class: str | None,
-    react_owned_paths: Mapping[str, object] | None = None,
+    matched_route_owner: str,
+    artifact_stage: str,
 ) -> str | None:
     """The catalog surface of one request, or None.
 
-    On the current artifact a request resolving to a React-owned route
-    belongs to the React owner, so no catalog match is reported; under
-    ``rollback-probe`` the prior artifact still resolves those paths to
-    their legacy owners, so suppression never applies there.  Without a
-    ``react_owned_paths`` mapping the pure catalog match applies."""
-    if (
-        react_owned_paths
-        and process_class != "rollback-probe"
-        and path in react_owned_paths
-    ):
+    Ownership is derived from the route selected by ASGI dispatch and the
+    installed artifact stage.  Traffic class remains an audit population and
+    has no effect on ownership."""
+    surface_id = match_legacy_surface(method, path)
+    if surface_id is None:
         return None
-    return match_legacy_surface(method, path)
+    entry = _ENTRY_BY_ID[surface_id]
+    if matched_route_owner != _RUNTIME_OWNER_BY_ID[surface_id]:
+        return None
+    if entry.kind == "page" and artifact_stage != "prior":
+        return None
+    return surface_id
 
 
 def resolve_route_owner(scope: Mapping[str, Any]) -> str:
@@ -430,8 +495,8 @@ class ObservationRecorder:
         artifact_sha256: str,
         process_id: str,
         process_class: str | None,
+        artifact_stage: str = "current",
         family_table: Mapping[str, str] | None = None,
-        react_owned_paths: Mapping[str, object] | None = None,
     ) -> None:
         self._clock = clock
         self._sink = sink
@@ -439,10 +504,10 @@ class ObservationRecorder:
         self._artifact_sha256 = artifact_sha256
         self._process_id = process_id
         self._process_class = process_class
+        self._artifact_stage = artifact_stage
         self._family_table = (
             dict(family_table) if family_table is not None else default_family_table()
         )
-        self._react_owned_paths = react_owned_paths
         self._correlation_counter = 0
 
     def classify(self, path: str) -> str:
@@ -480,8 +545,8 @@ class ObservationRecorder:
             "legacy_surface_id": legacy_surface_id_for(
                 method,
                 path,
-                self._process_class,
-                react_owned_paths=self._react_owned_paths,
+                matched_route_owner,
+                self._artifact_stage,
             ),
             "response_status": response_status,
         }
@@ -593,6 +658,7 @@ class ObservationConfig:
     log_dir: Path | None
     window_id: str
     artifact_sha256: str
+    artifact_stage: str
     process_class: str | None
     process_id: str
 
@@ -612,6 +678,7 @@ def config_from_env(environ: Mapping[str, str] | None = None) -> ObservationConf
         log_dir=Path(log_dir) if log_dir else None,
         window_id=env.get("TASK4_OBS_WINDOW_ID", "").strip(),
         artifact_sha256=env.get("TASK4_OBS_ARTIFACT_SHA256", "").strip(),
+        artifact_stage=env.get("TASK4_OBS_ARTIFACT_STAGE", "").strip() or "current",
         process_class=env.get("TASK4_OBS_PROCESS_CLASS", "").strip() or None,
         process_id=env.get("TASK4_OBS_PROCESS_ID", "").strip() or str(os.getpid()),
     )
@@ -621,13 +688,14 @@ def recorder_from_env(
     environ: Mapping[str, str] | None = None,
     *,
     family_table: Mapping[str, str] | None = None,
-    react_owned_paths: Mapping[str, object] | None = None,
 ) -> ObservationRecorder | NoopRecorder:
     """The env-driven recorder factory: absent or incomplete observation
     configuration yields the capture-free no-op recorder."""
     config = config_from_env(environ)
     if not config.enabled:
         return NoopRecorder()
+    if config.artifact_stage not in ARTIFACT_STAGES:
+        raise ValueError(f"unknown observation artifact stage {config.artifact_stage!r}")
     return ObservationRecorder(
         SystemClock(),
         JsonlSink(config.log_dir),
@@ -635,8 +703,8 @@ def recorder_from_env(
         artifact_sha256=config.artifact_sha256,
         process_id=config.process_id,
         process_class=config.process_class,
+        artifact_stage=config.artifact_stage,
         family_table=family_table,
-        react_owned_paths=react_owned_paths,
     )
 
 
@@ -722,6 +790,57 @@ def _parse_lifecycle_lines(raw: bytes) -> tuple[list[dict] | None, str | None]:
     return records, None
 
 
+def _manifest_sha256(data: Mapping[str, Any]) -> str:
+    payload = {key: value for key, value in data.items() if key != "manifest_sha256"}
+    encoded = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _infer_process_artifacts(
+    records: list[dict],
+    lifecycle: list[dict],
+    process_class: str | None,
+    current_artifact_sha256: str,
+    prior_artifact_sha256: str | None,
+) -> dict[str, dict[str, str]]:
+    process_ids = {
+        str(item["process_id"])
+        for item in [*records, *lifecycle]
+        if isinstance(item.get("process_id"), str)
+    }
+    result: dict[str, dict[str, str]] = {}
+    for process_id in sorted(process_ids):
+        relevant = [item for item in [*records, *lifecycle] if item.get("process_id") == process_id]
+        artifact_values = {str(item.get("artifact_sha256", "")) for item in relevant}
+        if len(artifact_values) != 1:
+            raise ValueError(f"process {process_id!r} has multiple artifact identities")
+        classes = {
+            str(item["traffic_class"])
+            for item in records
+            if item.get("process_id") == process_id and item.get("traffic_class") != "health"
+        }
+        if len(classes) > 1:
+            raise ValueError(f"process {process_id!r} has multiple traffic classes")
+        traffic_class = next(iter(classes), process_class or "release")
+        artifact_sha256 = next(iter(artifact_values))
+        if artifact_sha256 == current_artifact_sha256:
+            artifact_stage = "current"
+        elif prior_artifact_sha256 and artifact_sha256 == prior_artifact_sha256:
+            artifact_stage = "prior"
+        else:
+            raise ValueError(
+                f"process {process_id!r} has an artifact identity outside the bundle contract"
+            )
+        result[process_id] = {
+            "artifact_sha256": artifact_sha256,
+            "artifact_stage": artifact_stage,
+            "traffic_class": traffic_class,
+        }
+    return result
+
+
 def build_bundle(
     output_dir: Path | str,
     *,
@@ -737,6 +856,8 @@ def build_bundle(
     cohort: tuple[str, ...] | list[str],
     family_table: Mapping[str, str] | None = None,
     prior_artifact: Mapping[str, str] | None = None,
+    process_artifacts: Mapping[str, Mapping[str, str]] | None = None,
+    release_evidence: Mapping[str, Any] | None = None,
 ) -> dict:
     """Seal one window bundle: the raw JSONL evidence, its SHA256 digests,
     window markers, expected sequence range, lifecycle, environment and
@@ -770,9 +891,10 @@ def build_bundle(
             record["legacy_surface_id"], str
         ):
             raise ValueError(f"cannot seal bundle: record {index} legacy_surface_id wrong type")
-    _lifecycle, lifecycle_reason = _parse_lifecycle_lines(lifecycle_raw)
+    lifecycle, lifecycle_reason = _parse_lifecycle_lines(lifecycle_raw)
     if lifecycle_reason:
         raise ValueError(f"cannot seal bundle: {lifecycle_reason}")
+    assert lifecycle is not None
 
     table = dict(family_table) if family_table is not None else default_family_table()
     if records:
@@ -789,7 +911,23 @@ def build_bundle(
         per_class[record["traffic_class"]] += 1
         surface = record["legacy_surface_id"]
         if surface is not None:
+            if surface not in per_entry:
+                raise ValueError(
+                    f"cannot seal bundle: record has unknown legacy_surface_id {surface!r}"
+                )
             per_entry[surface][record["traffic_class"]] += 1
+
+    artifact_map = (
+        {process_id: dict(identity) for process_id, identity in process_artifacts.items()}
+        if process_artifacts is not None
+        else _infer_process_artifacts(
+            records,
+            lifecycle,
+            process_class,
+            artifact_sha256,
+            (prior_artifact or {}).get("wheel_sha256") if prior_artifact else None,
+        )
+    )
 
     manifest: dict[str, Any] = {
         "schema_version": BUNDLE_SCHEMA_VERSION,
@@ -815,7 +953,10 @@ def build_bundle(
         "per_traffic_class_counts": per_class,
         "per_entry_counts": per_entry,
         "prior_artifact_identity": dict(prior_artifact) if prior_artifact else None,
+        "process_artifacts": artifact_map,
+        "release_evidence": dict(release_evidence) if release_evidence else None,
     }
+    manifest["manifest_sha256"] = _manifest_sha256(manifest)
     (output / "requests.jsonl").write_bytes(requests_raw)
     (output / "process-lifecycle.jsonl").write_bytes(lifecycle_raw)
     (output / "manifest.json").write_text(
@@ -863,18 +1004,239 @@ def _invalid(reason: str) -> ObservationVerdict:
     )
 
 
+def _canonical_family_contract() -> dict[str, str]:
+    """Registered current-app families used as the verifier authority.
+
+    The import is lazy to avoid the application/observation import cycle.
+    """
+    from task4_consistency.web.app import app
+
+    return app_family_table(app)
+
+
+def _check_release_evidence(data: Mapping[str, Any]) -> str | None:
+    prior = data.get("prior_artifact_identity")
+    evidence = data.get("release_evidence")
+    has_prior_stage = any(
+        isinstance(identity, Mapping) and identity.get("artifact_stage") == "prior"
+        for identity in (data.get("process_artifacts") or {}).values()
+    )
+    if not has_prior_stage:
+        if prior is not None or evidence is not None:
+            return "manifest prior evidence is present without a prior-stage process"
+        return None
+    if not isinstance(prior, Mapping):
+        return "manifest prior_artifact_identity is malformed"
+    if set(prior) != set(PRIOR_ARTIFACT_FIELDS):
+        return "manifest prior_artifact_identity fields do not match the fixed contract"
+    if not isinstance(prior.get("wheel_sha256"), str) or re.fullmatch(
+        r"[0-9a-f]{64}", prior["wheel_sha256"]
+    ) is None:
+        return "manifest prior wheel identity is malformed"
+    if not isinstance(prior.get("commit"), str) or re.fullmatch(
+        r"[0-9a-f]{40}", prior["commit"]
+    ) is None:
+        return "manifest prior commit identity is malformed"
+    if not isinstance(evidence, Mapping):
+        return "manifest release_evidence is missing"
+    if set(evidence) != set(RELEASE_EVIDENCE_FIELDS):
+        return "manifest release_evidence fields do not match the fixed contract"
+    reviewed_commit = evidence.get("reviewed_commit")
+    prior_commit = evidence.get("prior_commit")
+    if not isinstance(reviewed_commit, str) or re.fullmatch(r"[0-9a-f]{40}", reviewed_commit) is None:
+        return "manifest reviewed_commit is malformed"
+    if not isinstance(prior_commit, str) or re.fullmatch(r"[0-9a-f]{40}", prior_commit) is None:
+        return "manifest prior_commit is malformed"
+    if evidence.get("tracked_tree_clean") is not True:
+        return "manifest tracked_tree_clean is not true"
+    current_sha = evidence.get("current_wheel_sha256")
+    prior_sha = evidence.get("prior_wheel_sha256")
+    if current_sha != data.get("artifact_sha256"):
+        return "manifest current wheel identity does not match artifact_sha256"
+    if prior_sha != prior.get("wheel_sha256"):
+        return "manifest prior wheel identity does not match prior_artifact_identity"
+    if prior.get("commit") != prior_commit:
+        return "manifest prior commit identity mismatch"
+    elapsed = evidence.get("elapsed_seconds")
+    if not isinstance(elapsed, (int, float)) or isinstance(elapsed, bool) or elapsed <= 0:
+        return "manifest elapsed_seconds is malformed"
+    window_start = _parse_utc(data.get("window_start_utc"))
+    window_end = _parse_utc(data.get("window_end_utc"))
+    if window_start is None or window_end is None or window_end <= window_start:
+        return "manifest window markers are not a positive interval"
+    expected_elapsed = (window_end - window_start).total_seconds()
+    if abs(float(elapsed) - expected_elapsed) > 1e-6:
+        return "manifest elapsed_seconds does not match the sealed window"
+    timezone_name = evidence.get("timezone")
+    if not isinstance(timezone_name, str) or re.fullmatch(r"[A-Za-z0-9_+:/.-]+", timezone_name) is None:
+        return "manifest timezone is missing or malformed"
+    node_version = evidence.get("node_version")
+    if not isinstance(node_version, str) or re.fullmatch(r"v\d+\.\d+\.\d+", node_version) is None:
+        return "manifest node_version is missing or malformed"
+    npm_version = evidence.get("npm_version")
+    if not isinstance(npm_version, str) or re.fullmatch(r"\d+\.\d+\.\d+", npm_version) is None:
+        return "manifest npm_version is missing or malformed"
+    package_identity = evidence.get("package_identity")
+    if not isinstance(package_identity, str) or re.fullmatch(
+        r"task4-consistency==[0-9A-Za-z.+-]+", package_identity
+    ) is None:
+        return "manifest package_identity is missing or malformed"
+    network_routes = evidence.get("network_routes")
+    if not isinstance(network_routes, str) or not network_routes.strip():
+        return "manifest network_routes is missing or malformed"
+    if "127.0.0.1" not in network_routes or "lo" not in network_routes:
+        return "manifest network_routes do not prove loopback namespace"
+    if re.search(r"(?im)^\s*default\b", network_routes):
+        return "manifest network_routes expose a default route"
+    node_ids = evidence.get("cohort_node_ids")
+    if not isinstance(node_ids, list) or not node_ids or not all(
+        isinstance(node_id, str) and node_id for node_id in node_ids
+    ):
+        return "manifest cohort_node_ids is missing or malformed"
+    if len(node_ids) != len(set(node_ids)):
+        return "manifest cohort_node_ids contain duplicates"
+    if not any(node_id.startswith("test_t54_prior_artifact.spec.js:11:1 ") for node_id in node_ids):
+        return "manifest cohort_node_ids omit the prior-artifact browser node"
+    node_ids_raw = ("\n".join(node_ids) + "\n").encode("utf-8")
+    if evidence.get("cohort_node_ids_sha256") != hashlib.sha256(node_ids_raw).hexdigest():
+        return "manifest cohort_node_ids digest mismatch"
+    spec_hashes = evidence.get("cohort_spec_sha256")
+    if not isinstance(spec_hashes, Mapping) or not spec_hashes:
+        return "manifest cohort_spec_sha256 is missing or malformed"
+    if not all(
+        isinstance(path, str)
+        and isinstance(digest, str)
+        and re.fullmatch(r"[0-9a-f]{64}", digest)
+        for path, digest in spec_hashes.items()
+    ):
+        return "manifest cohort_spec_sha256 is malformed"
+    if "playwright.config.js" not in spec_hashes or not any(
+        path.endswith(".spec.js") for path in spec_hashes
+    ):
+        return "manifest cohort_spec_sha256 omits the Playwright contract"
+    if evidence.get("viewports") != ["1280x800", "390x844"]:
+        return "manifest viewport contract mismatch"
+    fact_hashes = evidence.get("accepted_fact_sha256")
+    if not isinstance(fact_hashes, Mapping) or set(fact_hashes) != {
+        "current", "prior", "restored"
+    }:
+        return "manifest accepted_fact_sha256 is missing or malformed"
+    if not all(
+        isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value)
+        for value in fact_hashes.values()
+    ):
+        return "manifest accepted_fact_sha256 is malformed"
+    if len(set(fact_hashes.values())) != 1 or evidence.get("accepted_facts_equal") is not True:
+        return "manifest accepted facts are not equal across all stages"
+    return None
+
+
+def _check_manifest_contract(data: Mapping[str, Any]) -> str | None:
+    if set(data) != set(MANIFEST_FIELDS):
+        return "manifest fields do not match the fixed contract"
+    if data.get("manifest_sha256") != _manifest_sha256(data):
+        return "manifest digest mismatch (structure changed after sealing)"
+    for field in ("bundle_id", "window_id", "process_id"):
+        if not isinstance(data.get(field), str) or not data[field]:
+            return f"manifest {field} is missing or malformed"
+    if not isinstance(data.get("artifact_sha256"), str) or re.fullmatch(
+        r"[0-9a-f]{64}", data["artifact_sha256"]
+    ) is None:
+        return "manifest artifact_sha256 is malformed"
+    environment = data.get("environment_identity")
+    if not isinstance(environment, Mapping) or set(environment) != set(ENVIRONMENT_IDENTITY_FIELDS):
+        return "manifest environment_identity fields do not match the fixed contract"
+    if not all(isinstance(environment[field], str) and environment[field] for field in ENVIRONMENT_IDENTITY_FIELDS):
+        return "manifest environment_identity is malformed"
+    window_start = _parse_utc(data.get("window_start_utc"))
+    window_end = _parse_utc(data.get("window_end_utc"))
+    if window_start is None or window_end is None or window_end <= window_start:
+        return "manifest window markers are not a positive UTC interval"
+    expected_classification = {
+        "traffic_classes": list(TRAFFIC_CLASSES),
+        "health_path": HEALTH_PATH,
+        "unknown_invalidates": True,
+    }
+    if data.get("classification_manifest") != expected_classification:
+        return "manifest traffic classification contract mismatch"
+    if data.get("dynamic_path_family") != DYNAMIC_KB_FAMILY:
+        return "manifest dynamic path family contract mismatch"
+    table = data.get("path_family_table")
+    if not isinstance(table, Mapping) or not all(
+        isinstance(path, str) and isinstance(family, str)
+        for path, family in table.items()
+    ):
+        return "manifest path_family_table is malformed"
+    canonical_table = _canonical_family_contract()
+    if dict(table) != canonical_table:
+        return "manifest path family table does not match the registered contract"
+    if set(data.get("per_traffic_class_counts") or {}) != set(TRAFFIC_CLASSES):
+        return "manifest traffic-count keys do not match the fixed vocabulary"
+    per_entry = data.get("per_entry_counts")
+    if not isinstance(per_entry, Mapping) or set(per_entry) != set(CATALOG_IDS):
+        return "manifest entry-count keys do not match the compiled catalog"
+    if any(
+        not isinstance(counts, Mapping) or set(counts) != set(TRAFFIC_CLASSES)
+        for counts in per_entry.values()
+    ):
+        return "manifest per-entry traffic keys do not match the fixed vocabulary"
+    cohort = data.get("frozen_cohort_manifest")
+    if not isinstance(cohort, Mapping) or set(cohort) != set(COHORT_MANIFEST_FIELDS):
+        return "manifest frozen cohort fields do not match the fixed contract"
+    processes = cohort.get("processes") if isinstance(cohort, Mapping) else None
+    if not isinstance(processes, list) or not processes or not all(
+        isinstance(process_id, str) and process_id for process_id in processes
+    ) or len(processes) != len(set(processes)):
+        return "manifest frozen process cohort is malformed"
+    process_artifacts = data.get("process_artifacts")
+    if not isinstance(process_artifacts, Mapping) or set(process_artifacts) != set(processes):
+        return "manifest process artifact map does not match the frozen cohort"
+    for process_id, identity in process_artifacts.items():
+        if not isinstance(process_id, str) or not isinstance(identity, Mapping):
+            return "manifest process artifact entry is malformed"
+        if set(identity) != set(PROCESS_ARTIFACT_FIELDS):
+            return f"process {process_id} artifact fields do not match the fixed contract"
+        sha = identity.get("artifact_sha256")
+        if not isinstance(sha, str) or re.fullmatch(r"[0-9a-f]{64}", sha) is None:
+            return f"process {process_id} artifact_sha256 is malformed"
+        if identity.get("artifact_stage") not in ARTIFACT_STAGES:
+            return f"process {process_id} artifact stage is invalid"
+        if identity.get("traffic_class") not in TRAFFIC_CLASSES:
+            return f"process {process_id} traffic class is invalid"
+        if identity.get("artifact_stage") == "current" and sha != data.get("artifact_sha256"):
+            return f"process {process_id} current artifact identity mismatch"
+    prior = data.get("prior_artifact_identity")
+    if prior is not None:
+        prior_sha = prior.get("wheel_sha256") if isinstance(prior, Mapping) else None
+        prior_processes = [
+            process_id
+            for process_id, identity in process_artifacts.items()
+            if identity.get("artifact_stage") == "prior"
+        ]
+        if not prior_processes:
+            return "manifest prior artifact has no prior-stage process"
+        if any(process_artifacts[process_id].get("artifact_sha256") != prior_sha for process_id in prior_processes):
+            return "manifest prior-stage process artifact identity mismatch"
+    elif any(
+        identity.get("artifact_stage") == "prior"
+        for identity in process_artifacts.values()
+        if isinstance(identity, Mapping)
+    ):
+        return "manifest prior-stage process is missing prior artifact identity"
+    return _check_release_evidence(data)
+
+
 def _check_request_records(
     records: list[dict], data: Mapping[str, Any]
 ) -> str | None:
     """Per-record closed-schema, sequence, traffic, correlation, path
     family, route owner, leak and identity checks; the first violation
     with its concrete reason."""
-    allowed = tuple(
-        data.get("classification_manifest", {}).get("traffic_classes", TRAFFIC_CLASSES)
-    )
-    table = data.get("path_family_table") or {}
-    dynamic_family = data.get("dynamic_path_family", DYNAMIC_KB_FAMILY)
+    allowed = TRAFFIC_CLASSES
+    table = data["path_family_table"]
+    dynamic_family = DYNAMIC_KB_FAMILY
     allowed_families = set(table.values()) | {dynamic_family}
+    process_artifacts = data["process_artifacts"]
     string_fields = (
         "timestamp_utc",
         "artifact_sha256",
@@ -907,6 +1269,8 @@ def _check_request_records(
             record["legacy_surface_id"], str
         ):
             return f"record {index} field 'legacy_surface_id' wrong type"
+        if record["legacy_surface_id"] is not None and record["legacy_surface_id"] not in CATALOG_IDS:
+            return f"record {index} unknown legacy_surface_id"
         if _parse_utc(record["timestamp_utc"]) is None:
             return f"record {index} invalid timestamp"
         if record["traffic_class"] not in allowed:
@@ -924,6 +1288,8 @@ def _check_request_records(
             return f"record {index} duplicate correlation_id"
         seen_correlations.add(correlation)
         family = record["normalized_path_family"]
+        if family == UNREGISTERED_PATH_FAMILY:
+            return f"record {index} unregistered path family sentinel"
         if "?" in family or "#" in family or "=" in family:
             return f"record {index} path family contains a query value"
         if (
@@ -939,8 +1305,21 @@ def _check_request_records(
         findings = scan_record_for_leaks(record)
         if findings:
             return f"record {index} leak: {findings[0]}"
-        if record["artifact_sha256"] != data.get("artifact_sha256"):
-            return f"record {index} artifact_sha256 does not match the sealed manifest"
+        identity = process_artifacts.get(record["process_id"])
+        if identity is None:
+            return f"record {index} process {record['process_id']!r} has no artifact identity"
+        if record["artifact_sha256"] != identity.get("artifact_sha256"):
+            return f"record {index} artifact_sha256 does not match its process identity"
+        if record["traffic_class"] != "health" and record["traffic_class"] != identity.get("traffic_class"):
+            return f"record {index} traffic class does not match its process identity"
+        expected_surface = legacy_surface_id_for(
+            record["method"],
+            family,
+            record["matched_route_owner"],
+            str(identity.get("artifact_stage")),
+        )
+        if record["legacy_surface_id"] != expected_surface:
+            return f"record {index} legacy surface does not match resolved ownership"
         if record["window_id"] != data.get("window_id"):
             return f"record {index} window_id does not match the sealed manifest"
     sequences = [record["sequence"] for record in records]
@@ -978,11 +1357,15 @@ def _check_lifecycle(
     """Per-process lifecycle integrity: clean start/end, unique identity
     per window, and membership in the frozen cohort."""
     processes: dict[str, dict[str, list[datetime]]] = {}
+    process_artifacts = data["process_artifacts"]
     for index, entry in enumerate(lifecycle, 1):
         if entry["window_id"] != data.get("window_id"):
             return None, f"lifecycle record {index} window_id does not match the sealed manifest"
-        if entry["artifact_sha256"] != data.get("artifact_sha256"):
-            return None, f"lifecycle record {index} artifact_sha256 does not match the sealed manifest"
+        identity = process_artifacts.get(entry["process_id"])
+        if identity is None:
+            return None, f"lifecycle record {index} process has no artifact identity"
+        if entry["artifact_sha256"] != identity.get("artifact_sha256"):
+            return None, f"lifecycle record {index} artifact_sha256 does not match its process identity"
         bucket = processes.setdefault(entry["process_id"], {"start": [], "end": []})
         bucket[entry["event"]].append(_parse_utc(entry["timestamp_utc"]))
     for process_id in sorted(processes):
@@ -1054,6 +1437,9 @@ def verify_bundle(
         lifecycle_raw = lifecycle_raw.encode("utf-8")
     if data.get("schema_version") != BUNDLE_SCHEMA_VERSION:
         return _invalid(f"unsupported bundle schema_version {data.get('schema_version')!r}")
+    manifest_reason = _check_manifest_contract(data)
+    if manifest_reason is not None:
+        return _invalid(manifest_reason)
     if data.get("requests_raw_sha256") != hashlib.sha256(requests_raw).hexdigest():
         return _invalid("requests.jsonl digest mismatch (bytes changed after sealing)")
     if data.get("lifecycle_raw_sha256") != hashlib.sha256(lifecycle_raw).hexdigest():
@@ -1091,13 +1477,10 @@ def verify_bundle(
         if not (window_start <= timestamp <= window_end):
             return _invalid(f"record {index} timestamp outside sealed window range")
 
-    allowed = tuple(
-        data.get("classification_manifest", {}).get("traffic_classes", TRAFFIC_CLASSES)
-    )
-    per_class = {cls: 0 for cls in allowed}
+    per_class = {cls: 0 for cls in TRAFFIC_CLASSES}
     per_entry: dict[str, dict[str, int]] = {
-        entry_id: {cls: 0 for cls in allowed}
-        for entry_id in (data.get("per_entry_counts") or {})
+        entry_id: {cls: 0 for cls in TRAFFIC_CLASSES}
+        for entry_id in CATALOG_IDS
     }
     for record in records:
         per_class[record["traffic_class"]] += 1
@@ -1110,6 +1493,19 @@ def verify_bundle(
         return _invalid("sealed per-entry counts mismatch")
     if per_class.get("operator-simulated", 0) == 0:
         return _invalid("operator population (operator-simulated denominator) is empty")
+    if any(
+        identity.get("artifact_stage") == "prior"
+        for identity in data["process_artifacts"].values()
+    ):
+        for entry_id in (
+            "legacy-page-root",
+            "legacy-page-controlled-s01",
+            "legacy-page-controlled-s02",
+        ):
+            if per_entry[entry_id]["rollback-probe"] == 0:
+                return _invalid(
+                    f"required prior-artifact rollback observation missing for {entry_id}"
+                )
 
     operator_hits: dict[str, int] = {}
     rollback_hits: dict[str, int] = {}

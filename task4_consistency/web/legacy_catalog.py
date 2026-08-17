@@ -99,10 +99,15 @@ _DIRECT_STORE_ALLOWLIST: dict[tuple[str, str], int] = {
 _MUTATION_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 _ROUTE_DEFINITION_RE = re.compile(
-    r"@app\.(get|post|put|patch|delete)\(\s*['\"]([^'\"]+)['\"]"
+    r"@[A-Za-z_][A-Za-z0-9_]*\.(get|post|put|patch|delete)\(\s*['\"]([^'\"]+)['\"]"
+)
+_MOUNT_DEFINITION_RE = re.compile(
+    r"[A-Za-z_][A-Za-z0-9_]*\.mount\(\s*['\"]([^'\"]+)['\"][\s\S]*?"
+    r"name\s*=\s*['\"]([^'\"]+)['\"]\s*,?\s*\)",
+    re.MULTILINE,
 )
 _CALL_START_RE = re.compile(r"\b([\w.$]+)\s*\(")
-_METHOD_FIELD_RE = re.compile(r"\bmethod\s*:\s*['\"]([A-Za-z]+)['\"]")
+_METHOD_FIELD_RE = re.compile(r"\bmethod\s*:\s*([^,}\n]+)")
 
 
 @dataclass(frozen=True)
@@ -121,10 +126,15 @@ class LegacySurface:
     kind: str  # "page" | "static" | "mutation"
     method: str
     path: str
+    family: str
     description: str
     owners: tuple[str, ...] = ()
     rollback_occurrences: tuple[tuple[str, int], ...] = ()
     facet: str = ""
+    route_owner_file: str = "task4_consistency/web/app.py"
+    route_owner_symbol: str = ""
+    route_owner_path: str = ""
+    reference_occurrences: tuple[tuple[str, int], ...] = ()
 
     def matches(self, method: str, path: str) -> bool:
         if method.upper() != self.method:
@@ -140,51 +150,72 @@ CONTRACTED_LEGACY_ENTRIES: tuple[LegacySurface, ...] = (
         kind="page",
         method="GET",
         path="/",
+        family="root",
         description="Root legacy template owner",
         owners=("task4_consistency/web/templates/index.html",),
         rollback_occurrences=(("task4_consistency/web/templates/index.html", 0),),
+        route_owner_symbol="index",
     ),
     LegacySurface(
         id="legacy-page-controlled-s01",
         kind="page",
         method="GET",
         path="/controlled/s01",
+        family="controlled_s01",
         description="S01 template plus inline script owner",
         owners=("task4_consistency/web/templates/s01.html",),
         rollback_occurrences=(("task4_consistency/web/templates/s01.html", 0),),
         facet="template + inline script",
+        route_owner_symbol="controlled_s01_page",
     ),
     LegacySurface(
         id="legacy-page-controlled-s02",
         kind="page",
         method="GET",
         path="/controlled/s02",
+        family="controlled_s02",
         description="S02 template plus inline script owner",
         owners=("task4_consistency/web/templates/s02.html",),
         rollback_occurrences=(("task4_consistency/web/templates/s02.html", 0),),
         facet="template + inline script",
+        route_owner_symbol="controlled_s02_page",
     ),
     LegacySurface(
         id="legacy-static-app-js",
         kind="static",
         method="GET",
         path="/static/app.js",
+        family="static_app_js",
         description="Legacy demo application script",
-        owners=("task4_consistency/web/static/app.js",),
+        owners=(
+            "task4_consistency/web/static/app.js",
+            "task4_consistency/web/templates/index.html",
+        ),
+        route_owner_symbol="static",
+        route_owner_path="/static",
+        reference_occurrences=(("task4_consistency/web/templates/index.html", 1),),
     ),
     LegacySurface(
         id="legacy-static-style-css",
         kind="static",
         method="GET",
         path="/static/style.css",
+        family="static_style_css",
         description="Legacy demo stylesheet",
-        owners=("task4_consistency/web/static/style.css",),
+        owners=(
+            "task4_consistency/web/static/style.css",
+            "task4_consistency/web/templates/index.html",
+        ),
+        route_owner_symbol="static",
+        route_owner_path="/static",
+        reference_occurrences=(("task4_consistency/web/templates/index.html", 1),),
     ),
     LegacySurface(
         id="legacy-mutation-rules-put",
         kind="mutation",
         method="PUT",
         path="/api/rules",
+        family="rules",
         description="Direct rule package mutation",
         owners=(
             "task4_consistency/web/app.py",
@@ -194,12 +225,14 @@ CONTRACTED_LEGACY_ENTRIES: tuple[LegacySurface, ...] = (
             ("task4_consistency/web/app.py", 1),
             ("task4_consistency/web/static/app.js", 2),
         ),
+        route_owner_symbol="put_rules",
     ),
     LegacySurface(
         id="legacy-mutation-rules-reset-post",
         kind="mutation",
         method="POST",
         path="/api/rules/reset",
+        family="rules_reset",
         description="Direct rule package reset",
         owners=(
             "task4_consistency/web/app.py",
@@ -209,12 +242,14 @@ CONTRACTED_LEGACY_ENTRIES: tuple[LegacySurface, ...] = (
             ("task4_consistency/web/app.py", 1),
             ("task4_consistency/web/static/app.js", 1),
         ),
+        route_owner_symbol="reset_rules",
     ),
     LegacySurface(
         id="legacy-mutation-kb-post",
         kind="mutation",
         method="POST",
         path="/api/kb",
+        family="kb",
         description="Direct KB alias mutation",
         owners=(
             "task4_consistency/web/app.py",
@@ -224,12 +259,14 @@ CONTRACTED_LEGACY_ENTRIES: tuple[LegacySurface, ...] = (
             ("task4_consistency/web/app.py", 1),
             ("task4_consistency/web/static/app.js", 1),
         ),
+        route_owner_symbol="kb_add",
     ),
     LegacySurface(
         id="legacy-mutation-kb-delete",
         kind="mutation",
         method="DELETE",
         path="/api/kb/{section}/{key}",
+        family="kb_delete",
         description="Direct KB alias deletion",
         owners=(
             "task4_consistency/web/app.py",
@@ -239,15 +276,18 @@ CONTRACTED_LEGACY_ENTRIES: tuple[LegacySurface, ...] = (
             ("task4_consistency/web/app.py", 1),
             ("task4_consistency/web/static/app.js", 1),
         ),
+        route_owner_symbol="kb_delete",
     ),
     LegacySurface(
         id="legacy-mutation-kb-reload-post",
         kind="mutation",
         method="POST",
         path="/api/kb/reload",
+        family="kb_reload",
         description="Direct KB singleton reload (process state mutation)",
         owners=("task4_consistency/web/app.py",),
         rollback_occurrences=(("task4_consistency/web/app.py", 1),),
+        route_owner_symbol="kb_reload",
     ),
 )
 
@@ -256,25 +296,6 @@ _ENTRY_BY_ID = {entry.id: entry for entry in CONTRACTED_LEGACY_ENTRIES}
 # The #54 canonical route cutover: these canonical routes serve the
 # qualified React build; their catalog entries become rollback-only owners.
 CANONICAL_REACT_ROUTES: tuple[str, ...] = ("/", "/controlled/s01", "/controlled/s02")
-
-# Every current-artifact route that resolves to the qualified React shell:
-# the canonical routes plus their /react aliases.  Observation suppresses
-# catalog matches for these paths on the current artifact (the request
-# belongs to the React owner); under ``rollback-probe`` the prior artifact
-# still resolves them to their legacy owners, so suppression never applies
-# there.
-REACT_OWNED_PATHS: tuple[str, ...] = (
-    "/",
-    "/demo/react",
-    "/controlled/s01",
-    "/controlled/s01/react",
-    "/controlled/s02",
-    "/controlled/s02/react",
-    "/controlled/s05/react",
-    "/controlled/s08/react",
-    "/controlled/s09/react",
-)
-
 
 def match_legacy_surface(method: str, path: str) -> str | None:
     """The stable catalog entry ID for an HTTP request, or None when the
@@ -400,16 +421,14 @@ def _legacy_family(url_value: str | None, raw_arg: str) -> str | None:
     """Canonical legacy endpoint family of a call/route URL argument, or
     None when it targets no legacy family."""
     if url_value is not None:
-        if url_value == "/api/kb/reload":
-            return "kb_reload"
-        if url_value == "/api/rules/reset":
-            return "rules_reset"
-        if url_value == "/api/rules":
-            return "rules"
-        if url_value == "/api/kb":
-            return "kb"
-        if url_value.startswith("/api/kb/") and "/" in url_value[len("/api/kb/") :]:
-            return "kb_delete"
+        for entry in CONTRACTED_LEGACY_ENTRIES:
+            if entry.kind != "mutation":
+                continue
+            if entry.path == "/api/kb/{section}/{key}":
+                if url_value.startswith("/api/kb/") and "/" in url_value[len("/api/kb/") :]:
+                    return entry.family
+            elif url_value == entry.path:
+                return entry.family
         return None
     # Dynamic first argument: only the /api/kb/<seg>/<seg> family is
     # detectable by its static prefix (templates and concatenations).
@@ -478,14 +497,16 @@ def _scan_mutation_edges(
         for match in _ROUTE_DEFINITION_RE.finditer(text):
             method = match.group(1).upper()
             url = match.group(2)
+            route_details.append(
+                (relative, method, url, _owner_symbol(text, match.end()))
+            )
             family = _legacy_family(url, url)
             if family is None or method not in _MUTATION_METHODS:
                 continue
             key = (relative, family, method)
             route_definitions[key] = route_definitions.get(key, 0) + 1
-            route_details.append(
-                (relative, method, url, _owner_symbol(text, match.end()))
-            )
+        for match in _MOUNT_DEFINITION_RE.finditer(text):
+            route_details.append((relative, "MOUNT", match.group(1), match.group(2)))
         for match in _CALL_START_RE.finditer(text):
             end = _call_end(text, match.end() - 1)
             if end < 0:
@@ -497,7 +518,10 @@ def _scan_mutation_edges(
             method_match = _METHOD_FIELD_RE.search(body)
             if not method_match:
                 continue
-            method = method_match.group(1).upper()
+            method_value = _first_argument(method_match.group(1))
+            if method_value is None:
+                continue
+            method = method_value.upper()
             if method not in _MUTATION_METHODS:
                 continue
             key = (relative, family, method)
@@ -505,13 +529,55 @@ def _scan_mutation_edges(
     return route_definitions, call_sites, route_details
 
 
+_PAGE_TEMPLATE_CALLS: dict[str, re.Pattern[str]] = {
+    "legacy-page-root": re.compile(
+        r"(?:TEMPLATES\s*/\s*['\"]index\.html['\"]|['\"]index\.html['\"])"
+        r"[^\n]{0,120}(?:read_text|open|TemplateResponse)"
+    ),
+    "legacy-page-controlled-s01": re.compile(
+        r"(?:S01_TEMPLATE|['\"]s01\.html['\"])[^\n]{0,120}"
+        r"(?:read_text|open|TemplateResponse)"
+    ),
+    "legacy-page-controlled-s02": re.compile(
+        r"(?:S02_TEMPLATE|['\"]s02\.html['\"])[^\n]{0,120}"
+        r"(?:read_text|open|TemplateResponse)"
+    ),
+}
+
+
+def _scan_nonmutation_references(
+    root: Path, entries: tuple[LegacySurface, ...]
+) -> dict[tuple[str, str], int]:
+    """Literal legacy asset references and direct template reads.
+
+    Canonical React links to ``/controlled/s01`` and ``/controlled/s02`` are
+    current route calls, so page-path strings are intentionally excluded.
+    Direct reads of the retired templates and exact legacy static URLs remain
+    source edges and are occurrence-counted.
+    """
+    findings: dict[tuple[str, str], int] = {}
+    for path in _scanned_source_files(root):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        relative = path.relative_to(root).as_posix()
+        for entry in entries:
+            count = 0
+            if entry.kind == "static":
+                count = len(re.findall(re.escape(entry.path), text))
+            elif entry.kind == "page":
+                pattern = _PAGE_TEMPLATE_CALLS.get(entry.id)
+                count = len(pattern.findall(text)) if pattern else 0
+            if count:
+                findings[(relative, entry.id)] = count
+    return findings
+
+
 # --- Public report -----------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class CanonicalEdge:
-    """One source occurrence of a legacy mutation family outside every
-    declared rollback owner of its catalog entry."""
+    """One source occurrence of a legacy family outside every declared
+    rollback owner of its catalog entry."""
 
     entry_id: str
     path: str
@@ -541,6 +607,17 @@ class MissingOwner:
 
 
 @dataclass(frozen=True)
+class RouteOwnerMismatch:
+    entry_id: str
+    method: str
+    path: str
+    owner_file: str
+    owner_symbol: str
+    observed: int
+    expected: int
+
+
+@dataclass(frozen=True)
 class UncatalogedRoute:
     """A legacy mutation route definition that no catalog entry claims."""
 
@@ -566,6 +643,10 @@ class EntryReport:
     path: str
     description: str
     declared_owners: tuple[str, ...]
+    route_owner_file: str
+    route_owner_symbol: str
+    route_owner_path: str
+    route_owner_occurrences: int
     rollback_occurrences: tuple[dict[str, object], ...]
     canonical_edge_occurrences: int
     rollback_edge_occurrences: int
@@ -585,6 +666,7 @@ class LegacyContractReport:
     canonical_source_edges: tuple[CanonicalEdge, ...] = ()
     occurrence_mismatches: tuple[OccurrenceMismatch, ...] = ()
     missing_owners: tuple[MissingOwner, ...] = ()
+    route_owner_mismatches: tuple[RouteOwnerMismatch, ...] = ()
     uncataloged_routes: tuple[UncatalogedRoute, ...] = ()
     direct_store_mismatches: tuple[DirectStoreMismatch, ...] = ()
     raw_token_counts: dict[tuple[str, str], int] = field(default_factory=dict)
@@ -593,6 +675,7 @@ class LegacyContractReport:
     def completeness_ok(self) -> bool:
         return (
             not self.missing_owners
+            and not self.route_owner_mismatches
             and not self.uncataloged_routes
             and not self.occurrence_mismatches
         )
@@ -619,6 +702,10 @@ class LegacyContractReport:
                     "path": report.path,
                     "description": report.description,
                     "declared_owners": list(report.declared_owners),
+                    "route_owner_file": report.route_owner_file,
+                    "route_owner_symbol": report.route_owner_symbol,
+                    "route_owner_path": report.route_owner_path,
+                    "route_owner_occurrences": report.route_owner_occurrences,
                     "rollback_occurrences": [
                         dict(item) for item in report.rollback_occurrences
                     ],
@@ -651,6 +738,18 @@ class LegacyContractReport:
             "missing_owners": [
                 {"entry_id": missing.entry_id, "owner": missing.owner}
                 for missing in self.missing_owners
+            ],
+            "route_owner_mismatches": [
+                {
+                    "entry_id": mismatch.entry_id,
+                    "method": mismatch.method,
+                    "path": mismatch.path,
+                    "owner_file": mismatch.owner_file,
+                    "owner_symbol": mismatch.owner_symbol,
+                    "observed": mismatch.observed,
+                    "expected": mismatch.expected,
+                }
+                for mismatch in self.route_owner_mismatches
             ],
             "uncataloged_routes": [
                 {
@@ -690,17 +789,9 @@ def _owner_symbol(text: str, search_start: int) -> str:
 
 def _entry_family_path(entry: LegacySurface) -> str:
     """The semantic family of a mutation entry."""
-    if entry.path == "/api/kb/{section}/{key}":
-        return "kb_delete"
-    if entry.path == "/api/kb/reload":
-        return "kb_reload"
-    if entry.path == "/api/rules/reset":
-        return "rules_reset"
-    if entry.path == "/api/rules":
-        return "rules"
-    if entry.path == "/api/kb":
-        return "kb"
-    raise KeyError(entry.path)
+    if entry.kind != "mutation":
+        raise KeyError(entry.path)
+    return entry.family
 
 
 def _family_entries(entries: tuple[LegacySurface, ...]) -> dict[str, LegacySurface]:
@@ -729,6 +820,7 @@ def scan_legacy_contract(
 
     scanned = _scan_source_tree(root)
     route_definitions, call_sites, route_details = _scan_mutation_edges(root)
+    nonmutation_references = _scan_nonmutation_references(root, entries)
     family_entries = _family_entries(entries)
 
     # Completeness: owner files exist; legacy routes are cataloged.
@@ -738,6 +830,33 @@ def scan_legacy_contract(
         for owner in entry.owners
         if not (root / owner).is_file()
     ]
+
+    route_owner_mismatches: list[RouteOwnerMismatch] = []
+    route_owner_counts: dict[str, int] = {}
+    for entry in entries:
+        expected_path = entry.route_owner_path or entry.path
+        expected_method = "MOUNT" if entry.route_owner_path else entry.method
+        observed = sum(
+            1
+            for relative, method, path, symbol in route_details
+            if relative == entry.route_owner_file
+            and method == expected_method
+            and path == expected_path
+            and symbol == entry.route_owner_symbol
+        )
+        route_owner_counts[entry.id] = observed
+        if observed != 1:
+            route_owner_mismatches.append(
+                RouteOwnerMismatch(
+                    entry_id=entry.id,
+                    method=entry.method,
+                    path=entry.path,
+                    owner_file=entry.route_owner_file,
+                    owner_symbol=entry.route_owner_symbol,
+                    observed=observed,
+                    expected=1,
+                )
+            )
 
     uncataloged_routes: list[UncatalogedRoute] = []
     for relative, method, url, symbol in route_details:
@@ -805,6 +924,38 @@ def scan_legacy_contract(
                         )
                     )
 
+            expected_references = dict(entry.reference_occurrences)
+            observed_references = {
+                relative: count
+                for (relative, entry_id), count in nonmutation_references.items()
+                if entry_id == entry.id
+            }
+            for relative in sorted(set(expected_references) | set(observed_references)):
+                observed = observed_references.get(relative, 0)
+                expected = expected_references.get(relative, 0)
+                if relative in expected_references:
+                    if observed != expected:
+                        occurrence_mismatches.append(
+                            OccurrenceMismatch(
+                                entry.id,
+                                relative,
+                                entry.family,
+                                entry.method,
+                                observed,
+                                expected,
+                            )
+                        )
+                elif observed:
+                    canonical_edges.append(
+                        CanonicalEdge(
+                            entry.id,
+                            relative,
+                            entry.family,
+                            entry.method,
+                            observed,
+                        )
+                    )
+
     direct_store_mismatches: list[DirectStoreMismatch] = []
     direct_store = {
         key: count
@@ -849,6 +1000,10 @@ def scan_legacy_contract(
             path=entry.path,
             description=entry.description,
             declared_owners=entry.owners,
+            route_owner_file=entry.route_owner_file,
+            route_owner_symbol=entry.route_owner_symbol,
+            route_owner_path=entry.route_owner_path or entry.path,
+            route_owner_occurrences=route_owner_counts[entry.id],
             rollback_occurrences=tuple(
                 {"path": path, "expected": count}
                 for path, count in entry.rollback_occurrences
@@ -862,6 +1017,7 @@ def scan_legacy_contract(
         canonical_source_edges=tuple(canonical_edges),
         occurrence_mismatches=tuple(occurrence_mismatches),
         missing_owners=tuple(missing_owners),
+        route_owner_mismatches=tuple(route_owner_mismatches),
         uncataloged_routes=tuple(uncataloged_routes),
         direct_store_mismatches=tuple(direct_store_mismatches),
         raw_token_counts=scanned,
