@@ -725,7 +725,7 @@ def _parse_rules_payload(body: "RulesBody") -> tuple[dict[str, Any], str]:
         detail={
             "error": "missing_body",
             "message": "需要 content 或 yaml_text",
-            "hint": "PUT /api/rules  body: {\"yaml_text\": \"...\"}",
+            "hint": "POST /api/rules/validate body: {\"yaml_text\": \"...\"}",
         },
     )
 
@@ -2738,11 +2738,11 @@ def _s07_recovery_query_principal(request: Request) -> S01CommandPrincipal:
 
 @app.get("/controlled/s02", response_class=HTMLResponse)
 def controlled_s02_page(request: Request) -> HTMLResponse:
-    # Canonical Integrator page (Issue #54 cutover): the same qualified
-    # React build as the /react alias with the existing S02 session
-    # issuance and no-store.  A missing or incomplete build is an explicit
-    # 503; the legacy template stays packaged for the deployment-only
-    # rollback path (#45 owns physical removal).
+    # Canonical Integrator page (Issues #54/#45): the same qualified React
+    # build as the /react alias with the existing S02 session issuance and
+    # no-store.  A missing or incomplete build is an explicit 503.  The
+    # legacy template is physically removed (#45); rollback is artifact-only
+    # via the prior installed wheel.
     _s02_service()
     if not S01_REACT_INDEX.is_file():
         raise HTTPException(
@@ -3302,11 +3302,11 @@ def _react_shell_index_html() -> str | None:
 
 @app.get("/controlled/s01", response_class=HTMLResponse)
 def controlled_s01_page(request: Request) -> HTMLResponse:
-    # Canonical Reviewer page (Issue #54 cutover): the same qualified React
+    # Canonical Reviewer page (Issues #54/#45): the same qualified React
     # build as the /react alias with the existing S01 session issuance, role
-    # checks and no-store.  A missing or incomplete build is an explicit 503;
-    # the legacy template stays packaged for the deployment-only rollback
-    # path (#45 owns physical removal).
+    # checks and no-store.  A missing or incomplete build is an explicit 503.
+    # The legacy template is physically removed (#45); rollback is
+    # artifact-only via the prior installed wheel.
     _s01_service()
     index_html = _react_shell_index_html()
     if index_html is None:
@@ -4461,10 +4461,10 @@ def controlled_s01_audit_timeline(
 
 @app.get("/", response_class=HTMLResponse)
 def index() -> HTMLResponse:
-    # Canonical root (Issue #54 cutover): the qualified React demo shell,
+    # Canonical root (Issues #54/#45): the qualified React demo shell,
     # no-store, fail-closed when the build is missing.  The legacy demo
-    # shell stays packaged for the deployment-only rollback path (#45 owns
-    # physical removal).
+    # shell is physically removed (#45); rollback is artifact-only via the
+    # prior installed wheel.
     index_html = _react_shell_index_html()
     if index_html is None:
         response = JSONResponse(

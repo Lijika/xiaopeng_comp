@@ -1532,9 +1532,10 @@ def load_current_observation_module() -> ModuleType:
 
 def wrap_prior_artifact_app(prior_app: Any, current_observation: ModuleType) -> Any:
     """Register the current observation middleware around a prior-artifact
-    FastAPI app without altering the prior wheel's bytes.  The current
-    catalog is immutable data; the explicit prior artifact stage makes the
-    prior artifact's canonical route owners resolve to legacy entries."""
+    FastAPI app without altering the prior wheel's bytes.  After Issue #45
+    physically removed the legacy templates, prior canonical React pages
+    resolve to no legacy surface (legacy_surface_id=None); retired static
+    and mutation owners resolve only through the stable catalog IDs."""
     recorder = current_observation.recorder_from_env(
         family_table=current_observation.app_family_table(prior_app)
     )

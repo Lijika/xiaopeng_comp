@@ -203,3 +203,63 @@ def test_web_check_missing_documents_tip():
     d = r.json()["detail"]
     assert d["error"] == "missing_documents"
     assert "hint" in d
+
+
+def test_attack_web_kb_gate_exit_1_on_any_open_result(monkeypatch):
+    """Issue #45 Round-1: any open RET-*/ADV-* result must fail the gate.
+
+    Red at 8a869767 (a RET open is outside the W1/W2 gate set, so the
+    command exits 0).  Preserves the per-probe output and total count.
+    """
+    import sys
+
+    import scripts.attack_web_kb as attack_web_kb
+
+    monkeypatch.setattr(sys, "argv", ["attack_web_kb.py"])
+    monkeypatch.setattr(
+        attack_web_kb,
+        "_has_delivery",
+        lambda: {"kb_pkg": False, "web_pkg": True, "run_web": False},
+    )
+    monkeypatch.setattr(
+        attack_web_kb,
+        "attack_w1_w2_local",
+        lambda: [("RET-1", "retired route", "HTTP 200 (expect 405)", False)],
+    )
+    assert attack_web_kb.main() == 1
+
+
+def test_attack_web_kb_gate_exit_0_when_all_closed(monkeypatch):
+    """A nonempty all-closed result still exits 0 (regression guard)."""
+    import sys
+
+    import scripts.attack_web_kb as attack_web_kb
+
+    monkeypatch.setattr(sys, "argv", ["attack_web_kb.py"])
+    monkeypatch.setattr(
+        attack_web_kb,
+        "_has_delivery",
+        lambda: {"kb_pkg": False, "web_pkg": True, "run_web": False},
+    )
+    monkeypatch.setattr(
+        attack_web_kb,
+        "attack_w1_w2_local",
+        lambda: [
+            ("ADV-W1", "bad rules reject", "HTTP 400", True),
+            ("RET-1", "retired route", "HTTP 405 (expect 405)", True),
+        ],
+    )
+    assert attack_web_kb.main() == 0
+
+
+def test_rules_validate_empty_body_uses_retained_hint():
+    """Issue #45 Round-1: empty-body recovery names the retained endpoint.
+
+    Red at 8a869767 (the hint advertises the retired PUT /api/rules writer).
+    """
+    client = TestClient(app)
+    r = client.post("/api/rules/validate", json={})
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert detail["error"] == "missing_body"
+    assert detail["hint"] == 'POST /api/rules/validate body: {"yaml_text": "..."}'

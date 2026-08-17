@@ -94,7 +94,6 @@ bash scripts/run_web.sh
 |------|------|
 | [`docs/INTERFACE.md`](docs/INTERFACE.md) | 输入输出与 API |
 | [`docs/DEPLOY.md`](docs/DEPLOY.md) | 部署手册 |
-| [`docs/CONFIG_GUIDE.md`](docs/CONFIG_GUIDE.md) | 配置方案 |
 | [`docs/EVALUATION_REPORT.md`](docs/EVALUATION_REPORT.md) | 正式评估报告 |
 | [`docs/STEP2_TO_TASK4_PIPELINE.md`](docs/STEP2_TO_TASK4_PIPELINE.md) | step2 框位清单 → 外部 OCR → 任务4 衔接（`1.zip`+step2 不能单独当真跨单输入） |
 

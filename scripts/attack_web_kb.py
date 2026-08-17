@@ -466,7 +466,7 @@ def main() -> int:
         print(f"  {k}: {v}")
 
     if not any(delivery.values()) and not args.base:
-        print("PREP: Web/KB not delivered yet. Attack plan in docs/ATTACK_CASES.md Round10.")
+        print("PREP: Web/KB not delivered yet. Only POST /api/rules/validate remains as a mutable-rules surface.")
         print("After delivery: .venv/bin/python scripts/attack_web_kb.py --base http://127.0.0.1:8000")
         return 2
 
@@ -488,17 +488,14 @@ def main() -> int:
 
     print("=== WEB/KB ATTACK RESULTS ===")
     open_n = 0
-    w12_open = 0
     for hid, title, detail, closed in results:
         st = "CLOSED" if closed else "OPEN"
         if not closed:
             open_n += 1
-            if hid.startswith("ADV-W1") or hid.startswith("ADV-W2"):
-                w12_open += 1
         print(f"{hid:12} | {st:6} | {title:22} | {detail}")
-    print(f"open={open_n} w12_open={w12_open} total={len(results)}")
-    # Round16 gate: W1/W2 must be closed
-    return 0 if w12_open == 0 else 1
+    print(f"open={open_n} total={len(results)}")
+    # Issue #45 Round-1: any open result (W1/W2, KB, or RET) fails the gate
+    return 0 if open_n == 0 else 1
 
 
 if __name__ == "__main__":
