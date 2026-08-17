@@ -1,9 +1,17 @@
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
 import { fetchRouter, renderWithQuery } from "./test-utils";
+
+// The canonical Reviewer workbench path is the baseline for tests that render
+// <App /> without choosing a shell pathname: the jsdom default URL ("/") now
+// mounts the demo shell, so every controlled-shell render must start from
+// /controlled/s01.
+beforeEach(() => {
+  window.history.replaceState(null, "", "/controlled/s01");
+});
 
 const WORK_ID = "recovery_work_t01queue1234567890abcdef";
 
@@ -956,7 +964,7 @@ describe("queue shell (App)", () => {
     ).toHaveLength(0);
   });
 
-  it("keeps the Reviewer workbench on the legacy pathname even without the S02 prefix", async () => {
+  it("mounts the Reviewer workbench on the canonical /controlled/s01 and its /controlled/s01/react alias", async () => {
     fetchRouter({
       "GET /controlled/s01/api/queries/queue": () =>
         new Response(
@@ -968,62 +976,72 @@ describe("queue shell (App)", () => {
           { status: 200, headers: { "Content-Type": "application/json" } },
         ),
     });
-    window.history.pushState(null, "", "/controlled/s01/react");
-    renderWithQuery(<App />);
-    await waitFor(() =>
-      expect(screen.getByTestId("queue-panel")).toBeInTheDocument(),
-    );
-    expect(screen.queryByTestId("integrator-panel")).not.toBeInTheDocument();
-    expect(screen.getByTestId("boundary-track")).toHaveTextContent("C-DEMO");
+    // Canonical route and its alias both mount the Reviewer workbench; the
+    // Integrator shell must never mount on either.
+    for (const pathname of ["/controlled/s01", "/controlled/s01/react"]) {
+      window.history.pushState(null, "", pathname);
+      const view = renderWithQuery(<App />);
+      await waitFor(() =>
+        expect(screen.getByTestId("queue-panel")).toBeInTheDocument(),
+      );
+      expect(screen.queryByTestId("integrator-panel")).not.toBeInTheDocument();
+      expect(screen.getByTestId("boundary-track")).toHaveTextContent("C-DEMO");
+      view.unmount();
+    }
   });
 
-  it("mounts the demo shell exactly on /demo/react and never issues controlled reads", async () => {
-    const router = fetchRouter({
-      "GET /api/demo/fixtures": () =>
-        new Response(
-          JSON.stringify({
-            fixtures: [
-              {
-                fixture_id: "app_demo_step2_ok",
-                title: "赛题样例绑定·字段一致",
-                description: "多单据关键字段对齐",
-                field_source: "synthetic",
-                step2_sample_id: "JFL25P02L080310-01",
-              },
-            ],
-            batch_max_n: 50,
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
+  it("mounts the demo shell on the canonical root / and the /demo/react alias and never issues controlled reads", async () => {
+    // The canonical root and its alias both mount the same closed synthetic
+    // demo shell with the identical boundary contract.
+    for (const pathname of ["/", "/demo/react"]) {
+      const router = fetchRouter({
+        "GET /api/demo/fixtures": () =>
+          new Response(
+            JSON.stringify({
+              fixtures: [
+                {
+                  fixture_id: "app_demo_step2_ok",
+                  title: "赛题样例绑定·字段一致",
+                  description: "多单据关键字段对齐",
+                  field_source: "synthetic",
+                  step2_sample_id: "JFL25P02L080310-01",
+                },
+              ],
+              batch_max_n: 50,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+      });
+      window.history.pushState(null, "", pathname);
+      const view = renderWithQuery(<App />);
+      await waitFor(() =>
+        expect(screen.getByTestId("demo-panel")).toBeInTheDocument(),
+      );
+      expect(screen.getByTestId("demo-boundary-track")).toHaveTextContent(
+        "C-DEMO",
+      );
+      expect(screen.getByTestId("demo-boundary-scope")).toHaveTextContent(
+        "synthetic",
+      );
+      // T07: the batch + read-only summary panel mounts here too, but neither
+      // fires a batch POST nor a summary GET without an explicit action.
+      expect(screen.getByTestId("demo-batch-panel")).toBeInTheDocument();
+      expect(screen.getByTestId("demo-eval-panel")).toBeInTheDocument();
+      expect(screen.getByTestId("demo-eval-status")).toHaveTextContent("未加载");
+      expect(screen.queryByTestId("queue-panel")).not.toBeInTheDocument();
+      expect(
+        router.calls.filter((call) => call.url.includes("/controlled/")),
+      ).toHaveLength(0);
+      expect(
+        router.calls.filter(
+          (call) => call.url === "/api/demo/evaluate/summary",
         ),
-    });
-    window.history.pushState(null, "", "/demo/react");
-    renderWithQuery(<App />);
-    await waitFor(() =>
-      expect(screen.getByTestId("demo-panel")).toBeInTheDocument(),
-    );
-    expect(screen.getByTestId("demo-boundary-track")).toHaveTextContent(
-      "C-DEMO",
-    );
-    expect(screen.getByTestId("demo-boundary-scope")).toHaveTextContent(
-      "synthetic",
-    );
-    // T07: the batch + read-only summary panel mounts here too, but neither
-    // fires a batch POST nor a summary GET without an explicit action.
-    expect(screen.getByTestId("demo-batch-panel")).toBeInTheDocument();
-    expect(screen.getByTestId("demo-eval-panel")).toBeInTheDocument();
-    expect(screen.getByTestId("demo-eval-status")).toHaveTextContent("未加载");
-    expect(screen.queryByTestId("queue-panel")).not.toBeInTheDocument();
-    expect(
-      router.calls.filter((call) => call.url.includes("/controlled/")),
-    ).toHaveLength(0);
-    expect(
-      router.calls.filter(
-        (call) => call.url === "/api/demo/evaluate/summary",
-      ),
-    ).toHaveLength(0);
-    expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(
-      0,
-    );
+      ).toHaveLength(0);
+      expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(
+        0,
+      );
+      view.unmount();
+    }
   });
 });
 

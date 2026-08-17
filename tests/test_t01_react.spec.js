@@ -661,8 +661,8 @@ async function runFullChainTracer(browser, viewport, label) {
       "verify-button",
     ]);
 
-    const legacyResponse = await reviewer.goto(`${server.baseURL}/controlled/s01`);
-    expect(legacyResponse.status()).toBe(200);
+    const canonicalResponse = await reviewer.goto(`${server.baseURL}/controlled/s01`);
+    expect(canonicalResponse.status()).toBe(200);
 
     expect(reviewerDiagnostics.browserErrors).toEqual([]);
     expect(operatorDiagnostics.browserErrors).toEqual([]);

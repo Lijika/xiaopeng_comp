@@ -69,7 +69,7 @@ def test_web_api_smoke():
 
     r = client.get("/")
     assert r.status_code == 200
-    assert "校验" in r.text
+    assert "/static/react/assets/" in r.text
 
 
 def test_web_batch_and_evaluate_summary():

@@ -808,16 +808,16 @@ async function runStatePhases(page, baseURL, label) {
   await page.goto(`${baseURL}${DEMO_URL}`, { waitUntil: "networkidle" });
 }
 
-async function runLegacyRollback(page, baseURL) {
-  const legacyResponse = await page.goto(`${baseURL}/`, {
+async function runCanonicalRootProbe(page, baseURL) {
+  // Issue #54 cutover: the canonical root serves the qualified React demo
+  // shell (the legacy demo shell is rollback-only; the deployment-only
+  // rollback rehearsal over the prior wheel lives in the installed harness).
+  const response = await page.goto(`${baseURL}/`, {
     waitUntil: "networkidle",
   });
-  expect(legacyResponse.status()).toBe(200);
-  await page.locator('.scenario[data-id="vin"]').click();
-  await expect(page.locator("#kpis")).toContainText("已加载");
-  await page.locator("#btn-run-check").click();
-  await expect(page.locator("#check-msg")).toContainText("完成");
-  await expect(page.locator("#result-panel")).toBeVisible();
+  expect(response.status()).toBe(200);
+  await expect(page.getByTestId("demo-panel")).toBeVisible();
+  await expect(page.getByTestId("demo-boundary-track")).toHaveText("C-DEMO");
 }
 
 const VIEWPORTS = [
@@ -826,7 +826,7 @@ const VIEWPORTS = [
 ];
 
 for (const viewport of VIEWPORTS) {
-  test(`T07 production tracer (${viewport.label}): bounded batch check, read-only summary, cap rejection, state matrix, legacy rollback`, async ({
+  test(`T07 production tracer (${viewport.label}): bounded batch check, read-only summary, cap rejection, state matrix, canonical root`, async ({
     browser,
   }) => {
     test.setTimeout(240_000);
@@ -855,7 +855,7 @@ for (const viewport of VIEWPORTS) {
       await runApiContract(page, server.baseURL);
       await runSummaryFlow(page, server.baseURL, viewport.label, demoRequests);
 
-      await runLegacyRollback(page, server.baseURL);
+      await runCanonicalRootProbe(page, server.baseURL);
 
       expect(diagnostics.browserErrors).toEqual([]);
       expect(diagnostics.consoleErrors).toEqual([]);

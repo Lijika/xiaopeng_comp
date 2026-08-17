@@ -1213,21 +1213,11 @@ for (const viewport of VIEWPORTS) {
         "expires",
       );
 
-      // ---- Server-declared legacy fallback (P-4): the React shell
-      // metadata exposes the legacy entry; open it and reuse the T01
-      // legacy smoke assertion shape ----
-      const legacyFallback = await operator.evaluate(() => {
-        const meta = document.querySelector('meta[name="app-legacy-fallback"]');
-        return meta ? meta.getAttribute("content") : null;
-      });
-      expect(legacyFallback).toBe("/controlled/s01");
-      const legacyPage = await resources.demoContext.newPage();
-      const legacyResponse = await legacyPage.goto(
-        `${server.baseURL}${legacyFallback}`,
-        { waitUntil: "networkidle" },
-      );
-      expect(legacyResponse.status()).toBe(200);
-      await legacyPage.close();
+      // Issue #54 cutover: the same-artifact legacy fallback metadata was
+      // removed from the React shell; deployment-only rollback to the
+      // prior wheel (where /, /controlled/s01 and /controlled/s02 resolve
+      // to their legacy owners) is rehearsed in the installed release
+      // harness under rollback-probe.
 
       // The hold is consumed: the affected application's old run is no
       // longer current (stale/recheck fact, server-owned).

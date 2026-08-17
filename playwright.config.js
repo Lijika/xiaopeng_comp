@@ -3,12 +3,8 @@ const { defineConfig } = require("@playwright/test");
 module.exports = defineConfig({
   testDir: "./tests",
   testMatch: [
-    "test_s01_browser.spec.js",
-    "test_s02_browser.spec.js",
-    "test_s03_browser.spec.js",
     "test_s05_browser.spec.js",
     "test_s06_browser.spec.js",
-    "test_s07_browser.spec.js",
     "test_t01_react.spec.js",
     "test_t02_react.spec.js",
     "test_t03_react.spec.js",

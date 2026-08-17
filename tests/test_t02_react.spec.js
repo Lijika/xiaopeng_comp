@@ -820,15 +820,17 @@ async function runFullChainTracer(browser, viewport, label) {
       "review-evidence-revision",
     ]);
 
-    // Rollback smoke: both legacy shells still serve on the same app.
-    const legacyS01 = await reviewer.goto(`${server.baseURL}/controlled/s01`);
-    expect(legacyS01.status()).toBe(200);
-    const legacyS02 = await reviewer.request.get(
+    // Rollback smoke: both canonical React shells still serve on the same
+    // app (Issue #54 cutover; deployment-only rollback to the prior wheel
+    // is rehearsed in the installed release harness).
+    const canonicalS01 = await reviewer.goto(`${server.baseURL}/controlled/s01`);
+    expect(canonicalS01.status()).toBe(200);
+    const canonicalS02 = await reviewer.request.get(
       `${server.baseURL}/controlled/s02`,
       { headers: { Authorization: `Bearer ${S02_CREDENTIAL}` } },
     );
-    expect(legacyS02.ok()).toBeTruthy();
-    expect(legacyS02.headers()["cache-control"]).toContain("no-store");
+    expect(canonicalS02.ok()).toBeTruthy();
+    expect(canonicalS02.headers()["cache-control"]).toContain("no-store");
 
     expect(diagnostics.browserErrors).toEqual([]);
     expect(diagnostics.consoleErrors).toEqual([]);

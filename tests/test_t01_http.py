@@ -948,9 +948,11 @@ def _create_t01_app_environment(
     return values
 
 
-def test_react_shell_missing_build_fails_explicitly_and_legacy_route_stays(
+def test_react_shell_missing_build_fails_explicitly_on_canonical_and_alias_routes(
     tmp_path: Path,
 ) -> None:
+    """Issue #54 cutover: a missing React build is an explicit minimized 503
+    on the canonical routes and the /react aliases alike."""
     state_path = tmp_path / "t01-react-missing.sqlite3"
     missing_build = tmp_path / "no-react-build"
     missing_build.mkdir()
@@ -975,17 +977,161 @@ def test_react_shell_missing_build_fails_explicitly_and_legacy_route_stays(
         assert unavailable.headers["cache-control"] == "no-store"
         assert str(missing_build) not in unavailable.text
 
-        legacy = server.request(
+        canonical = server.request(
             "GET",
             "/controlled/s01",
             headers=demo_auth_headers(),
             use_session=False,
         )
-        assert legacy.status == 200, legacy.text
-        assert legacy.headers["cache-control"] == "no-store"
+        assert canonical.status == 503, canonical.text
+        assert canonical.json() == {
+            "detail": {
+                "error": "S01_REACT_UNAVAILABLE",
+                "message": "Controlled S01 React shell is not built",
+            }
+        }
+        assert canonical.headers["cache-control"] == "no-store"
+
+        root = server.request("GET", "/", use_session=False)
+        assert root.status == 503, root.text
+        assert root.json() == {
+            "detail": {
+                "error": "DEMO_REACT_UNAVAILABLE",
+                "message": "React demo shell is not built",
+            }
+        }
+        assert root.headers["cache-control"] == "no-store"
 
         queue = _reviewer_queue(server)
         assert queue == {"items": [], "recovery_items": [], "projection_watermark": 0}
+
+
+S02_CANONICAL_TENANT = "tenant-t54"
+S02_CANONICAL_SOURCE = "t54-registered-source"
+S02_CANONICAL_SUBJECT = "t54-integrator"
+S02_CANONICAL_CREDENTIAL = "t54-s02-credential"
+
+
+def _s02_canonical_environment(state_path: Path, tmp_path: Path) -> dict[str, str]:
+    """A minimal valid S02 source registry + environment so the canonical
+    Integrator page can issue its S02 session during the #54 cutover test."""
+    object_root = tmp_path / "s02-objects"
+    object_root.mkdir()
+    (object_root / "result.json").write_text('{"ok": true}', encoding="utf-8")
+    registry = tmp_path / "s02-registry.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "schema_version": "s02-runtime-registry/1",
+                "sources": [
+                    {
+                        "tenant_id": S02_CANONICAL_TENANT,
+                        "source_system_id": S02_CANONICAL_SOURCE,
+                        "workload_identity_id": "t54-workload",
+                        "adapter_id": "t54-adapter",
+                        "adapter_version": "1",
+                        "source_shape": "ocr-detection/unversioned",
+                        "producer_family": "t54-ocr",
+                    }
+                ],
+                "objects": [
+                    {
+                        "tenant_id": S02_CANONICAL_TENANT,
+                        "source_system_id": S02_CANONICAL_SOURCE,
+                        "object_ref": "t54-result",
+                        "media_type": "application/json",
+                        "file": "result.json",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    env = _environment(state_path, "verified")
+    env.update(
+        {
+            "TASK4_S02_TEST_STATE_PATH": str(state_path),
+            "TASK4_S02_TEST_REGISTRY_PATH": str(registry),
+            "TASK4_S02_TEST_OBJECT_ROOT": str(object_root),
+            "TASK4_S02_TEST_BACKGROUND_ENABLED": "0",
+            "TASK4_S02_CREDENTIAL": S02_CANONICAL_CREDENTIAL,
+            "TASK4_S02_SUBJECT": S02_CANONICAL_SUBJECT,
+            "TASK4_S02_TENANT_ID": S02_CANONICAL_TENANT,
+            "TASK4_S02_SOURCE_SYSTEM_ID": S02_CANONICAL_SOURCE,
+        }
+    )
+    return env
+
+
+def test_canonical_routes_serve_the_qualified_react_shell(tmp_path: Path) -> None:
+    """Issue #54 cutover: /, /controlled/s01 and /controlled/s02 serve the
+    qualified React build with the retained no-store/session semantics; the
+    /react aliases stay available."""
+    state_path = tmp_path / "t54-canonical-shell.sqlite3"
+    with UvicornLoopback(
+        _s02_canonical_environment(state_path, tmp_path),
+        app_target="task4_consistency.web.app:create_s02_test_app",
+        app_factory=True,
+    ) as server:
+        root = server.request("GET", "/", use_session=False)
+        assert root.status == 200, root.text
+        assert root.headers["cache-control"] == "no-store"
+        assert root.headers["pragma"] == "no-cache"
+        root_assets = _hashed_react_assets(root.text)
+        assert root_assets, "canonical root must serve the React shell"
+        import re as _re
+
+        root_module = _re.search(
+            r'<script[^>]+type="module"[^>]+src="[^"]+"', root.text
+        )
+        assert root_module is not None, "canonical root must carry a module entry"
+
+        for path, auth_headers in (
+            ("/controlled/s01", demo_auth_headers()),
+            ("/controlled/s02", {"Authorization": f"Bearer {S02_CANONICAL_CREDENTIAL}"}),
+        ):
+            shell = server.request(
+                "GET",
+                path,
+                headers=auth_headers,
+                use_session=False,
+            )
+            assert shell.status == 200, (path, shell.text)
+            assert shell.headers["cache-control"] == "no-store"
+            assert shell.headers["pragma"] == "no-cache"
+            assert "set-cookie" in shell.headers, path
+            assets = _hashed_react_assets(shell.text)
+            assert assets, f"{path} must serve the React shell"
+            for asset in assets:
+                asset_response = server.request("GET", asset, use_session=False)
+                assert asset_response.status == 200, (path, asset)
+                assert "immutable" in asset_response.headers.get(
+                    "cache-control", ""
+                ), (path, asset)
+
+            # The /react alias serves the identical artifact.
+            alias = server.request(
+                "GET",
+                f"{path}/react",
+                headers=auth_headers,
+                use_session=False,
+            )
+            assert alias.status == 200, (path, alias.text)
+            assert _hashed_react_assets(alias.text), path
+            assert "set-cookie" in alias.headers, path
+
+
+def _hashed_react_assets(html: str) -> list[str]:
+    import re as _re
+
+    return sorted(
+        set(
+            _re.findall(
+                r"/static/react/assets/[A-Za-z0-9._/-]+\.js",
+                html,
+            )
+        )
+    )
 
 
 def test_react_shell_serves_committed_build_with_no_store_shell_and_immutable_assets(
@@ -1039,13 +1185,17 @@ def test_react_shell_serves_committed_build_with_no_store_shell_and_immutable_as
         assert direct_index.status == 200
         assert direct_index.headers["cache-control"] == "no-store"
 
-        legacy = server.request(
+        canonical = server.request(
             "GET",
             "/controlled/s01",
             headers=demo_auth_headers(),
             use_session=False,
         )
-        assert legacy.status == 200, legacy.text
+        assert canonical.status == 200, canonical.text
+        assert _hashed_react_assets(canonical.text), (
+            "canonical /controlled/s01 must serve the React shell"
+        )
+        assert canonical.headers["cache-control"] == "no-store"
 
 
 def test_verify_validation_errors_return_the_real_detail_list_shape(
@@ -1179,11 +1329,12 @@ def test_unauthenticated_recovery_reads_and_commands_are_hidden_typed_404(
         assert blocked["recovery_work_id"] not in hidden_command.text
 
 
-def test_react_shell_rejects_partial_builds_and_legacy_route_stays(
+def test_react_shell_rejects_partial_builds_and_canonical_routes_stay_closed(
     tmp_path: Path,
 ) -> None:
     """Every incomplete React build yields the stable S01 503 with a
-    minimized no-store body while the legacy route stays available."""
+    minimized no-store body while the canonical routes fail closed with
+    the same explicit 503."""
     state_path = tmp_path / "t01-partial.sqlite3"
     legacy_marker = "一致性审核工作台 · C-DEMO"
     outside_asset = tmp_path / "outside.css"
@@ -1385,7 +1536,7 @@ def test_react_shell_rejects_partial_builds_and_legacy_route_stays(
             assert str(react_dir) not in shell.text, case_name
             assert legacy_marker not in shell.text, case_name
 
-    # The legacy route stays independently available (200, no-store) even
+    # The canonical route stays closed with the same explicit 503 even
     # when the React build is partial; one request after the matrix keeps
     # every partial case lightweight.
     with UvicornLoopback(
@@ -1393,15 +1544,20 @@ def test_react_shell_rejects_partial_builds_and_legacy_route_stays(
         app_target="tests.test_t01_http:create_t01_test_app",
         app_factory=True,
     ) as server:
-        legacy = server.request(
+        canonical = server.request(
             "GET",
             "/controlled/s01",
             headers=demo_auth_headers(),
             use_session=False,
         )
-        assert legacy.status == 200, legacy.text
-        assert legacy.headers["cache-control"] == "no-store"
-        assert "set-cookie" in legacy.headers
+        assert canonical.status == 503, canonical.text
+        assert canonical.json() == {
+            "detail": {
+                "error": "S01_REACT_UNAVAILABLE",
+                "message": "Controlled S01 React shell is not built",
+            }
+        }
+        assert canonical.headers["cache-control"] == "no-store"
 
 
 def test_queue_shared_authority_failure_returns_minimized_unavailable(

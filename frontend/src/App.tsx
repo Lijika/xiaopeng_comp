@@ -17,11 +17,15 @@ function readParam(name: string): string | null {
 }
 
 /** The one built artifact serves every shell; the pathname owns which role UI
- * mounts.  ``/demo/react`` is the exact T06 demo shell; ``/controlled/s02/react``
- * is the Integrator shell and ``/controlled/s05/react`` the Exception Approver
- * shell; every other path keeps the Reviewer workbench behind the legacy URLs. */
+ * mounts.  ``/`` is the canonical demo shell and ``/demo/react`` its alias;
+ * ``/controlled/s01`` is the canonical Reviewer workbench (alias
+ * ``/controlled/s01/react``), ``/controlled/s02`` the canonical Integrator
+ * shell (alias ``/controlled/s02/react``), ``/controlled/s05`` the Exception
+ * Approver shell, ``/controlled/s08`` the policy-release shell and
+ * ``/controlled/s09`` the governance workspace shell. */
 function isDemoShell(): boolean {
-  return window.location.pathname === "/demo/react";
+  const pathname = window.location.pathname;
+  return pathname === "/" || pathname === "/demo/react";
 }
 function isIntegratorShell(): boolean {
   return window.location.pathname.startsWith("/controlled/s02");

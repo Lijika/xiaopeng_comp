@@ -160,31 +160,49 @@ curl -s http://127.0.0.1:8765/api/health
 
 `RELEASE_PY` 指向 `.venv/bin/python` 绝对路径，与 release harness 的 qualified interpreter 契约一致（`$ROOT/.venv/bin/python`）。发布资格门禁（安装包导入来源、wheel 内容、聚焦 release 测试、真实 uvicorn 健康检查、完整浏览器矩阵）由 `scripts/test_installed_web_release.sh` 执行。
 
-### 5.3 React 路由与 legacy 回退矩阵
+### 5.3 React 路由与 canonical 切流矩阵（Issue #54）
 
-| React 路由 | 用途 | React build 缺失/不完整时 |
+当前制品（#54 之后）在 canonical 路由直接服务已认证 React build；legacy 模板/静态/变更接口仍打包在 wheel 内，仅作为**部署回滚路径**存在（#45 负责物理删除）。
+
+| 路由 | 用途 | React build 缺失/不完整时 |
 |------|------|------|
-| `/controlled/s01/react` | 审核工作台 | `503 S01_REACT_UNAVAILABLE`；legacy `/controlled/s01` 可用 |
-| `/controlled/s02/react` | 集成工作台 | `503 S02_REACT_UNAVAILABLE`；legacy `/controlled/s02` 可用 |
-| `/controlled/s05/react` | 例外审批 | `503 S05_REACT_UNAVAILABLE`；legacy `/controlled/s01` 可用 |
-| `/controlled/s08/react` | 策略管理 | `503 S08_REACT_UNAVAILABLE`；legacy `/controlled/s01` 可用 |
-| `/controlled/s09/react` | 治理工作区 | `503 S09_REACT_UNAVAILABLE`；legacy `/controlled/s01` 可用 |
-| `/demo/react` | 根 demo 的 React 壳 | `503 DEMO_REACT_UNAVAILABLE`；legacy `/` 可用 |
+| `/` | canonical 根（React demo 壳，别名 `/demo/react`） | `503 DEMO_REACT_UNAVAILABLE` |
+| `/controlled/s01` | canonical 审核工作台（别名 `/controlled/s01/react`） | `503 S01_REACT_UNAVAILABLE` |
+| `/controlled/s02` | canonical 集成工作台（别名 `/controlled/s02/react`） | `503 S02_REACT_UNAVAILABLE` |
+| `/controlled/s05/react` | 例外审批 | `503 S05_REACT_UNAVAILABLE` |
+| `/controlled/s08/react` | 策略管理 | `503 S08_REACT_UNAVAILABLE` |
+| `/controlled/s09/react` | 治理工作区 | `503 S09_REACT_UNAVAILABLE` |
 
 - 每个 React shell 与 `/static/react/index.html` 均 `Cache-Control: no-store` + `Pragma: no-cache`；content-hashed assets（`/static/react/assets/*`）为 `Cache-Control: public, max-age=31536000, immutable`；production 构建不产出 sourcemap。
-- **503 含义与排查**：React build 缺失/不完整（引用 asset 缺失、外部 URL、query/fragment、路径穿越、重复属性、缺 module entry、类型错配）一律返回稳定 503，body 最小化、不泄露内部路径，legacy 路由独立可访问。排查顺序：检查安装根 `task4_consistency/web/static/react/index.html` 与 `assets/` 是否完整 → 确认 index.html 引用的每个 hash asset 都在 → 重跑 `npm run build` → 重启 uvicorn。
-- 浏览器矩阵（S01–S09 流程、retained demo、两个 viewport、键盘/语义/overflow/security）由 Playwright specs 覆盖：`npm run test:e2e`。
+- **503 含义与排查**：React build 缺失/不完整（引用 asset 缺失、外部 URL、query/fragment、路径穿越、重复属性、缺 module entry、类型错配）一律返回稳定 503，body 最小化、不泄露内部路径，canonical 路由与别名同闭。排查顺序：检查安装根 `task4_consistency/web/static/react/index.html` 与 `assets/` 是否完整 → 确认 index.html 引用的每个 hash asset 都在 → 重跑 `npm run build` → 重启 uvicorn。
+- **Legacy 表面契约**：`task4_consistency/web/legacy_catalog.py` 是唯一权威目录（10 个稳定条目：root/S01/S02 页面、`/static/app.js`、`/static/style.css`、`PUT /api/rules`、`POST /api/rules/reset`、`POST /api/kb`、`DELETE /api/kb/{section}/{key}`、`POST /api/kb/reload`）。源扫描与运行时观察都消费该目录；canonical 源边必须为零。
+- 浏览器矩阵（S05/S06 + T01/T02/T03/T06/T07/T08 production React 流程、两个 viewport、键盘/语义/overflow/security）由 Playwright specs 覆盖：`npm run test:e2e`。受控窗口内该矩阵作为 `operator-simulated` 队列运行，legacy 模板控制台浏览器 spec（S01/S02/S03/S07）已在 #54 按等接口证据退役。
 
-### 5.4 静态制品回滚（prior static artifact rollback）
+### 5.4 部署回滚（deployment-only rollback，Issue #54）
 
-accepted backend facts 由服务端 SQLite authority（`TASK4_S01_STATE_PATH`）与 Governance Ledger 持有；浏览器与静态制品不拥有 lifecycle/decision/policy/audit facts。回滚**只替换静态制品并重启进程**，accepted facts 不受影响：
+回滚是**制品级**的：停止当前 wheel 进程 → 启动**上一合格 wheel**（同一 SQLite authority `TASK4_S01_STATE_PATH`）→ 验证 legacy 所有者（`/`、`/controlled/s01`、`/controlled/s02` 由 prior 制品解析为 legacy 模板）与 accepted facts 不变 → 停止 → 重启当前 wheel（canonical React 恢复）。浏览器与静态制品不拥有 lifecycle/decision/policy/audit facts；回滚只替换可执行制品与进程身份。发布资格门禁内的一次 current → prior → current 演练由 `scripts/test_installed_web_release.sh` 执行（prior wheel 从 fixed base `git archive` 构建，字节不变）。
 
-1. 停止 uvicorn；
-2. 备份并替换安装根 `task4_consistency/web/static/react/` 为先前的完整 build（整目录替换，index.html 与 assets 必须一致）；
-3. 以相同环境（同一 `TASK4_S01_STATE_PATH`）重启 uvicorn；
-4. 验证恢复：React 路由与 hash assets 返回 200；用注册身份查询受控 API（如 S01 `GET /controlled/s01/api/queries/applications/{application_id}/history` 与 `current-route`、S08/S09 governance workspace），已接受的 fact、revision 与 history 与回滚前一致；`TASK4_AUDIT_LOG` 无异常变更。
+### 5.5 观察遥测（Issue #54）
 
-### 5.5 鉴权与环境变量
+应用入口观察模块（`task4_consistency/web/observation.py`）在 canonical FastAPI 适配器内消费 legacy 目录并输出确定性证据记录；它不是 security-audit、Lifecycle 或 Policy Governance 所有者。**不设置任何观察变量时完全无捕获**（零磁盘、零行为差异）。
+
+| 变量 | 说明 |
+|------|------|
+| `TASK4_OBS_LOG_DIR` | 观察日志目录（`requests.jsonl`、`process-lifecycle.jsonl`、`sequence` sidecar） |
+| `TASK4_OBS_WINDOW_ID` | 受控窗口标识（同一窗口所有进程共享） |
+| `TASK4_OBS_ARTIFACT_SHA256` | 被观察制品（当前 wheel）SHA256 |
+| `TASK4_OBS_PROCESS_CLASS` | `operator-simulated` / `release` / `health` / `playwright-probe` / `rollback-probe`；缺失或非法 → `unknown` 并使窗口无效 |
+| `TASK4_OBS_PROCESS_ID` | 进程身份（默认 `os.getpid()`） |
+
+证据验证：
+
+```bash
+.venv/bin/python -m task4_consistency.web.observation verify --manifest <window-manifest.json>
+```
+
+有效窗口 = 非空 operator 分母、连续序列、精确摘要、干净进程生命周期、零 unknown 类别、零 canonical 源边、零 operator-simulated legacy 命中；`rollback-probe` 的 legacy 命中单独计入 manifest。窗口 raw 日志与其 SHA256 一并封存。
+
+### 5.6 鉴权与环境变量
 
 | 变量 | 默认 | 说明 |
 |------|------|------|

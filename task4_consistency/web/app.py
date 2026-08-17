@@ -61,6 +61,13 @@ from task4_consistency.rules.critical_guard import (
 from task4_consistency.rules.engine import RuleEngine
 from task4_consistency.rules.loader import load_rules
 
+from task4_consistency.web.legacy_catalog import REACT_OWNED_PATHS
+from task4_consistency.web.observation import (
+    ObservationMiddleware,
+    app_family_table,
+    recorder_from_env,
+)
+
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_RULES = ROOT / "configs" / "rules_auto_lease.yaml"
 RUNTIME_RULES = ROOT / "configs" / "runtime_rules.yaml"
@@ -2766,10 +2773,30 @@ def _s07_recovery_query_principal(request: Request) -> S01CommandPrincipal:
 
 @app.get("/controlled/s02", response_class=HTMLResponse)
 def controlled_s02_page(request: Request) -> HTMLResponse:
+    # Canonical Integrator page (Issue #54 cutover): the same qualified
+    # React build as the /react alias with the existing S02 session
+    # issuance and no-store.  A missing or incomplete build is an explicit
+    # 503; the legacy template stays packaged for the deployment-only
+    # rollback path (#45 owns physical removal).
     _s02_service()
-    if not S02_TEMPLATE.is_file():
-        raise HTTPException(500, detail={"error": "S02_PAGE_UNAVAILABLE"})
-    response = HTMLResponse(S02_TEMPLATE.read_text(encoding="utf-8"))
+    if not S01_REACT_INDEX.is_file():
+        raise HTTPException(
+            503,
+            detail={
+                "error": "S02_REACT_UNAVAILABLE",
+                "message": "Controlled S02 React shell is not built",
+            },
+        )
+    index_html = S01_REACT_INDEX.read_text(encoding="utf-8")
+    if not _react_build_is_complete(index_html):
+        raise HTTPException(
+            503,
+            detail={
+                "error": "S02_REACT_UNAVAILABLE",
+                "message": "Controlled S02 React shell is not built",
+            },
+        )
+    response = HTMLResponse(index_html)
     _issue_s02_session(request, response)
     _s01_disable_cache(response)
     return response
@@ -3310,12 +3337,22 @@ def _react_shell_index_html() -> str | None:
 
 @app.get("/controlled/s01", response_class=HTMLResponse)
 def controlled_s01_page(request: Request) -> HTMLResponse:
+    # Canonical Reviewer page (Issue #54 cutover): the same qualified React
+    # build as the /react alias with the existing S01 session issuance, role
+    # checks and no-store.  A missing or incomplete build is an explicit 503;
+    # the legacy template stays packaged for the deployment-only rollback
+    # path (#45 owns physical removal).
     _s01_service()
-    if not S01_TEMPLATE.is_file():
-        raise HTTPException(500, detail={"error": "S01_PAGE_UNAVAILABLE"})
-    return _controlled_s01_shell_response(
-        request, S01_TEMPLATE.read_text(encoding="utf-8")
-    )
+    index_html = _react_shell_index_html()
+    if index_html is None:
+        raise HTTPException(
+            503,
+            detail={
+                "error": "S01_REACT_UNAVAILABLE",
+                "message": "Controlled S01 React shell is not built",
+            },
+        )
+    return _controlled_s01_shell_response(request, index_html)
 
 
 @app.get("/controlled/s01/react", response_class=HTMLResponse)
@@ -4459,8 +4496,26 @@ def controlled_s01_audit_timeline(
 
 @app.get("/", response_class=HTMLResponse)
 def index() -> HTMLResponse:
-    html = (TEMPLATES / "index.html").read_text(encoding="utf-8")
-    return HTMLResponse(html)
+    # Canonical root (Issue #54 cutover): the qualified React demo shell,
+    # no-store, fail-closed when the build is missing.  The legacy demo
+    # shell stays packaged for the deployment-only rollback path (#45 owns
+    # physical removal).
+    index_html = _react_shell_index_html()
+    if index_html is None:
+        response = JSONResponse(
+            status_code=503,
+            content={
+                "detail": {
+                    "error": "DEMO_REACT_UNAVAILABLE",
+                    "message": "React demo shell is not built",
+                }
+            },
+        )
+        _s01_disable_cache(response)
+        return response
+    response = HTMLResponse(index_html)
+    _s01_disable_cache(response)
+    return response
 
 
 @app.get("/api/health")
@@ -5767,6 +5822,23 @@ def demo_evaluate_summary() -> DemoEvaluationSummaryResponse:
         warnings=warnings_list,
         honesty_note=metrics.honesty_note,
     )
+
+
+# --- Issue #54: application-entry observation telemetry ----------------------
+# One closed observation module behind the FastAPI adapter.  Registered
+# OUTERMOST (the last add_middleware call wraps everything else) so it sees
+# all HTTP, static mounts, auth and 404s, plus lifespan scopes, and records
+# the resolved route owner and final status after response resolution.
+# Ordinary runs with no observation environment stay capture-free
+# (NoopRecorder).  Observation writes zero lifecycle, evidence, audit or
+# business revisions and stays a separate evidence stream from the Security
+# Audit ledger (ADR-0004).  A recorder failure surfaces as a failed request;
+# it never silently drops evidence.
+_OBSERVATION_RECORDER = recorder_from_env(
+    family_table=app_family_table(app),
+    react_owned_paths=REACT_OWNED_PATHS,
+)
+app.add_middleware(ObservationMiddleware, recorder=_OBSERVATION_RECORDER)
 
 
 def create_app() -> FastAPI:

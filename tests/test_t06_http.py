@@ -342,11 +342,12 @@ def test_demo_react_shell_503_when_build_missing(monkeypatch):
 
 
 def test_legacy_surfaces_unchanged():
-    """Legacy /, /api/fixtures*, /api/check remain usable (rollback path)."""
+    """Canonical root serves the React shell while the demo APIs remain
+    usable (Issue #54 cutover; the legacy root is rollback-only)."""
     client = make_client()
     r = client.get("/")
     assert r.status_code == 200
-    assert 'id="fixture-select"' in r.text
+    assert "/static/react/assets/" in r.text
 
     f = client.get("/api/fixtures")
     assert f.status_code == 200

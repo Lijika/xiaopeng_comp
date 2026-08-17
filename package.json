@@ -6,7 +6,6 @@
     "npm": "11.11.0"
   },
   "scripts": {
-    "test:s01:browser": "playwright test tests/test_s01_browser.spec.js",
     "generate:api": ".venv/bin/python scripts/export_openapi.py frontend/src/generated/openapi.json && openapi-typescript frontend/src/generated/openapi.json -o frontend/src/generated/api.ts",
     "check:generated": "node scripts/check_generated.mjs",
     "typecheck": "tsc -p frontend/tsconfig.json --noEmit",
