@@ -385,14 +385,19 @@ def legacy_surface_id_for(
 
     Ownership is derived from the route selected by ASGI dispatch and the
     installed artifact stage.  Traffic class remains an audit population and
-    has no effect on ownership."""
+    has no effect on ownership.  Issue #45 contraction: canonical React
+    pages never resolve to a legacy surface (both stages serve the
+    qualified React shell), and a retired surface is observable only from
+    the prior artifact that still physically served it."""
     surface_id = match_legacy_surface(method, path)
     if surface_id is None:
         return None
     entry = _ENTRY_BY_ID[surface_id]
     if matched_route_owner != _RUNTIME_OWNER_BY_ID[surface_id]:
         return None
-    if entry.kind == "page" and artifact_stage != "prior":
+    if entry.kind == "page":
+        return None
+    if entry.retired and artifact_stage != "prior":
         return None
     return surface_id
 
@@ -1095,7 +1100,10 @@ def _check_release_evidence(data: Mapping[str, Any]) -> str | None:
         return "manifest cohort_node_ids is missing or malformed"
     if len(node_ids) != len(set(node_ids)):
         return "manifest cohort_node_ids contain duplicates"
-    if not any(node_id.startswith("test_t54_prior_artifact.spec.js:11:1 ") for node_id in node_ids):
+    if not any(
+        node_id.startswith("test_t54_prior_artifact.spec.js:23:1 ")
+        for node_id in node_ids
+    ):
         return "manifest cohort_node_ids omit the prior-artifact browser node"
     node_ids_raw = ("\n".join(node_ids) + "\n").encode("utf-8")
     if evidence.get("cohort_node_ids_sha256") != hashlib.sha256(node_ids_raw).hexdigest():
@@ -1493,19 +1501,10 @@ def verify_bundle(
         return _invalid("sealed per-entry counts mismatch")
     if per_class.get("operator-simulated", 0) == 0:
         return _invalid("operator population (operator-simulated denominator) is empty")
-    if any(
-        identity.get("artifact_stage") == "prior"
-        for identity in data["process_artifacts"].values()
-    ):
-        for entry_id in (
-            "legacy-page-root",
-            "legacy-page-controlled-s01",
-            "legacy-page-controlled-s02",
-        ):
-            if per_entry[entry_id]["rollback-probe"] == 0:
-                return _invalid(
-                    f"required prior-artifact rollback observation missing for {entry_id}"
-                )
+    # Issue #45: prior canonical React pages resolve to no legacy surface,
+    # so the former dedicated prior legacy-page-hit threshold is removed.
+    # Prior-artifact identity, complete lifecycles, accepted-fact equality
+    # and the rollback browser evidence remain the rollback evidence.
 
     operator_hits: dict[str, int] = {}
     rollback_hits: dict[str, int] = {}

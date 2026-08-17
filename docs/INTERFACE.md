@@ -252,14 +252,13 @@ import 后 `meta` 强制：`source=external_ocr`, `field_source=external_ocr`, `
 
 品牌/型号：`R_BRAND_CROSS` / `R_MODEL_CROSS`（缺字段 skip，不强制齐套）。
 
-### Critical 指纹与规则热更（Round16）
+### Critical 指纹与规则校验（Round16 · Issue #45 收缩后）
 
 - 模块：`task4_consistency.rules.critical_guard`
 - `enforce_critical_fingerprints(cfg)`：缺/篡改 critical 三剑客 → `CriticalGuardError`（`.error` 码）
-- Web：
-  - `PUT /api/rules`：校验+指纹通过后才 `tmp+fsync+os.replace`；失败零碰 active
-  - `POST /api/rules/validate`：干跑；返回 `critical_fingerprints` 元数据
-  - `POST /api/rules/reset`：写锁内 unlink runtime
+- Web（收缩后**仅校验、不写盘**）：
+  - `POST /api/rules/validate`：干跑；返回 `critical_fingerprints` 元数据；**永不写 `runtime_rules.yaml`**
+  - `PUT /api/rules` / `POST /api/rules/reset`：已退役（请求落 405/404 absence）；规则/KB 变更由 S08/S09 治理
 - error 码：`critical_rule_missing` / `critical_semantic_tamper` / `critical_docs_stripped` / `critical_on_missing_skip`
 
 ## 5. Python API

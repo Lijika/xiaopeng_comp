@@ -27,7 +27,7 @@ def test_adv_w1_poison_rules_not_persisted(tmp_path, monkeypatch):
     monkeypatch.delenv("TASK4_WEB_TOKEN", raising=False)
     client = TestClient(webapp.app)
     bad = {"version": 1, "field_aliases": {}, "rules": [{"type": "exact", "field": "vin"}]}
-    r = client.put("/api/rules", json={"content": bad})
+    r = client.post("/api/rules/validate", json={"content": bad})
     assert r.status_code == 400
     assert not runtime.exists()
     h = client.get("/api/health")
@@ -55,7 +55,7 @@ def test_adv_w2_cannot_drop_critical_vin_rule(tmp_path, monkeypatch):
     client = TestClient(webapp.app)
     data = _base_package()
     data["rules"] = [r for r in data["rules"] if r.get("id") != "R_VIN_CROSS"]
-    r = client.put("/api/rules", json={"content": data})
+    r = client.post("/api/rules/validate", json={"content": data})
     assert r.status_code == 400
     detail = r.json()["detail"]
     msg = detail.get("message", "") if isinstance(detail, dict) else str(detail)

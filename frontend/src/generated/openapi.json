@@ -976,30 +976,6 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
-      "KBItem": {
-        "properties": {
-          "key": {
-            "title": "Key",
-            "type": "string"
-          },
-          "section": {
-            "description": "address_aliases | org_aliases | plate_prefixes",
-            "title": "Section",
-            "type": "string"
-          },
-          "value": {
-            "title": "Value",
-            "type": "string"
-          }
-        },
-        "required": [
-          "section",
-          "key",
-          "value"
-        ],
-        "title": "KBItem",
-        "type": "object"
-      },
       "RulesBody": {
         "properties": {
           "content": {
@@ -11293,44 +11269,6 @@
           }
         },
         "summary": "Kb Get"
-      },
-      "post": {
-        "operationId": "kb_add_api_kb_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/KBItem"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Kb Add Api Kb Post",
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Kb Add"
       }
     },
     "/api/kb/graph": {
@@ -11352,76 +11290,6 @@
           }
         },
         "summary": "Kb Graph"
-      }
-    },
-    "/api/kb/reload": {
-      "post": {
-        "operationId": "kb_reload_api_kb_reload_post",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Kb Reload Api Kb Reload Post",
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Kb Reload"
-      }
-    },
-    "/api/kb/{section}/{key}": {
-      "delete": {
-        "operationId": "kb_delete_api_kb__section___key__delete",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "section",
-            "required": true,
-            "schema": {
-              "title": "Section",
-              "type": "string"
-            }
-          },
-          {
-            "in": "path",
-            "name": "key",
-            "required": true,
-            "schema": {
-              "title": "Key",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Kb Delete Api Kb  Section   Key  Delete",
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Kb Delete"
       }
     },
     "/api/ocr_inbox": {
@@ -11463,65 +11331,6 @@
           }
         },
         "summary": "Get Rules"
-      },
-      "put": {
-        "description": "Atomic save: validate+fingerprint first; then lock → tmp+fsync+replace.\n\nARCH Round16 W1: on any failure **never touch** active runtime_rules.yaml\n(no write_text rollback).",
-        "operationId": "put_rules_api_rules_put",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/RulesBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Put Rules Api Rules Put",
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Put Rules"
-      }
-    },
-    "/api/rules/reset": {
-      "post": {
-        "operationId": "reset_rules_api_rules_reset_post",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Reset Rules Api Rules Reset Post",
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Reset Rules"
       }
     },
     "/api/rules/validate": {

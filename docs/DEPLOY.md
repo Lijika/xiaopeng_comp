@@ -35,8 +35,8 @@ pip install -r requirements.txt
 | 路径 | 用途 |
 |------|------|
 | `configs/rules_auto_lease.yaml` | **默认规则包**（版本化，勿在生产热改后不备份） |
-| `configs/runtime_rules.yaml` | Web UI 保存的运行时规则（优先于默认包） |
-| `configs/rules_auto_lease.yaml.bak` | 首次写 runtime 时可能生成的备份 |
+| `configs/runtime_rules.yaml` | 运行时规则覆盖包（**Web 不再写入**；存在时优先于默认包，损坏被自愈隔离） |
+| `configs/rules_auto_lease.yaml.bak` | 历史遗留备份（Web 不再写 runtime，不再生成新备份） |
 | `configs/kb/entity_kb.json` | 实体知识库（地址/机构/车牌别名） |
 | `fixtures/applications/` | 评估与演示样例 |
 | `fixtures/labels/expected_verdicts.json` | 评估标签索引 |
@@ -53,11 +53,10 @@ cp configs/kb/entity_kb.json "configs/backup/kb_$(date +%Y%m%d).json"
 test -f configs/runtime_rules.yaml && cp configs/runtime_rules.yaml "configs/backup/runtime_$(date +%Y%m%d).yaml"
 ```
 
-恢复默认规则（丢弃 Web 改动）：
+恢复默认规则（剥离 runtime 覆盖包；Web 不再直接改规则/KB，变更由 S08/S09 治理）：
 
 ```bash
 rm -f configs/runtime_rules.yaml
-# 或 Web UI「恢复默认包」/ POST /api/rules/reset
 ```
 
 ## 4. CLI 用法
@@ -162,7 +161,7 @@ curl -s http://127.0.0.1:8765/api/health
 
 ### 5.3 React 路由与 canonical 切流矩阵（Issue #54）
 
-当前制品（#54 之后）在 canonical 路由直接服务已认证 React build；legacy 模板/静态/变更接口仍打包在 wheel 内，仅作为**部署回滚路径**存在（#45 负责物理删除）。
+当前制品（Issue #45 收缩后）在 canonical 路由直接服务已认证 React build；legacy 模板/静态五个文件已由 #45 物理删除、五个直接变更接口已退役，不再打包进 wheel。fixed-base 先于 #45 的旧 wheel 仍含 legacy 面，仅作为**部署回滚路径**存在。
 
 | 路由 | 用途 | React build 缺失/不完整时 |
 |------|------|------|
@@ -175,12 +174,12 @@ curl -s http://127.0.0.1:8765/api/health
 
 - 每个 React shell 与 `/static/react/index.html` 均 `Cache-Control: no-store` + `Pragma: no-cache`；content-hashed assets（`/static/react/assets/*`）为 `Cache-Control: public, max-age=31536000, immutable`；production 构建不产出 sourcemap。
 - **503 含义与排查**：React build 缺失/不完整（引用 asset 缺失、外部 URL、query/fragment、路径穿越、重复属性、缺 module entry、类型错配）一律返回稳定 503，body 最小化、不泄露内部路径，canonical 路由与别名同闭。排查顺序：检查安装根 `task4_consistency/web/static/react/index.html` 与 `assets/` 是否完整 → 确认 index.html 引用的每个 hash asset 都在 → 重跑 `npm run build` → 重启 uvicorn。
-- **Legacy 表面契约**：`task4_consistency/web/legacy_catalog.py` 是唯一权威目录（10 个稳定条目：root/S01/S02 页面、`/static/app.js`、`/static/style.css`、`PUT /api/rules`、`POST /api/rules/reset`、`POST /api/kb`、`DELETE /api/kb/{section}/{key}`、`POST /api/kb/reload`）。源扫描与运行时观察都消费该目录；canonical 源边必须为零。
+- **Legacy 表面契约（Issue #45 收缩后全退役）**：`task4_consistency/web/legacy_catalog.py` 是唯一权威目录（10 个条目现全部 `retired=True`：root/S01/S02 模板页面、`/static/app.js`、`/static/style.css`、`PUT /api/rules`、`POST /api/rules/reset`、`POST /api/kb`、`DELETE /api/kb/{section}/{key}`、`POST /api/kb/reload`）。五个物理文件（三个模板 + 两个静态）必须保持删除，任一复现即 reintroduction 失败；五个变更 handler 已物理移除，请求落框架 405/404 absence 状态。规则/KB 保留面仅 `GET /api/rules`、`POST /api/rules/validate`（干跑，永不写 `runtime_rules.yaml`）、`GET /api/kb`、`GET /api/kb/graph`；`/static` mount 只服务 react 资产。源扫描与运行时观察都消费该目录；canonical 源边必须为零。
 - 浏览器矩阵（S05/S06 + T01/T02/T03/T06/T07/T08 production React 流程、两个 viewport、键盘/语义/overflow/security）由 Playwright specs 覆盖：`npm run test:e2e`。受控窗口内该矩阵作为 `operator-simulated` 队列运行，legacy 模板控制台浏览器 spec（S01/S02/S03/S07）已在 #54 按等接口证据退役。
 
 ### 5.4 部署回滚（deployment-only rollback，Issue #54）
 
-回滚是**制品级**的：停止当前 wheel 进程 → 启动**上一合格 wheel**（同一 SQLite authority `TASK4_S01_STATE_PATH`）→ 验证 legacy 所有者（`/`、`/controlled/s01`、`/controlled/s02` 由 prior 制品解析为 legacy 模板）与 accepted facts 不变 → 停止 → 重启当前 wheel（canonical React 恢复）。浏览器与静态制品不拥有 lifecycle/decision/policy/audit facts；回滚只替换可执行制品与进程身份。发布资格门禁内的一次 current → prior → current 演练由 `scripts/test_installed_web_release.sh` 执行（prior wheel 从 fixed base `git archive` 构建，字节不变）。
+回滚是**制品级**的（current → prior → current 三阶段）：停止当前 wheel 进程 → 启动**上一合格 wheel**（同一 SQLite authority `TASK4_S01_STATE_PATH`；prior 为 fixed-base `2627d488...` 构建，canonical root/S01/S02 在 prior 阶段同样服务 qualified React shell，静态/mutation legacy 面仅在 prior 阶段制品中解析）→ 验证 accepted facts 不变 → 停止 → 重启当前 wheel（canonical React 恢复）。**accepted facts 在三个阶段必须保持相等**；浏览器与静态制品不拥有 lifecycle/decision/policy/audit facts；回滚只替换可执行制品与进程身份。发布资格门禁内的一次 current → prior → current 演练由 `scripts/test_installed_web_release.sh` 执行（prior wheel 从 fixed base `git archive` 构建，字节不变）。
 
 ### 5.5 观察遥测（Issue #54）
 
@@ -212,11 +211,11 @@ curl -s http://127.0.0.1:8765/api/health
 | `HOST` | `127.0.0.1` | 监听地址；对外可 `0.0.0.0` |
 | `PORT` | `8765` | 端口 |
 | `TASK4_WEB_TOKEN` | *(空)* | **仅限 open demo 的 API**。未设置 → 开放 demo；设置后 `/`、`/api/health`、`/static/*` 保持开放，其余 open demo API 需 `Authorization: Bearer <token>` 或 `X-Task4-Token: <token>`；`/controlled/s01|s02|s05|s08|s09/*` 不受其影响，继续使用各自注册身份 |
-| `TASK4_AUDIT_LOG` | `out/audit.log`（源码检出 / 安装根下） | 审计 JSONL 路径（规则保存 / KB 变更 / 鉴权拒绝 / runtime 自愈） |
+| `TASK4_AUDIT_LOG` | `out/audit.log`（源码检出 / 安装根下） | 审计 JSONL 路径（鉴权拒绝 / runtime 自愈；规则/KB 变更由 S08/S09 治理，不再经 open demo API 写入） |
 
 浏览器：
 
-- 首页 `http://127.0.0.1:8765/` — 校验演示 / 批量·evaluate(suite) / 规则维护 / 知识库
+- 首页 `http://127.0.0.1:8765/` — 校验演示 / 批量·evaluate(suite) / 规则·知识库（只读；变更走 `/controlled/s08/react` 策略管理 / `/controlled/s09/react` 治理工作区）
 - 健康检查 `GET /api/health`（返回 `auth_required` 是否启用 token）
 
 **批量评估：** 全量带标签指标请用 **CLI** `evaluate --suite main`（或 `bash scripts/ci_gate.sh`）。Web 仅提供 `GET /api/evaluate/summary` 与 `POST /api/check/batch`（check 上限 **50** 笔、同步、无 job 队列；**无** `/api/evaluate/batch`）。反向代理超时建议 ≥30s。
@@ -233,10 +232,10 @@ curl -s -H "Authorization: Bearer change-me" http://127.0.0.1:8765/api/fixtures
 **审计日志：**
 
 - 默认追加写入 `out/audit.log`（JSONL，每行一事件）
-- 事件含：`rules_save` / `rules_reset` / `kb_add` / `kb_delete` / `auth_denied` / `rules_auto_heal`
+- 事件含：`auth_denied` / `rules_auto_heal`（`rules_save` / `rules_reset` / `kb_add` / `kb_delete` 已随 #45 直接变更接口退役）
 - 生产建议轮转该文件并限制目录权限
 
-**安全提示：** 无 `TASK4_WEB_TOKEN` 时服务为**开放 demo**，仅内网/本机；`TASK4_WEB_TOKEN` 仅控制 open demo API。生产发布请使用受控路由（`/controlled/s01|s02|s05|s08|s09/*`），其访问由各场景注册身份与受控部署前置保障，不受 `TASK4_WEB_TOKEN` 影响；同时启用 HTTPS、限制监听地址。规则保存失败会回滚；损坏的 `runtime_rules.yaml` 会被隔离为 `*.yaml.bad` 并回退默认包。
+**安全提示：** 无 `TASK4_WEB_TOKEN` 时服务为**开放 demo**，仅内网/本机；`TASK4_WEB_TOKEN` 仅控制 open demo API。生产发布请使用受控路由（`/controlled/s01|s02|s05|s08|s09/*`），其访问由各场景注册身份与受控部署前置保障，不受 `TASK4_WEB_TOKEN` 影响；同时启用 HTTPS、限制监听地址。损坏的 `runtime_rules.yaml` 会被隔离为 `*.yaml.bad` 并回退默认包；规则/KB 变更请走受控治理（S08/S09），open demo API 不提供直接写入。
 
 ## 6. 健康检查清单
 
@@ -244,7 +243,7 @@ curl -s -H "Authorization: Bearer change-me" http://127.0.0.1:8765/api/fixtures
 2. `evaluate` 输出 `THRESHOLD PASS`  
 3. `attack_probes.py` `release_open=0`  
 4. Web 能加载 fixture 并完成一次校验  
-5. 规则保存后 `configs/runtime_rules.yaml` 存在且再次校验生效  
+5. `GET /api/rules` 可读且 `POST /api/rules/validate` 干跑通过（不写盘）
 
 ## 7. 卸载 / 清理
 

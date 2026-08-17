@@ -1,6 +1,6 @@
-"""Web 业务向：表单 content 保存路径 + step2 API。
+"""Web 业务向：表单 content 校验路径 + step2 API。
 
-- UI `saveRulesForm` → PUT /api/rules {content: ...}
+- UI `saveRulesForm` 表单内容 → POST /api/rules/validate 干跑（PUT 保存已退役，不写 runtime）
 - step2 页序样例列表/详情（无 OCR 文本）
 """
 
@@ -11,7 +11,6 @@ from pathlib import Path
 import yaml
 from fastapi.testclient import TestClient
 
-from task4_consistency.rules.critical_guard import enforce_critical_fingerprints
 from task4_consistency.rules.loader import load_rules
 from task4_consistency.web import app as webapp
 
@@ -20,8 +19,8 @@ RULES = ROOT / "configs" / "rules_auto_lease.yaml"
 STEP2 = ROOT / "data" / "step2"
 
 
-def test_put_rules_content_form_path_success(tmp_path, monkeypatch):
-    """表单保存：GET content → 微调 → PUT content → runtime 生效。"""
+def test_validate_rules_content_form_path(tmp_path, monkeypatch):
+    """表单保存：GET content → 微调 → validate content 干跑（不再写 runtime_rules.yaml）。"""
     runtime = tmp_path / "runtime_rules.yaml"
     monkeypatch.setattr(webapp, "RUNTIME_RULES", runtime)
     monkeypatch.delenv("TASK4_WEB_TOKEN", raising=False)
@@ -39,34 +38,26 @@ def test_put_rules_content_form_path_success(tmp_path, monkeypatch):
     content = yaml.safe_load(RULES.read_text(encoding="utf-8"))
     content["version"] = str(content.get("version", "1.9.0")) + "-form"
     content["changelog"] = list(content.get("changelog") or []) + [
-        "form content path save test"
+        "form content path validate test"
     ]
 
-    r = client.put("/api/rules", json={"content": content})
+    r = client.post("/api/rules/validate", json={"content": content})
     assert r.status_code == 200, r.text
     data = r.json()
     assert data["ok"] is True
-    assert runtime.exists()
     assert data["version"] == content["version"]
     assert data["n_rules"] >= 3
-
-    cfg = load_rules(runtime)
-    enforce_critical_fingerprints(cfg)
-    assert cfg.version == content["version"]
-
-    # dry-run validate also accepts content
-    v = client.post("/api/rules/validate", json={"content": content})
-    assert v.status_code == 200, v.text
-    assert v.json()["ok"] is True
+    # dry-run: validate never writes runtime_rules.yaml
+    assert not runtime.exists()
 
 
-def test_put_rules_content_reject_non_object(tmp_path, monkeypatch):
+def test_validate_rules_content_reject_non_object(tmp_path, monkeypatch):
     """非 object content：Pydantic 422 或业务 400 content_not_object；均不得写 runtime。"""
     runtime = tmp_path / "runtime_rules.yaml"
     monkeypatch.setattr(webapp, "RUNTIME_RULES", runtime)
     monkeypatch.delenv("TASK4_WEB_TOKEN", raising=False)
     client = TestClient(webapp.app)
-    r = client.put("/api/rules", json={"content": ["not", "object"]})
+    r = client.post("/api/rules/validate", json={"content": ["not", "object"]})
     # FastAPI/Pydantic rejects list before handler (422); handler path is 400 content_not_object
     assert r.status_code in (400, 422), r.text
     if r.status_code == 400:

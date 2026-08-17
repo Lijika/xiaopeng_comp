@@ -33,8 +33,7 @@ include = ["task4_consistency*"]
 
 [tool.setuptools.package-data]
 task4_consistency = [
-  "web/templates/*.html",
-  "web/static/**/*",
+  "web/static/react/**/*",
 ]
 
 [tool.pytest.ini_options]

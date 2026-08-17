@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
-"""Round10 attacks: Web rule save + KB alias FP/FN.
+"""Attacks: rule validate/critical-guard + KB alias FP/FN + retired-route absence.
 
 Prep mode (default): if web/kb not delivered, print PREP and exit 2.
 Live mode: pass --base http://host:port to hit APIs.
+
+The five retired mutation routes (PUT /api/rules, POST /api/rules/reset,
+POST /api/kb, DELETE /api/kb/{section}/{key}, POST /api/kb/reload) must now
+return framework absence statuses (405/404); probes verify that. Rule
+W1/W2 probes use the retained dry-run seam POST /api/rules/validate, which
+never writes runtime_rules.yaml.
 
   .venv/bin/python scripts/attack_web_kb.py
   .venv/bin/python scripts/attack_web_kb.py --base http://127.0.0.1:8000
@@ -224,7 +230,7 @@ def attack_kb_local() -> list[tuple[str, str, str, bool]]:
 
 
 def attack_web_http(base: str) -> list[tuple[str, str, str, bool]]:
-    """HTTP attacks against rule/KB APIs."""
+    """HTTP attacks against rule/KB APIs (live server)."""
     import urllib.error
     import urllib.request
 
@@ -255,10 +261,21 @@ def attack_web_http(base: str) -> list[tuple[str, str, str, bool]]:
         except Exception as e:
             return 0, str(e)
 
-    # ADV-W1 bad rules payload (API expects content|yaml_text)
+    # retired mutation routes must be absent: framework statuses only
+    for hid, title, method, path, expect in [
+        ("RET-1", "PUT /api/rules absent", "PUT", "/api/rules", 405),
+        ("RET-2", "POST /api/rules/reset absent", "POST", "/api/rules/reset", 404),
+        ("RET-3", "POST /api/kb absent", "POST", "/api/kb", 405),
+        ("RET-4", "DELETE /api/kb/{s}/{k} absent", "DELETE", "/api/kb/org_aliases/x", 404),
+        ("RET-5", "POST /api/kb/reload absent", "POST", "/api/kb/reload", 404),
+    ]:
+        code, _ = req(method, path)
+        results.append((hid, title, f"HTTP {code} (expect {expect})", code == expect))
+
+    # ADV-W1 bad rules payload (validate seam; never writes)
     code, _ = req(
-        "PUT",
-        "/api/rules",
+        "POST",
+        "/api/rules/validate",
         {"content": {"version": 1, "field_aliases": {}, "rules": [{"type": "exact"}]}},
     )
     results.append(
@@ -282,17 +299,16 @@ def attack_web_http(base: str) -> list[tuple[str, str, str, bool]]:
                     r["threshold"] = 0.0
                     touched = True
         if touched:
-            code2, body2 = req("PUT", "/api/rules", {"content": content})
+            code2, body2 = req("POST", "/api/rules/validate", {"content": content})
             ok = code2 >= 400
             results.append(
                 (
                     "ADV-W2",
                     "loosen VIN FN",
-                    f"put={code2} detail={str(body2)[:80]}",
+                    f"validate={code2} detail={str(body2)[:80]}",
                     ok,
                 )
             )
-            req("POST", "/api/rules/reset")
         else:
             results.append(
                 ("ADV-W2", "loosen VIN FN", "R_VIN_CROSS not in GET content.rules", False)
@@ -300,29 +316,11 @@ def attack_web_http(base: str) -> list[tuple[str, str, str, bool]]:
     else:
         results.append(("ADV-W2", "loosen VIN FN", f"GET /api/rules -> {code}", False))
 
-    # ADV-K1 via HTTP — wrong shape should 4xx; correct org collapse blocked by brand guard
-    code, _ = req(
-        "POST",
-        "/api/kb",
-        {"section": "org_aliases", "key": "一汽大众", "value": "大众"},
-    )
-    # may 200 or 400 depending on policy; brand field must stay distinct after reload
-    results.append(
-        (
-            "ADV-K1-http",
-            "kb brand alias API",
-            f"HTTP {code}",
-            code >= 400 or code == 200,  # surface reachable; K1 brand check is local
-        )
-    )
-    if code == 200:
-        req("DELETE", "/api/kb/org_aliases/%E4%B8%80%E6%B1%BD%E5%A4%A7%E4%BC%97")
-
     return results
 
 
 def attack_w1_w2_local() -> list[tuple[str, str, str, bool]]:
-    """Round16: in-process W1/W2 probes via TestClient (no live server)."""
+    """Round16: in-process W1/W2 + retired-route probes via TestClient (no live server)."""
     import copy
     import tempfile
 
@@ -343,35 +341,61 @@ def attack_w1_w2_local() -> list[tuple[str, str, str, bool]]:
         try:
             client = TestClient(webapp.app)
 
-            # ADV-W1: bad payload must 4xx and not create runtime
-            code = client.put(
-                "/api/rules",
-                json={"content": {"version": 1, "field_aliases": {}, "rules": [{"type": "exact", "field": "vin"}]}},
+            def validate(payload: dict[str, Any]) -> Any:
+                return client.post("/api/rules/validate", json=payload)
+
+            # retired mutation routes must be absent (framework statuses)
+            for hid, title, method, path, body, expect in [
+                ("RET-1", "PUT /api/rules absent", "put", "/api/rules",
+                 {"content": {"version": 1}}, 405),
+                ("RET-2", "POST /api/rules/reset absent", "post", "/api/rules/reset",
+                 None, 404),
+                ("RET-3", "POST /api/kb absent", "post", "/api/kb",
+                 {"section": "org_aliases", "key": "x", "value": "y"}, 405),
+                ("RET-4", "DELETE /api/kb/{s}/{k} absent", "delete",
+                 "/api/kb/org_aliases/x", None, 404),
+                ("RET-5", "POST /api/kb/reload absent", "post", "/api/kb/reload",
+                 None, 404),
+            ]:
+                kwargs = {"json": body} if body is not None else {}
+                res = getattr(client, method)(path, **kwargs)
+                results.append(
+                    (hid, title, f"HTTP {res.status_code} (expect {expect})", res.status_code == expect)
+                )
+
+            # ADV-W1: bad payload must 4xx and never create runtime
+            code = validate(
+                {"content": {"version": 1, "field_aliases": {}, "rules": [{"type": "exact", "field": "vin"}]}}
             ).status_code
             closed_w1 = code >= 400 and not runtime.exists()
             results.append(("ADV-W1", "bad rules zero-touch", f"HTTP {code} exists={runtime.exists()}", closed_w1))
 
-            # seed good runtime then poison attempt must leave content identical
-            client.put("/api/rules", json={"yaml_text": default_yaml})
-            before = runtime.read_text(encoding="utf-8") if runtime.exists() else ""
-            code = client.put(
-                "/api/rules",
-                json={"yaml_text": "not: valid: yaml: ["},
-            ).status_code
-            after = runtime.read_text(encoding="utf-8") if runtime.exists() else ""
+            # ADV-W1b: poison yaml dry-run — no runtime to clobber under validate
+            r = validate({"yaml_text": "not: valid: yaml: ["})
             results.append(
                 (
                     "ADV-W1b",
-                    "poison yaml no clobber",
-                    f"HTTP {code} same={before == after}",
-                    code >= 400 and before == after and bool(before),
+                    "poison yaml dry-run",
+                    f"HTTP {r.status_code} exists={runtime.exists()}",
+                    r.status_code >= 400 and not runtime.exists(),
                 )
+            )
+
+            # ADV-W1c: retained good package validates clean, still no write
+            r = validate({"yaml_text": default_yaml})
+            ok_v = (
+                r.status_code == 200
+                and r.json().get("ok") is True
+                and not runtime.exists()
+            )
+            results.append(
+                ("ADV-W1c", "good rules validate", f"HTTP {r.status_code} exists={runtime.exists()}", ok_v)
             )
 
             # ADV-W2: delete VIN
             loose = copy.deepcopy(pkg)
             loose["rules"] = [r for r in loose["rules"] if r.get("id") != "R_VIN_CROSS"]
-            r = client.put("/api/rules", json={"content": loose})
+            r = validate({"content": loose})
             err = (r.json().get("detail") or {}).get("error") if r.status_code >= 400 else None
             results.append(
                 ("ADV-W2", "drop R_VIN_CROSS", f"HTTP {r.status_code} err={err}", r.status_code >= 400)
@@ -383,7 +407,7 @@ def attack_w1_w2_local() -> list[tuple[str, str, str, bool]]:
                 if rule.get("id") == "R_VIN_CROSS":
                     rule["type"] = "fuzzy"
                     rule["threshold"] = 0.0
-            r = client.put("/api/rules", json={"content": loose})
+            r = validate({"content": loose})
             err = (r.json().get("detail") or {}).get("error") if r.status_code >= 400 else None
             results.append(
                 (
@@ -399,7 +423,7 @@ def attack_w1_w2_local() -> list[tuple[str, str, str, bool]]:
             for rule in loose["rules"]:
                 if rule.get("id") == "R_VIN_CROSS":
                     rule["docs"] = []
-            r = client.put("/api/rules", json={"content": loose})
+            r = validate({"content": loose})
             err = (r.json().get("detail") or {}).get("error") if r.status_code >= 400 else None
             results.append(
                 (
@@ -415,7 +439,7 @@ def attack_w1_w2_local() -> list[tuple[str, str, str, bool]]:
             for rule in loose["rules"]:
                 if rule.get("id") == "R_VIN_CROSS":
                     rule["on_missing"] = "skip"
-            r = client.put("/api/rules", json={"content": loose})
+            r = validate({"content": loose})
             err = (r.json().get("detail") or {}).get("error") if r.status_code >= 400 else None
             results.append(
                 (
@@ -456,7 +480,7 @@ def main() -> int:
         results.extend(attack_web_http(args.base))
     elif delivery["web_pkg"] or delivery["run_web"]:
         if not args.base:
-            print("NOTE: live HTTP attacks need --base; ran in-process W1/W2")
+            print("NOTE: live HTTP attacks need --base; ran in-process W1/W2 + retired-route probes")
 
     if not results:
         print("No runnable attacks (module shape unknown). Update script after API freeze.")

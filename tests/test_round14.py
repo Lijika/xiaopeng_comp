@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from task4_consistency.audit import audit_log_path, write_audit
+from task4_consistency.audit import write_audit
 from task4_consistency.cli import main
 from task4_consistency.models import Application
 from task4_consistency.normalize.vin import normalize_vin_ex
@@ -139,19 +139,7 @@ def test_r14_fixtures_critical_boundaries():
                 )
 
 
-def test_web_audit_on_rules_save(tmp_path, monkeypatch):
-    log = tmp_path / "a.log"
-    runtime = tmp_path / "runtime_rules.yaml"
-    monkeypatch.setenv("TASK4_AUDIT_LOG", str(log))
-    monkeypatch.delenv("TASK4_WEB_TOKEN", raising=False)
-    monkeypatch.setattr(webapp, "RUNTIME_RULES", runtime)
-    client = TestClient(webapp.app)
-    good = RULES.read_text(encoding="utf-8")
-    r = client.put("/api/rules", json={"yaml_text": good})
-    assert r.status_code == 200
-    assert log.exists()
-    events = [json.loads(x) for x in log.read_text(encoding="utf-8").splitlines() if x.strip()]
-    assert any(e["action"] == "rules_save" and e["ok"] for e in events)
+
 
 
 def test_web_token_auth_optional(monkeypatch):

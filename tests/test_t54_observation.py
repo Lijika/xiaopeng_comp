@@ -76,7 +76,7 @@ def _serialize(records: list[dict]) -> bytes:
 
 def _release_evidence(elapsed_seconds: float = 19.0) -> dict:
     node_ids = [
-        "test_t54_prior_artifact.spec.js:11:1 › T54 installed prior artifact serves legacy root, S01, and S02 at both viewports",
+        "test_t54_prior_artifact.spec.js:23:1 › T54 installed prior artifact serves the qualified React shell on root, S01, and S02 at both viewports",
         "test_t01_react.spec.js:702:3 › T01 production tracer (desktop 1280x800)",
     ]
     return {
@@ -163,15 +163,21 @@ def _valid_bundle(
     with_rollback_probe: bool = False,
 ) -> tuple[dict, bytes, bytes]:
     """The canonical valid window: operator-simulated process p-1 (two
-    non-catalog records), release process p-2 (React owner, cataloged
-    static, mutation path, health), both with clean lifecycle spans."""
+    non-catalog records, or a prior-stage cataloged static hit when
+    ``operator_on_catalog``), release process p-2 (React owner, retired
+    static and mutation paths resolving to None in the current artifact,
+    health), both with clean lifecycle spans.  ``with_rollback_probe`` adds
+    the prior-artifact rollback-probe process p-3 (canonical React pages
+    resolve to None; the prior static/mutation owners still record)."""
     clock = FixedClock(T0)
     sink = InMemorySink()
+    p1_stage = "prior" if operator_on_catalog else "current"
+    p1_sha = PRIOR_ARTIFACT_SHA if operator_on_catalog else ARTIFACT_SHA
     p1 = ObservationRecorder(
         clock, sink,
-        window_id=WINDOW_ID, artifact_sha256=ARTIFACT_SHA,
+        window_id=WINDOW_ID, artifact_sha256=p1_sha,
         process_id="p-1", process_class="operator-simulated",
-        artifact_stage="current", family_table=FAMILY_TABLE,
+        artifact_stage=p1_stage, family_table=FAMILY_TABLE,
     )
     p2 = ObservationRecorder(
         clock, sink,
@@ -215,6 +221,7 @@ def _valid_bundle(
     p2.record_lifecycle("end")  # T0+9
 
     cohort = ["p-1", "p-2"]
+    has_prior_stage = operator_on_catalog or with_rollback_probe
     if with_rollback_probe:
         clock.advance(timedelta(seconds=1))
         p3 = ObservationRecorder(
@@ -241,24 +248,33 @@ def _valid_bundle(
         )
         clock.advance(timedelta(seconds=1))
         p3.record_http(
+            method="GET", path="/static/app.js", response_status=200,
+            matched_route_owner="StaticFiles",
+        )
+        clock.advance(timedelta(seconds=1))
+        p3.record_http(
             method="DELETE", path="/api/kb/address_aliases/somekey",
             response_status=200, matched_route_owner="kb_delete",
         )
         clock.advance(timedelta(seconds=1))
-        p3.record_lifecycle("end")  # T0+15
+        p3.record_lifecycle("end")  # T0+16
         cohort.append("p-3")
 
     return _seal(
         tmp_path, sink,
         window_start=T0 - timedelta(seconds=1),
-        window_end=T0 + timedelta(seconds=18 if with_rollback_probe else 10),
+        window_end=T0 + timedelta(seconds=19 if with_rollback_probe else 10),
         cohort=tuple(cohort),
         prior_artifact=(
             {"wheel_sha256": PRIOR_ARTIFACT_SHA, "commit": "d" * 40}
-            if with_rollback_probe
+            if has_prior_stage
             else None
         ),
-        release_evidence=_release_evidence() if with_rollback_probe else None,
+        release_evidence=(
+            _release_evidence(elapsed_seconds=20.0 if with_rollback_probe else 11.0)
+            if has_prior_stage
+            else None
+        ),
     )
 
 
@@ -330,8 +346,9 @@ def test_valid_bundle_verifies_with_exact_counts(tmp_path: Path) -> None:
         "legacy-mutation-kb-delete",
         "legacy-mutation-kb-reload-post",
     )}
-    entry_counts["legacy-static-app-js"]["release"] = 1
-    entry_counts["legacy-mutation-rules-put"]["release"] = 1
+    # Issue #45 contraction: every current-artifact request to a retired
+    # static/mutation surface and every canonical React page resolves to
+    # no legacy surface, so the base window has zero catalog hits.
     assert verdict.per_entry_counts == entry_counts
     assert verdict.acceptance is not None
     assert verdict.acceptance.zero_caller_ok
@@ -349,9 +366,10 @@ def test_valid_bundle_verifies_with_exact_counts(tmp_path: Path) -> None:
 
 
 def test_valid_bundle_canonical_records(tmp_path: Path) -> None:
-    """The sealed records carry the canonical shapes: React owner, cataloged
-    static, mutation path, protected 404 (dynamic family, unmatched owner),
-    and health -- no raw paths, no query values, no concrete KB text."""
+    """The sealed records carry the canonical shapes: React owner, retired
+    static and mutation paths resolving to no legacy surface in the current
+    artifact, protected 404 (dynamic family, unmatched owner), and health
+    -- no raw paths, no query values, no concrete KB text."""
     _manifest, raw, _lifecycle_raw = _valid_bundle(tmp_path)
     records = _records(raw)
     by_seq = {record["sequence"]: record for record in records}
@@ -366,9 +384,11 @@ def test_valid_bundle_canonical_records(tmp_path: Path) -> None:
     assert by_seq[2]["matched_route_owner"] == "unmatched"
     assert by_seq[2]["normalized_path_family"] == DYNAMIC_KB_FAMILY
     assert by_seq[3]["matched_route_owner"] == "index"
-    assert by_seq[3]["legacy_surface_id"] is None
-    assert by_seq[4]["legacy_surface_id"] == "legacy-static-app-js"
-    assert by_seq[5]["legacy_surface_id"] == "legacy-mutation-rules-put"
+    assert by_seq[3]["legacy_surface_id"] is None  # canonical React owner
+    # The retired static and mutation surfaces are absent in the current
+    # artifact, so owner matches still resolve to no legacy surface.
+    assert by_seq[4]["legacy_surface_id"] is None
+    assert by_seq[5]["legacy_surface_id"] is None
     assert by_seq[5]["method"] == "PUT"
     assert by_seq[6]["traffic_class"] == "health"  # /api/health always health
     assert by_seq[6]["legacy_surface_id"] is None
@@ -584,7 +604,7 @@ def test_prior_stage_requires_the_complete_release_evidence_contract(tmp_path: P
 def test_release_evidence_rejects_resealed_semantic_alterations(tmp_path: Path) -> None:
     manifest, raw, lifecycle_raw = _valid_bundle(tmp_path, with_rollback_probe=True)
     cases = (
-        ("elapsed_seconds", 20.0, "elapsed_seconds does not match"),
+        ("elapsed_seconds", 21.0, "elapsed_seconds does not match"),
         ("network_routes", "default via 10.0.0.1 dev eth0", "loopback namespace"),
         ("viewports", ["1024x768", "390x844"], "viewport contract"),
         ("package_identity", "tampered-package", "package_identity is missing or malformed"),
@@ -912,16 +932,24 @@ def test_rollback_probe_catalog_hits_stay_separate_from_operator_counts(tmp_path
     manifest, raw, lifecycle_raw = _valid_bundle(tmp_path, with_rollback_probe=True)
     verdict = verify_bundle(manifest, requests_raw=raw, lifecycle_raw=lifecycle_raw)
     assert verdict.valid, verdict.reason
-    assert verdict.per_traffic_class_counts["rollback-probe"] == 4
+    assert verdict.per_traffic_class_counts["rollback-probe"] == 5
     assert verdict.per_traffic_class_counts["operator-simulated"] == 2
     assert verdict.per_entry_counts["legacy-mutation-kb-delete"]["rollback-probe"] == 1
+    assert verdict.per_entry_counts["legacy-static-app-js"]["rollback-probe"] == 1
+    # Prior-artifact canonical React pages resolve to no legacy surface
+    # (the fixed base serves the qualified React shell), so the page
+    # entries stay at zero.
+    for entry_id in (
+        "legacy-page-root",
+        "legacy-page-controlled-s01",
+        "legacy-page-controlled-s02",
+    ):
+        assert verdict.per_entry_counts[entry_id]["rollback-probe"] == 0, entry_id
     assert verdict.acceptance is not None
     assert verdict.acceptance.zero_caller_ok
     assert verdict.acceptance.operator_catalog_hits == {}
     assert verdict.acceptance.rollback_probe_catalog_hits == {
-        "legacy-page-root": 1,
-        "legacy-page-controlled-s01": 1,
-        "legacy-page-controlled-s02": 1,
+        "legacy-static-app-js": 1,
         "legacy-mutation-kb-delete": 1,
     }
     assert manifest["process_artifacts"]["p-3"] == {
@@ -931,14 +959,16 @@ def test_rollback_probe_catalog_hits_stay_separate_from_operator_counts(tmp_path
     }
 
 
-def test_removing_a_prior_legacy_hit_invalidates_even_after_resealing(
-    tmp_path: Path,
-) -> None:
+def test_removing_a_prior_legacy_hit_no_longer_invalidates(tmp_path: Path) -> None:
+    """Issue #45 removed the dedicated prior-artifact page-hit threshold:
+    prior canonical pages resolve to the React shell (no legacy surface),
+    so a window without a prior page hit stays VALID as long as the prior
+    artifact identity, lifecycle and release evidence remain intact."""
     manifest, raw, lifecycle_raw = _valid_bundle(tmp_path, with_rollback_probe=True)
     records = [
         record
         for record in _records(raw)
-        if record["legacy_surface_id"] != "legacy-page-root"
+        if record["legacy_surface_id"] != "legacy-mutation-kb-delete"
     ]
     for sequence, record in enumerate(records, 1):
         record["sequence"] = sequence
@@ -946,14 +976,14 @@ def test_removing_a_prior_legacy_hit_invalidates_even_after_resealing(
     changed = copy.deepcopy(manifest)
     changed["expected_sequence_range"] = [1, len(records)]
     changed["per_traffic_class_counts"]["rollback-probe"] -= 1
-    changed["per_entry_counts"]["legacy-page-root"]["rollback-probe"] = 0
+    changed["per_entry_counts"]["legacy-mutation-kb-delete"]["rollback-probe"] = 0
     changed = _rehash(changed, raw=raw2)
-    _expect_invalid(
-        changed,
-        raw2,
-        lifecycle_raw,
-        "required prior-artifact rollback observation missing for legacy-page-root",
-    )
+    verdict = verify_bundle(changed, requests_raw=raw2, lifecycle_raw=lifecycle_raw)
+    assert verdict.valid, verdict.reason
+    assert verdict.acceptance is not None
+    assert verdict.acceptance.rollback_probe_catalog_hits == {
+        "legacy-static-app-js": 1,
+    }
 
 
 # --- 3. classification ------------------------------------------------------
@@ -1081,9 +1111,9 @@ def test_artifact_stage_controls_owner_while_traffic_class_only_classifies() -> 
         )
         return recorder.record_http(
             method="GET",
-            path="/",
+            path="/static/app.js",
             response_status=200,
-            matched_route_owner="index",
+            matched_route_owner="StaticFiles",
         )
 
     current_release = record("release", "current")
@@ -1091,7 +1121,7 @@ def test_artifact_stage_controls_owner_while_traffic_class_only_classifies() -> 
     prior_rollback = record("rollback-probe", "prior")
     assert current_release["legacy_surface_id"] is None
     assert current_rollback_class["legacy_surface_id"] is None
-    assert prior_rollback["legacy_surface_id"] == "legacy-page-root"
+    assert prior_rollback["legacy_surface_id"] == "legacy-static-app-js"
     assert current_rollback_class["traffic_class"] == "rollback-probe"
 
 
@@ -1515,9 +1545,15 @@ def create_prior_observer_wrapped_app() -> Any:
     """Uvicorn app factory for the rollback probe: the repo app stands in
     for the prior artifact, wrapped by the current observation module.  The
     installed rollback stage in the release harness wraps the true prior
-    wheel the same way."""
+    wheel the same way.  The repo app self-registers its own observation
+    middleware at import (Issue #54); like the harness wrapper it is
+    neutralized here so the current observation module records each
+    rollback request exactly once."""
     import task4_consistency.web.app as web
 
+    inner = getattr(web, "_OBSERVATION_RECORDER", None)
+    if inner is not None:
+        inner.enabled = False
     return wrap_prior_artifact_app(web.create_app(), load_current_observation_module())
 
 
@@ -1525,9 +1561,10 @@ def test_http_observation_records_closed_schema_and_preserves_authority(
     tmp_path: Path,
 ) -> None:
     """Real uvicorn + observation env: canonical shell, protected 404,
-    cataloged static, mutation path and a handler rejection produce closed
-    records with the resolved route owner and final status, while session
-    issuance and authority reads stay unchanged."""
+    retired static/mutation surfaces resolving to no legacy surface, and a
+    handler rejection produce closed records with the resolved route owner
+    and final status, while session issuance and authority reads stay
+    unchanged."""
     state_path = tmp_path / "t54-obs-http.sqlite3"
     log_dir = tmp_path / "obs-log"
     env = _observation_environment(state_path, log_dir)
@@ -1554,16 +1591,19 @@ def test_http_observation_records_closed_schema_and_preserves_authority(
         )
         assert not_found.status == 404, not_found.text
 
+        # Issue #45 contraction: the five product files are deleted and the
+        # five mutation handlers are retired, so the retired surfaces are
+        # absent from the HTTP surface with the framework absence status.
         static = server.request("GET", "/static/app.js", use_session=False)
-        assert static.status == 200, static.text
+        assert static.status == 404, static.text
 
         reloaded = server.request("POST", "/api/kb/reload", use_session=False)
-        assert reloaded.status == 200, reloaded.text
+        assert reloaded.status == 404, reloaded.text
 
         rejected = server.request(
             "DELETE", "/api/kb/unknown-section/somekey", use_session=False
         )
-        assert rejected.status == 400, rejected.text
+        assert rejected.status == 404, rejected.text
 
         health = server.request("GET", "/api/health", use_session=False)
         assert health.status == 200, health.text
@@ -1582,28 +1622,23 @@ def test_http_observation_records_closed_schema_and_preserves_authority(
     assert by_family["/"]["legacy_surface_id"] is None  # canonical React owner
     assert by_family["/controlled/s01"]["matched_route_owner"] == "controlled_s01_page"
     assert by_family["/controlled/s01"]["legacy_surface_id"] is None  # React owner
-    assert by_family["/static/app.js"]["legacy_surface_id"] == "legacy-static-app-js"
-    assert (
-        by_family["/api/kb/reload"]["legacy_surface_id"]
-        == "legacy-mutation-kb-reload-post"
-    )
-    assert (
-        by_family["/api/kb/{section}/{key}"]["legacy_surface_id"]
-        == "legacy-mutation-kb-delete"
-    )
+    # Retired static/mutation surfaces resolve to no legacy surface in the
+    # current artifact.
+    assert by_family["/static/app.js"]["legacy_surface_id"] is None
+    assert by_family["/api/kb/reload"]["legacy_surface_id"] is None
+    assert by_family["/api/kb/{section}/{key}"]["legacy_surface_id"] is None
     assert by_family["/api/health"]["traffic_class"] == "health"
     assert by_family["/api/health"]["matched_route_owner"] == "health"
     assert all(record["traffic_class"] != "unknown" for record in records)
     assert all(record["matched_route_owner"] for record in records)
     assert all(
-        record["response_status"] in (200, 400, 404) for record in records
+        record["response_status"] in (200, 404) for record in records
     )
     sequences = [record["sequence"] for record in records]
     assert sequences == list(range(1, len(sequences) + 1))
 
-    # The sealed window is valid; operator-simulated requests to retained
-    # legacy surfaces fail only the zero-caller acceptance, exactly as the
-    # catalog contract requires.
+    # The sealed window is valid; no retired surface is observable, so the
+    # zero-caller acceptance holds for the operator-simulated cohort.
     lifecycle = [
         json.loads(line)
         for line in (log_dir / "process-lifecycle.jsonl")
@@ -1640,12 +1675,8 @@ def test_http_observation_records_closed_schema_and_preserves_authority(
     verdict = observation_module.verify_bundle(tmp_path / "obs-bundle" / "manifest.json")
     assert verdict.valid, verdict.reason
     assert verdict.acceptance is not None
-    assert verdict.acceptance.zero_caller_ok is False
-    assert verdict.acceptance.operator_catalog_hits == {
-        "legacy-static-app-js": 1,
-        "legacy-mutation-kb-reload-post": 1,
-        "legacy-mutation-kb-delete": 1,
-    }
+    assert verdict.acceptance.zero_caller_ok is True
+    assert verdict.acceptance.operator_catalog_hits == {}
 
 
 def test_http_observation_is_capture_free_without_observation_environment(
@@ -1728,6 +1759,22 @@ def test_prior_artifact_observer_factory_wraps_without_altering_prior_bytes(
 
     records = _read_request_records(log_dir)
     by_family = {record["normalized_path_family"]: record for record in records}
-    assert by_family["/"]["legacy_surface_id"] == "legacy-page-root"
+    # Issue #45: canonical React pages (root/S01) resolve to no legacy
+    # surface even from the prior-artifact observer wrapper.
+    assert by_family["/"]["legacy_surface_id"] is None
     assert by_family["/"]["traffic_class"] == "rollback-probe"
     assert by_family["/api/health"]["traffic_class"] == "health"
+    # The wrapped prior app still self-registers its own observation
+    # middleware (Issue #54); the factory neutralizes it so the current
+    # observer records each request exactly once.  Duplicated correlations
+    # would invalidate a sealed window, so assert uniqueness + a single
+    # lifecycle span here.
+    correlations = [record["correlation_id"] for record in records]
+    assert len(correlations) == len(set(correlations)), "correlation ids duplicated"
+    lifecycle = [
+        json.loads(line)
+        for line in (log_dir / "process-lifecycle.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert [entry["event"] for entry in lifecycle] == ["start", "end"]

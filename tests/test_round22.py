@@ -4,16 +4,11 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from task4_consistency.audit import audit_log_path, read_audit_tail, write_audit
-from task4_consistency.web import app as webapp
+from task4_consistency.audit import read_audit_tail, write_audit
 from task4_consistency.web.app import app
-
-ROOT = Path(__file__).resolve().parents[1]
-RULES = ROOT / "configs" / "rules_auto_lease.yaml"
 
 
 def test_health_has_rules_kb_version():
@@ -42,21 +37,6 @@ def test_audit_jsonl_write_and_tail(tmp_path, monkeypatch):
     assert events[-1]["action"] in {"kb_add", "rules_save"}
     lines = log.read_text(encoding="utf-8").strip().splitlines()
     assert all(json.loads(x).get("action") for x in lines)
-
-
-def test_rules_save_writes_audit(tmp_path, monkeypatch):
-    log = tmp_path / "a.log"
-    runtime = tmp_path / "runtime_rules.yaml"
-    monkeypatch.setenv("TASK4_AUDIT_LOG", str(log))
-    monkeypatch.delenv("TASK4_WEB_TOKEN", raising=False)
-    monkeypatch.setattr(webapp, "RUNTIME_RULES", runtime)
-    client = TestClient(webapp.app)
-    good = RULES.read_text(encoding="utf-8")
-    r = client.put("/api/rules", json={"yaml_text": good})
-    assert r.status_code == 200
-    assert log.exists()
-    actions = [json.loads(x)["action"] for x in log.read_text(encoding="utf-8").splitlines() if x.strip()]
-    assert "rules_save" in actions
 
 
 def test_audit_recent_api(tmp_path, monkeypatch):

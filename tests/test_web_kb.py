@@ -150,7 +150,7 @@ def test_org_alias_brand_normalize():
 
 
 def test_web_rules_validate_and_reject_bad_yaml(tmp_path, monkeypatch):
-    """Round13: dry-run validate + invalid save must not poison runtime."""
+    """Round13: dry-run validate + invalid payloads never touch runtime."""
     import task4_consistency.web.app as webapp
 
     runtime = tmp_path / "runtime_rules.yaml"
@@ -166,7 +166,7 @@ def test_web_rules_validate_and_reject_bad_yaml(tmp_path, monkeypatch):
     assert not runtime.exists()  # validate must not write
 
     # invalid YAML syntax
-    r = client.put("/api/rules", json={"yaml_text": "rules: [\n  - id: x\n type broken"})
+    r = client.post("/api/rules/validate", json={"yaml_text": "rules: [\n  - id: x\n type broken"})
     assert r.status_code == 400
     detail = r.json()["detail"]
     assert isinstance(detail, dict)
@@ -184,20 +184,16 @@ rules:
     field: vin
     docs: [机动车登记证书]
 """
-    r = client.put("/api/rules", json={"yaml_text": bad})
+    r = client.post("/api/rules/validate", json={"yaml_text": bad})
     assert r.status_code == 400
     detail = r.json()["detail"]
     assert "message" in detail
     assert not runtime.exists()
 
-    # good save then bad save rolls back
-    r = client.put("/api/rules", json={"yaml_text": good})
-    assert r.status_code == 200
-    assert runtime.exists()
-    prev = runtime.read_text(encoding="utf-8")
-    r = client.put("/api/rules", json={"yaml_text": bad})
-    assert r.status_code == 400
-    assert runtime.read_text(encoding="utf-8") == prev
+    # valid again after rejects: still dry-run, runtime never appears
+    r = client.post("/api/rules/validate", json={"yaml_text": good})
+    assert r.status_code == 200, r.text
+    assert not runtime.exists()
 
 
 def test_web_check_missing_documents_tip():
@@ -207,12 +203,3 @@ def test_web_check_missing_documents_tip():
     d = r.json()["detail"]
     assert d["error"] == "missing_documents"
     assert "hint" in d
-
-
-def test_web_kb_empty_key_rejected():
-    client = TestClient(app)
-    r = client.post(
-        "/api/kb",
-        json={"section": "org_aliases", "key": "  ", "value": "x"},
-    )
-    assert r.status_code == 422  # pydantic validation

@@ -88,24 +88,75 @@ def create_t10_test_app() -> Any:
         web.S01_REACT_INDEX = Path(react_dir).resolve() / "index.html"
     return web.app
 
-# --- Group 1: contracted legacy entry catalog gate (Issue #54) -------------
+# --- Group 1: contracted legacy entry catalog gate (Issue #45) -------------
 #
-# The production gate is one catalog completeness/source-edge assertion over
-# the public scanner (task4_consistency/web/legacy_catalog.py).  The former
-# test-local scanners, allowlists and parser ownership were retired after the
-# public replacement passed; the parameterized public attack matrix lives in
-# tests/test_t54_legacy_catalog.py::TestPublicScanAttackMatrix (method flip,
-# concatenation, new React callers, duplicate allowed-file calls, inline
-# template calls, read-only diagnostics and the KB reload family).
+# The production gate is one catalog absence/reintroduction assertion over
+# the public scanner (task4_consistency/web/legacy_catalog.py).  Issue #45
+# contracted the ten cataloged surfaces: the five physical web files are
+# deleted and the five direct mutation handlers are retired, so the current
+# tree expectation is ABSENCE.  The scan therefore reports every
+# reintroduced retired file, route handler or caller as a failure; the
+# parameterized public reintroduction matrix lives in
+# tests/test_t54_legacy_catalog.py.
+
+RETIRED_WEB_FILES = (
+    "task4_consistency/web/templates/index.html",
+    "task4_consistency/web/templates/s01.html",
+    "task4_consistency/web/templates/s02.html",
+    "task4_consistency/web/static/app.js",
+    "task4_consistency/web/static/style.css",
+)
+
+# (method, path, framework absence status) for the five retired direct
+# mutation surfaces: 405 when the path still exists with other methods,
+# 404 when no route remains.
+RETIRED_MUTATION_CONTRACT = (
+    ("PUT", "/api/rules", 405),
+    ("POST", "/api/rules/reset", 404),
+    ("POST", "/api/kb", 405),
+    ("DELETE", "/api/kb/address_aliases/somekey", 404),
+    ("POST", "/api/kb/reload", 404),
+)
 
 
-def test_legacy_mutation_callers_are_frozen_to_exact_production_owners() -> None:
-    """The production source tree satisfies the complete contracted catalog
-    gate: exact declared owners, frozen rollback occurrences, zero canonical
-    source edges, zero direct-store drift and no uncataloged legacy route."""
+def test_contracted_legacy_surfaces_are_physically_retired() -> None:
+    """The production tree satisfies the complete post-contraction catalog
+    gate: every retired file absent, every retired handler absent from the
+    route table and OpenAPI, canonical React routes and the /static mount
+    intact, and zero canonical source edges / direct-store drift."""
+    import task4_consistency.web.app as web
+
+    for relative in RETIRED_WEB_FILES:
+        assert not (ROOT / relative).is_file(), f"retired file reappeared: {relative}"
+    route_method_paths = {
+        (method, path)
+        for route in web.app.routes
+        for method in (getattr(route, "methods", None) or ())
+        for path in (getattr(route, "path", None),)
+        if path is not None
+    }
+    for method, path, _status in RETIRED_MUTATION_CONTRACT:
+        assert (method, path) not in route_method_paths, (
+            f"retired mutation route reappeared: {method} {path}"
+        )
+    spec = web.app.openapi()
+    paths = spec["paths"]
+    assert "put" not in paths.get("/api/rules", {})
+    assert "post" not in paths.get("/api/kb", {})
+    assert "/api/rules/reset" not in paths
+    assert "/api/kb/reload" not in paths
+    assert "/api/kb/{section}/{key}" not in paths
+    assert "get" in paths.get("/api/rules", {})
+    assert "get" in paths.get("/api/kb", {})
+    # Canonical React routes stay served by the explicit FastAPI handlers.
+    assert "/" in paths
+    assert "/controlled/s01" in paths
+    assert "/controlled/s02" in paths
+
     report = scan_legacy_contract(ROOT)
     assert report.completeness_ok, (
         f"catalog completeness failed: "
+        f"retired_owners_present={[r for r in report.retired_owners_present]} "
         f"missing_owners={[m for m in report.missing_owners]} "
         f"uncataloged_routes={[r for r in report.uncataloged_routes]} "
         f"occurrence_mismatches={[m for m in report.occurrence_mismatches]}"
@@ -119,6 +170,7 @@ def test_legacy_mutation_callers_are_frozen_to_exact_production_owners() -> None
             ]
         )
     )
+    assert report.retired_owners_present == ()
     assert report.direct_store_mismatches == (), (
         "direct-store mutation callers changed: "
         + repr(
@@ -129,6 +181,47 @@ def test_legacy_mutation_callers_are_frozen_to_exact_production_owners() -> None
         )
     )
     assert report.ok
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "expected_status"),
+    RETIRED_MUTATION_CONTRACT,
+)
+def test_retired_mutation_paths_return_framework_absence_status(
+    tmp_path: Path, method: str, path: str, expected_status: int
+) -> None:
+    """Each retired direct-mutation surface returns the framework absence
+    status (405 for a known path without the method, 404 when no route
+    remains) and leaves the active rules and KB read projection
+    byte-identical."""
+    import task4_consistency.web.app as web
+
+    react_live = tmp_path / "react"
+    shutil.copytree(
+        Path(web.__file__).resolve().parent / "static" / "react", react_live
+    )
+    state_path = tmp_path / "t10-retired.sqlite3"
+    env = _create_t01_app_environment(state_path, "verified", str(react_live))
+    env["TASK4_WEB_TOKEN"] = ""  # open demo mode for the read projection
+    with UvicornLoopback(
+        env,
+        app_target=T10_APP_FACTORY,
+        app_factory=True,
+    ) as server:
+        before = server.request("GET", "/api/rules", use_session=False)
+        assert before.status == 200, before.text
+        before_kb = server.request("GET", "/api/kb", use_session=False)
+        assert before_kb.status == 200, before_kb.text
+
+        response = server.request(method, path, use_session=False)
+        assert response.status == expected_status, response.text
+
+        after = server.request("GET", "/api/rules", use_session=False)
+        assert after.status == 200, after.text
+        assert after.text == before.text, "active rules changed by a retired surface"
+        after_kb = server.request("GET", "/api/kb", use_session=False)
+        assert after_kb.status == 200, after_kb.text
+        assert after_kb.text == before_kb.text, "KB read projection changed"
 
 
 # --- Group 2: retired installed-package seams (Issue #54) -------------------

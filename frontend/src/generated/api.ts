@@ -253,8 +253,7 @@ export interface paths {
         /** Kb Get */
         get: operations["kb_get_api_kb_get"];
         put?: never;
-        /** Kb Add */
-        post: operations["kb_add_api_kb_post"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -276,40 +275,6 @@ export interface paths {
         put?: never;
         post?: never;
         delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/kb/reload": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Kb Reload */
-        post: operations["kb_reload_api_kb_reload_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/kb/{section}/{key}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post?: never;
-        /** Kb Delete */
-        delete: operations["kb_delete_api_kb__section___key__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -344,32 +309,8 @@ export interface paths {
         };
         /** Get Rules */
         get: operations["get_rules_api_rules_get"];
-        /**
-         * Put Rules
-         * @description Atomic save: validate+fingerprint first; then lock → tmp+fsync+replace.
-         *
-         *     ARCH Round16 W1: on any failure **never touch** active runtime_rules.yaml
-         *     (no write_text rollback).
-         */
-        put: operations["put_rules_api_rules_put"];
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/rules/reset": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
         put?: never;
-        /** Reset Rules */
-        post: operations["reset_rules_api_rules_reset_post"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2314,18 +2255,6 @@ export interface components {
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
-        };
-        /** KBItem */
-        KBItem: {
-            /** Key */
-            key: string;
-            /**
-             * Section
-             * @description address_aliases | org_aliases | plate_prefixes
-             */
-            section: string;
-            /** Value */
-            value: string;
         };
         /** RulesBody */
         RulesBody: {
@@ -6208,41 +6137,6 @@ export interface operations {
             };
         };
     };
-    kb_add_api_kb_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["KBItem"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     kb_graph_api_kb_graph_get: {
         parameters: {
             query?: never;
@@ -6261,62 +6155,6 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
-                };
-            };
-        };
-    };
-    kb_reload_api_kb_reload_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-        };
-    };
-    kb_delete_api_kb__section___key__delete: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                section: string;
-                key: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -6344,63 +6182,6 @@ export interface operations {
         };
     };
     get_rules_api_rules_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-        };
-    };
-    put_rules_api_rules_put: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["RulesBody"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    reset_rules_api_rules_reset_post: {
         parameters: {
             query?: never;
             header?: never;

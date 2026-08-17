@@ -8,7 +8,19 @@ const VIEWPORTS = [
   { width: 390, height: 844, label: "390x844" },
 ];
 
-test("T54 installed prior artifact serves legacy root, S01, and S02 at both viewports", async ({
+/** The canonical qualified React shell contract shared by the T01 shell and
+ * canonical-route contracts: no-store shell response, the #root shell element
+ * and exactly one content-hashed /static/react/assets/ module reference. */
+async function assertReactShell(page, response) {
+  expect(response.status()).toBe(200);
+  expect(response.headers()["cache-control"]).toContain("no-store");
+  await expect(page.locator("#root")).toBeAttached();
+  await expect(page.locator('script[src*="/static/react/assets/"]')).toHaveCount(
+    1,
+  );
+}
+
+test("T54 installed prior artifact serves the qualified React shell on root, S01, and S02 at both viewports", async ({
   browser,
 }) => {
   test.skip(!BASE_URL, "executed by the installed rollback harness");
@@ -20,9 +32,11 @@ test("T54 installed prior artifact serves legacy root, S01, and S02 at both view
     const rootResponse = await root.goto(`${BASE_URL}/`, {
       waitUntil: "domcontentloaded",
     });
-    expect(rootResponse.status(), viewport.label).toBe(200);
-    await expect(root.locator('script[src="/static/app.js"]')).toHaveCount(1);
-    await expect(root.locator("#scenario-grid")).toBeVisible();
+    await assertReactShell(root, rootResponse);
+    await expect(root.getByTestId("demo-boundary-track")).toHaveText("C-DEMO");
+    await expect(root.getByTestId("demo-boundary-scope")).toHaveText(
+      "synthetic",
+    );
     await rootContext.close();
 
     const s01Context = await browser.newContext({
@@ -33,9 +47,9 @@ test("T54 installed prior artifact serves legacy root, S01, and S02 at both view
     const s01Response = await s01.goto(`${BASE_URL}/controlled/s01`, {
       waitUntil: "domcontentloaded",
     });
-    expect(s01Response.status(), viewport.label).toBe(200);
-    await expect(s01.locator("#normal-workbench")).toBeVisible();
-    await expect(s01.locator('[data-testid="boundary-gate"]')).toContainText("G1");
+    await assertReactShell(s01, s01Response);
+    await expect(s01.getByTestId("boundary-track")).toHaveText("C-DEMO");
+    await expect(s01.getByTestId("boundary-gate")).toHaveText("G2");
     await s01Context.close();
 
     const s02Context = await browser.newContext({
@@ -46,9 +60,11 @@ test("T54 installed prior artifact serves legacy root, S01, and S02 at both view
     const s02Response = await s02.goto(`${BASE_URL}/controlled/s02`, {
       waitUntil: "domcontentloaded",
     });
-    expect(s02Response.status(), viewport.label).toBe(200);
-    await expect(s02.locator("#queue-body")).toBeVisible();
-    await expect(s02.locator("#decision-form")).toBeAttached();
+    await assertReactShell(s02, s02Response);
+    await expect(s02.getByTestId("integrator-boundary-track")).toHaveText(
+      "R-OBSERVED",
+    );
+    await expect(s02.getByTestId("integrator-boundary-gate")).toHaveText("S02");
     await s02Context.close();
   }
 });

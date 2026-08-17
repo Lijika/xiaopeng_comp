@@ -54,7 +54,7 @@ Python ≥ 3.10；依赖轻量（PyYAML + 标准库）。系统 Python 若受 PE
 | **CLI check** | `python -m task4_consistency check <app.json> -c configs/rules_auto_lease.yaml` | 单申请三态报告 |
 | **evaluate main** | `python -m task4_consistency evaluate -c configs/rules_auto_lease.yaml --suite main -o out/metrics_main.json` | **唯一交付数字** |
 | **evaluate semi** | `… --suite semi -o out/metrics_semi.json` | external_ocr 集；无 label 时仅 smoke |
-| **Web 演示** | `bash scripts/run_web.sh` → http://127.0.0.1:8765/ | 校验 / 批量 / 规则 / KB；可选 `TASK4_WEB_TOKEN` |
+| **Web 演示** | `bash scripts/run_web.sh` → http://127.0.0.1:8765/ | 校验 / 批量 / 规则·KB 只读（变更走 S08/S09 治理）；可选 `TASK4_WEB_TOKEN` |
 | **OCR 导入** | `python scripts/import_external_ocr.py fixtures/ocr_inbox/example.json -o fixtures/semi/` | 离线中间 JSON，无 OCR 引擎 |
 | **bench** | `python scripts/bench.py` | → `out/bench.json`（mean≪50ms） |
 | **demo** | `bash scripts/demo.sh` | 报告样例 + evaluate + probes |
@@ -76,10 +76,10 @@ python -m task4_consistency evaluate \
 # 单元测试
 pytest -q
 
-# Web 集成演示 + 规则维护 + 知识库
+# Web 集成演示 + 规则/KB 只读视图（变更由 S08/S09 治理）
 bash scripts/run_web.sh
 # 浏览器打开 http://127.0.0.1:8765/
-#   校验演示 / 批量·evaluate(suite) / 规则维护 / 实体知识库
+#   校验演示 / 批量·evaluate(suite) / 规则·知识库（只读；变更走 S08 策略管理 / S09 治理工作区）
 ```
 
 ## 输入 / 输出

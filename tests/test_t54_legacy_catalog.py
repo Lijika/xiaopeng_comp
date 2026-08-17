@@ -1,12 +1,15 @@
-"""T54 contracted legacy entry catalog public seam (Issue #54).
+"""T54 contracted legacy entry catalog public seam (Issue #54) +
+post-contraction reintroduction guard (Issue #45).
 
 The catalog is the single code-owned authority for the retirement inventory
-of the contracted legacy HTTP surfaces.  This module tests the public seam:
-the exact stable ID set, the declared owner/route metadata (including the
-previously unscanned ``POST /api/kb/reload`` family), the completeness gate
-(missing owners / uncataloged legacy routes), and the public source scan
-(canonical edges vs rollback-internal occurrences) over a physically built
-temporary tree with injected callers.
+of the contracted legacy HTTP surfaces.  Issue #45 physically deleted the
+five cataloged web files and retired the five direct mutation handlers, so
+the current-tree expectation for every entry is ABSENCE.  This module tests
+the public seam: the exact stable ID set (unchanged), the declared
+retirement metadata, the completeness gate (no reintroduced retired file,
+no reappeared handler, no uncataloged legacy route), and the public source
+scan (canonical edges vs zero rollback occurrences) over a physically built
+temporary tree with injected reintroductions.
 """
 
 from __future__ import annotations
@@ -38,176 +41,105 @@ EXPECTED_IDS = (
     "legacy-mutation-kb-reload-post",
 )
 
-# Declared rollback-owner files shared by the mutation entries (route
-# definitions in app.py, frozen call sites in static/app.js).
+# Retired product files (Issue #45 deletion list).
 APP_PY = "task4_consistency/web/app.py"
 APP_JS = "task4_consistency/web/static/app.js"
 S01_HTML = "task4_consistency/web/templates/s01.html"
+INDEX_HTML = "task4_consistency/web/templates/index.html"
+STYLE_CSS = "task4_consistency/web/static/style.css"
 
 
 def _entry(entry_id: str):
     return next(entry for entry in CONTRACTED_LEGACY_ENTRIES if entry.id == entry_id)
 
 
-def _copy_production_tree(tree: Path) -> None:
+def _copy_contracted_tree(tree: Path) -> None:
+    """The contracted production tree: the app module and the KB store
+    (every cataloged web file is absent by design)."""
     for relative in (
         APP_PY,
-        APP_JS,
         "task4_consistency/kb/store.py",
         "task4_consistency/kb/__init__.py",
-        S01_HTML,
-        "task4_consistency/web/templates/s02.html",
-        "task4_consistency/web/templates/index.html",
-        "task4_consistency/web/static/style.css",
     ):
         target = tree / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / relative, target)
 
 
+def _write_evil_caller(tree: Path, body: str) -> Path:
+    evil = tree / "frontend" / "src" / "evil.tsx"
+    evil.parent.mkdir(parents=True, exist_ok=True)
+    evil.write_text(body, encoding="utf-8")
+    return evil
+
+
 def test_catalog_contains_exact_ten_contracted_legacy_surfaces() -> None:
     """The catalog is the frozen authority: exactly the ten stable IDs from
-    the #45 contraction contract, in a stable order."""
+    the #45 contraction contract, in a stable order, all retired."""
     assert tuple(entry.id for entry in CONTRACTED_LEGACY_ENTRIES) == EXPECTED_IDS
     assert len({entry.id for entry in CONTRACTED_LEGACY_ENTRIES}) == 10
+    assert all(entry.retired for entry in CONTRACTED_LEGACY_ENTRIES)
 
 
-def test_reload_entry_declares_route_owner_and_never_canonical_edges() -> None:
-    """``POST /api/kb/reload`` is a contracted surface with its FastAPI
-    route definition as the declared owner; the fixed base has zero
-    canonical source edges for it."""
-    reload_entry = _entry("legacy-mutation-kb-reload-post")
-    assert reload_entry.method == "POST"
-    assert reload_entry.path == "/api/kb/reload"
-    assert reload_entry.kind == "mutation"
-    assert APP_PY in reload_entry.owners
+def test_retirement_metadata_is_frozen_per_entry() -> None:
+    """Every entry declares the retired physical files it guards and the
+    expected route-owner occurrence (0 for the retired mutation handlers,
+    1 for the retained canonical React pages and the /static mount)."""
+    expected_retired_files = {
+        "legacy-page-root": (INDEX_HTML,),
+        "legacy-page-controlled-s01": (S01_HTML,),
+        "legacy-page-controlled-s02": ("task4_consistency/web/templates/s02.html",),
+        "legacy-static-app-js": (APP_JS, INDEX_HTML),
+        "legacy-static-style-css": (STYLE_CSS, INDEX_HTML),
+        "legacy-mutation-rules-put": (APP_JS,),
+        "legacy-mutation-rules-reset-post": (APP_JS,),
+        "legacy-mutation-kb-post": (APP_JS,),
+        "legacy-mutation-kb-delete": (APP_JS,),
+        "legacy-mutation-kb-reload-post": (),
+    }
+    for entry in CONTRACTED_LEGACY_ENTRIES:
+        assert entry.retired_files == expected_retired_files[entry.id], entry.id
+        assert entry.route_owner_file == APP_PY, entry.id
+        if entry.kind == "mutation":
+            assert entry.expected_route_owner_occurrences == 0, entry.id
+            assert dict(entry.rollback_occurrences).get(APP_PY, 0) == 0
+        else:
+            assert entry.expected_route_owner_occurrences == 1, entry.id
+
+
+def test_contracted_tree_scan_passes_with_zero_presence() -> None:
+    """The production tree satisfies the complete post-contraction
+    contract: all entries retired, no reintroduced retired file, no
+    reappeared handler, zero canonical source edges, zero occurrences and
+    no direct-store drift."""
     report = scan_legacy_contract(ROOT)
-    assert report.completeness_ok
-    assert report.zero_canonical_source_edges
-    assert report.ok
-    assert not any(
-        edge.entry_id == reload_entry.id for edge in report.canonical_source_edges
+    assert report.completeness_ok, (
+        f"retired_owners_present={[r for r in report.retired_owners_present]} "
+        f"route_owner_mismatches={[m for m in report.route_owner_mismatches]} "
+        f"uncataloged_routes={[r for r in report.uncataloged_routes]} "
+        f"occurrence_mismatches={[m for m in report.occurrence_mismatches]}"
     )
-    assert match_legacy_surface("POST", "/api/kb/reload") == reload_entry.id
-
-
-def test_fixed_base_scan_reports_exact_owners_and_zero_canonical_edges() -> None:
-    """The production tree at the fixed base satisfies the complete
-    retirement contract: every declared owner present, every rollback
-    occurrence exactly frozen, no uncataloged legacy route, and zero
-    canonical source edges for every entry."""
-    report = scan_legacy_contract(ROOT)
-    assert report.completeness_ok
     assert report.zero_canonical_source_edges
-    assert report.missing_owners == ()
-    assert report.uncataloged_routes == ()
+    assert report.retired_owners_present == ()
+    assert report.route_owner_mismatches == ()
     assert report.occurrence_mismatches == ()
     assert report.direct_store_mismatches == ()
     assert report.ok
-    # Declared owners are exactly the current production files.
-    assert report.entries["legacy-mutation-rules-put"].declared_owners == (
-        APP_PY,
-        APP_JS,
-    )
-    assert report.entries["legacy-page-controlled-s01"].declared_owners == (S01_HTML,)
-    # The canonical React routes are catalog-driven route inventory.
     assert "/" in CANONICAL_REACT_ROUTES
     assert "/controlled/s01" in CANONICAL_REACT_ROUTES
     assert "/controlled/s02" in CANONICAL_REACT_ROUTES
     assert all(entry.route_owner_symbol for entry in CONTRACTED_LEGACY_ENTRIES)
-    assert all(item.route_owner_occurrences == 1 for item in report.entries.values())
-
-
-def test_scan_fails_when_declared_route_owner_symbol_is_renamed(tmp_path: Path) -> None:
-    tree = tmp_path / "renamed-route-owner"
-    _copy_production_tree(tree)
-    app = tree / APP_PY
-    app.write_text(
-        app.read_text(encoding="utf-8").replace("def kb_reload()", "def renamed_kb_reload()", 1),
-        encoding="utf-8",
+    # Retired mutation handlers are absent (observed 0 == expected 0) and
+    # the retained canonical React pages / static mount stay (observed 1).
+    for entry in CONTRACTED_LEGACY_ENTRIES:
+        assert report.entries[entry.id].route_owner_occurrences == (
+            entry.expected_route_owner_occurrences
+        ), entry.id
+    assert all(
+        item.route_owner_occurrences == 1
+        for item in report.entries.values()
+        if item.kind != "mutation"
     )
-    report = scan_legacy_contract(tree)
-    assert not report.completeness_ok
-    assert any(
-        mismatch.entry_id == "legacy-mutation-kb-reload-post"
-        and mismatch.owner_symbol == "kb_reload"
-        and mismatch.observed == 0
-        for mismatch in report.route_owner_mismatches
-    )
-
-
-def test_scan_fails_when_declared_page_route_disappears(tmp_path: Path) -> None:
-    tree = tmp_path / "missing-page-route"
-    _copy_production_tree(tree)
-    app = tree / APP_PY
-    app.write_text(
-        app.read_text(encoding="utf-8").replace(
-            '@app.get("/controlled/s01", response_class=HTMLResponse)',
-            '# removed controlled s01 route',
-            1,
-        ),
-        encoding="utf-8",
-    )
-    report = scan_legacy_contract(tree)
-    assert any(
-        mismatch.entry_id == "legacy-page-controlled-s01"
-        and mismatch.observed == 0
-        for mismatch in report.route_owner_mismatches
-    )
-
-
-def test_scan_fails_when_static_reference_disappears(tmp_path: Path) -> None:
-    tree = tmp_path / "missing-static-reference"
-    _copy_production_tree(tree)
-    template = tree / "task4_consistency/web/templates/index.html"
-    template.write_text(
-        template.read_text(encoding="utf-8").replace("/static/style.css", "/removed.css", 1),
-        encoding="utf-8",
-    )
-    report = scan_legacy_contract(tree)
-    assert any(
-        mismatch.entry_id == "legacy-static-style-css"
-        and mismatch.observed == 0
-        and mismatch.expected == 1
-        for mismatch in report.occurrence_mismatches
-    )
-
-
-def test_scan_detects_uncataloged_legacy_route_when_reload_entry_removed(
-    tmp_path: Path,
-) -> None:
-    """Completeness fails with the exact method/path and owner symbol when a
-    legacy route remains but no catalog entry claims it."""
-    tree = tmp_path / "injected-route-without-entry"
-    _copy_production_tree(tree)
-    entries_without_reload = tuple(
-        entry for entry in CONTRACTED_LEGACY_ENTRIES if entry.id != "legacy-mutation-kb-reload-post"
-    )
-    report = scan_legacy_contract(tree, entries=entries_without_reload)
-    assert not report.completeness_ok
-    assert not report.ok
-    assert any(
-        route.method == "POST"
-        and route.path == "/api/kb/reload"
-        and route.owner_file == APP_PY
-        and route.owner_symbol == "kb_reload"
-        for route in report.uncataloged_routes
-    ), report.uncataloged_routes
-
-
-def test_scan_reports_missing_declared_owner(tmp_path: Path) -> None:
-    """Renaming or deleting a declared template/static/handler owner fails
-    completeness with the entry ID and the missing owner path."""
-    tree = tmp_path / "injected-missing-owner"
-    _copy_production_tree(tree)
-    (tree / S01_HTML).rename(tree / f"{S01_HTML}.bak")
-    report = scan_legacy_contract(tree)
-    assert not report.completeness_ok
-    assert not report.ok
-    assert any(
-        missing.entry_id == "legacy-page-controlled-s01" and missing.owner == S01_HTML
-        for missing in report.missing_owners
-    ), report.missing_owners
 
 
 def test_match_legacy_surface_covers_ten_surfaces_and_stays_closed() -> None:
@@ -239,183 +171,167 @@ def test_match_legacy_surface_covers_ten_surfaces_and_stays_closed() -> None:
     assert match_legacy_surface("GET", "/api/kb/one-segment") is None
 
 
-class TestPublicScanAttackMatrix:
-    """Injected production-source callers must be reported through the
-    public scan exactly as the frozen contract requires (consolidated from
-    the former T10 parser-internal cases)."""
+class TestReintroductionAttackMatrix:
+    """Reintroducing any retired file, handler, caller or direct store
+    mutation must fail the public scan (Issue #45 post-contraction
+    guard)."""
 
-    def test_scan_reports_second_call_inside_allowed_owner(self, tmp_path: Path) -> None:
-        tree = tmp_path / "injected-extra-call"
-        _copy_production_tree(tree)
-        app_js = tree / APP_JS
-        app_js.write_text(
-            app_js.read_text(encoding="utf-8")
-            + '\nvoid fetch("/api/rules", { method: "PUT", body: "{}" });\n',
+    def test_scan_fails_when_retired_page_file_reappears(self, tmp_path: Path) -> None:
+        tree = tmp_path / "reintroduced-page-file"
+        _copy_contracted_tree(tree)
+        (tree / INDEX_HTML).parent.mkdir(parents=True, exist_ok=True)
+        (tree / INDEX_HTML).write_text("<html>legacy root</html>\n", encoding="utf-8")
+        report = scan_legacy_contract(tree)
+        assert not report.completeness_ok
+        assert not report.ok
+        assert any(
+            present.entry_id == "legacy-page-root" and present.owner == INDEX_HTML
+            for present in report.retired_owners_present
+        ), report.retired_owners_present
+
+    def test_scan_fails_when_retired_static_file_reappears(self, tmp_path: Path) -> None:
+        tree = tmp_path / "reintroduced-static-file"
+        _copy_contracted_tree(tree)
+        (tree / APP_JS).parent.mkdir(parents=True, exist_ok=True)
+        (tree / APP_JS).write_text("void 0;\n", encoding="utf-8")
+        report = scan_legacy_contract(tree)
+        assert not report.completeness_ok
+        assert not report.ok
+        assert any(
+            present.entry_id == "legacy-static-app-js" and present.owner == APP_JS
+            for present in report.retired_owners_present
+        ), report.retired_owners_present
+
+    def test_scan_fails_when_retired_handler_reappears(self, tmp_path: Path) -> None:
+        tree = tmp_path / "reintroduced-handler"
+        _copy_contracted_tree(tree)
+        app = tree / APP_PY
+        app.write_text(
+            app.read_text(encoding="utf-8")
+            + '\n\n@app.put("/api/rules")\ndef put_rules() -> dict:\n    return {"ok": True}\n',
             encoding="utf-8",
         )
         report = scan_legacy_contract(tree)
         assert not report.ok
         assert any(
             mismatch.entry_id == "legacy-mutation-rules-put"
-            and mismatch.path == APP_JS
-            and mismatch.observed == 3
-            and mismatch.expected == 2
-            for mismatch in report.occurrence_mismatches
-        ), report.occurrence_mismatches
-
-    def test_scan_normalizes_concatenated_put_caller(self, tmp_path: Path) -> None:
-        tree = tmp_path / "injected-concatenated-put"
-        _copy_production_tree(tree)
-        app_js = tree / APP_JS
-        app_js.write_text(
-            app_js.read_text(encoding="utf-8")
-            + '\nvoid fetch("/api/" + "rules", { method: "PUT", body: "{}" });\n',
-            encoding="utf-8",
-        )
-        report = scan_legacy_contract(tree)
-        assert not report.ok
+            and mismatch.owner_symbol == "put_rules"
+            and mismatch.observed == 1
+            and mismatch.expected == 0
+            for mismatch in report.route_owner_mismatches
+        ), report.route_owner_mismatches
         assert any(
             mismatch.entry_id == "legacy-mutation-rules-put"
-            for mismatch in report.occurrence_mismatches
-        ), report.occurrence_mismatches
-
-    def test_scan_semantic_method_flip_keeps_raw_token_count(self, tmp_path: Path) -> None:
-        tree = tmp_path / "injected-method-change"
-        _copy_production_tree(tree)
-        app_js = tree / APP_JS
-        changed = app_js.read_text(encoding="utf-8").replace(
-            'const kb = await api("/api/kb");',
-            'const kb = await api("/api/kb", { method: "POST", body: "{}" });',
-            1,
-        )
-        app_js.write_text(changed, encoding="utf-8")
-        report = scan_legacy_contract(tree)
-        # Raw endpoint text count stays equal; the semantic scan sees the
-        # new kb POST occurrence.
-        assert report.raw_token_counts[(APP_JS, "api_kb")] == 3
-        assert not report.ok
-        assert any(
-            mismatch.entry_id == "legacy-mutation-kb-post"
-            and mismatch.path == APP_JS
-            and mismatch.observed == 2
-            and mismatch.expected == 1
-            for mismatch in report.occurrence_mismatches
-        ), report.occurrence_mismatches
-
-    def test_scan_treats_read_only_raw_tokens_as_diagnostics(self, tmp_path: Path) -> None:
-        tree = tmp_path / "injected-read-only-token"
-        _copy_production_tree(tree)
-        app_js = tree / APP_JS
-        app_js.write_text(
-            app_js.read_text(encoding="utf-8") + '\nvoid fetch("/api/rules");\n',
-            encoding="utf-8",
-        )
-        report = scan_legacy_contract(tree)
-        assert report.raw_token_counts[(APP_JS, "api_rules")] == 4
-        assert report.zero_canonical_source_edges
-        assert report.ok
-
-    def test_scan_reports_inline_template_caller_on_s01_facet(self, tmp_path: Path) -> None:
-        tree = tmp_path / "injected-template-caller"
-        _copy_production_tree(tree)
-        s01 = tree / S01_HTML
-        s01.write_text(
-            s01.read_text(encoding="utf-8")
-            + '\n<script>void fetch("/api/rules", { method: "PUT", body: "{}" });</script>\n',
-            encoding="utf-8",
-        )
-        report = scan_legacy_contract(tree)
-        assert not report.ok
-        assert any(
-            mismatch.entry_id == "legacy-page-controlled-s01"
-            and mismatch.path == S01_HTML
             and mismatch.observed == 1
             and mismatch.expected == 0
             for mismatch in report.occurrence_mismatches
         ), report.occurrence_mismatches
 
-    def test_scan_reports_new_react_caller_for_reload(self, tmp_path: Path) -> None:
-        tree = tmp_path / "injected-reload-caller"
-        _copy_production_tree(tree)
-        evil = tree / "frontend" / "src" / "evil.tsx"
-        evil.parent.mkdir(parents=True, exist_ok=True)
-        evil.write_text(
-            "export function callLegacyReload(): void {\n"
-            '  void fetch("/api/kb/reload", { method: "POST", body: "{}" });\n'
+    def test_scan_fails_when_react_caller_reappears(self, tmp_path: Path) -> None:
+        tree = tmp_path / "reintroduced-caller"
+        _copy_contracted_tree(tree)
+        _write_evil_caller(
+            tree,
+            "export function callLegacyRules(): void {\n"
+            '  void fetch("/api/rules", { method: "PUT", body: "{}" });\n'
             "}\n",
+        )
+        report = scan_legacy_contract(tree)
+        assert not report.zero_canonical_source_edges
+        assert not report.ok
+        assert any(
+            edge.entry_id == "legacy-mutation-rules-put"
+            and edge.path == "frontend/src/evil.tsx"
+            and edge.occurrences == 1
+            for edge in report.canonical_source_edges
+        ), report.canonical_source_edges
+
+    def test_scan_fails_when_template_read_reappears(self, tmp_path: Path) -> None:
+        tree = tmp_path / "reintroduced-template-read"
+        _copy_contracted_tree(tree)
+        app = tree / APP_PY
+        app.write_text(
+            app.read_text(encoding="utf-8")
+            + "\ndef injected():\n    return S01_TEMPLATE.read_text()\n",
             encoding="utf-8",
         )
         report = scan_legacy_contract(tree)
         assert not report.zero_canonical_source_edges
         assert not report.ok
         assert any(
-            edge.entry_id == "legacy-mutation-kb-reload-post"
-            and edge.path == "frontend/src/evil.tsx"
-            and edge.occurrences == 1
-            for edge in report.canonical_source_edges
-        ), report.canonical_source_edges
-
-    def test_scan_reports_new_react_caller_for_rules(self, tmp_path: Path) -> None:
-        tree = tmp_path / "injected-src"
-        _copy_production_tree(tree)
-        evil = tree / "frontend" / "src" / "evil.tsx"
-        evil.parent.mkdir(parents=True, exist_ok=True)
-        evil.write_text(
-            "export function callLegacyRules(): void {\n"
-            '  void fetch("/api/rules", { method: "PUT", body: "{}" });\n'
-            "}\n",
-            encoding="utf-8",
-        )
-        report = scan_legacy_contract(tree)
-        assert any(
-            edge.entry_id == "legacy-mutation-rules-put"
-            and edge.path == "frontend/src/evil.tsx"
-            for edge in report.canonical_source_edges
-        ), report.canonical_source_edges
-
-    def test_scan_reports_new_static_asset_caller(self, tmp_path: Path) -> None:
-        tree = tmp_path / "injected-static-caller"
-        _copy_production_tree(tree)
-        evil = tree / "frontend" / "src" / "evil.tsx"
-        evil.parent.mkdir(parents=True, exist_ok=True)
-        evil.write_text('void fetch("/static/app.js");\n', encoding="utf-8")
-        report = scan_legacy_contract(tree)
-        assert any(
-            edge.entry_id == "legacy-static-app-js"
-            and edge.path == "frontend/src/evil.tsx"
-            for edge in report.canonical_source_edges
-        )
-
-    def test_scan_reports_direct_legacy_template_read(self, tmp_path: Path) -> None:
-        tree = tmp_path / "injected-template-read"
-        _copy_production_tree(tree)
-        app = tree / APP_PY
-        app.write_text(
-            app.read_text(encoding="utf-8") + "\ndef injected():\n    return S01_TEMPLATE.read_text()\n",
-            encoding="utf-8",
-        )
-        report = scan_legacy_contract(tree)
-        assert any(
             edge.entry_id == "legacy-page-controlled-s01" and edge.path == APP_PY
             for edge in report.canonical_source_edges
-        )
+        ), report.canonical_source_edges
 
-    def test_scan_normalizes_dynamic_path_and_concatenated_method(
+    def test_scan_fails_when_retired_static_reference_reappears(
         self, tmp_path: Path
     ) -> None:
-        tree = tmp_path / "injected-dynamic-delete"
-        _copy_production_tree(tree)
-        evil = tree / "frontend" / "src" / "evil.tsx"
-        evil.parent.mkdir(parents=True, exist_ok=True)
-        evil.write_text(
-            "export function remove(section: string, key: string): void {\n"
-            "  void fetch(`/api/kb/${section}/${key}`, { method: \"DE\" + \"LETE\" });\n"
-            "}\n",
+        tree = tmp_path / "reintroduced-static-reference"
+        _copy_contracted_tree(tree)
+        (tree / INDEX_HTML).parent.mkdir(parents=True, exist_ok=True)
+        (tree / INDEX_HTML).write_text(
+            '<html><link rel="stylesheet" href="/static/style.css"></html>\n',
             encoding="utf-8",
         )
         report = scan_legacy_contract(tree)
+        assert not report.ok
         assert any(
-            edge.entry_id == "legacy-mutation-kb-delete"
-            and edge.path == "frontend/src/evil.tsx"
-            for edge in report.canonical_source_edges
+            present.entry_id == "legacy-page-root" and present.owner == INDEX_HTML
+            for present in report.retired_owners_present
+        ), report.retired_owners_present
+        assert any(
+            mismatch.entry_id == "legacy-static-style-css"
+            and mismatch.path == INDEX_HTML
+            and mismatch.observed == 1
+            and mismatch.expected == 0
+            for mismatch in report.occurrence_mismatches
+        ), report.occurrence_mismatches
+
+    def test_scan_fails_when_direct_store_mutation_reappears(self, tmp_path: Path) -> None:
+        tree = tmp_path / "reintroduced-direct-store"
+        _copy_contracted_tree(tree)
+        app = tree / APP_PY
+        app.write_text(
+            app.read_text(encoding="utf-8")
+            + "\ndef injected():\n"
+            + '    return get_kb().add_alias("address_aliases", "x", "y")\n',
+            encoding="utf-8",
         )
+        report = scan_legacy_contract(tree)
+        assert not report.ok
+        assert any(
+            mismatch.path == APP_PY
+            and mismatch.token == "add_alias"
+            and mismatch.observed == 1
+            and mismatch.expected == 0
+            for mismatch in report.direct_store_mismatches
+        ), report.direct_store_mismatches
+
+    def test_scan_detects_uncataloged_legacy_route_when_reload_entry_removed(
+        self, tmp_path: Path
+    ) -> None:
+        """Completeness fails with the exact method/path and owner symbol
+        when a legacy route is reintroduced but no catalog entry claims it."""
+        tree = tmp_path / "injected-route-without-entry"
+        _copy_contracted_tree(tree)
+        app = tree / APP_PY
+        app.write_text(
+            app.read_text(encoding="utf-8")
+            + '\n\n@app.post("/api/kb/reload")\ndef kb_reload() -> dict:\n    return {"ok": True}\n',
+            encoding="utf-8",
+        )
+        entries_without_reload = tuple(
+            entry
+            for entry in CONTRACTED_LEGACY_ENTRIES
+            if entry.id != "legacy-mutation-kb-reload-post"
+        )
+        report = scan_legacy_contract(tree, entries=entries_without_reload)
+        assert not report.completeness_ok
+        assert not report.ok
+        assert any(
+            route.method == "POST"
+            and route.path == "/api/kb/reload"
+            and route.owner_file == APP_PY
+            and route.owner_symbol == "kb_reload"
+            for route in report.uncataloged_routes
+        ), report.uncataloged_routes

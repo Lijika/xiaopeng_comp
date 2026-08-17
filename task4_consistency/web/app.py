@@ -1,4 +1,4 @@
-"""FastAPI demo: check applications, edit rules, maintain entity KB."""
+"""FastAPI demo: check applications, validate rule packages, maintain entity KB reads."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import hmac
 import json
 import os
 import re
-import shutil
 import sys
 import tempfile
 import threading
@@ -30,7 +29,6 @@ from pydantic import (
     ConfigDict,
     Field,
     ValidationError,
-    field_validator,
     model_serializer,
 )
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -49,7 +47,7 @@ from task4_consistency.controlled.s02 import (
     RegisteredSource,
     load_runtime_registry,
 )
-from task4_consistency.kb.store import get_kb, reload_kb
+from task4_consistency.kb.store import get_kb
 
 from task4_consistency.models import Application
 from task4_consistency.report import report_to_html
@@ -72,10 +70,6 @@ DEFAULT_RULES = ROOT / "configs" / "rules_auto_lease.yaml"
 RUNTIME_RULES = ROOT / "configs" / "runtime_rules.yaml"
 FIXTURES = ROOT / "fixtures" / "applications"
 STATIC = Path(__file__).resolve().parent / "static"
-TEMPLATES = Path(__file__).resolve().parent / "templates"
-_KB_SECTIONS = {"address_aliases", "org_aliases", "plate_prefixes"}
-S01_TEMPLATE = TEMPLATES / "s01.html"
-S02_TEMPLATE = TEMPLATES / "s02.html"
 S01_REACT_STATIC = STATIC / "react"
 S01_REACT_INDEX = S01_REACT_STATIC / "index.html"
 
@@ -354,10 +348,6 @@ class S01Principal:
     roles: frozenset[str]
     scope: str
     expires_at: float
-
-
-# ARCH Round16 W1: serialize put/reset; no concurrent half-writes
-RULES_WRITE_LOCK = threading.Lock()
 
 
 class S01BackgroundRuntime:
@@ -789,30 +779,6 @@ class CheckBody(BaseModel):
 class RulesBody(BaseModel):
     content: dict[str, Any] | None = None
     yaml_text: str | None = None
-
-
-class KBItem(BaseModel):
-    section: str = Field(description="address_aliases | org_aliases | plate_prefixes")
-    key: str
-    value: str
-
-    @field_validator("section")
-    @classmethod
-    def _section_ok(cls, v: str) -> str:
-        s = str(v).strip()
-        if s not in _KB_SECTIONS:
-            raise ValueError(
-                f"section 必须是 {sorted(_KB_SECTIONS)} 之一，收到: {v!r}"
-            )
-        return s
-
-    @field_validator("key", "value")
-    @classmethod
-    def _nonempty(cls, v: str) -> str:
-        s = str(v).strip()
-        if not s:
-            raise ValueError("key/value 不能为空")
-        return s
 
 
 class S01SubmitBody(BaseModel):
@@ -4907,101 +4873,6 @@ def validate_rules(body: RulesBody) -> dict[str, Any]:
     }
 
 
-@app.put("/api/rules")
-def put_rules(body: RulesBody) -> dict[str, Any]:
-    """Atomic save: validate+fingerprint first; then lock → tmp+fsync+replace.
-
-    ARCH Round16 W1: on any failure **never touch** active runtime_rules.yaml
-    (no write_text rollback).
-    """
-    _data, yaml_text = _parse_rules_payload(body)
-    # full validation BEFORE lock / BEFORE any write near active path
-    cfg = _validate_rules_yaml(yaml_text)
-
-    RUNTIME_RULES.parent.mkdir(parents=True, exist_ok=True)
-    if not RUNTIME_RULES.exists() and DEFAULT_RULES.exists():
-        bak = ROOT / "configs" / "rules_auto_lease.yaml.bak"
-        if not bak.exists():
-            shutil.copy2(DEFAULT_RULES, bak)
-
-    tmp_path = RUNTIME_RULES.with_suffix(".yaml.tmp")
-    with RULES_WRITE_LOCK:
-        try:
-            # write only to sibling tmp; fsync; then atomic replace
-            with open(tmp_path, "w", encoding="utf-8") as fh:
-                fh.write(yaml_text)
-                fh.flush()
-                os.fsync(fh.fileno())
-            # re-validate from the bytes about to become active
-            cfg2 = load_rules(tmp_path)
-            enforce_critical_fingerprints(cfg2)
-            os.replace(tmp_path, RUNTIME_RULES)
-            cfg = cfg2
-        except HTTPException:
-            tmp_path.unlink(missing_ok=True)
-            raise
-        except CriticalGuardError as e:
-            tmp_path.unlink(missing_ok=True)
-            write_audit(
-                "rules_save",
-                ok=False,
-                detail={"error": e.error, "message": str(e)},
-            )
-            raise HTTPException(
-                400,
-                detail={
-                    "error": e.error,
-                    "message": str(e),
-                    "hint": "critical 指纹未通过；active runtime 未改动",
-                },
-            ) from e
-        except Exception as e:
-            # failure: zero touch active (delete tmp only)
-            tmp_path.unlink(missing_ok=True)
-            write_audit(
-                "rules_save",
-                ok=False,
-                detail={"error": "rules_save_failed", "message": str(e)},
-            )
-            raise HTTPException(
-                400,
-                detail={
-                    "error": "rules_save_failed",
-                    "message": f"规则保存失败（active 未改动）: {e}",
-                    "hint": "修复 YAML 后重试；当前仍使用上一版 runtime 或默认包",
-                },
-            ) from e
-
-    write_audit(
-        "rules_save",
-        ok=True,
-        detail={
-            "path": _rel_to_root(RUNTIME_RULES),
-            "package": cfg.package,
-            "version": cfg.version,
-            "n_rules": len(cfg.rules),
-        },
-    )
-    return {
-        "ok": True,
-        "path": _rel_to_root(RUNTIME_RULES),
-        "package": cfg.package,
-        "version": cfg.version,
-        "n_rules": len(cfg.rules),
-        "message": "规则已保存并通过校验与 critical 指纹",
-    }
-
-
-@app.post("/api/rules/reset")
-def reset_rules() -> dict[str, Any]:
-    with RULES_WRITE_LOCK:
-        existed = RUNTIME_RULES.exists()
-        if existed:
-            RUNTIME_RULES.unlink()
-    write_audit("rules_reset", ok=True, detail={"had_runtime": existed})
-    return {"ok": True, "active": _rel_to_root(_active_rules_path())}
-
-
 @app.get("/api/kb/graph")
 def kb_graph() -> dict[str, Any]:
     """Lightweight entity graph (synonym/part_of) for demo + future linking."""
@@ -5015,74 +4886,6 @@ def kb_graph() -> dict[str, Any]:
 @app.get("/api/kb")
 def kb_get() -> dict[str, Any]:
     return get_kb().to_dict()
-
-
-@app.post("/api/kb")
-def kb_add(item: KBItem) -> dict[str, Any]:
-    try:
-        get_kb().add_alias(item.section, item.key, item.value)
-    except KeyError as e:
-        raise HTTPException(
-            400,
-            detail={
-                "error": "unknown_section",
-                "message": str(e),
-                "hint": f"section 仅支持 {sorted(_KB_SECTIONS)}",
-            },
-        ) from e
-    except ValueError as e:
-        raise HTTPException(
-            400,
-            detail={
-                "error": "invalid_kb_item",
-                "message": str(e),
-                "hint": "key 与 value 均需非空字符串",
-            },
-        ) from e
-    reload_kb()
-    write_audit(
-        "kb_add",
-        ok=True,
-        detail={"section": item.section, "key": item.key, "value": item.value},
-    )
-    return {"ok": True, "kb": get_kb().to_dict(), "message": "别名已添加"}
-
-
-@app.delete("/api/kb/{section}/{key}")
-def kb_delete(section: str, key: str) -> dict[str, Any]:
-    if section not in _KB_SECTIONS:
-        raise HTTPException(
-            400,
-            detail={
-                "error": "unknown_section",
-                "message": f"未知 section: {section}",
-                "hint": f"section 仅支持 {sorted(_KB_SECTIONS)}",
-            },
-        )
-    ok = get_kb().remove_alias(section, key)
-    if not ok:
-        write_audit(
-            "kb_delete",
-            ok=False,
-            detail={"section": section, "key": key, "error": "not_found"},
-        )
-        raise HTTPException(
-            404,
-            detail={
-                "error": "kb_key_not_found",
-                "message": f"未找到 {section}/{key}",
-                "hint": "先 GET /api/kb 查看现有别名",
-            },
-        )
-    reload_kb()
-    write_audit("kb_delete", ok=True, detail={"section": section, "key": key})
-    return {"ok": True, "kb": get_kb().to_dict(), "message": "别名已删除"}
-
-
-@app.post("/api/kb/reload")
-def kb_reload() -> dict[str, Any]:
-    kb = reload_kb()
-    return {"ok": True, "kb": kb.to_dict()}
 
 
 # --- S08 governed policy HTTP adapter --------------------------------------

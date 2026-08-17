@@ -1,4 +1,5 @@
-"""Contracted Legacy Entry Catalog (Issue #54).
+"""Contracted Legacy Entry Catalog (Issue #54) + post-contraction
+reintroduction guard (Issue #45).
 
 The single code-owned authority for the retirement inventory of the
 contracted legacy HTTP surfaces owned by the #45 contraction contract.  It
@@ -8,16 +9,22 @@ catalog instead of test-local copies.
 
 Every entry carries a stable identity plus the metadata needed for source
 scanning, HTTP route/static matching, traffic classification, release
-evidence, and later physical deletion: the HTTP method and canonical path
-pattern, the declared rollback owners (files that are allowed to contain
-the surface today), and the frozen occurrence count per owner for the
-semantic caller inventory.
+evidence, and the permanent post-contraction guard: the HTTP method and
+canonical path pattern, the declared rollback owners (files that once held
+the surface), the frozen occurrence count per owner, and the retirement
+state.  Issue #45 physically deleted the five cataloged web files and
+retired the five direct mutation handlers, so every current entry is
+``retired``: its ``retired_files`` must stay absent, its retired route
+owner must stay gone (``expected_route_owner_occurrences`` 0 for the mutation
+handlers, 1 for the retained canonical React page handlers and the
+/static mount), and any reappearing file, handler, caller or direct-store
+mutation fails the completeness gate.
 
 The catalog owns retirement-contract metadata only.  Application Lifecycle,
 Policy Governance, security audit, authentication, authorization, and
 session ownership remain unchanged (ADR-0004 / ADR-0006).  ``#45`` owns the
 physical removal of the cataloged files and handlers; this ticket records
-zero canonical caller edges and removes their canonical page ownership.
+permanent absence evidence and removes their canonical page ownership.
 
 Semantic caller scanning (lifted from the former T10 test-local scanners)
 inventories actual mutating call signatures: route definitions are
@@ -85,11 +92,11 @@ _DIRECT_STORE_TOKENS = frozenset(
 
 # Exact frozen direct-store inventory (authoritative raw mutations outside
 # the HTTP semantic scanner): (relative_path, token) -> occurrence count.
+# Issue #45 removed kb_add/kb_delete from app.py; the runtime self-healing
+# replace/unlink paths are the only remaining app.py direct-store owners.
 _DIRECT_STORE_ALLOWLIST: dict[tuple[str, str], int] = {
-    ("task4_consistency/web/app.py", "add_alias"): 1,
-    ("task4_consistency/web/app.py", "remove_alias"): 1,
-    ("task4_consistency/web/app.py", "runtime_rules_unlink"): 2,
-    ("task4_consistency/web/app.py", "runtime_rules_replace"): 2,
+    ("task4_consistency/web/app.py", "runtime_rules_unlink"): 1,
+    ("task4_consistency/web/app.py", "runtime_rules_replace"): 1,
     ("task4_consistency/kb/store.py", "add_alias"): 1,
     ("task4_consistency/kb/store.py", "remove_alias"): 1,
     ("task4_consistency/kb/__init__.py", "add_alias"): 5,
@@ -115,11 +122,14 @@ class LegacySurface:
     """One contracted legacy HTTP surface and its retirement metadata.
 
     ``path`` is the canonical path pattern (``{section}/{key}`` marks the
-    dynamic KB delete family).  ``owners`` are the declared rollback-owner
-    files; ``rollback_occurrences`` freezes how many semantic occurrences
-    each owner may hold today.  A page owner's expected count of zero
-    covers every family: the template's inline JavaScript is a declared
-    owner facet and must not gain any mutation call.
+    dynamic KB delete family).  ``owners`` are the declared (historical)
+    rollback-owner files; ``rollback_occurrences`` freezes how many
+    semantic occurrences each owner may hold today.  A page owner's
+    expected count of zero covers every family: the template's inline
+    JavaScript is a declared owner facet and must not gain any mutation
+    call.  Retired entries additionally freeze ``retired_files`` (they
+    must stay deleted) and the expected route-owner occurrence
+    (``expected_route_owner_occurrences``).
     """
 
     id: str
@@ -135,6 +145,14 @@ class LegacySurface:
     route_owner_symbol: str = ""
     route_owner_path: str = ""
     reference_occurrences: tuple[tuple[str, int], ...] = ()
+    # Issue #45 post-contraction guard: a retired surface is permanently
+    # absent.  ``retired_files`` are the physical files whose reappearance
+    # is a reintroduction failure; ``expected_route_owner_occurrences`` freezes how many
+    # route-owner occurrences may remain (0 = the handler was deleted,
+    # 1 = the canonical React page handler / static mount is retained).
+    retired: bool = False
+    retired_files: tuple[str, ...] = ()
+    expected_route_owner_occurrences: int = 1
 
     def matches(self, method: str, path: str) -> bool:
         if method.upper() != self.method:
@@ -151,10 +169,12 @@ CONTRACTED_LEGACY_ENTRIES: tuple[LegacySurface, ...] = (
         method="GET",
         path="/",
         family="root",
-        description="Root legacy template owner",
+        description="Legacy root template owner (retired: canonical route serves React)",
         owners=("task4_consistency/web/templates/index.html",),
         rollback_occurrences=(("task4_consistency/web/templates/index.html", 0),),
         route_owner_symbol="index",
+        retired=True,
+        retired_files=("task4_consistency/web/templates/index.html",),
     ),
     LegacySurface(
         id="legacy-page-controlled-s01",
@@ -162,11 +182,13 @@ CONTRACTED_LEGACY_ENTRIES: tuple[LegacySurface, ...] = (
         method="GET",
         path="/controlled/s01",
         family="controlled_s01",
-        description="S01 template plus inline script owner",
+        description="S01 template plus inline script owner (retired: React shell)",
         owners=("task4_consistency/web/templates/s01.html",),
         rollback_occurrences=(("task4_consistency/web/templates/s01.html", 0),),
         facet="template + inline script",
         route_owner_symbol="controlled_s01_page",
+        retired=True,
+        retired_files=("task4_consistency/web/templates/s01.html",),
     ),
     LegacySurface(
         id="legacy-page-controlled-s02",
@@ -174,11 +196,13 @@ CONTRACTED_LEGACY_ENTRIES: tuple[LegacySurface, ...] = (
         method="GET",
         path="/controlled/s02",
         family="controlled_s02",
-        description="S02 template plus inline script owner",
+        description="S02 template plus inline script owner (retired: React shell)",
         owners=("task4_consistency/web/templates/s02.html",),
         rollback_occurrences=(("task4_consistency/web/templates/s02.html", 0),),
         facet="template + inline script",
         route_owner_symbol="controlled_s02_page",
+        retired=True,
+        retired_files=("task4_consistency/web/templates/s02.html",),
     ),
     LegacySurface(
         id="legacy-static-app-js",
@@ -186,14 +210,19 @@ CONTRACTED_LEGACY_ENTRIES: tuple[LegacySurface, ...] = (
         method="GET",
         path="/static/app.js",
         family="static_app_js",
-        description="Legacy demo application script",
+        description="Legacy demo application script (retired)",
         owners=(
             "task4_consistency/web/static/app.js",
             "task4_consistency/web/templates/index.html",
         ),
         route_owner_symbol="static",
         route_owner_path="/static",
-        reference_occurrences=(("task4_consistency/web/templates/index.html", 1),),
+        reference_occurrences=(("task4_consistency/web/templates/index.html", 0),),
+        retired=True,
+        retired_files=(
+            "task4_consistency/web/static/app.js",
+            "task4_consistency/web/templates/index.html",
+        ),
     ),
     LegacySurface(
         id="legacy-static-style-css",
@@ -201,14 +230,19 @@ CONTRACTED_LEGACY_ENTRIES: tuple[LegacySurface, ...] = (
         method="GET",
         path="/static/style.css",
         family="static_style_css",
-        description="Legacy demo stylesheet",
+        description="Legacy demo stylesheet (retired)",
         owners=(
             "task4_consistency/web/static/style.css",
             "task4_consistency/web/templates/index.html",
         ),
         route_owner_symbol="static",
         route_owner_path="/static",
-        reference_occurrences=(("task4_consistency/web/templates/index.html", 1),),
+        reference_occurrences=(("task4_consistency/web/templates/index.html", 0),),
+        retired=True,
+        retired_files=(
+            "task4_consistency/web/static/style.css",
+            "task4_consistency/web/templates/index.html",
+        ),
     ),
     LegacySurface(
         id="legacy-mutation-rules-put",
@@ -216,16 +250,19 @@ CONTRACTED_LEGACY_ENTRIES: tuple[LegacySurface, ...] = (
         method="PUT",
         path="/api/rules",
         family="rules",
-        description="Direct rule package mutation",
+        description="Direct rule package mutation (retired: validation only)",
         owners=(
             "task4_consistency/web/app.py",
             "task4_consistency/web/static/app.js",
         ),
         rollback_occurrences=(
-            ("task4_consistency/web/app.py", 1),
-            ("task4_consistency/web/static/app.js", 2),
+            ("task4_consistency/web/app.py", 0),
+            ("task4_consistency/web/static/app.js", 0),
         ),
         route_owner_symbol="put_rules",
+        retired=True,
+        retired_files=("task4_consistency/web/static/app.js",),
+        expected_route_owner_occurrences=0,
     ),
     LegacySurface(
         id="legacy-mutation-rules-reset-post",
@@ -233,16 +270,19 @@ CONTRACTED_LEGACY_ENTRIES: tuple[LegacySurface, ...] = (
         method="POST",
         path="/api/rules/reset",
         family="rules_reset",
-        description="Direct rule package reset",
+        description="Direct rule package reset (retired)",
         owners=(
             "task4_consistency/web/app.py",
             "task4_consistency/web/static/app.js",
         ),
         rollback_occurrences=(
-            ("task4_consistency/web/app.py", 1),
-            ("task4_consistency/web/static/app.js", 1),
+            ("task4_consistency/web/app.py", 0),
+            ("task4_consistency/web/static/app.js", 0),
         ),
         route_owner_symbol="reset_rules",
+        retired=True,
+        retired_files=("task4_consistency/web/static/app.js",),
+        expected_route_owner_occurrences=0,
     ),
     LegacySurface(
         id="legacy-mutation-kb-post",
@@ -250,16 +290,19 @@ CONTRACTED_LEGACY_ENTRIES: tuple[LegacySurface, ...] = (
         method="POST",
         path="/api/kb",
         family="kb",
-        description="Direct KB alias mutation",
+        description="Direct KB alias mutation (retired)",
         owners=(
             "task4_consistency/web/app.py",
             "task4_consistency/web/static/app.js",
         ),
         rollback_occurrences=(
-            ("task4_consistency/web/app.py", 1),
-            ("task4_consistency/web/static/app.js", 1),
+            ("task4_consistency/web/app.py", 0),
+            ("task4_consistency/web/static/app.js", 0),
         ),
         route_owner_symbol="kb_add",
+        retired=True,
+        retired_files=("task4_consistency/web/static/app.js",),
+        expected_route_owner_occurrences=0,
     ),
     LegacySurface(
         id="legacy-mutation-kb-delete",
@@ -267,16 +310,19 @@ CONTRACTED_LEGACY_ENTRIES: tuple[LegacySurface, ...] = (
         method="DELETE",
         path="/api/kb/{section}/{key}",
         family="kb_delete",
-        description="Direct KB alias deletion",
+        description="Direct KB alias deletion (retired)",
         owners=(
             "task4_consistency/web/app.py",
             "task4_consistency/web/static/app.js",
         ),
         rollback_occurrences=(
-            ("task4_consistency/web/app.py", 1),
-            ("task4_consistency/web/static/app.js", 1),
+            ("task4_consistency/web/app.py", 0),
+            ("task4_consistency/web/static/app.js", 0),
         ),
         route_owner_symbol="kb_delete",
+        retired=True,
+        retired_files=("task4_consistency/web/static/app.js",),
+        expected_route_owner_occurrences=0,
     ),
     LegacySurface(
         id="legacy-mutation-kb-reload-post",
@@ -284,10 +330,12 @@ CONTRACTED_LEGACY_ENTRIES: tuple[LegacySurface, ...] = (
         method="POST",
         path="/api/kb/reload",
         family="kb_reload",
-        description="Direct KB singleton reload (process state mutation)",
+        description="Direct KB singleton reload (retired; process state mutation)",
         owners=("task4_consistency/web/app.py",),
-        rollback_occurrences=(("task4_consistency/web/app.py", 1),),
+        rollback_occurrences=(("task4_consistency/web/app.py", 0),),
         route_owner_symbol="kb_reload",
+        retired=True,
+        expected_route_owner_occurrences=0,
     ),
 )
 
@@ -607,6 +655,15 @@ class MissingOwner:
 
 
 @dataclass(frozen=True)
+class RetiredOwnerPresent:
+    """A retired physical file reappeared in the tree (Issue #45
+    reintroduction guard).  Its presence is a completeness failure."""
+
+    entry_id: str
+    owner: str
+
+
+@dataclass(frozen=True)
 class RouteOwnerMismatch:
     entry_id: str
     method: str
@@ -650,6 +707,8 @@ class EntryReport:
     rollback_occurrences: tuple[dict[str, object], ...]
     canonical_edge_occurrences: int
     rollback_edge_occurrences: int
+    retired: bool = False
+    retired_files: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -657,15 +716,16 @@ class LegacyContractReport:
     """The complete public scan result over one source tree.
 
     ``ok`` means the full retirement contract holds: completeness
-    (declared owners present, every legacy route cataloged, frozen
-    rollback occurrences) plus zero canonical source edges and zero
-    direct-store drift.
+    (no reintroduced retired file, declared owners present for the
+    non-retired entries, every legacy route cataloged, frozen occurrence
+    counts) plus zero canonical source edges and zero direct-store drift.
     """
 
     entries: dict[str, EntryReport] = field(default_factory=dict)
     canonical_source_edges: tuple[CanonicalEdge, ...] = ()
     occurrence_mismatches: tuple[OccurrenceMismatch, ...] = ()
     missing_owners: tuple[MissingOwner, ...] = ()
+    retired_owners_present: tuple[RetiredOwnerPresent, ...] = ()
     route_owner_mismatches: tuple[RouteOwnerMismatch, ...] = ()
     uncataloged_routes: tuple[UncatalogedRoute, ...] = ()
     direct_store_mismatches: tuple[DirectStoreMismatch, ...] = ()
@@ -675,6 +735,7 @@ class LegacyContractReport:
     def completeness_ok(self) -> bool:
         return (
             not self.missing_owners
+            and not self.retired_owners_present
             and not self.route_owner_mismatches
             and not self.uncataloged_routes
             and not self.occurrence_mismatches
@@ -711,6 +772,8 @@ class LegacyContractReport:
                     ],
                     "canonical_edge_occurrences": report.canonical_edge_occurrences,
                     "rollback_edge_occurrences": report.rollback_edge_occurrences,
+                    "retired": report.retired,
+                    "retired_files": list(report.retired_files),
                 }
                 for report in self.entries.values()
             ],
@@ -738,6 +801,10 @@ class LegacyContractReport:
             "missing_owners": [
                 {"entry_id": missing.entry_id, "owner": missing.owner}
                 for missing in self.missing_owners
+            ],
+            "retired_owners_present": [
+                {"entry_id": present.entry_id, "owner": present.owner}
+                for present in self.retired_owners_present
             ],
             "route_owner_mismatches": [
                 {
@@ -823,12 +890,23 @@ def scan_legacy_contract(
     nonmutation_references = _scan_nonmutation_references(root, entries)
     family_entries = _family_entries(entries)
 
-    # Completeness: owner files exist; legacy routes are cataloged.
+    # Completeness: declared owner files exist for the non-retired
+    # entries; no retired physical file reappeared; legacy routes are
+    # cataloged.
     missing_owners = [
         MissingOwner(entry.id, owner)
         for entry in entries
+        if not entry.retired
         for owner in entry.owners
         if not (root / owner).is_file()
+    ]
+
+    retired_owners_present = [
+        RetiredOwnerPresent(entry.id, owner)
+        for entry in entries
+        if entry.retired
+        for owner in entry.retired_files
+        if (root / owner).is_file()
     ]
 
     route_owner_mismatches: list[RouteOwnerMismatch] = []
@@ -845,7 +923,7 @@ def scan_legacy_contract(
             and symbol == entry.route_owner_symbol
         )
         route_owner_counts[entry.id] = observed
-        if observed != 1:
+        if observed != entry.expected_route_owner_occurrences:
             route_owner_mismatches.append(
                 RouteOwnerMismatch(
                     entry_id=entry.id,
@@ -854,7 +932,7 @@ def scan_legacy_contract(
                     owner_file=entry.route_owner_file,
                     owner_symbol=entry.route_owner_symbol,
                     observed=observed,
-                    expected=1,
+                    expected=entry.expected_route_owner_occurrences,
                 )
             )
 
@@ -1010,6 +1088,8 @@ def scan_legacy_contract(
             ),
             canonical_edge_occurrences=canonical_count,
             rollback_edge_occurrences=rollback_edges,
+            retired=entry.retired,
+            retired_files=entry.retired_files,
         )
 
     return LegacyContractReport(
@@ -1017,6 +1097,7 @@ def scan_legacy_contract(
         canonical_source_edges=tuple(canonical_edges),
         occurrence_mismatches=tuple(occurrence_mismatches),
         missing_owners=tuple(missing_owners),
+        retired_owners_present=tuple(retired_owners_present),
         route_owner_mismatches=tuple(route_owner_mismatches),
         uncataloged_routes=tuple(uncataloged_routes),
         direct_store_mismatches=tuple(direct_store_mismatches),

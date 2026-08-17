@@ -11,8 +11,9 @@
 #  6. copy configs/ fixtures/ data/ into the installed root (the app derives
 #     ROOT from __file__, so the installed copy is the runtime authority)
 #  7. provenance probe: task4_consistency.__file__ lives under <tmp>/site and
-#     the installed React shell / hashed assets / legacy static / templates
-#     exist with no sourcemaps
+#     the installed React shell / hashed assets exist with no sourcemaps while
+#     the removed legacy web/templates and static app.js/style.css surface
+#     stays absent
 #  8. focused release pytest (tests/test_t10_release.py + the canonical
 #     T01 shell/cache contracts) with PYTHONSAFEPATH=1 and
 #     PYTHONPATH=<site>:<repo>
@@ -40,9 +41,10 @@
 # /tmp/t10-installed-release.*).
 #
 # The prior wheel is built from a `git archive` of the fixed base commit
-# (Issue #54 fixed base 424c54fa...) and its bytes are never altered; it is
-# installed beside the current artifact for the deployment-only rollback
-# rehearsal.
+# (Issue #54 fixed base 2627d4886..., which already serves the qualified
+# React shell on /, /controlled/s01 and /controlled/s02) and its bytes are
+# never altered; it is installed beside the current artifact for the
+# deployment-only rollback rehearsal.
 #
 # All evidence goes to $LOG_DIR (default /tmp/codex/ticket-44-kimi-evidence)
 # as lane-c-harness-*.log; Playwright artifacts and the sealed observation
@@ -75,8 +77,9 @@ FAILED_STEP=""
 STATUS=0
 SOURCE_INPUT_CHANGED=0
 
-# Issue #54 fixed base (prior qualified artifact).
-T54_FIXED_BASE="424c54fa5103fd0b3acb72d7e36fb02a86677135"
+# Issue #54 fixed base (prior qualified artifact; serves the qualified React
+# shell on the canonical routes, so the prior root probe expects '200 react').
+T54_FIXED_BASE="2627d4886c89523edce6f13ac3d434789b4ba0c6"
 
 step() { CURRENT_STEP="$1"; printf '\n== %s ==\n' "$1" | tee -a "$LOG"; }
 
@@ -351,6 +354,16 @@ sys.path.insert(0, str(PRIOR_SITE))
 import task4_consistency.web.app as prior_web  # noqa: E402
 
 prior_app = prior_web.app
+# The prior artifact (fixed base 2627d488) self-registers its own
+# observation middleware at import (Issue #54 final seam).  If left
+# enabled, it records every rollback request AGAIN alongside the current
+# observer below, duplicating correlation ids in the shared JSONL and
+# invalidating the sealed window.  Neutralize it at runtime without ever
+# altering the prior wheel's bytes: the current observation module remains
+# the sole recorder for the prior-artifact rollback stage.
+_inner_recorder = getattr(prior_web, "_OBSERVATION_RECORDER", None)
+if _inner_recorder is not None:
+    _inner_recorder.enabled = False
 recorder = current_observation.recorder_from_env(
     family_table=current_observation.app_family_table(prior_app)
 )
@@ -359,8 +372,8 @@ WRAPPER
 sed -i "s|__PRIOR_SITE__|$TMP/prior-site|; s|__CURRENT_SITE__|$TMP/site|" "$TMP/prior_wrapper_app.py"
 "$PY" -c "import ast; ast.parse(open('$TMP/prior_wrapper_app.py').read())" && echo "prior wrapper syntax OK" | tee -a "$LOG"
 
-# 7. Provenance probe: installed import + React shell/hashed assets/legacy
-#    static/templates present, no sourcemaps.
+# 7. Provenance probe: installed import + React shell/hashed assets present,
+#    the removed legacy static/templates surface absent, no sourcemaps.
 step "7/10 provenance probe against installed root (current)"
 env PYTHONSAFEPATH=1 PYTHONPATH="$TMP/site:$ROOT" TASK4_T10_INSTALLED_ROOT="$TMP/site" \
   "$PY" -P - <<'PY' 2>&1 | tee -a "$LOG"
@@ -389,10 +402,13 @@ for ref in refs:
     assert asset.is_file(), f"installed hashed asset missing: {asset}"
 print(f"installed React shell references {len(refs)} hashed assets")
 
-legacy = web / "static" / "app.js"
-assert legacy.is_file(), f"legacy static app.js missing: {legacy}"
+# The five legacy web files are contracted away (Issue #45): the installed
+# artifact must not ship them, while the React index + hashed assets above
+# remain the shell authority.
+for name in ("app.js", "style.css"):
+    assert not (web / "static" / name).exists(), f"retired legacy static present: {name}"
 for name in ("index.html", "s01.html", "s02.html"):
-    assert (web / "templates" / name).is_file(), f"installed template missing: {web / 'templates' / name}"
+    assert not (web / "templates" / name).exists(), f"retired legacy template present: {name}"
 maps = sorted((web / "static" / "react").rglob("*.map"))
 assert not maps, f"production build must not ship sourcemaps: {maps}"
 print("provenance probe OK")
@@ -781,13 +797,13 @@ print("prior_import=", module_file)
 PRIORPY
 PRIOR_ROOT_PROBE="$(get_shell "$PRIOR_PORT" "/" "")"
 echo "prior_root_probe: $PRIOR_ROOT_PROBE" >>"$LOG"
-[[ "$PRIOR_ROOT_PROBE" == 200\ other ]] || { echo "ERROR: prior root must serve the legacy shell" >>"$LOG"; exit 1; }
+[[ "$PRIOR_ROOT_PROBE" == "200 react" ]] || { echo "ERROR: prior root must serve the React shell" >>"$LOG"; exit 1; }
 PRIOR_S01_PROBE="$(get_shell "$PRIOR_PORT" "/controlled/s01" "Bearer s01-registered-demo-test-credential")"
 echo "prior_s01_probe: $PRIOR_S01_PROBE" >>"$LOG"
-[[ "$PRIOR_S01_PROBE" == 200* ]] || { echo "ERROR: prior s01 must serve the legacy shell" >>"$LOG"; exit 1; }
+[[ "$PRIOR_S01_PROBE" == 200* ]] || { echo "ERROR: prior s01 must serve the React shell" >>"$LOG"; exit 1; }
 PRIOR_S02_PROBE="$(get_shell "$PRIOR_PORT" "/controlled/s02" "Bearer t54-s02-credential")"
 echo "prior_s02_probe: $PRIOR_S02_PROBE" >>"$LOG"
-[[ "$PRIOR_S02_PROBE" == 200* ]] || { echo "ERROR: prior s02 must serve the legacy shell" >>"$LOG"; exit 1; }
+[[ "$PRIOR_S02_PROBE" == 200* ]] || { echo "ERROR: prior s02 must serve the React shell" >>"$LOG"; exit 1; }
 HEALTH_PY "$PRIOR_PORT" >/dev/null || { echo "ERROR: prior health failed" >>"$LOG"; exit 1; }
 step "9/10 window: prior-artifact Playwright ownership probe"
 env TASK4_T54_PRIOR_BASE_URL="http://127.0.0.1:$PRIOR_PORT" \
