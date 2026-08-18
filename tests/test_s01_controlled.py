@@ -5361,6 +5361,37 @@ def test_expired_session_is_removed_from_persisted_demo_authority(
         assert connection.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
 
 
+@pytest.mark.parametrize(
+    "expires_at",
+    ["not-a-number", True, float("nan"), float("inf"), -1.0],
+)
+def test_resolve_session_fails_closed_on_corrupt_persisted_expiry(
+    tmp_path: Path,
+    expires_at: object,
+) -> None:
+    state_path = tmp_path / "corrupt-session.sqlite3"
+    service = ControlledScenarioService(
+        fixture_root=ROOT / "fixtures" / "applications",
+        rules_path=ROOT / "configs" / "rules_auto_lease.yaml",
+        state_path=state_path,
+    )
+    token, principal = service.issue_session(
+        now=100,
+        ttl_seconds=900,
+        subject="registered-test-user",
+        roles=("integrator", "reviewer"),
+    )
+    principal["expires_at"] = expires_at
+    token_digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    with sqlite3.connect(state_path) as connection:
+        connection.execute(
+            "UPDATE sessions SET payload = ? WHERE item_id = ?",
+            (json.dumps(principal), token_digest),
+        )
+
+    assert service.resolve_session(token, now=101) is None
+
+
 def test_session_issuance_removes_all_abandoned_expired_sessions(
     tmp_path: Path,
 ) -> None:

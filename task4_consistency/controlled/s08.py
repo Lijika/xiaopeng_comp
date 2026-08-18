@@ -977,7 +977,7 @@ class PolicyGovernanceService:
                 "required audit or storage authority is unavailable"
             )
         with self._lock:
-            for _ in range(3):
+            for attempt in range(3):
                 self._store.reload()
                 key = self._idempotency_key(principal, action, idempotency_key)
                 replay = self._replay_or_conflict(self._store, key, fingerprint)
@@ -988,6 +988,8 @@ class PolicyGovernanceService:
                 try:
                     staged.persist()
                 except StaleStoreRevision:
+                    if attempt < 2:
+                        time.sleep(0.01)
                     continue
                 except ScheduleReservationConflict as error:
                     raise PolicyConflict(

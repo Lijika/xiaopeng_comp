@@ -5683,7 +5683,21 @@ class ControlledScenarioService:
             principal = self._store.sessions.get(token_digest)
             if principal is None or principal.get("status") != "active":
                 return None
-            if float(principal["expires_at"]) > float(now):
+            raw_expires_at = principal.get("expires_at")
+            try:
+                expires_at = (
+                    float(raw_expires_at)
+                    if not isinstance(raw_expires_at, bool)
+                    and isinstance(raw_expires_at, (int, float))
+                    else None
+                )
+            except (TypeError, ValueError, OverflowError):
+                expires_at = None
+            if (
+                expires_at is not None
+                and math.isfinite(expires_at)
+                and expires_at > float(now)
+            ):
                 return copy.deepcopy(principal)
             staged = copy.deepcopy(self._store)
             del staged.sessions[token_digest]

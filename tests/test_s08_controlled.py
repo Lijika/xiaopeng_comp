@@ -2183,11 +2183,12 @@ def test_concurrent_overlapping_activation_has_one_winner_and_no_mixed_projectio
     # 2. Concurrent activation: two instances race; exactly one wins.
     errors: list[Exception] = []
     results: list[dict[str, Any]] = []
+    activation_now = int(time.time()) + 301
 
     def worker(service: PolicyGovernanceService) -> None:
         try:
             results.append(
-                service.process_next_policy_job(now=int(time.time()) + 301)
+                service.process_next_policy_job(now=activation_now)
             )
         except Exception as error:  # pragma: no cover - defensive
             errors.append(error)

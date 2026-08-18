@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 
+from task4_consistency.controlled import s08 as s08_module
 from task4_consistency.controlled.s01 import (
     AdmissionDisposition,
     ControlledScenarioService,
@@ -26,6 +27,7 @@ from task4_consistency.controlled.s01 import (
     S01CommandPrincipal,
     _PinnedReleaseUnavailable,
 )
+from task4_consistency.controlled.s01_store import SQLiteTargetStore
 from task4_consistency.controlled.s01_checker import (
     TargetChecker,
     TargetCheckResult,
@@ -1016,6 +1018,50 @@ def test_hold_never_auto_expires_and_recovery_needs_exact_proof(
         and job.get("application_id") == application_id
     ]
     assert len(reevaluation_jobs) == 1
+
+
+def test_recover_hold_waits_for_transient_store_revision_writer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, policy = _s09_governed(tmp_path)
+    _s01_submit_and_run(service, "s09-recover-contention")
+    hold = policy.impose_hold(
+        principal=OPERATOR,
+        reason_code="S09_TEST_HOLD",
+        hold_scope="open_cycle",
+        idempotency_key="s09-recover-contention-hold",
+        expected_governance_revision=governance_revision(policy),
+    )
+    assert service.process_next_policy_impact() == 1
+    expected_revision = governance_revision(policy)
+
+    original_persist = SQLiteTargetStore.persist
+    contending = True
+
+    def persist_with_competing_revision(staged: SQLiteTargetStore) -> None:
+        if contending:
+            competing = SQLiteTargetStore(staged.state_path)
+            original_persist(competing)
+        original_persist(staged)
+
+    def finish_competing_write(_: float) -> None:
+        nonlocal contending
+        contending = False
+
+    monkeypatch.setattr(SQLiteTargetStore, "persist", persist_with_competing_revision)
+    monkeypatch.setattr(s08_module.time, "sleep", finish_competing_write)
+
+    released = policy.recover_hold(
+        principal=APPROVER,
+        hold_id=hold["hold_id"],
+        recovery_generation=1,
+        idempotency_key="s09-recover-contention-release",
+        expected_governance_revision=expected_revision,
+    )
+
+    assert released["status"] == "accepted"
+    assert released["replayed"] is False
 
 
 def test_outstanding_member_blocks_recovery(
