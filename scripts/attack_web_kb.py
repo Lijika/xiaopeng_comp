@@ -466,7 +466,7 @@ def main() -> int:
         print(f"  {k}: {v}")
 
     if not any(delivery.values()) and not args.base:
-        print("PREP: Web/KB not delivered yet. Only POST /api/rules/validate remains as a mutable-rules surface.")
+        print("PREP: Web/KB not delivered yet. After delivery, POST /api/rules/validate is the retained dry-run validation endpoint and never mutates runtime rules.")
         print("After delivery: .venv/bin/python scripts/attack_web_kb.py --base http://127.0.0.1:8000")
         return 2
 
