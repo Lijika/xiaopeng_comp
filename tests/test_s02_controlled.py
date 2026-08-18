@@ -921,6 +921,7 @@ def test_layout_only_and_raw_null_observations_never_become_field_values(
                 {
                     "filename": "page.png",
                     "order": 1,
+                    "page_type": "登记页",
                     "detections": [
                         {
                             "bbox": [0, 0, 1, 1],
@@ -959,6 +960,24 @@ def test_layout_only_and_raw_null_observations_never_become_field_values(
     assert all(link["value_state"] == "not_detected" for link in finding["evidence_links"])
     assert all(link["raw_masked"] is None for link in finding["evidence_links"])
     assert all(link["evidence_eligible"] is False for link in finding["evidence_links"])
+    membership = workspace["membership_ledger"][0]
+    assert membership["attachment_id"] == "attachment-layout-only"
+    assert membership["page_ordinal"] == 1
+    assert len(membership["candidates"]) == 1
+    candidate = membership["candidates"][0]
+    assert candidate["claim_id"].startswith("membership_claim_")
+    assert {key: value for key, value in candidate.items() if key != "claim_id"} == {
+        "document_instance_id": "document-layout-only",
+        "document_role": "registration_certificate",
+        "provenance": {
+            "adapter_id": "step2-page-order",
+            "adapter_version": "1",
+            "source_pointer": "/pages/0",
+            "fact": "page.page_type",
+            "page_type": "登记页",
+            "inferred": False,
+        },
+    }
 
 
 def test_retries_duplicates_and_later_revisions_never_duplicate_accepted_facts(

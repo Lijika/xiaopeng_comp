@@ -810,25 +810,31 @@ class RegisteredSourceBoundary:
 
         # S10: map every step2 page_order page into one immutable candidate
         # page-membership claim (provenance-bearing; never inferred).  The page
-        # identity is the admitted attachment page hash, so the claim binds to
-        # the same application-local page the observations reference.
+        # identity is the admitted attachment reference plus page ordinal;
+        # content hash remains the page-integrity evidence.
         page_memberships: list[dict[str, Any]] = []
         if registration.source_shape == "step2-page-order/unversioned":
-            def resolve_page_sha256(source_page: dict[str, Any]) -> str:
+            def resolve_page_binding(
+                source_page: dict[str, Any],
+            ) -> tuple[str, str]:
                 source_name = _source_name(source_page.get("filename"))
                 binding = pages.get(
                     hashlib.sha256(source_name.encode("utf-8")).hexdigest()
                 )
-                if not isinstance(binding, dict) or not isinstance(
-                    binding.get("source_sha256"), str
+                if (
+                    not isinstance(binding, dict)
+                    or not isinstance(binding.get("attachment_ref"), str)
+                    or not isinstance(binding.get("source_sha256"), str)
                 ):
                     RegisteredSourceBoundary._provenance_failure(failure_context)
-                return str(binding["source_sha256"])
+                return str(binding["attachment_ref"]), str(binding["source_sha256"])
 
             page_memberships = step2_page_order_membership_claims(
                 result_payload,
                 application_id=upstream_ref,
-                resolve_page_sha256=resolve_page_sha256,
+                resolve_page_binding=resolve_page_binding,
+                document_instance_id=document_id,
+                document_role=document_role,
             )
 
         authenticated_context = {
@@ -2041,16 +2047,18 @@ def step2_page_order_membership_claims(
     payload: dict[str, Any],
     *,
     application_id: str,
-    resolve_page_sha256: Callable[[dict[str, Any]], str] | None = None,
+    resolve_page_binding: Callable[[dict[str, Any]], tuple[str, str]] | None = None,
+    document_instance_id: str | None = None,
+    document_role: str | None = None,
 ) -> list[dict[str, Any]]:
     """Map each step2 page_order page into one candidate page-membership claim.
 
     S10 migration: a non-inferred page with a recognised ``page_type`` becomes
-    one candidate claim keyed by its page identity, candidate document instance
-    and role, and explicit provenance.  No claim is inferred from confidence,
-    order, count, or last write.  When ``resolve_page_sha256`` is supplied it
-    maps a source page to the admitted attachment page hash; otherwise the
-    stable source-name hash is used as the page identity for corpus checks."""
+    one candidate claim keyed by its page identity and explicit provenance.
+    Document instance and role come only from the registered submission
+    binding.  When that binding or the admitted attachment binding is absent,
+    the corpus projection records ``unknown``.  No claim is inferred from
+    confidence, order, count, or last write."""
     source_pages = payload.get("pages")
     if not isinstance(source_pages, list):
         return []
@@ -2065,12 +2073,17 @@ def step2_page_order_membership_claims(
             continue
         source_name = _source_name(source_page.get("filename"))
         default_sha256 = hashlib.sha256(source_name.encode("utf-8")).hexdigest()
-        source_sha256 = (
-            resolve_page_sha256(source_page)
-            if resolve_page_sha256 is not None
-            else default_sha256
+        attachment_id, source_sha256 = (
+            resolve_page_binding(source_page)
+            if resolve_page_binding is not None
+            else ("unknown", default_sha256)
         )
-        if not isinstance(source_sha256, str) or len(source_sha256) != 64:
+        if (
+            not isinstance(attachment_id, str)
+            or not attachment_id
+            or not isinstance(source_sha256, str)
+            or len(source_sha256) != 64
+        ):
             continue
         page_ordinal = source_page.get("order")
         if isinstance(page_ordinal, bool) or not isinstance(page_ordinal, int):
@@ -2079,9 +2092,12 @@ def step2_page_order_membership_claims(
             page_ordinal = page_index + 1
         claim_material = {
             "application_id": application_id,
+            "attachment_id": attachment_id,
             "source_sha256": source_sha256,
             "page_ordinal": page_ordinal,
             "page_type": page_type,
+            "document_instance_id": document_instance_id or "unknown",
+            "document_role": document_role or "unknown",
             "source_pointer": f"/pages/{page_index}",
         }
         claims.append(
@@ -2091,18 +2107,20 @@ def step2_page_order_membership_claims(
                 + _digest(_canonical_json(claim_material))[:24],
                 "application_id": application_id,
                 "page": {
+                    "attachment_id": attachment_id,
                     "source_sha256": source_sha256,
                     "page_ordinal": page_ordinal,
                 },
                 "candidate_document": {
-                    "document_instance_id": f"{application_id}:{page_type}",
-                    "document_role": "机动车登记证书",
+                    "document_instance_id": document_instance_id or "unknown",
+                    "document_role": document_role or "unknown",
                 },
                 "provenance": {
                     "adapter_id": "step2-page-order",
                     "adapter_version": "1",
                     "source_pointer": f"/pages/{page_index}",
                     "fact": "page.page_type",
+                    "page_type": page_type,
                     "inferred": False,
                 },
             }

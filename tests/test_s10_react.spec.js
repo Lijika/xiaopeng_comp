@@ -220,6 +220,42 @@ async function openClaimedReviewPanel(reviewer, server) {
   return { workId, applicationId };
 }
 
+async function waitForApplicationWork(
+  reviewer,
+  server,
+  applicationId,
+  predecessorWorkId,
+) {
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    const queue = await reviewer.request.get(
+      `${server.baseURL}/controlled/s01/api/queries/queue`,
+    );
+    const item = (await queue.json()).items?.find(
+      (candidate) =>
+        candidate.application_id === applicationId &&
+        candidate.work_item_id !== predecessorWorkId,
+    );
+    if (item !== undefined) return item;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error("S10 successor manual work never appeared");
+}
+
+async function openAndClaimWork(reviewer, server, item) {
+  await reviewer.goto(`${server.baseURL}${REACT_URL}`, {
+    waitUntil: "networkidle",
+  });
+  await expect(reviewer.getByTestId("queue-panel")).toBeVisible();
+  await reviewer.getByRole("link", { name: new RegExp(item.work_item_id) }).click();
+  await expect(reviewer.getByTestId("review-panel")).toBeVisible();
+  await reviewer.getByRole("button", { name: "认领" }).click();
+  await expect(reviewer.getByTestId("review-command-status")).toContainText(
+    "认领已接受",
+  );
+  await expect(reviewer.getByTestId("review-status")).toHaveText("claimed");
+}
+
 async function settleCleanup(cleanups) {
   const failures = [];
   for (const cleanup of cleanups) {
@@ -245,16 +281,26 @@ test("S10 membership dual-pane correction reruns and changes only via a fresh cu
       extraHTTPHeaders: { Authorization: `Bearer ${DEMO_CREDENTIAL}` },
     });
     const reviewer = await resources.reviewerContext.newPage();
-    const { applicationId } = await openClaimedReviewPanel(
+    const { workId, applicationId } = await openClaimedReviewPanel(
       reviewer,
       server,
     );
 
-    // The dual pane shows the coexisting candidate claims, provenance and the
-    // ambiguous state without any silent selection.
+    // The visible ledger keeps every page, candidate claim and provenance.
+    const ledger = reviewer.getByTestId("review-membership-ledger");
+    await expect(ledger).toBeVisible();
+    await expect(ledger).toContainText("/pages/0");
+    await expect(ledger).toContainText("/pages/1");
+    await expect(reviewer.getByTestId("review-membership-ledger-page")).toHaveCount(2);
+    await expect(reviewer.getByTestId("review-membership-ledger-candidate")).toHaveCount(3);
+
+    // The dual pane shows the coexisting candidate claims and ambiguous state.
     await expect(reviewer.getByTestId("review-membership")).toBeVisible();
     await expect(reviewer.getByTestId("review-membership-candidate").first()).toBeVisible();
     await expect(reviewer.getByTestId("review-membership-candidate-instance").first()).toBeVisible();
+    await expect(reviewer.getByTestId("review-membership-candidate-provenance").first()).toContainText(
+      "source_pointer=/pages/0",
+    );
 
     // Read the authoritative route before the correction.
     const routeBefore = await (
@@ -263,16 +309,25 @@ test("S10 membership dual-pane correction reruns and changes only via a fresh cu
       )
     ).json();
 
-    // Accept the first candidate of the ambiguous page with a registered reason.
+    // Accept a claim whose public identifier contains the delimiter used by
+    // the legacy UI.  The claim id remains byte-for-byte intact.
     await reviewer.getByTestId("review-membership-start").click();
     await expect(reviewer.getByTestId("review-membership-form")).toBeVisible();
-    await reviewer.getByTestId("review-membership-candidate-select").selectOption(
-      "reg_cert_instance_a::机动车登记证书",
-    );
-    await reviewer.getByTestId("review-membership-reason").selectOption(
+    const candidateSelect = reviewer.getByRole("combobox", { name: "候选实例" });
+    const reasonSelect = reviewer.getByRole("combobox", { name: "原因" });
+    await expect(reasonSelect.locator("option")).toHaveCount(3);
+    await expect(
+      reasonSelect.locator('option[value="MEMBERSHIP_PAGE_UNASSIGNED"]'),
+    ).toHaveCount(0);
+    await candidateSelect.selectOption("s10::claim_page1_b");
+    await expect(candidateSelect).toHaveValue("s10::claim_page1_b");
+    await reasonSelect.selectOption(
       "MEMBERSHIP_SOURCE_VERIFIED",
     );
     await reviewer.getByTestId("review-membership-submit").click();
+    await expect(reviewer.getByTestId("review-command-status")).toContainText(
+      "页归属已接受",
+    );
 
     // Acceptance advances Evidence; the successor run converges through
     // current-route/history and only then replaces the current run.
@@ -290,6 +345,131 @@ test("S10 membership dual-pane correction reruns and changes only via a fresh cu
       )
       .toBeGreaterThanOrEqual(2);
 
+    const firstHistory = await (
+      await reviewer.request.get(
+        `${server.baseURL}/controlled/s01/api/queries/applications/${encodeURIComponent(applicationId)}/history`,
+      )
+    ).json();
+    const firstRouteAfter = await (
+      await reviewer.request.get(
+        `${server.baseURL}/controlled/s01/api/queries/applications/${encodeURIComponent(applicationId)}/current-route`,
+      )
+    ).json();
+
+    // The old run stays immutable; the first correction becomes current only
+    // through its fresh complete run.
+    const firstRunIds = firstHistory.runs.map((run) => run.run_id);
+    expect(firstRunIds).toContain(routeBefore.current_run_id);
+    expect(firstRouteAfter.current_run_id).not.toBe(routeBefore.current_run_id);
+    expect(firstRouteAfter.evidence_revision).toBe(2);
+    expect(firstHistory.membership_history).toHaveLength(1);
+    expect(firstHistory.memberships).toHaveLength(4);
+
+    // The next work item exposes page 1 as selected history.  Append a later
+    // page 1 decision from that ledger entry so the predecessor remains visible
+    // as superseded.
+    const successorWork = await waitForApplicationWork(
+      reviewer,
+      server,
+      applicationId,
+      workId,
+    );
+    await openAndClaimWork(reviewer, server, successorWork);
+    const successorLedger = reviewer.getByTestId("review-membership-ledger");
+    await expect(successorLedger).toContainText("selected");
+    await expect(successorLedger).toContainText("active");
+    await reviewer
+      .getByRole("button", {
+        name: "选择附件 s10-attachment-1 第 1 页",
+      })
+      .click();
+    await expect(reviewer.getByTestId("review-membership")).toContainText("页 1");
+    const successorCandidate = reviewer.getByRole("combobox", {
+      name: "候选实例",
+    });
+    await successorCandidate.selectOption("s10_claim_page1_a");
+    await reviewer
+      .getByRole("combobox", { name: "原因" })
+      .selectOption("MEMBERSHIP_SOURCE_MISASSIGNED");
+    await reviewer.getByTestId("review-membership-submit").click();
+    await expect(reviewer.getByTestId("review-command-status")).toContainText(
+      "页归属已接受",
+    );
+
+    await expect
+      .poll(
+        async () => {
+          const history = await (
+            await reviewer.request.get(
+              `${server.baseURL}/controlled/s01/api/queries/applications/${encodeURIComponent(applicationId)}/history`,
+            )
+          ).json();
+          return history.runs ? history.runs.length : 0;
+        },
+        { timeout: 15_000, message: "superseding run did not complete" },
+      )
+      .toBeGreaterThanOrEqual(3);
+
+    const supersededHistory = await (
+      await reviewer.request.get(
+        `${server.baseURL}/controlled/s01/api/queries/applications/${encodeURIComponent(applicationId)}/history`,
+      )
+    ).json();
+    const page1Decisions = supersededHistory.memberships.filter(
+      (record) =>
+        record.record_kind === "accepted" &&
+        record.page.attachment_id === "s10-attachment-1",
+    );
+    expect(page1Decisions).toHaveLength(2);
+    const superseded = page1Decisions.find((record) => record.status === "superseded");
+    const active = page1Decisions.find((record) => record.status === "active");
+    expect(superseded).toBeDefined();
+    expect(active.supersedes).toEqual([superseded.decision_id]);
+    await expect(reviewer.getByTestId("review-history-memberships")).toContainText(
+      "superseded",
+    );
+
+    // Page 2 remains unresolved in the next cycle.  Resolve it through an
+    // explicit unassign, preserving both page 1 decisions.
+    const finalWork = await waitForApplicationWork(
+      reviewer,
+      server,
+      applicationId,
+      successorWork.work_item_id,
+    );
+    await openAndClaimWork(reviewer, server, finalWork);
+    await reviewer
+      .getByRole("button", {
+        name: "选择附件 s10-attachment-2 第 2 页",
+      })
+      .click();
+    await expect(reviewer.getByTestId("review-membership")).toContainText("页 2");
+    await reviewer.getByTestId("review-membership-unassign-radio").click();
+    const unassignReason = reviewer.getByRole("combobox", { name: "原因" });
+    await expect(unassignReason.locator("option")).toHaveCount(3);
+    await expect(
+      unassignReason.locator('option[value="MEMBERSHIP_INSTANCE_WRONG"]'),
+    ).toHaveCount(0);
+    await unassignReason.selectOption("MEMBERSHIP_PAGE_UNASSIGNED");
+    await reviewer.getByTestId("review-membership-submit").click();
+    await expect(reviewer.getByTestId("review-command-status")).toContainText(
+      "页归属已接受",
+    );
+
+    await expect
+      .poll(
+        async () => {
+          const history = await (
+            await reviewer.request.get(
+              `${server.baseURL}/controlled/s01/api/queries/applications/${encodeURIComponent(applicationId)}/history`,
+            )
+          ).json();
+          return history.runs ? history.runs.length : 0;
+        },
+        { timeout: 15_000, message: "final successor run did not complete" },
+      )
+      .toBeGreaterThanOrEqual(4);
+
     const history = await (
       await reviewer.request.get(
         `${server.baseURL}/controlled/s01/api/queries/applications/${encodeURIComponent(applicationId)}/history`,
@@ -300,22 +480,28 @@ test("S10 membership dual-pane correction reruns and changes only via a fresh cu
         `${server.baseURL}/controlled/s01/api/queries/applications/${encodeURIComponent(applicationId)}/current-route`,
       )
     ).json();
-
-    // The old run stays immutable in history; route changes only via a fresh
-    // complete run that won current-run CAS.
     const runIds = history.runs.map((run) => run.run_id);
     expect(runIds).toContain(routeBefore.current_run_id);
-    expect(routeAfter.current_run_id).not.toBe(routeBefore.current_run_id);
-    expect(routeAfter.evidence_revision).toBe(2);
-    expect(history.membership_history.length).toBe(1);
-    expect(history.memberships.length).toBeGreaterThanOrEqual(8);
-    // The accepted decision and its superseded predecessors are preserved.
+    expect(runIds).toContain(firstRouteAfter.current_run_id);
+    expect(routeAfter.current_run_id).not.toBe(firstRouteAfter.current_run_id);
+    expect(routeAfter.evidence_revision).toBe(4);
+    expect(routeAfter.route).toBe("auto_complete");
+    expect(history.membership_history).toHaveLength(3);
+    expect(history.memberships).toHaveLength(6);
     const decisions = history.memberships.filter(
       (record) =>
         record.record_kind === "accepted" || record.record_kind === "unassigned",
     );
-    expect(decisions.some((record) => record.status === "active")).toBe(true);
-    expect(decisions.some((record) => record.status === "superseded")).toBe(true);
+    expect(decisions).toHaveLength(3);
+    expect(decisions.filter((record) => record.status === "superseded")).toHaveLength(1);
+    expect(decisions.filter((record) => record.status === "active")).toHaveLength(2);
+    expect(decisions.some((record) => record.record_kind === "unassigned")).toBe(true);
+    await expect(reviewer.getByTestId("review-history-memberships")).toContainText(
+      "unassigned",
+    );
+    await expect(
+      reviewer.getByTestId("review-history-membership-corrections"),
+    ).toContainText("MEMBERSHIP_PAGE_UNASSIGNED");
   } catch (error) {
     failure = error;
     throw error;

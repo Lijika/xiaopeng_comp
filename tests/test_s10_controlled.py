@@ -11,6 +11,7 @@ majority or last write.
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 
 import pytest
@@ -36,17 +37,24 @@ REVIEWER = S01CommandPrincipal(
     scope=INTEGRATOR.scope,
     source_id="s10-review-console",
 )
+AUDITOR = S01CommandPrincipal(
+    subject="s10-auditor",
+    role="auditor",
+    scope=INTEGRATOR.scope,
+    source_id="s10-audit-console",
+)
 
 PAGE1 = "1010101010101010101010101010101010101010101010101010101010101010"  # ambiguous
 PAGE2 = "2020202020202020202020202020202020202020202020202020202020202020"  # unresolved
-PAGE3 = "3030303030303030303030303030303030303030303030303030303030303030"  # explicit unassigned
 
 
 def _ready_membership(
     tmp_path: Path,
+    *,
+    fixture_root: Path | None = None,
 ) -> tuple[ControlledScenarioService, str, dict[str, object]]:
     service = ControlledScenarioService(
-        fixture_root=ROOT / "fixtures" / "applications",
+        fixture_root=fixture_root or ROOT / "fixtures" / "applications",
         rules_path=ROOT / "configs" / "rules_auto_lease.yaml",
         state_path=tmp_path / "target.sqlite3",
         scenario_id=SCENARIO,
@@ -99,6 +107,7 @@ def _ready_membership(
         "work_item": work_item,
         "claimed": claimed,
         "blockers": membership_blockers,
+        "workspace": workspace,
     }
 
 
@@ -110,11 +119,23 @@ def _accept_command(
     reason_code: str = "MEMBERSHIP_SOURCE_VERIFIED",
 ) -> dict[str, object]:
     membership = finding["membership"]
+    candidate = next(
+        candidate
+        for candidate in membership["candidates"]
+        if candidate["document_instance_id"] == instance_id
+        and candidate["document_role"] == role
+    )
     return {
-        "schema_version": "page-membership-correction/1",
+        "schema_version": "page-membership-correction/2",
         "finding_id": finding["finding_id"],
+        "candidate_claim_id": candidate["claim_id"],
+        "attachment_id": membership["attachment_id"],
         "page_source_sha256": membership["page_source_sha256"],
         "page_ordinal": membership["page_ordinal"],
+        "source_evidence": copy.deepcopy(membership["source_evidence"]),
+        "expected_active_decision_ids": copy.deepcopy(
+            membership["active_decision_ids"]
+        ),
         "decision": "accept",
         "document_instance_id": instance_id,
         "document_role": role,
@@ -125,13 +146,76 @@ def _accept_command(
 def _unassign_command(finding: dict[str, object], reason_code: str) -> dict[str, object]:
     membership = finding["membership"]
     return {
-        "schema_version": "page-membership-correction/1",
+        "schema_version": "page-membership-correction/2",
         "finding_id": finding["finding_id"],
+        "candidate_claim_id": membership["candidates"][0]["claim_id"],
+        "attachment_id": membership["attachment_id"],
         "page_source_sha256": membership["page_source_sha256"],
         "page_ordinal": membership["page_ordinal"],
+        "source_evidence": copy.deepcopy(membership["source_evidence"]),
+        "expected_active_decision_ids": copy.deepcopy(
+            membership["active_decision_ids"]
+        ),
         "decision": "unassign",
         "reason_code": reason_code,
     }
+
+
+def test_integrator_membership_decisions_have_no_reviewer_authority(
+    tmp_path: Path,
+) -> None:
+    """Integrator input can register candidate claims; Reviewer decisions are
+    created only by the controlled correction command."""
+    payload = json.loads(
+        (ROOT / "fixtures" / "applications" / SCENARIO).read_text(encoding="utf-8")
+    )
+    candidate = payload["graph"]["page_memberships"][0]
+    payload["graph"]["page_memberships"].extend(
+        [
+            {
+                "record_kind": "accepted",
+                "decision_id": "integrator-accepted",
+                "application_id": payload["application_id"],
+                "page": copy.deepcopy(candidate["page"]),
+                "document_instance_id": candidate["candidate_document"][
+                    "document_instance_id"
+                ],
+                "document_role": candidate["candidate_document"]["document_role"],
+            },
+            {
+                "record_kind": "unassigned",
+                "decision_id": "integrator-unassigned",
+                "application_id": payload["application_id"],
+                "page": copy.deepcopy(candidate["page"]),
+            },
+        ]
+    )
+    fixture_root = tmp_path / "fixtures"
+    fixture_root.mkdir()
+    (fixture_root / SCENARIO).write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+    service = ControlledScenarioService(
+        fixture_root=fixture_root,
+        rules_path=ROOT / "configs" / "rules_auto_lease.yaml",
+        state_path=tmp_path / "target.sqlite3",
+        scenario_id=SCENARIO,
+    )
+    admitted = service.submit_demo(
+        scenario_id=SCENARIO,
+        idempotency_key="s10-authority-intake",
+        principal=INTEGRATOR,
+    )
+    assert admitted.disposition is AdmissionDisposition.ACCEPTED
+    history = service.application_history_view(
+        principal=REVIEWER,
+        application_id=str(admitted.application_id),
+    )
+    assert history["memberships"]
+    assert {record["record_kind"] for record in history["memberships"]} == {
+        "candidate"
+    }
+    assert history["membership_history"] == []
 
 
 def test_membership_blockers_surface_every_candidate_without_selection(
@@ -139,8 +223,8 @@ def test_membership_blockers_surface_every_candidate_without_selection(
 ) -> None:
     """The workspace presents coexisting candidate claims and provenance without
     silently selecting a winner by type, order, confidence, majority or last
-    write.  An explicitly unassigned page is not a blocker; an unresolved page
-    and an ambiguous page are."""
+    write.  A single candidate is unresolved and coexisting candidates are
+    ambiguous."""
     service, application_id, state = _ready_membership(tmp_path)
     blockers = state["blockers"]
     by_sha = {item["membership"]["page_source_sha256"]: item for item in blockers}
@@ -160,13 +244,145 @@ def test_membership_blockers_surface_every_candidate_without_selection(
         principal=REVIEWER,
         application_id=application_id,
     )
-    ledger_pages = {
-        item["page"]["source_sha256"]: item
-        for item in history["memberships"]
-        if item["record_kind"] in {"accepted", "unassigned"}
+    assert {item["record_kind"] for item in history["memberships"]} == {
+        "candidate"
     }
-    assert ledger_pages[PAGE3]["record_kind"] == "unassigned"
-    assert ledger_pages[PAGE3]["status"] == "active"
+
+
+def test_membership_finding_exposes_complete_command_identity(tmp_path: Path) -> None:
+    _, _, state = _ready_membership(tmp_path)
+    ambiguous = next(
+        item
+        for item in state["blockers"]
+        if item["rule_id"] == "MEMBERSHIP_AMBIGUOUS"
+    )["membership"]
+    assert ambiguous["attachment_id"] == "s10-attachment-1"
+    assert ambiguous["page_ordinal"] == 1
+    assert ambiguous["active_decision_ids"] == []
+    assert ambiguous["source_evidence"]["evidence_revision"] == 1
+    assert ambiguous["source_evidence"]["event_id"].startswith("evidence_")
+    assert {candidate["claim_id"] for candidate in ambiguous["candidates"]} == {
+        "s10_claim_page1_a",
+        "s10::claim_page1_b",
+    }
+
+
+def test_workspace_ledger_exposes_every_candidate_and_provenance(
+    tmp_path: Path,
+) -> None:
+    _, _, state = _ready_membership(tmp_path)
+    ledger = state["workspace"]["membership_ledger"]
+    by_page = {
+        (page["attachment_id"], page["page_ordinal"]): page for page in ledger
+    }
+    assert set(by_page) == {
+        ("s10-attachment-1", 1),
+        ("s10-attachment-2", 2),
+    }
+    assert by_page[("s10-attachment-1", 1)]["state"] == "ambiguous"
+    assert by_page[("s10-attachment-2", 2)]["state"] == "unresolved"
+    assert {
+        (candidate["claim_id"], candidate["provenance"]["source_pointer"])
+        for candidate in by_page[("s10-attachment-1", 1)]["candidates"]
+    } == {
+        ("s10_claim_page1_a", "/pages/0"),
+        ("s10::claim_page1_b", "/pages/0"),
+    }
+    assert all(page["decisions"] == [] for page in ledger)
+    assert all(page["finding_id"] for page in ledger)
+
+
+def test_same_sha_attachment_pages_remain_distinct_membership_targets(
+    tmp_path: Path,
+) -> None:
+    payload = json.loads(
+        (ROOT / "fixtures" / "applications" / SCENARIO).read_text(encoding="utf-8")
+    )
+    payload["graph"]["page_memberships"][2]["page"]["source_sha256"] = PAGE1
+    fixture_root = tmp_path / "fixtures"
+    fixture_root.mkdir()
+    (fixture_root / SCENARIO).write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+    _, _, state = _ready_membership(tmp_path, fixture_root=fixture_root)
+    identities = {
+        (
+            item["membership"]["attachment_id"],
+            item["membership"]["page_ordinal"],
+        )
+        for item in state["blockers"]
+    }
+    assert identities == {
+        ("s10-attachment-1", 1),
+        ("s10-attachment-2", 2),
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "reason_code"),
+    [
+        ("page_ordinal", 100, "MEMBERSHIP_PAGE_OUTSIDE_APPLICATION"),
+        (
+            "attachment_id",
+            "attachment_from_another_application",
+            "MEMBERSHIP_PAGE_OUTSIDE_APPLICATION",
+        ),
+        ("candidate_claim_id", "missing_claim", "MEMBERSHIP_CLAIM_MISMATCH"),
+        (
+            "source_evidence",
+            {"event_id": "evidence_stale", "evidence_revision": 1},
+            "STALE_MEMBERSHIP_SOURCE_EVIDENCE",
+        ),
+        (
+            "expected_active_decision_ids",
+            ["decision_stale"],
+            "STALE_MEMBERSHIP_PREDECESSORS",
+        ),
+    ],
+)
+def test_membership_identity_conflicts_have_zero_public_effects(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    reason_code: str,
+) -> None:
+    service, application_id, state = _ready_membership(tmp_path)
+    finding = next(
+        item
+        for item in state["blockers"]
+        if item["rule_id"] == "MEMBERSHIP_AMBIGUOUS"
+    )
+    command = _accept_command(finding, instance_id="reg_cert_instance_a")
+    command[field] = value
+    route_before = service.current_route_view(
+        principal=REVIEWER, application_id=application_id
+    )
+    audit_before = service.audit_timeline(
+        principal=AUDITOR, application_id=application_id
+    )
+
+    result = service.correct_page_membership(
+        principal=REVIEWER,
+        application_id=application_id,
+        work_item_id=state["work_item_id"],
+        expected_fence=state["claimed"]["claim_fence"],
+        expected_context=state["work_item"]["command_context"],
+        idempotency_key=f"s10-conflict-{field}",
+        membership=command,
+        now=101,
+    )
+
+    assert result["status"] in {"rejected", "stale"}
+    assert result["reason_code"] == reason_code
+    assert service.current_route_view(
+        principal=REVIEWER, application_id=application_id
+    ) == route_before
+    assert service.audit_timeline(
+        principal=AUDITOR, application_id=application_id
+    ) == audit_before
+    assert service.application_history_view(
+        principal=REVIEWER, application_id=application_id
+    )["membership_history"] == []
 
 
 def test_membership_successor_requires_fresh_current_run(tmp_path: Path) -> None:
@@ -259,23 +475,75 @@ def test_membership_successor_requires_fresh_current_run(tmp_path: Path) -> None
     assert new_run["current"] is True
     assert old_run["evidence_revision"] == 1
     assert new_run["evidence_revision"] == 2
-    # The accepted decision superseded both fixture-accepted predecessors.
     ledger = {
         record["decision_id"]: record
         for record in history["memberships"]
         if record["record_kind"] in {"accepted", "unassigned"}
     }
-    assert ledger["s10_fixture_accept_page1_a"]["status"] == "superseded"
-    assert ledger["s10_fixture_accept_page1_b"]["status"] == "superseded"
     assert ledger[accepted["membership_decision_id"]]["status"] == "active"
+    assert ledger[accepted["membership_decision_id"]]["supersedes"] == []
 
 
-def test_membership_unassign_withdraws_accepted_predecessors(
+def test_accepted_instance_changes_and_pins_the_frozen_snapshot(
     tmp_path: Path,
 ) -> None:
-    """An explicit unassign is a first-class accepted decision that withdraws or
-    supersedes every active accepted predecessor of the page, appends the fact,
-    and keeps every prior candidate/decision visible (append-only)."""
+    service, application_id, state = _ready_membership(tmp_path)
+    old_history = service.application_history_view(
+        principal=REVIEWER,
+        application_id=application_id,
+    )
+    old_run = next(run for run in old_history["runs"] if run["current"])
+    ambiguous = next(
+        item
+        for item in state["blockers"]
+        if item["rule_id"] == "MEMBERSHIP_AMBIGUOUS"
+    )
+
+    accepted = service.correct_page_membership(
+        principal=REVIEWER,
+        application_id=application_id,
+        work_item_id=state["work_item_id"],
+        expected_fence=state["claimed"]["claim_fence"],
+        expected_context=state["work_item"]["command_context"],
+        idempotency_key="s10-accept-instance-b",
+        membership=_accept_command(ambiguous, instance_id="reg_cert_instance_b"),
+        now=101,
+    )
+    assert accepted["status"] == "accepted"
+    completed = service.process_next_job()
+    assert completed.status == "complete"
+
+    history = service.application_history_view(
+        principal=REVIEWER,
+        application_id=application_id,
+    )
+    new_run = next(run for run in history["runs"] if run["current"])
+    assert new_run["evidence_snapshot_digest"] != old_run["evidence_snapshot_digest"]
+    assert new_run["evidence_document_instance_ids"] == ["reg_cert_instance_b"]
+    assert new_run["membership_decisions"] == [
+        {
+            "decision_id": accepted["membership_decision_id"],
+            "candidate_claim_id": "s10::claim_page1_b",
+            "attachment_id": "s10-attachment-1",
+            "page_source_sha256": PAGE1,
+            "page_ordinal": 1,
+            "document_instance_id": "reg_cert_instance_b",
+            "document_role": "机动车登记证书",
+            "decision": "accept",
+            "evidence_revision": 2,
+        }
+    ]
+    assert old_run["current"] is True
+    assert next(
+        run for run in history["runs"] if run["run_id"] == old_run["run_id"]
+    )["current"] is False
+
+
+def test_membership_unassign_is_an_explicit_decision(
+    tmp_path: Path,
+) -> None:
+    """An explicit unassign is a Reviewer decision that preserves every source
+    candidate and keeps the page outside checker evidence."""
     service, application_id, state = _ready_membership(tmp_path)
     work_item_id = state["work_item_id"]
     work_item = state["work_item"]
@@ -306,23 +574,9 @@ def test_membership_unassign_withdraws_accepted_predecessors(
         for record in history["memberships"]
         if record["record_kind"] in {"accepted", "unassigned"}
     }
-    # Both fixture-accepted predecessors were withdrawn by the unassign.
-    assert by_id["s10_fixture_accept_page1_a"]["status"] == "superseded"
-    assert by_id["s10_fixture_accept_page1_b"]["status"] == "superseded"
     unassign_record = by_id[unassigned["membership_decision_id"]]
     assert unassign_record["status"] == "active"
-    assert set(unassign_record["supersedes"]) == {
-        "s10_fixture_accept_page1_a",
-        "s10_fixture_accept_page1_b",
-    }
-    # The page is now explicitly unassigned and outside the checker projection.
-    effective = service._effective_page_memberships(
-        service._admitted_graph(service._store.applications[application_id])[
-            "page_memberships"
-        ]
-    )
-    assert effective[PAGE1]["kind"] == "unassigned"
-
+    assert unassign_record["supersedes"] == []
     replaced = service.process_next_job()
     assert replaced.status == "complete"
     current = service.current_route_view(
@@ -344,6 +598,13 @@ def test_membership_unassign_withdraws_accepted_predecessors(
         if item.get("rule_id") in {"MEMBERSHIP_UNRESOLVED", "MEMBERSHIP_AMBIGUOUS"}
     ]
     assert {item["membership"]["page_source_sha256"] for item in blockers} == {PAGE2}
+    page1 = next(
+        item
+        for item in workspace["membership_ledger"]
+        if item["attachment_id"] == "s10-attachment-1"
+        and item["page_ordinal"] == 1
+    )
+    assert page1["state"] == "unassigned"
     assert current["route"] == "manual_review"
 
 
@@ -450,6 +711,100 @@ def test_membership_sequential_corrections_rerun_to_auto_complete(
     assert len(history["membership_history"]) == 2
 
 
+def test_later_membership_decision_supersedes_active_predecessor(
+    tmp_path: Path,
+) -> None:
+    service, application_id, state = _ready_membership(tmp_path)
+    ambiguous = next(
+        item
+        for item in state["blockers"]
+        if item["rule_id"] == "MEMBERSHIP_AMBIGUOUS"
+    )
+    first = service.correct_page_membership(
+        principal=REVIEWER,
+        application_id=application_id,
+        work_item_id=state["work_item_id"],
+        expected_fence=state["claimed"]["claim_fence"],
+        expected_context=state["work_item"]["command_context"],
+        idempotency_key="s10-first-membership-decision",
+        membership=_accept_command(ambiguous, instance_id="reg_cert_instance_a"),
+        now=101,
+    )
+    assert first["status"] == "accepted"
+    assert service.process_next_job().status == "complete"
+    service.refresh_projection()
+
+    queue = service.queue_view(
+        role="reviewer",
+        scope=REVIEWER.scope,
+        subject=REVIEWER.subject,
+        now=102,
+    )
+    successor_work_id = queue["items"][0]["work_item_id"]
+    successor_work = service.review_work_item_view(
+        principal=REVIEWER,
+        work_item_id=successor_work_id,
+        now=102,
+    )
+    successor_claim = service.claim_review_work_item(
+        principal=REVIEWER,
+        work_item_id=successor_work_id,
+        expected_context=successor_work["command_context"],
+        now=102,
+    )
+    workspace = service.workspace_view(
+        application_id,
+        role="reviewer",
+        scope=REVIEWER.scope,
+        subject=REVIEWER.subject,
+        now=102,
+    )
+    page = next(
+        item
+        for item in workspace["membership_ledger"]
+        if item["attachment_id"] == "s10-attachment-1"
+        and item["page_ordinal"] == 1
+    )
+    assert page["state"] == "selected"
+    assert page["finding_id"] == ambiguous["finding_id"]
+    assert page["active_decision_ids"] == [first["membership_decision_id"]]
+    assert page["source_evidence"]["evidence_revision"] == 2
+
+    successor = service.correct_page_membership(
+        principal=REVIEWER,
+        application_id=application_id,
+        work_item_id=successor_work_id,
+        expected_fence=successor_claim["claim_fence"],
+        expected_context=successor_work["command_context"],
+        idempotency_key="s10-successor-membership-decision",
+        membership=_accept_command(
+            {"finding_id": page["finding_id"], "membership": page},
+            instance_id="reg_cert_instance_b",
+            reason_code="MEMBERSHIP_SOURCE_MISASSIGNED",
+        ),
+        now=103,
+    )
+
+    assert successor["status"] == "accepted"
+    history = service.application_history_view(
+        principal=REVIEWER,
+        application_id=application_id,
+    )
+    decisions = {
+        item["decision_id"]: item
+        for item in history["memberships"]
+        if item["record_kind"] in {"accepted", "unassigned"}
+    }
+    assert decisions[first["membership_decision_id"]]["status"] == "superseded"
+    assert decisions[successor["membership_decision_id"]]["status"] == "active"
+    assert decisions[successor["membership_decision_id"]]["supersedes"] == [
+        first["membership_decision_id"]
+    ]
+    assert len(
+        [item for item in history["memberships"] if item["record_kind"] == "candidate"]
+    ) == 3
+
+
 def test_membership_ambiguous_role_input_is_conflict_without_revision(
     tmp_path: Path,
 ) -> None:
@@ -488,7 +843,7 @@ def test_membership_page_outside_application_is_rejected(tmp_path: Path) -> None
     service, application_id, state = _ready_membership(tmp_path)
     ambiguous = next(item for item in state["blockers"] if item["rule_id"] == "MEMBERSHIP_AMBIGUOUS")
     command = _accept_command(ambiguous, instance_id="reg_cert_instance_a")
-    command["page_source_sha256"] = "f" * 64
+    command["attachment_id"] = "attachment_from_another_application"
     rejected = service.correct_page_membership(
         principal=REVIEWER,
         application_id=application_id,
@@ -532,10 +887,13 @@ def test_membership_idempotency_replays_one_successor(tmp_path: Path) -> None:
     assert first["status"] == "accepted"
     assert second["status"] == "accepted"
     assert second["replayed"] is True
-    detail = service._admitted_graph(service._store.applications[application_id])
+    history = service.application_history_view(
+        principal=REVIEWER,
+        application_id=application_id,
+    )
     records = [
         record
-        for record in detail["page_memberships"]
+        for record in history["memberships"]
         if record["record_kind"] in {"accepted", "unassigned"}
         and record["page"]["source_sha256"] == PAGE1
         and record["status"] == "active"
@@ -543,10 +901,98 @@ def test_membership_idempotency_replays_one_successor(tmp_path: Path) -> None:
     assert len(records) == 1
     membership_audits = [
         event
-        for event in service._store.audit_events
+        for event in service.audit_timeline(
+            principal=AUDITOR,
+            application_id=application_id,
+        )["events"]
         if event["action"] == "page_membership_corrected"
     ]
     assert len(membership_audits) == 1
+
+
+@pytest.mark.parametrize(
+    "fault_point",
+    (
+        "membership.evidence",
+        "membership.lifecycle",
+        "membership.work_item",
+        "membership.job",
+        "membership.outbox",
+        "membership.audit",
+        "membership.idempotency",
+        "membership.publish",
+    ),
+)
+def test_each_membership_write_fault_has_zero_public_effect(
+    tmp_path: Path,
+    fault_point: str,
+) -> None:
+    service, application_id, state = _ready_membership(tmp_path)
+    ambiguous = next(
+        item
+        for item in state["blockers"]
+        if item["rule_id"] == "MEMBERSHIP_AMBIGUOUS"
+    )
+
+    def observe() -> dict[str, object]:
+        return {
+            "route": service.current_route_view(
+                principal=REVIEWER,
+                application_id=application_id,
+            ),
+            "work_item": service.review_work_item_view(
+                principal=REVIEWER,
+                work_item_id=state["work_item_id"],
+                now=100,
+            ),
+            "workspace": service.workspace_view(
+                application_id,
+                role="reviewer",
+                scope=REVIEWER.scope,
+                subject=REVIEWER.subject,
+                now=100,
+            ),
+            "history": service.application_history_view(
+                principal=REVIEWER,
+                application_id=application_id,
+            ),
+            "audit": service.audit_timeline(
+                principal=AUDITOR,
+                application_id=application_id,
+            ),
+        }
+
+    before = observe()
+
+    def fail(selected: str) -> None:
+        if selected == fault_point:
+            raise OSError("injected membership write failure")
+
+    faulty = ControlledScenarioService(
+        fixture_root=ROOT / "fixtures" / "applications",
+        rules_path=ROOT / "configs" / "rules_auto_lease.yaml",
+        state_path=tmp_path / "target.sqlite3",
+        scenario_id=SCENARIO,
+        fault_injector=fail,
+    )
+    failed = faulty.correct_page_membership(
+        principal=REVIEWER,
+        application_id=application_id,
+        work_item_id=state["work_item_id"],
+        expected_fence=state["claimed"]["claim_fence"],
+        expected_context=state["work_item"]["command_context"],
+        idempotency_key=f"s10-fault-{fault_point}",
+        membership=_accept_command(ambiguous, instance_id="reg_cert_instance_a"),
+        now=101,
+    )
+
+    assert failed["status"] == "unavailable"
+    assert failed["reason_code"] == (
+        "AUDIT_UNAVAILABLE"
+        if fault_point == "membership.audit"
+        else "STORAGE_UNAVAILABLE"
+    )
+    assert observe() == before
 
 
 def test_membership_requires_finding_in_current_run(tmp_path: Path) -> None:
@@ -615,6 +1061,10 @@ def test_field_correction_preserves_page_membership_ledger(tmp_path: Path) -> No
         for link in field_finding["evidence_links"]
         if link["document_id"] == "reg"
     )
+    memberships_before = service.application_history_view(
+        principal=REVIEWER,
+        application_id=admitted.application_id,
+    )["memberships"]
     accepted = service.correct_field_observation(
         principal=REVIEWER,
         application_id=admitted.application_id,
@@ -639,24 +1089,13 @@ def test_field_correction_preserves_page_membership_ledger(tmp_path: Path) -> No
         now=101,
     )
     assert accepted["status"] == "accepted"
-    graph = service._admitted_graph(
-        service._store.applications[admitted.application_id]
-    )
-    memberships = graph.get("page_memberships")
-    assert isinstance(memberships, list) and len(memberships) >= 4
-    assert {item["record_kind"] for item in memberships} == {
-        "candidate",
-        "accepted",
-        "unassigned",
-    }
-    # The Evidence event for the field correction carried the same graph.
-    event = next(
-        event
-        for event in service._store.evidence_events
-        if event["kind"] == "field_correction"
-        and event["application_id"] == admitted.application_id
-    )
-    assert event["payload"]["graph"]["page_memberships"]
+    memberships_after = service.application_history_view(
+        principal=REVIEWER,
+        application_id=admitted.application_id,
+    )["memberships"]
+    assert memberships_after == memberships_before
+    assert len(memberships_after) == 3
+    assert {item["record_kind"] for item in memberships_after} == {"candidate"}
 
 
 def test_membership_accept_must_reference_a_candidate(tmp_path: Path) -> None:
@@ -667,6 +1106,12 @@ def test_membership_accept_must_reference_a_candidate(tmp_path: Path) -> None:
     ambiguous = next(
         item for item in state["blockers"] if item["rule_id"] == "MEMBERSHIP_AMBIGUOUS"
     )
+    command = _accept_command(
+        ambiguous,
+        instance_id="reg_cert_instance_a",
+        reason_code="MEMBERSHIP_SOURCE_MISASSIGNED",
+    )
+    command["document_instance_id"] = "invented_instance_not_in_ledger"
     accepted = service.correct_page_membership(
         principal=REVIEWER,
         application_id=application_id,
@@ -674,11 +1119,7 @@ def test_membership_accept_must_reference_a_candidate(tmp_path: Path) -> None:
         expected_fence=state["claimed"]["claim_fence"],
         expected_context=state["work_item"]["command_context"],
         idempotency_key="s10-accept-non-candidate",
-        membership=_accept_command(
-            ambiguous,
-            instance_id="invented_instance_not_in_ledger",
-            reason_code="MEMBERSHIP_SOURCE_MISASSIGNED",
-        ),
+        membership=command,
         now=101,
     )
     assert accepted["status"] == "rejected"

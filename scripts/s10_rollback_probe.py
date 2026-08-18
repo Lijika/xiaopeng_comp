@@ -14,7 +14,12 @@ Run against the candidate commit:
 
 from __future__ import annotations
 
-import sys
+import io
+import json
+import os
+import sqlite3
+import subprocess
+import tarfile
 import tempfile
 from pathlib import Path
 
@@ -26,6 +31,181 @@ from task4_consistency.controlled.s01 import (
 
 ROOT = Path(__file__).resolve().parents[1]
 SCENARIO = "app_s10_ambiguous_membership.json"
+ROLLBACK_REVISION = "d3afeceb0a890f68ae55f31cd83d80a60177b4c0"
+
+
+def _membership_command(
+    finding: dict[str, object],
+    *,
+    decision: str,
+    reason_code: str,
+) -> dict[str, object]:
+    membership = finding["membership"]
+    assert isinstance(membership, dict)
+    candidates = membership["candidates"]
+    assert isinstance(candidates, list) and candidates
+    candidate = candidates[0]
+    assert isinstance(candidate, dict)
+    command: dict[str, object] = {
+        "schema_version": "page-membership-correction/2",
+        "finding_id": finding["finding_id"],
+        "candidate_claim_id": candidate["claim_id"],
+        "attachment_id": membership["attachment_id"],
+        "page_source_sha256": membership["page_source_sha256"],
+        "page_ordinal": membership["page_ordinal"],
+        "source_evidence": membership["source_evidence"],
+        "expected_active_decision_ids": membership["active_decision_ids"],
+        "decision": decision,
+        "reason_code": reason_code,
+    }
+    if decision == "accept":
+        command.update(
+            document_instance_id=candidate["document_instance_id"],
+            document_role=candidate["document_role"],
+        )
+    return command
+
+
+def _preserved_facts(
+    service: ControlledScenarioService,
+    reviewer: S01CommandPrincipal,
+    application_id: str,
+) -> dict[str, object]:
+    history = service.application_history_view(
+        principal=reviewer, application_id=application_id
+    )
+    return {
+        "route": service.current_route_view(
+            principal=reviewer, application_id=application_id
+        ),
+        "runs": [
+            {
+                key: run.get(key)
+                for key in (
+                    "run_id",
+                    "current",
+                    "evidence_revision",
+                    "evidence_snapshot_id",
+                    "evidence_snapshot_digest",
+                )
+            }
+            for run in history["runs"]
+        ],
+        "memberships": [
+            {
+                key: record.get(key)
+                for key in (
+                    "record_kind",
+                    "claim_id",
+                    "decision_id",
+                    "candidate_document",
+                    "document_instance_id",
+                    "document_role",
+                    "page",
+                    "source_evidence",
+                    "status",
+                    "supersedes",
+                )
+            }
+            for record in history["memberships"]
+        ],
+        "membership_history": [
+            {
+                key: correction.get(key)
+                for key in (
+                    "correction_id",
+                    "decision_id",
+                    "decision",
+                    "page_ordinal",
+                    "evidence_revision",
+                    "supersedes",
+                )
+            }
+            for correction in history["membership_history"]
+        ],
+    }
+
+
+def _rollback_executable_facts(
+    *,
+    state_path: Path,
+    prior_root: Path,
+    reviewer: S01CommandPrincipal,
+    application_id: str,
+) -> dict[str, object]:
+    archive = subprocess.run(
+        [
+            "git",
+            "archive",
+            ROLLBACK_REVISION,
+            "task4_consistency",
+            "configs",
+            "fixtures",
+        ],
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+    )
+    with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode="r:") as bundle:
+        bundle.extractall(prior_root)
+    rollback_state = prior_root / "rollback.sqlite3"
+    with sqlite3.connect(state_path) as source, sqlite3.connect(rollback_state) as target:
+        source.backup(target)
+    probe = r'''
+import json
+import sys
+from pathlib import Path
+from task4_consistency.controlled.s01 import ControlledScenarioService, S01CommandPrincipal
+
+root = Path(sys.argv[1])
+service = ControlledScenarioService(
+    fixture_root=root / "fixtures" / "applications",
+    rules_path=root / "configs" / "rules_auto_lease.yaml",
+    state_path=Path(sys.argv[2]),
+    scenario_id=sys.argv[3],
+)
+reviewer = S01CommandPrincipal(
+    subject=sys.argv[4], role="reviewer", scope="C-DEMO", source_id="s10-probe-console"
+)
+application_id = sys.argv[5]
+history = service.application_history_view(principal=reviewer, application_id=application_id)
+facts = {
+    "route": service.current_route_view(principal=reviewer, application_id=application_id),
+    "runs": [
+        {key: run.get(key) for key in ("run_id", "current", "evidence_revision", "evidence_snapshot_id", "evidence_snapshot_digest")}
+        for run in history["runs"]
+    ],
+    "memberships": [
+        {key: record.get(key) for key in ("record_kind", "claim_id", "decision_id", "candidate_document", "document_instance_id", "document_role", "page", "source_evidence", "status", "supersedes")}
+        for record in history["memberships"]
+    ],
+    "membership_history": [
+        {key: correction.get(key) for key in ("correction_id", "decision_id", "decision", "page_ordinal", "evidence_revision", "supersedes")}
+        for correction in history["membership_history"]
+    ],
+}
+print(json.dumps(facts, ensure_ascii=False, sort_keys=True))
+'''
+    environment = os.environ.copy()
+    environment.update(PYTHONPATH=str(prior_root), PYTHONDONTWRITEBYTECODE="1")
+    completed = subprocess.run(
+        [
+            str(ROOT / ".venv" / "bin" / "python"),
+            "-c",
+            probe,
+            str(prior_root),
+            str(rollback_state),
+            SCENARIO,
+            reviewer.subject,
+            application_id,
+        ],
+        cwd=prior_root,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(completed.stdout)
 
 
 def main() -> int:
@@ -95,18 +275,11 @@ def main() -> int:
             expected_fence=claimed["claim_fence"],
             expected_context=work_item["command_context"],
             idempotency_key="s10-probe-accept",
-            membership={
-                "schema_version": "page-membership-correction/1",
-                "finding_id": ambiguous["finding_id"],
-                "page_source_sha256": membership["page_source_sha256"],
-                "page_ordinal": membership["page_ordinal"],
-                "decision": "accept",
-                "document_instance_id": membership["candidates"][0][
-                    "document_instance_id"
-                ],
-                "document_role": membership["candidates"][0]["document_role"],
-                "reason_code": "MEMBERSHIP_SOURCE_VERIFIED",
-            },
+            membership=_membership_command(
+                ambiguous,
+                decision="accept",
+                reason_code="MEMBERSHIP_SOURCE_VERIFIED",
+            ),
         )
         assert accepted["status"] == "accepted", accepted
         replaced = service.process_next_job()
@@ -149,15 +322,8 @@ def main() -> int:
         assert len(service._store.evidence_events) >= 3
         graph = service._admitted_graph(app)
         ledger = graph["page_memberships"]
-        active = [
-            record
-            for record in ledger
-            if record["record_kind"] in {"accepted", "unassigned"}
-            and record["status"] == "active"
-        ]
         # Exactly one active decision for the corrected page; predecessors
-        # superseded, never removed.  (PAGE3's fixture unassigned stays active
-        # and untouched -- it is a different page.)
+        # stay in the append-only ledger.
         page1_active = [
             record
             for record in ledger
@@ -168,11 +334,41 @@ def main() -> int:
         assert len(page1_active) == 1
         assert page1_active[0]["decision_id"] == accepted["membership_decision_id"]
 
+        service.refresh_projection()
+        successor_queue = service.queue_view(
+            role="reviewer", scope=reviewer.scope, subject=reviewer.subject
+        )
+        successor_item = next(
+            item
+            for item in successor_queue["items"]
+            if item["application_id"] == application_id
+            and item["work_item_id"] != work_item_id
+        )
+        successor_work = service.review_work_item_view(
+            principal=reviewer, work_item_id=successor_item["work_item_id"]
+        )
+        claimed_successor = service.claim_review_work_item(
+            principal=reviewer,
+            work_item_id=successor_item["work_item_id"],
+            expected_context=successor_work["command_context"],
+        )
+        successor_workspace = service.workspace_view(
+            application_id,
+            role="reviewer",
+            scope=reviewer.scope,
+            subject=reviewer.subject,
+        )
+        unresolved = next(
+            item
+            for item in successor_workspace["mandatory_blockers"]
+            if item["rule_id"] == "MEMBERSHIP_UNRESOLVED"
+        )
+
         # 2. Stop drill: new admissions and new membership edits are disabled;
         # accepted facts / current route / history remain readable.
         stop = service.stop_new_cohort(
             reason_code=service._RUNTIME_STOP_REASON,
-            failure_reason_code="S10_PROBE_STOP",
+            failure_reason_code=service._REVIEW_SOURCE_FAILURE,
             principal=operator,
         )
         assert stop["admission"] == "stopped", stop
@@ -186,16 +382,103 @@ def main() -> int:
             and blocked.reason_code == service._RUNTIME_STOP_REASON
         ):
             raise SystemExit(f"stop drill did not block new cohort: {blocked.reason_code}")
+        before_edit_counts = {
+            "evidence": len(service._store.evidence_events),
+            "lifecycle": len(service._store.lifecycle_events),
+            "audit": len(service._store.audit_events),
+            "outbox": len(service._store.outbox),
+        }
+        stopped_edit = service.correct_page_membership(
+            principal=reviewer,
+            application_id=application_id,
+            work_item_id=successor_item["work_item_id"],
+            expected_fence=claimed_successor["claim_fence"],
+            expected_context=successor_work["command_context"],
+            idempotency_key="s10-probe-stopped-edit",
+            membership=_membership_command(
+                unresolved,
+                decision="unassign",
+                reason_code="MEMBERSHIP_PAGE_UNASSIGNED",
+            ),
+        )
+        assert stopped_edit["status"] == "stopped", stopped_edit
+        assert stopped_edit["reason_code"] == service._REVIEW_SOURCE_FAILURE
+        after_edit_counts = {
+            "evidence": len(service._store.evidence_events),
+            "lifecycle": len(service._store.lifecycle_events),
+            "audit": len(service._store.audit_events),
+            "outbox": len(service._store.outbox),
+        }
+        assert after_edit_counts == before_edit_counts
         still_current = service.current_route_view(
             principal=reviewer, application_id=application_id
         )
         assert still_current == current, "stop drill changed the current route"
-        assert service.application_history_view(
+        history_after_stop = service.application_history_view(
             principal=reviewer, application_id=application_id
-        )["membership_history"] == history["membership_history"]
+        )
+        assert history_after_stop["membership_history"] == history["membership_history"]
+
+        # A prior executable reads a SQLite copy without mutating the live
+        # authority.  Route, snapshots, claims and decisions must survive.
+        preserved = _preserved_facts(service, reviewer, application_id)
+        with tempfile.TemporaryDirectory() as rollback_dir:
+            rollback_facts = _rollback_executable_facts(
+                state_path=Path(td) / "target.sqlite3",
+                prior_root=Path(rollback_dir),
+                reviewer=reviewer,
+                application_id=application_id,
+            )
+        assert rollback_facts == preserved, json.dumps(
+            {"fixed": preserved, "rollback": rollback_facts},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+
+        # Restore the fixed executable, verify the repair, and append a forward
+        # successor from the still-claimed page 2 work item.
+        recovered = service.recover_runtime(
+            expected_failure_reason_code=service._REVIEW_SOURCE_FAILURE,
+            principal=operator,
+        )
+        assert recovered["recovery"] == "scheduled", recovered
+        forwarded = service.correct_page_membership(
+            principal=reviewer,
+            application_id=application_id,
+            work_item_id=successor_item["work_item_id"],
+            expected_fence=claimed_successor["claim_fence"],
+            expected_context=successor_work["command_context"],
+            idempotency_key="s10-probe-forward-unassign",
+            membership=_membership_command(
+                unresolved,
+                decision="unassign",
+                reason_code="MEMBERSHIP_PAGE_UNASSIGNED",
+            ),
+        )
+        assert forwarded["status"] == "accepted", forwarded
+        forward_run = service.process_next_job()
+        assert forward_run.status == "complete", forward_run.status
+        final_history = service.application_history_view(
+            principal=reviewer, application_id=application_id
+        )
+        assert len(final_history["membership_history"]) == 2
+        final_decisions = [
+            record
+            for record in final_history["memberships"]
+            if record["record_kind"] in {"accepted", "unassigned"}
+        ]
+        assert len(final_decisions) == 2
+        assert {
+            record["decision_id"] for record in final_decisions
+        } == {
+            accepted["membership_decision_id"],
+            forwarded["membership_decision_id"],
+        }
         print("S10 rollback/stop probe: PASS")
         print("  old run immutable and non-current; successor append-only")
-        print("  stop drill blocked new cohort; accepted facts readable")
+        print("  stop drill rejected an existing edit with zero writes")
+        print("  prior executable read persisted route, snapshots and ledger")
+        print("  fixed executable resumed and appended a forward successor")
         return 0
 
 

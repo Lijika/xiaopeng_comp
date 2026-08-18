@@ -72,6 +72,45 @@
         "owner_name": { "raw": "半真壬", "confidence": 0.99 },
         "address": { "raw": "江苏省南京市建邺区半真实路54号", "confidence": 0.99 }
       }
+    },
+    {
+      "doc_id": "reg-page-a",
+      "doc_type": "机动车登记证书",
+      "document_instance_id": "reg_cert_instance_a",
+      "page": {
+        "attachment_id": "s10-attachment-1",
+        "source_sha256": "1010101010101010101010101010101010101010101010101010101010101010",
+        "page_ordinal": 1
+      },
+      "fields": {
+        "page_marker": { "raw": "A", "confidence": 0.99 }
+      }
+    },
+    {
+      "doc_id": "reg-page-b",
+      "doc_type": "机动车登记证书",
+      "document_instance_id": "reg_cert_instance_b",
+      "page": {
+        "attachment_id": "s10-attachment-1",
+        "source_sha256": "1010101010101010101010101010101010101010101010101010101010101010",
+        "page_ordinal": 1
+      },
+      "fields": {
+        "page_marker": { "raw": "B", "confidence": 0.99 }
+      }
+    },
+    {
+      "doc_id": "reg-page-c",
+      "doc_type": "机动车登记证书",
+      "document_instance_id": "reg_cert_instance_c",
+      "page": {
+        "attachment_id": "s10-attachment-2",
+        "source_sha256": "2020202020202020202020202020202020202020202020202020202020202020",
+        "page_ordinal": 2
+      },
+      "fields": {
+        "page_marker": { "raw": "C", "confidence": 0.99 }
+      }
     }
   ],
   "graph": {
@@ -81,6 +120,7 @@
         "claim_id": "s10_claim_page1_a",
         "application_id": "APP-S10-AMBIGUOUS-MEMBERSHIP",
         "page": {
+          "attachment_id": "s10-attachment-1",
           "source_sha256": "1010101010101010101010101010101010101010101010101010101010101010",
           "page_ordinal": 1
         },
@@ -96,9 +136,10 @@
       },
       {
         "record_kind": "candidate",
-        "claim_id": "s10_claim_page1_b",
+        "claim_id": "s10::claim_page1_b",
         "application_id": "APP-S10-AMBIGUOUS-MEMBERSHIP",
         "page": {
+          "attachment_id": "s10-attachment-1",
           "source_sha256": "1010101010101010101010101010101010101010101010101010101010101010",
           "page_ordinal": 1
         },
@@ -113,46 +154,11 @@
         }
       },
       {
-        "record_kind": "accepted",
-        "decision_id": "s10_fixture_accept_page1_a",
-        "membership_id": "s10_fixture_accept_page1_a",
-        "application_id": "APP-S10-AMBIGUOUS-MEMBERSHIP",
-        "page": {
-          "source_sha256": "1010101010101010101010101010101010101010101010101010101010101010",
-          "page_ordinal": 1
-        },
-        "document_instance_id": "reg_cert_instance_a",
-        "document_role": "机动车登记证书",
-        "actor": "fixture-admitted",
-        "reason_code": "MEMBERSHIP_SOURCE_VERIFIED",
-        "time": 0,
-        "source_evidence": {},
-        "supersedes": [],
-        "status": "active"
-      },
-      {
-        "record_kind": "accepted",
-        "decision_id": "s10_fixture_accept_page1_b",
-        "membership_id": "s10_fixture_accept_page1_b",
-        "application_id": "APP-S10-AMBIGUOUS-MEMBERSHIP",
-        "page": {
-          "source_sha256": "1010101010101010101010101010101010101010101010101010101010101010",
-          "page_ordinal": 1
-        },
-        "document_instance_id": "reg_cert_instance_b",
-        "document_role": "机动车登记证书",
-        "actor": "fixture-admitted",
-        "reason_code": "MEMBERSHIP_SOURCE_VERIFIED",
-        "time": 0,
-        "source_evidence": {},
-        "supersedes": [],
-        "status": "active"
-      },
-      {
         "record_kind": "candidate",
         "claim_id": "s10_claim_page2",
         "application_id": "APP-S10-AMBIGUOUS-MEMBERSHIP",
         "page": {
+          "attachment_id": "s10-attachment-2",
           "source_sha256": "2020202020202020202020202020202020202020202020202020202020202020",
           "page_ordinal": 2
         },
@@ -165,40 +171,6 @@
           "adapter_version": "1",
           "source_pointer": "/pages/1"
         }
-      },
-      {
-        "record_kind": "candidate",
-        "claim_id": "s10_claim_page3",
-        "application_id": "APP-S10-AMBIGUOUS-MEMBERSHIP",
-        "page": {
-          "source_sha256": "3030303030303030303030303030303030303030303030303030303030303030",
-          "page_ordinal": 3
-        },
-        "candidate_document": {
-          "document_instance_id": "reg_cert_instance_d",
-          "document_role": "机动车登记证书"
-        },
-        "provenance": {
-          "adapter_id": "c-demo-s10-fixture",
-          "adapter_version": "1",
-          "source_pointer": "/pages/2"
-        }
-      },
-      {
-        "record_kind": "unassigned",
-        "decision_id": "s10_fixture_unassign_page3",
-        "membership_id": "s10_fixture_unassign_page3",
-        "application_id": "APP-S10-AMBIGUOUS-MEMBERSHIP",
-        "page": {
-          "source_sha256": "3030303030303030303030303030303030303030303030303030303030303030",
-          "page_ordinal": 3
-        },
-        "actor": "fixture-admitted",
-        "reason_code": "MEMBERSHIP_SOURCE_VERIFIED",
-        "time": 0,
-        "source_evidence": {},
-        "supersedes": [],
-        "status": "active"
       }
     ]
   },

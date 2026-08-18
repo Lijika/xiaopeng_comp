@@ -9361,8 +9361,12 @@ class ControlledScenarioService:
         base_contract = {
             "schema_version",
             "finding_id",
+            "candidate_claim_id",
+            "attachment_id",
             "page_source_sha256",
             "page_ordinal",
+            "source_evidence",
+            "expected_active_decision_ids",
             "decision",
             "reason_code",
         }
@@ -9377,12 +9381,19 @@ class ControlledScenarioService:
             contract = base_contract
         if set(membership) != contract:
             raise ValueError("page membership does not match the registered contract")
-        if membership.get("schema_version") != "page-membership-correction/1":
+        if membership.get("schema_version") != "page-membership-correction/2":
             raise ValueError("page membership schema version is unsupported")
-        for key in ("finding_id", "page_source_sha256"):
+        for key in (
+            "finding_id",
+            "candidate_claim_id",
+            "attachment_id",
+            "page_source_sha256",
+        ):
             value = membership.get(key)
             if not isinstance(value, str) or not value or value.strip() != value:
                 raise ValueError(f"page membership {key} is invalid")
+        candidate_claim_id = membership["candidate_claim_id"]
+        attachment_id = membership["attachment_id"]
         page_source_sha256 = membership["page_source_sha256"]
         if len(page_source_sha256) != 64 or any(
             character not in "0123456789abcdef"
@@ -9396,6 +9407,30 @@ class ControlledScenarioService:
             or page_ordinal < 1
         ):
             raise ValueError("page membership target is invalid")
+        source_evidence = membership.get("source_evidence")
+        if (
+            not isinstance(source_evidence, dict)
+            or set(source_evidence) != {"event_id", "evidence_revision"}
+            or not isinstance(source_evidence.get("event_id"), str)
+            or not source_evidence["event_id"]
+            or isinstance(source_evidence.get("evidence_revision"), bool)
+            or not isinstance(source_evidence["evidence_revision"], int)
+            or source_evidence["evidence_revision"] < 1
+        ):
+            raise ValueError("page membership source evidence is invalid")
+        expected_active_decision_ids = membership.get(
+            "expected_active_decision_ids"
+        )
+        if (
+            not isinstance(expected_active_decision_ids, list)
+            or any(
+                not isinstance(item, str) or not item or item.strip() != item
+                for item in expected_active_decision_ids
+            )
+            or expected_active_decision_ids
+            != sorted(set(expected_active_decision_ids))
+        ):
+            raise ValueError("page membership predecessors are invalid")
         reason_code = membership.get("reason_code")
         allowed_reasons = (
             self._MEMBERSHIP_ACCEPT_REASON_CODES
@@ -9505,14 +9540,13 @@ class ControlledScenarioService:
                     and finding.get("run_id") == work_item["run_id"]
                     and finding.get("finding_id") == normalized["finding_id"]
                 ]
-                if (
-                    len(findings) != 1
-                    or normalized["finding_id"] not in work_item["finding_ids"]
-                    or findings[0].get("mandatory") is not True
-                    or findings[0].get("verdict") == "consistent"
-                    or findings[0].get("rule_id") not in self._MEMBERSHIP_RULE_IDS
-                ):
-                    raise ValueError("page membership finding is not correctable")
+                finding_is_correctable = (
+                    len(findings) == 1
+                    and normalized["finding_id"] in work_item["finding_ids"]
+                    and findings[0].get("mandatory") is True
+                    and findings[0].get("verdict") != "consistent"
+                    and findings[0].get("rule_id") in self._MEMBERSHIP_RULE_IDS
+                )
                 gate = self._review_write_gate(app=app)
                 if gate is not None:
                     status, gate_reason_code = gate
@@ -9538,31 +9572,17 @@ class ControlledScenarioService:
                         "work_item_id": work_item_id,
                         "reason_code": "MEMBERSHIP_LEDGER_UNAVAILABLE",
                     }
-                # Locality: the target page must belong to this application
-                # boundary -- an admitted attachment page or a declared ledger
-                # page.  A page from another attachment or application cannot
-                # become a target.
-                attachment_shas: set[str] = set()
-                if isinstance(graph, dict):
-                    attachments = graph.get("attachments")
-                    if isinstance(attachments, list):
-                        attachment_shas = {
-                            item.get("source_sha256")
-                            for item in attachments
-                            if isinstance(item, dict)
-                            and isinstance(item.get("source_sha256"), str)
-                        }
+                page_identity = (attachment_id, page_ordinal)
                 ledger_pages = {
-                    record["page"]["source_sha256"]
+                    (
+                        record["page"].get("attachment_id"),
+                        record["page"].get("page_ordinal"),
+                    )
                     for record in memberships
                     if isinstance(record, dict)
                     and isinstance(record.get("page"), dict)
-                    and isinstance(record["page"].get("source_sha256"), str)
                 }
-                if (
-                    page_source_sha256 not in attachment_shas
-                    and page_source_sha256 not in ledger_pages
-                ):
+                if page_identity not in ledger_pages:
                     return {
                         "status": "rejected",
                         "replayed": False,
@@ -9576,6 +9596,8 @@ class ControlledScenarioService:
                     if isinstance(record, dict)
                     and record.get("record_kind") == "candidate"
                     and isinstance(record.get("page"), dict)
+                    and record["page"].get("attachment_id") == attachment_id
+                    and record["page"].get("page_ordinal") == page_ordinal
                     and record["page"].get("source_sha256") == page_source_sha256
                 ]
                 if not candidates:
@@ -9586,16 +9608,25 @@ class ControlledScenarioService:
                         "work_item_id": work_item_id,
                         "reason_code": "MEMBERSHIP_CLAIM_MISSING",
                     }
-                # An accepted decision must reference one of the page's
-                # coexisting candidate claims: the Reviewer resolves ambiguity
-                # among the visible candidates and never invents an instance or
-                # role that has no source evidence in this application.
-                if decision == "accept" and not any(
-                    isinstance(candidate.get("candidate_document"), dict)
-                    and candidate["candidate_document"].get("document_instance_id")
-                    == instance_id
-                    and candidate["candidate_document"].get("document_role") == role
+                selected_claims = [
+                    candidate
                     for candidate in candidates
+                    if candidate.get("claim_id") == candidate_claim_id
+                ]
+                if len(selected_claims) != 1:
+                    return {
+                        "status": "rejected",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "MEMBERSHIP_CLAIM_MISMATCH",
+                    }
+                selected_claim = selected_claims[0]
+                candidate_document = selected_claim.get("candidate_document")
+                if decision == "accept" and (
+                    not isinstance(candidate_document, dict)
+                    or candidate_document.get("document_instance_id") != instance_id
+                    or candidate_document.get("document_role") != role
                 ):
                     return {
                         "status": "rejected",
@@ -9604,15 +9635,79 @@ class ControlledScenarioService:
                         "work_item_id": work_item_id,
                         "reason_code": "MEMBERSHIP_ACCEPT_NOT_CANDIDATE",
                     }
-                finding_membership = findings[0].get("membership")
-                if (
-                    not isinstance(finding_membership, dict)
-                    or finding_membership.get("page_source_sha256")
-                    != page_source_sha256
-                ):
-                    raise ValueError(
-                        "page membership finding does not match the target page"
+                if decision == "accept":
+                    evidence_bindings = [
+                        document
+                        for document in self._admitted_evidence(app)
+                        if isinstance(document, dict)
+                        and document.get("document_instance_id") == instance_id
+                        and document.get("document_role") == role
+                        and document.get("page") == selected_claim.get("page")
+                    ]
+                    if len(evidence_bindings) != 1:
+                        return {
+                            "status": "rejected",
+                            "replayed": False,
+                            "application_id": application_id,
+                            "work_item_id": work_item_id,
+                            "reason_code": "MEMBERSHIP_EVIDENCE_BINDING_MISSING",
+                        }
+                current_source_evidence = self._current_evidence_reference(app)
+                if source_evidence != current_source_evidence:
+                    return {
+                        "status": "stale",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "STALE_MEMBERSHIP_SOURCE_EVIDENCE",
+                    }
+                active_decision_ids = sorted(
+                    record["decision_id"]
+                    for record in memberships
+                    if isinstance(record, dict)
+                    and record.get("record_kind") in {"accepted", "unassigned"}
+                    and record.get("status") == "active"
+                    and isinstance(record.get("page"), dict)
+                    and record["page"].get("attachment_id") == attachment_id
+                    and record["page"].get("page_ordinal") == page_ordinal
+                    and isinstance(record.get("decision_id"), str)
+                )
+                if expected_active_decision_ids != active_decision_ids:
+                    return {
+                        "status": "stale",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "STALE_MEMBERSHIP_PREDECESSORS",
+                    }
+                successor_target = (
+                    not finding_is_correctable
+                    and bool(active_decision_ids)
+                    and any(
+                        isinstance(record, dict)
+                        and record.get("decision_id") in active_decision_ids
+                        and record.get("finding_id") == normalized["finding_id"]
+                        for record in memberships
                     )
+                )
+                if not finding_is_correctable and not successor_target:
+                    raise ValueError("page membership finding is not correctable")
+                if finding_is_correctable:
+                    finding_membership = findings[0].get("membership")
+                    if (
+                        not isinstance(finding_membership, dict)
+                        or finding_membership.get("attachment_id") != attachment_id
+                        or finding_membership.get("page_source_sha256")
+                        != page_source_sha256
+                        or finding_membership.get("page_ordinal") != page_ordinal
+                        or finding_membership.get("source_evidence")
+                        != source_evidence
+                        or finding_membership.get("active_decision_ids")
+                        != expected_active_decision_ids
+                    ):
+                        raise ValueError(
+                            "page membership finding does not match the target page"
+                        )
 
                 staged = copy.deepcopy(self._store)
                 staged_app = staged.applications[application_id]
@@ -9629,7 +9724,8 @@ class ControlledScenarioService:
                         and record.get("record_kind") in {"accepted", "unassigned"}
                         and record.get("status") == "active"
                         and isinstance(record.get("page"), dict)
-                        and record["page"].get("source_sha256") == page_source_sha256
+                        and record["page"].get("attachment_id") == attachment_id
+                        and record["page"].get("page_ordinal") == page_ordinal
                         and isinstance(record.get("decision_id"), str)
                     }
                 )
@@ -9646,8 +9742,10 @@ class ControlledScenarioService:
                     ),
                     "decision_id": decision_id,
                     "membership_id": correction_id,
+                    "finding_id": normalized["finding_id"],
                     "application_id": application_id,
                     "page": {
+                        "attachment_id": attachment_id,
                         "source_sha256": page_source_sha256,
                         "page_ordinal": page_ordinal,
                     },
@@ -9655,11 +9753,8 @@ class ControlledScenarioService:
                     "reason_code": reason_code,
                     "time": membership_time,
                     "source_evidence": {
-                        "evidence_revision": next_evidence_revision,
-                        "event_id": self._stable_id(
-                            "evidence",
-                            f"{application_id}:membership:{correction_id}",
-                        ),
+                        **copy.deepcopy(current_source_evidence),
+                        "candidate_claim_id": candidate_claim_id,
                     },
                     "supersedes": superseded,
                     "status": "active",
@@ -9683,8 +9778,11 @@ class ControlledScenarioService:
                         "correction_id": correction_id,
                         "kind": "page_membership",
                         "decision_id": decision_id,
+                        "candidate_claim_id": candidate_claim_id,
+                        "attachment_id": attachment_id,
                         "page_source_sha256": page_source_sha256,
                         "page_ordinal": page_ordinal,
+                        "source_evidence": copy.deepcopy(current_source_evidence),
                         "decision": decision,
                         "document_instance_id": instance_id,
                         "document_role": role,
@@ -9755,7 +9853,11 @@ class ControlledScenarioService:
                         {
                             "correction_id": correction_id,
                             "membership_decision_id": decision_id,
+                            "candidate_claim_id": candidate_claim_id,
+                            "attachment_id": attachment_id,
                             "page_source_sha256": page_source_sha256,
+                            "page_ordinal": page_ordinal,
+                            "supersedes": copy.deepcopy(superseded),
                             "invalidated_run_id": work_item["run_id"],
                             "invalidated_route": old_route,
                             "invalidated_work_item_id": work_item_id,
@@ -9813,7 +9915,21 @@ class ControlledScenarioService:
                             "application_id": application_id,
                             "work_item_id": work_item_id,
                             "finding_id": normalized["finding_id"],
+                            "candidate_claim_id": candidate_claim_id,
+                            "attachment_id": attachment_id,
                             "page_source_sha256": page_source_sha256,
+                            "page_ordinal": page_ordinal,
+                            "source_evidence_event_id": current_source_evidence[
+                                "event_id"
+                            ],
+                            "source_evidence_revision": current_source_evidence[
+                                "evidence_revision"
+                            ],
+                            "supersedes": copy.deepcopy(superseded),
+                            "decision": decision,
+                            "document_instance_id": instance_id,
+                            "document_role": role,
+                            "cycle": app["cycle"],
                             "invalidated_run_id": work_item["run_id"],
                             "decision_id": decision_id,
                             "correction_id": correction_id,
@@ -9835,7 +9951,10 @@ class ControlledScenarioService:
                         "work_item_id": work_item_id,
                         "correction_id": correction_id,
                         "membership_decision_id": decision_id,
+                        "candidate_claim_id": candidate_claim_id,
+                        "attachment_id": attachment_id,
                         "page_source_sha256": page_source_sha256,
+                        "page_ordinal": page_ordinal,
                         "decision": decision,
                         "document_instance_id": instance_id,
                         "document_role": role,
@@ -13791,6 +13910,9 @@ class ControlledScenarioService:
                 "projection_watermark": projection["projection_watermark"],
                 "mandatory_blockers": findings,
                 "selected_finding": selected,
+                "membership_ledger": self._workspace_membership_ledger(
+                    self._store.applications[application_id], findings
+                ),
                 "actions": ["read_evidence"],
             }
             if projection["track"] == "R-OBSERVED":
@@ -14083,6 +14205,21 @@ class ControlledScenarioService:
                         "evidence_revision": spec["evidence_revision"],
                         "evidence_snapshot_id": spec["evidence_snapshot_id"],
                         "evidence_snapshot_digest": spec["evidence_snapshot_digest"],
+                        "membership_decisions": copy.deepcopy(
+                            spec.get("evidence_snapshot", {}).get(
+                                "membership_decisions", []
+                            )
+                        ),
+                        "evidence_document_instance_ids": sorted(
+                            document["document_instance_id"]
+                            for document in spec.get("evidence_snapshot", {}).get(
+                                "evidence", []
+                            )
+                            if isinstance(document, dict)
+                            and isinstance(
+                                document.get("document_instance_id"), str
+                            )
+                        ),
                         "release_id": spec["release_id"],
                         "release_digest": spec["release_digest"],
                         "checker_build": spec["checker_build"],
@@ -14319,8 +14456,11 @@ class ControlledScenarioService:
                             for key in (
                                 "correction_id",
                                 "decision_id",
+                                "candidate_claim_id",
+                                "attachment_id",
                                 "page_source_sha256",
                                 "page_ordinal",
+                                "source_evidence",
                                 "decision",
                                 "document_instance_id",
                                 "document_role",
@@ -14644,15 +14784,68 @@ class ControlledScenarioService:
             "schema_version": "s01-admitted-evidence/1",
             "evidence": copy.deepcopy(envelope.payload["application"]["evidence"]),
         }
-        # S10: a C-DEMO fixture may declare an application-local page-membership
-        # ledger on its graph.  It is admitted verbatim (immutable candidate
-        # claims plus any explicitly accepted/unassigned disposition facts) and
-        # travels with the Evidence payload and revisions.
+        # Integrators may register immutable membership claims. Reviewer
+        # decisions enter Evidence only through correct_page_membership().
         admitted_graph = envelope.payload["application"].get("graph")
         if isinstance(admitted_graph, dict) and isinstance(
             admitted_graph.get("page_memberships"), list
         ):
-            admitted_evidence["graph"] = copy.deepcopy(admitted_graph)
+            claims: list[dict[str, Any]] = []
+            claim_ids: set[str] = set()
+            for record in admitted_graph["page_memberships"]:
+                if not isinstance(record, dict) or record.get("record_kind") != "candidate":
+                    continue
+                page = record.get("page")
+                candidate = record.get("candidate_document")
+                claim_id = record.get("claim_id")
+                source_sha256 = (
+                    page.get("source_sha256") if isinstance(page, dict) else None
+                )
+                attachment_id = (
+                    page.get("attachment_id") if isinstance(page, dict) else None
+                )
+                page_ordinal = (
+                    page.get("page_ordinal") if isinstance(page, dict) else None
+                )
+                document_instance_id = (
+                    candidate.get("document_instance_id")
+                    if isinstance(candidate, dict)
+                    else None
+                )
+                document_role = (
+                    candidate.get("document_role")
+                    if isinstance(candidate, dict)
+                    else None
+                )
+                if (
+                    not isinstance(claim_id, str)
+                    or not claim_id
+                    or claim_id in claim_ids
+                    or not isinstance(attachment_id, str)
+                    or not attachment_id
+                    or not isinstance(source_sha256, str)
+                    or len(source_sha256) != 64
+                    or any(
+                        character not in "0123456789abcdef"
+                        for character in source_sha256
+                    )
+                    or isinstance(page_ordinal, bool)
+                    or not isinstance(page_ordinal, int)
+                    or page_ordinal < 1
+                    or not isinstance(document_instance_id, str)
+                    or not document_instance_id
+                    or not isinstance(document_role, str)
+                    or not document_role
+                    or not isinstance(record.get("provenance"), dict)
+                ):
+                    continue
+                claim_ids.add(claim_id)
+                normalized_claim = copy.deepcopy(record)
+                normalized_claim["application_id"] = app_id
+                claims.append(normalized_claim)
+            normalized_graph = copy.deepcopy(admitted_graph)
+            normalized_graph["page_memberships"] = claims
+            admitted_evidence["graph"] = normalized_graph
         admitted_evidence_bytes = json.dumps(
             admitted_evidence,
             ensure_ascii=False,
@@ -15836,134 +16029,26 @@ class ControlledScenarioService:
             graph = {}
         return copy.deepcopy(graph)
 
-    @staticmethod
-    def _registrable_candidate_membership(
-        *,
-        record: dict[str, Any],
-        application_id: str,
-    ) -> dict[str, Any] | None:
-        """Validate and normalize one admitted candidate page-membership claim."""
-        if not isinstance(record, dict):
-            return None
-        page = record.get("page")
-        candidate_document = record.get("candidate_document")
-        provenance = record.get("provenance")
-        if not isinstance(page, dict) or not isinstance(candidate_document, dict):
-            return None
-        source_sha256 = page.get("source_sha256")
-        page_ordinal = page.get("page_ordinal")
-        claim_id = record.get("claim_id")
-        candidate_instance = candidate_document.get("document_instance_id")
-        candidate_role = candidate_document.get("document_role")
-        if (
-            not isinstance(claim_id, str)
-            or not claim_id
-            or not isinstance(source_sha256, str)
-            or len(source_sha256) != 64
-            or any(character not in "0123456789abcdef" for character in source_sha256)
-            or isinstance(page_ordinal, bool)
-            or not isinstance(page_ordinal, int)
-            or page_ordinal < 1
-            or not isinstance(candidate_instance, str)
-            or not candidate_instance
-            or not isinstance(candidate_role, str)
-            or not candidate_role
-        ):
-            return None
+    def _current_evidence_reference(self, app: dict[str, Any]) -> dict[str, Any]:
+        events = [
+            event
+            for event in self._store.evidence_events
+            if event.get("application_id") == app["application_id"]
+            and event.get("revision") == app["evidence_revision"]
+            and event.get("kind")
+            in {
+                "admitted_snapshot",
+                "field_correction",
+                "membership_correction",
+                "supplement_attachment_version",
+            }
+        ]
+        if len(events) != 1 or not isinstance(events[0].get("event_id"), str):
+            raise RuntimeError("current evidence reference is unavailable")
         return {
-            "record_kind": "candidate",
-            "claim_id": claim_id,
-            "application_id": application_id,
-            "page": {
-                "source_sha256": source_sha256,
-                "page_ordinal": page_ordinal,
-            },
-            "candidate_document": {
-                "document_instance_id": candidate_instance,
-                "document_role": candidate_role,
-            },
-            "provenance": copy.deepcopy(provenance or {}),
+            "event_id": events[0]["event_id"],
+            "evidence_revision": app["evidence_revision"],
         }
-
-    def _registrable_membership_ledger(
-        self,
-        graph: Any,
-        *,
-        application_id: str,
-    ) -> list[dict[str, Any]]:
-        """Build the normalized append-only ledger admitted on the graph.
-
-        Only well-formed candidate claims are admitted; accepted/unassigned
-        dispositions inside a fixture are trusted only when they point at a
-        declared candidate claim of the same application boundary.  Nothing is
-        inferred from candidate confidence, order or count."""
-        if not isinstance(graph, dict):
-            return []
-        registrations = graph.get("page_memberships")
-        if not isinstance(registrations, list):
-            return []
-        if not registrations:
-            return []
-        ledger: list[dict[str, Any]] = []
-        for record in registrations:
-            if not isinstance(record, dict):
-                continue
-            kind = record.get("record_kind")
-            if kind == "candidate":
-                normalized = self._registrable_candidate_membership(
-                    record=record, application_id=application_id
-                )
-                if normalized is None:
-                    continue
-                ledger.append(normalized)
-            elif kind in {"accepted", "unassigned"}:
-                page = record.get("page")
-                source_sha256 = page.get("source_sha256") if isinstance(page, dict) else None
-                if not isinstance(source_sha256, str):
-                    continue
-                if any(
-                    item.get("record_kind") == "candidate"
-                    and isinstance(item.get("page"), dict)
-                    and item["page"].get("source_sha256") == source_sha256
-                    for item in ledger
-                ):
-                    decision_id = record.get("decision_id")
-                    decision_kind = kind
-                    successor = {
-                        "record_kind": decision_kind,
-                        "decision_id": (
-                            decision_id
-                            if isinstance(decision_id, str) and decision_id
-                            else self._stable_id(
-                                "decision", f"{application_id}:{source_sha256}:{kind}"
-                            )
-                        ),
-                        "application_id": application_id,
-                        "page": copy.deepcopy(page),
-                        "actor": str(record.get("actor") or "fixture-admitted"),
-                        "reason_code": str(record.get("reason_code") or "MEMBERSHIP_SOURCE_VERIFIED"),
-                        "time": int(record.get("time") or 0),
-                        "source_evidence": copy.deepcopy(
-                            record.get("source_evidence") or {}
-                        ),
-                        "supersedes": sorted(
-                            str(item)
-                            for item in (record.get("supersedes") or [])
-                            if isinstance(item, str) and item
-                        ),
-                        "status": "active",
-                    }
-                    if decision_kind == "accepted":
-                        successor["document_instance_id"] = str(
-                            record.get("document_instance_id") or ""
-                        )
-                        successor["document_role"] = str(
-                            record.get("document_role") or ""
-                        )
-                        if not successor["document_instance_id"] or not successor["document_role"]:
-                            continue
-                    ledger.append(successor)
-        return ledger
 
     @staticmethod
     def _assemble_evidence(evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -16036,7 +16121,7 @@ class ControlledScenarioService:
     @staticmethod
     def _effective_page_memberships(
         memberships: Any,
-    ) -> dict[str, dict[str, Any]]:
+    ) -> dict[tuple[str, int], dict[str, Any]]:
         """Compute each ledger page's current effective decision from the
         append-only membership records.
 
@@ -16049,24 +16134,31 @@ class ControlledScenarioService:
         and last write never select a winner."""
         if not isinstance(memberships, list):
             return {}
-        by_sha: dict[str, dict[str, Any]] = {}
+        by_page: dict[tuple[str, int], dict[str, Any]] = {}
         for record in memberships:
             if not isinstance(record, dict):
                 continue
             page = record.get("page")
-            source_sha = page.get("source_sha256") if isinstance(page, dict) else None
-            if not isinstance(source_sha, str) or not source_sha:
+            attachment_id = page.get("attachment_id") if isinstance(page, dict) else None
+            page_ordinal = page.get("page_ordinal") if isinstance(page, dict) else None
+            if (
+                not isinstance(attachment_id, str)
+                or not attachment_id
+                or isinstance(page_ordinal, bool)
+                or not isinstance(page_ordinal, int)
+                or page_ordinal < 1
+            ):
                 continue
-            entry = by_sha.setdefault(
-                source_sha, {"candidates": [], "decisions": []}
+            entry = by_page.setdefault(
+                (attachment_id, page_ordinal), {"candidates": [], "decisions": []}
             )
             kind = record.get("record_kind")
             if kind == "candidate":
                 entry["candidates"].append(record)
             elif kind in {"accepted", "unassigned"}:
                 entry["decisions"].append(record)
-        out: dict[str, dict[str, Any]] = {}
-        for source_sha, entry in by_sha.items():
+        out: dict[tuple[str, int], dict[str, Any]] = {}
+        for page_key, entry in by_page.items():
             if not entry["candidates"]:
                 continue
             active = [
@@ -16095,17 +16187,23 @@ class ControlledScenarioService:
                 }
                 if len(selections) == 1:
                     instance_id, role = next(iter(selections))
-                    out[source_sha] = {
+                    out[page_key] = {
                         "kind": "selected",
                         "document_instance_id": instance_id,
                         "document_role": role,
                     }
                 else:
-                    out[source_sha] = {"kind": "ambiguous"}
+                    out[page_key] = {"kind": "ambiguous"}
             elif unassigned:
-                out[source_sha] = {"kind": "unassigned"}
+                out[page_key] = {"kind": "unassigned"}
             else:
-                out[source_sha] = {"kind": "unresolved"}
+                out[page_key] = {
+                    "kind": (
+                        "ambiguous"
+                        if len(entry["candidates"]) > 1
+                        else "unresolved"
+                    )
+                }
         return out
 
     def _project_membership_evidence(
@@ -16124,37 +16222,22 @@ class ControlledScenarioService:
         selected = self._effective_page_memberships(memberships)
         if not selected:
             return evidence
-        projected = copy.deepcopy(evidence)
-        for document in projected:
-            role = document.get("document_role")
-            kept_observations = []
-            found_change = False
-            for observation in document.get("observations", []):
-                if not isinstance(observation, dict):
-                    kept_observations.append(observation)
-                    continue
-                state = selected.get(observation.get("source_sha256"))
-                if state is None or (
-                    state["kind"] == "selected"
-                    and state["document_role"] == role
-                ):
-                    kept_observations.append(observation)
-                    continue
-                found_change = True
-            if found_change:
-                document["observations"] = kept_observations
-                fields = document.get("fields")
-                if isinstance(fields, dict):
-                    for name in list(fields):
-                        value = fields[name]
-                        if not isinstance(value, dict):
-                            continue
-                        state = selected.get(value.get("source_sha256"))
-                        if state is not None and not (
-                            state["kind"] == "selected"
-                            and state["document_role"] == role
-                        ):
-                            del fields[name]
+        projected = []
+        for document in evidence:
+            page = document.get("page") if isinstance(document, dict) else None
+            if not isinstance(page, dict):
+                projected.append(copy.deepcopy(document))
+                continue
+            state = selected.get(
+                (page.get("attachment_id"), page.get("page_ordinal"))
+            )
+            if state is None or (
+                state.get("kind") == "selected"
+                and state.get("document_instance_id")
+                == document.get("document_instance_id")
+                and state.get("document_role") == document.get("document_role")
+            ):
+                projected.append(copy.deepcopy(document))
         return projected
 
     def _membership_findings(
@@ -16169,27 +16252,43 @@ class ControlledScenarioService:
         if not memberships:
             return []
         effective = self._effective_page_memberships(memberships)
+        source_evidence = self._current_evidence_reference(app)
         run_id = run_spec["run_id"]
         findings: list[dict[str, Any]] = []
-        seen: set[str] = set()
+        seen: set[tuple[str, int]] = set()
         for record in memberships:
             if not isinstance(record, dict) or record.get("record_kind") != "candidate":
                 continue
             page = record.get("page")
             source_sha = page.get("source_sha256") if isinstance(page, dict) else None
-            if not isinstance(source_sha, str) or not source_sha or source_sha in seen:
+            attachment_id = page.get("attachment_id") if isinstance(page, dict) else None
+            page_ordinal = page.get("page_ordinal") if isinstance(page, dict) else None
+            page_key = (attachment_id, page_ordinal)
+            if (
+                not isinstance(source_sha, str)
+                or not source_sha
+                or not isinstance(attachment_id, str)
+                or not attachment_id
+                or isinstance(page_ordinal, bool)
+                or not isinstance(page_ordinal, int)
+                or page_ordinal < 1
+                or page_key in seen
+            ):
                 continue
-            state = effective.get(source_sha)
+            state = effective.get(page_key)
             if state is None or state.get("kind") in {"selected", "unassigned"}:
                 continue
-            seen.add(source_sha)
+            seen.add(page_key)
             candidates = []
             for item in memberships:
                 if (
                     not isinstance(item, dict)
                     or item.get("record_kind") != "candidate"
                     or not isinstance(item.get("page"), dict)
-                    or item["page"].get("source_sha256") != source_sha
+                    or (
+                        item["page"].get("attachment_id"),
+                        item["page"].get("page_ordinal"),
+                    ) != page_key
                 ):
                     continue
                 candidate_document = item.get("candidate_document")
@@ -16211,23 +16310,18 @@ class ControlledScenarioService:
                 else "MEMBERSHIP_AMBIGUOUS"
             )
             finding_id = self._stable_id(
-                "finding", f"{run_id}:{rule_id}:{source_sha}"
+                "finding",
+                f"{run_id}:{rule_id}:{attachment_id}:{page_ordinal}:{source_sha}",
             )
-            accepted = [
-                decision.get("decision_id")
-                for decision in memberships
-                if isinstance(decision, dict)
-                and decision.get("record_kind") == "accepted"
-                and decision.get("status") == "active"
-                and isinstance(decision.get("page"), dict)
-                and decision["page"].get("source_sha256") == source_sha
-            ]
             unassigned = any(
                 isinstance(decision, dict)
                 and decision.get("record_kind") == "unassigned"
                 and decision.get("status") == "active"
                 and isinstance(decision.get("page"), dict)
-                and decision["page"].get("source_sha256") == source_sha
+                and (
+                    decision["page"].get("attachment_id"),
+                    decision["page"].get("page_ordinal"),
+                ) == page_key
                 for decision in memberships
             )
             findings.append(
@@ -16241,11 +16335,26 @@ class ControlledScenarioService:
                     "reason_code": rule_id,
                     "mandatory": True,
                     "membership": {
+                        "attachment_id": attachment_id,
                         "page_source_sha256": source_sha,
                         "page_ordinal": page.get("page_ordinal"),
                         "state": state["kind"],
                         "candidates": candidates,
-                        "accepted_decision_ids": accepted,
+                        "active_decision_ids": sorted(
+                            decision.get("decision_id")
+                            for decision in memberships
+                            if isinstance(decision, dict)
+                            and decision.get("record_kind")
+                            in {"accepted", "unassigned"}
+                            and decision.get("status") == "active"
+                            and isinstance(decision.get("page"), dict)
+                            and (
+                                decision["page"].get("attachment_id"),
+                                decision["page"].get("page_ordinal"),
+                            ) == page_key
+                            and isinstance(decision.get("decision_id"), str)
+                        ),
+                        "source_evidence": copy.deepcopy(source_evidence),
                         "unassigned": unassigned,
                     },
                     # Membership blockers reference pages and candidate document
@@ -16256,6 +16365,107 @@ class ControlledScenarioService:
                 }
             )
         return findings
+
+    def _workspace_membership_ledger(
+        self,
+        app: dict[str, Any],
+        findings: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        memberships = self._admitted_graph(app).get("page_memberships")
+        if not isinstance(memberships, list):
+            return []
+        effective = self._effective_page_memberships(memberships)
+        source_evidence = self._current_evidence_reference(app)
+        finding_ids = {
+            (
+                finding["membership"].get("attachment_id"),
+                finding["membership"].get("page_ordinal"),
+            ): finding.get("finding_id")
+            for finding in findings
+            if isinstance(finding.get("membership"), dict)
+        }
+        pages: dict[tuple[str, int], dict[str, Any]] = {}
+        for record in memberships:
+            if (
+                not isinstance(record, dict)
+                or not isinstance(record.get("page"), dict)
+            ):
+                continue
+            page = record["page"]
+            page_key = (page.get("attachment_id"), page.get("page_ordinal"))
+            if not isinstance(page_key[0], str) or not isinstance(page_key[1], int):
+                continue
+            item = pages.setdefault(
+                page_key,
+                {
+                    "attachment_id": page_key[0],
+                    "page_source_sha256": page.get("source_sha256"),
+                    "page_ordinal": page_key[1],
+                    "state": (effective.get(page_key) or {}).get("kind", "unresolved"),
+                    "finding_id": finding_ids.get(page_key),
+                    "active_decision_ids": [],
+                    "source_evidence": copy.deepcopy(source_evidence),
+                    "candidates": [],
+                    "decisions": [],
+                },
+            )
+            if record.get("record_kind") == "candidate":
+                candidate = record.get("candidate_document") or {}
+                item["candidates"].append(
+                    {
+                        "claim_id": record.get("claim_id"),
+                        "document_instance_id": candidate.get(
+                            "document_instance_id"
+                        ),
+                        "document_role": candidate.get("document_role"),
+                        "provenance": copy.deepcopy(record.get("provenance") or {}),
+                    }
+                )
+            elif record.get("record_kind") in {"accepted", "unassigned"}:
+                item["decisions"].append(
+                    {
+                        key: copy.deepcopy(record.get(key))
+                        for key in (
+                            "record_kind",
+                            "decision_id",
+                            "finding_id",
+                            "document_instance_id",
+                            "document_role",
+                            "actor",
+                            "reason_code",
+                            "time",
+                            "source_evidence",
+                            "supersedes",
+                            "status",
+                        )
+                    }
+                )
+        for page in pages.values():
+            page["candidates"].sort(key=lambda item: str(item.get("claim_id") or ""))
+            page["decisions"].sort(
+                key=lambda item: (
+                    int(item.get("time") or 0),
+                    str(item.get("decision_id") or ""),
+                )
+            )
+            active = [
+                item
+                for item in page["decisions"]
+                if item.get("status") == "active"
+                and isinstance(item.get("decision_id"), str)
+            ]
+            page["active_decision_ids"] = sorted(
+                item["decision_id"] for item in active
+            )
+            predecessor_finding_ids = {
+                item["finding_id"]
+                for item in active
+                if isinstance(item.get("finding_id"), str)
+                and item["finding_id"]
+            }
+            if page["finding_id"] is None and len(predecessor_finding_ids) == 1:
+                page["finding_id"] = next(iter(predecessor_finding_ids))
+        return [pages[key] for key in sorted(pages)]
 
     @classmethod
     def _verified_provenance_entries(
@@ -16439,6 +16649,31 @@ class ControlledScenarioService:
                 "document_role": str(document.get("doc_type") or ""),
                 "fields": fields,
             }
+            document_instance_id = document.get("document_instance_id")
+            declared_page = document.get("page")
+            if document_instance_id is not None or declared_page is not None:
+                if (
+                    not isinstance(document_instance_id, str)
+                    or not document_instance_id
+                    or document_instance_id.strip() != document_instance_id
+                    or not isinstance(declared_page, dict)
+                    or set(declared_page)
+                    != {"attachment_id", "source_sha256", "page_ordinal"}
+                    or not isinstance(declared_page.get("attachment_id"), str)
+                    or not declared_page["attachment_id"]
+                    or not isinstance(declared_page.get("source_sha256"), str)
+                    or len(declared_page["source_sha256"]) != 64
+                    or any(
+                        character not in "0123456789abcdef"
+                        for character in declared_page["source_sha256"]
+                    )
+                    or isinstance(declared_page.get("page_ordinal"), bool)
+                    or not isinstance(declared_page["page_ordinal"], int)
+                    or declared_page["page_ordinal"] < 1
+                ):
+                    raise ValueError("evidence document page binding is invalid")
+                evidence_document["document_instance_id"] = document_instance_id
+                evidence_document["page"] = copy.deepcopy(declared_page)
             if source.get("scenario_id") == "app_missing_vin_docs.json":
                 attachment_material = (
                     f"{source['source_object_ref']}:{document_id}:attachment:1"
@@ -16915,6 +17150,49 @@ class ControlledScenarioService:
                 self._project_membership_evidence(app)
             ),
         }
+        graph = self._admitted_graph(app)
+        memberships = graph.get("page_memberships") if isinstance(graph, dict) else None
+        if isinstance(memberships, list):
+            membership_decisions = []
+            for record in memberships:
+                if (
+                    not isinstance(record, dict)
+                    or record.get("record_kind") not in {"accepted", "unassigned"}
+                    or record.get("status") != "active"
+                    or not isinstance(record.get("page"), dict)
+                    or not isinstance(record.get("source_evidence"), dict)
+                ):
+                    continue
+                page = record["page"]
+                pin = {
+                    "decision_id": record.get("decision_id"),
+                    "candidate_claim_id": record["source_evidence"].get(
+                        "candidate_claim_id"
+                    ),
+                    "attachment_id": page.get("attachment_id"),
+                    "page_source_sha256": page.get("source_sha256"),
+                    "page_ordinal": page.get("page_ordinal"),
+                    "decision": (
+                        "accept"
+                        if record.get("record_kind") == "accepted"
+                        else "unassign"
+                    ),
+                    "evidence_revision": app["evidence_revision"],
+                }
+                if record.get("record_kind") == "accepted":
+                    pin["document_instance_id"] = record.get(
+                        "document_instance_id"
+                    )
+                    pin["document_role"] = record.get("document_role")
+                membership_decisions.append(pin)
+            snapshot_payload["membership_decisions"] = sorted(
+                membership_decisions,
+                key=lambda item: (
+                    str(item.get("attachment_id") or ""),
+                    int(item.get("page_ordinal") or 0),
+                    str(item.get("decision_id") or ""),
+                ),
+            )
         snapshot_bytes = json.dumps(
             snapshot_payload,
             ensure_ascii=False,

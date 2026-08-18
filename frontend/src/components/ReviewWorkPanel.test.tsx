@@ -273,12 +273,13 @@ function jsonResponse(payload: unknown, status = 200): Response {
  * JavaScript timer ceiling so no overflow warning or 1ms clamp occurs. */
 const LIVE_CLAIM_EXPIRES_AT = Math.floor(Date.now() / 1000) + 900;
 
-function claimedWorkPayload() {
+function claimedWorkPayload(overrides: Record<string, unknown> = {}) {
   return workPayload({
     status: "claimed",
     claim_subject: "t02-reviewer",
     claim_fence: 1,
     claim_expires_at: LIVE_CLAIM_EXPIRES_AT,
+    ...overrides,
   });
 }
 
@@ -459,96 +460,96 @@ describe("ReviewWorkPanel (T02)", () => {
     );
   });
 
-  it("presents S10 membership candidates and submits an explicit accept decision", async () => {
+  it("selects an active ledger page and submits a superseding membership decision", async () => {
     const MEMBERSHIP_FINDING_ID = "finding_s10panel0000000000000002";
+    const PREDECESSOR_DECISION_ID = "decision_s10panel_prior";
+    const SUCCESSOR_CONTEXT = {
+      ...CONTEXT,
+      evidence_revision: 2,
+      current_context: "9".repeat(64),
+    };
+    const SOURCE_EVIDENCE = {
+      event_id: "evidence_s10panel",
+      evidence_revision: 2,
+    };
+    const CANDIDATES = [
+      {
+        document_instance_id: "reg_cert_instance_a",
+        document_role: "机动车登记证书",
+        claim_id: "s10_claim_a",
+        provenance: {
+          adapter_id: "c-demo-s10-fixture",
+          adapter_version: "1",
+          source_pointer: "/pages/0",
+        },
+      },
+      {
+        document_instance_id: "reg::cert_instance_b",
+        document_role: "机动车登记证书",
+        claim_id: "s10::claim_b",
+        provenance: {
+          adapter_id: "c-demo-s10-fixture",
+          adapter_version: "1",
+          source_pointer: "/pages/0",
+        },
+      },
+    ];
     const membershipWorkspace = workspacePayload({
       claim_fence: 1,
       claim_expires_at: LIVE_CLAIM_EXPIRES_AT,
-      mandatory_blockers: [
+      evidence_revision: 2,
+      membership_ledger: [
         {
-          finding_id: MEMBERSHIP_FINDING_ID,
-          run_id: "run_t02panel",
-          rule_id: "MEMBERSHIP_AMBIGUOUS",
-          verdict: "uncertain",
-          severity: "critical",
-          reason_code: "MEMBERSHIP_AMBIGUOUS",
-          mandatory: true,
-          evidence_links: [],
-          membership: {
-            page_source_sha256: "10".repeat(32),
-            page_ordinal: 1,
-            state: "ambiguous",
-            candidates: [
-              {
-                document_instance_id: "reg_cert_instance_a",
-                document_role: "机动车登记证书",
-                claim_id: "s10_claim_a",
-                provenance: {
-                  adapter_id: "c-demo-s10-fixture",
-                  adapter_version: "1",
-                  source_pointer: "/pages/0",
-                },
-              },
-              {
-                document_instance_id: "reg_cert_instance_b",
-                document_role: "机动车登记证书",
-                claim_id: "s10_claim_b",
-                provenance: {
-                  adapter_id: "c-demo-s10-fixture",
-                  adapter_version: "1",
-                  source_pointer: "/pages/0",
-                },
-              },
-            ],
-            accepted_decision_ids: [],
-            unassigned: false,
-          },
-        },
-      ],
-      selected_finding: {
-        finding_id: MEMBERSHIP_FINDING_ID,
-        run_id: "run_t02panel",
-        rule_id: "MEMBERSHIP_AMBIGUOUS",
-        verdict: "uncertain",
-        severity: "critical",
-        reason_code: "MEMBERSHIP_AMBIGUOUS",
-        mandatory: true,
-        evidence_links: [],
-        membership: {
+          attachment_id: "s10-attachment-1",
           page_source_sha256: "10".repeat(32),
           page_ordinal: 1,
-          state: "ambiguous",
-          candidates: [
+          state: "selected",
+          finding_id: MEMBERSHIP_FINDING_ID,
+          active_decision_ids: [PREDECESSOR_DECISION_ID],
+          source_evidence: SOURCE_EVIDENCE,
+          candidates: CANDIDATES,
+          decisions: [
             {
+              record_kind: "accepted",
+              decision_id: PREDECESSOR_DECISION_ID,
               document_instance_id: "reg_cert_instance_a",
               document_role: "机动车登记证书",
-              claim_id: "s10_claim_a",
-              provenance: {
-                adapter_id: "c-demo-s10-fixture",
-                adapter_version: "1",
-                source_pointer: "/pages/0",
+              actor: "t02-reviewer",
+              reason_code: "MEMBERSHIP_SOURCE_VERIFIED",
+              time: 100,
+              source_evidence: {
+                ...SOURCE_EVIDENCE,
+                candidate_claim_id: "s10_claim_a",
               },
-            },
-            {
-              document_instance_id: "reg_cert_instance_b",
-              document_role: "机动车登记证书",
-              claim_id: "s10_claim_b",
-              provenance: {
-                adapter_id: "c-demo-s10-fixture",
-                adapter_version: "1",
-                source_pointer: "/pages/0",
-              },
+              supersedes: [],
+              status: "active",
             },
           ],
-          accepted_decision_ids: [],
-          unassigned: false,
         },
-      },
+      ],
     });
     const router = fetchRouter({
       ...baseRoutes(),
-      [`GET ${WORK_PATH}`]: () => jsonResponse(claimedWorkPayload()),
+      [`GET ${WORK_PATH}`]: () =>
+        jsonResponse(
+          claimedWorkPayload({
+            evidence_revision: 2,
+            command_context: SUCCESSOR_CONTEXT,
+          }),
+        ),
       [`GET ${WORKSPACE_PATH}`]: () => jsonResponse(membershipWorkspace),
+      [`GET ${ROUTE_PATH}`]: () => jsonResponse(routePayload({ evidence_revision: 2 })),
+      [`GET ${HISTORY_PATH}`]: () =>
+        jsonResponse(
+          historyPayload({
+            runs: [
+              {
+                ...historyPayload().runs[0],
+                evidence_revision: 2,
+              },
+            ],
+          }),
+        ),
       [`POST ${MEMBERSHIP_PATH}`]: () =>
         jsonResponse({
           status: "accepted",
@@ -557,30 +558,42 @@ describe("ReviewWorkPanel (T02)", () => {
           work_item_id: WORK_ID,
           correction_id: "membership_s10panel",
           membership_decision_id: "decision_s10panel",
+          candidate_claim_id: "s10::claim_b",
+          attachment_id: "s10-attachment-1",
           page_source_sha256: "10".repeat(32),
+          page_ordinal: 1,
           decision: "accept",
-          document_instance_id: "reg_cert_instance_a",
+          document_instance_id: "reg::cert_instance_b",
           document_role: "机动车登记证书",
           invalidated_run_id: "run_t02panel",
           job_id: "job_s10panel",
           phase: "Assembly",
           route: "pending_check",
           lifecycle_revision: 7,
-          evidence_revision: 2,
+          evidence_revision: 3,
         }),
     });
     renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
     await waitForReviewReady();
-    // The membership section shows every coexisting candidate claim.
-    expect(screen.getByTestId("review-membership")).toBeInTheDocument();
-    expect(screen.getAllByTestId("review-membership-candidate")).toHaveLength(2);
-    expect(
-      screen.getAllByTestId("review-membership-candidate-instance")[0],
-    ).toHaveTextContent("reg_cert_instance_a");
+    expect(screen.getByTestId("review-membership-ledger")).toHaveTextContent(
+      "/pages/0",
+    );
     await userEvent.click(
-      screen.getByTestId("review-membership-start"),
+      screen.getByRole("button", {
+        name: "选择附件 s10-attachment-1 第 1 页",
+      }),
     );
     await screen.findByTestId("review-membership-form");
+    const candidateSelect = screen.getByRole("combobox", {
+      name: "候选实例",
+    });
+    const reasonSelect = screen.getByRole("combobox", { name: "原因" });
+    expect(
+      within(reasonSelect).queryByRole("option", {
+        name: "MEMBERSHIP_PAGE_UNASSIGNED",
+      }),
+    ).not.toBeInTheDocument();
+    await userEvent.selectOptions(candidateSelect, "s10::claim_b");
     await userEvent.click(screen.getByTestId("review-membership-submit"));
     await vi.waitFor(() =>
       expect(
@@ -598,15 +611,19 @@ describe("ReviewWorkPanel (T02)", () => {
     expect(call?.body).toEqual({
       application_id: APP_ID,
       expected_fence: 1,
-      expected_context: CONTEXT,
+      expected_context: SUCCESSOR_CONTEXT,
       idempotency_key: expect.any(String),
       membership: {
-        schema_version: "page-membership-correction/1",
+        schema_version: "page-membership-correction/2",
         finding_id: MEMBERSHIP_FINDING_ID,
+        candidate_claim_id: "s10::claim_b",
+        attachment_id: "s10-attachment-1",
         page_source_sha256: "10".repeat(32),
         page_ordinal: 1,
+        source_evidence: SOURCE_EVIDENCE,
+        expected_active_decision_ids: [PREDECESSOR_DECISION_ID],
         decision: "accept",
-        document_instance_id: "reg_cert_instance_a",
+        document_instance_id: "reg::cert_instance_b",
         document_role: "机动车登记证书",
         reason_code: "MEMBERSHIP_SOURCE_VERIFIED",
       },

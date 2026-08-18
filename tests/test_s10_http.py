@@ -47,36 +47,46 @@ def _submit(server, key: str = "s10-http-intake"):
 def _accept_command(
     application_id: str, work_item, claimed, finding, idempotency_key: str = "s10-http-accept"
 ) -> dict:
-    candidates = finding["membership"]["candidates"]
+    membership = finding["membership"]
+    candidate = membership["candidates"][0]
     return {
         "application_id": application_id,
         "expected_fence": claimed["claim_fence"],
         "expected_context": work_item["command_context"],
         "idempotency_key": idempotency_key,
         "membership": {
-            "schema_version": "page-membership-correction/1",
+            "schema_version": "page-membership-correction/2",
             "finding_id": finding["finding_id"],
-            "page_source_sha256": finding["membership"]["page_source_sha256"],
-            "page_ordinal": finding["membership"]["page_ordinal"],
+            "candidate_claim_id": candidate["claim_id"],
+            "attachment_id": membership["attachment_id"],
+            "page_source_sha256": membership["page_source_sha256"],
+            "page_ordinal": membership["page_ordinal"],
+            "source_evidence": membership["source_evidence"],
+            "expected_active_decision_ids": membership["active_decision_ids"],
             "decision": "accept",
-            "document_instance_id": candidates[0]["document_instance_id"],
-            "document_role": candidates[0]["document_role"],
+            "document_instance_id": candidate["document_instance_id"],
+            "document_role": candidate["document_role"],
             "reason_code": "MEMBERSHIP_SOURCE_VERIFIED",
         },
     }
 
 
 def _unassign_command(application_id: str, work_item, claimed, finding) -> dict:
+    membership = finding["membership"]
     return {
         "application_id": application_id,
         "expected_fence": claimed["claim_fence"],
         "expected_context": work_item["command_context"],
         "idempotency_key": "s10-http-unassign",
         "membership": {
-            "schema_version": "page-membership-correction/1",
+            "schema_version": "page-membership-correction/2",
             "finding_id": finding["finding_id"],
-            "page_source_sha256": finding["membership"]["page_source_sha256"],
-            "page_ordinal": finding["membership"]["page_ordinal"],
+            "candidate_claim_id": membership["candidates"][0]["claim_id"],
+            "attachment_id": membership["attachment_id"],
+            "page_source_sha256": membership["page_source_sha256"],
+            "page_ordinal": membership["page_ordinal"],
+            "source_evidence": membership["source_evidence"],
+            "expected_active_decision_ids": membership["active_decision_ids"],
             "decision": "unassign",
             "reason_code": "MEMBERSHIP_PAGE_UNASSIGNED",
         },
@@ -247,7 +257,11 @@ def test_membership_successor_requires_fresh_current_run(tmp_path) -> None:
         run_ids = [record["run_id"] for record in history["runs"]]
         assert old_run_id in run_ids  # old run retained immutable
         assert len(history["membership_history"]) == 1
-        assert len(history["memberships"]) >= 8
+        assert len(history["memberships"]) == 4
+        assert {record["record_kind"] for record in history["memberships"]} == {
+            "candidate",
+            "accepted",
+        }
 
 
 def test_membership_unassign_over_http_then_auto_complete(tmp_path) -> None:
@@ -407,21 +421,35 @@ def test_membership_http_openapi_contract_is_closed(tmp_path) -> None:
         "membership",
     }
     membership = schema["properties"]["membership"]
-    assert membership["additionalProperties"] is False
-    assert set(membership["properties"]) == {
+    assert membership["discriminator"]["propertyName"] == "decision"
+    accept, unassign = membership["oneOf"]
+    assert accept["additionalProperties"] is False
+    assert unassign["additionalProperties"] is False
+    common = {
         "schema_version",
         "finding_id",
+        "candidate_claim_id",
+        "attachment_id",
         "page_source_sha256",
         "page_ordinal",
+        "source_evidence",
+        "expected_active_decision_ids",
         "decision",
-        "document_instance_id",
-        "document_role",
         "reason_code",
     }
-    assert membership["properties"]["reason_code"]["enum"] == [
+    assert set(accept["properties"]) == common | {
+        "document_instance_id",
+        "document_role",
+    }
+    assert set(unassign["properties"]) == common
+    assert accept["properties"]["reason_code"]["enum"] == [
         "MEMBERSHIP_SOURCE_VERIFIED",
         "MEMBERSHIP_SOURCE_MISASSIGNED",
         "MEMBERSHIP_INSTANCE_WRONG",
+    ]
+    assert unassign["properties"]["reason_code"]["enum"] == [
+        "MEMBERSHIP_SOURCE_VERIFIED",
+        "MEMBERSHIP_SOURCE_MISASSIGNED",
         "MEMBERSHIP_PAGE_UNASSIGNED",
     ]
     success = operation["responses"]["200"]["content"]["application/json"]["schema"]

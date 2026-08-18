@@ -85,7 +85,7 @@ function hasGovernedPin(
 }
 
 type S01EvidenceLink = components["schemas"]["S01EvidenceLink"];
-type S01WorkspaceFinding = components["schemas"]["S01WorkspaceFinding"];
+type S01WorkspaceMembershipPage = components["schemas"]["S01WorkspaceMembershipPage"];
 
 type Action =
   | "claim"
@@ -116,23 +116,44 @@ const CORRECTION_REASONS: readonly CorrectionReason[] = [
   "SOURCE_VALUE_MISSING",
 ];
 
-/** The closed membership-decision reason vocabulary of the S01 domain
- * authority (S10), bound to the generated OpenAPI literal. */
-type MembershipReason = MembershipCommand["membership"]["reason_code"];
+/** The discriminated membership-decision vocabulary of the S01 domain
+ * authority (S10), bound to the generated OpenAPI literals. */
+type MembershipPayload = MembershipCommand["membership"];
+type MembershipAccept = Extract<MembershipPayload, { decision: "accept" }>;
+type MembershipUnassign = Extract<MembershipPayload, { decision: "unassign" }>;
+type MembershipReason = MembershipPayload["reason_code"];
 
-const MEMBERSHIP_REASONS: readonly MembershipReason[] = [
+const MEMBERSHIP_ACCEPT_REASONS: readonly MembershipAccept["reason_code"][] = [
   "MEMBERSHIP_SOURCE_VERIFIED",
   "MEMBERSHIP_SOURCE_MISASSIGNED",
   "MEMBERSHIP_INSTANCE_WRONG",
+];
+
+const MEMBERSHIP_UNASSIGN_REASONS: readonly MembershipUnassign["reason_code"][] = [
+  "MEMBERSHIP_SOURCE_VERIFIED",
+  "MEMBERSHIP_SOURCE_MISASSIGNED",
   "MEMBERSHIP_PAGE_UNASSIGNED",
 ];
 
-/** The open membership decision draft for one selected membership blocker. */
+type MembershipTarget = {
+  findingId: string;
+  membership: Pick<
+    S01WorkspaceMembershipPage,
+    | "attachment_id"
+    | "page_source_sha256"
+    | "page_ordinal"
+    | "state"
+    | "candidates"
+    | "active_decision_ids"
+    | "source_evidence"
+  >;
+};
+
+/** The open membership decision draft for one server-owned ledger target. */
 type MembershipDraft = {
-  finding: S01WorkspaceFinding;
+  target: MembershipTarget;
   decision: "accept" | "unassign";
-  instanceId: string | null;
-  role: string | null;
+  claimId: string | null;
   reason: MembershipReason;
 };
 
@@ -348,9 +369,9 @@ function WorkspaceSection({
   onCorrectionReasonChange: (reason: CorrectionReason) => void;
   onSubmitCorrection: () => void;
   onCancelCorrection: () => void;
-  onStartMembership: (finding: S01WorkspaceFinding) => void;
+  onStartMembership: (target: MembershipTarget) => void;
   onMembershipDecision: (decision: "accept" | "unassign") => void;
-  onMembershipCandidate: (instanceId: string, role: string) => void;
+  onMembershipCandidate: (claimId: string) => void;
   onMembershipReasonChange: (reason: MembershipReason) => void;
   onSubmitMembership: () => void;
 }) {
@@ -381,7 +402,10 @@ function WorkspaceSection({
   }
   const finding = workspace.data.selected_finding ?? null;
   const findingId = finding?.finding_id ?? null;
-  const membership = finding === null ? null : (finding.membership ?? null);
+  const membership =
+    membershipDraft?.target.membership ??
+    (finding === null ? null : (finding.membership ?? null));
+  const membershipLedger = workspace.data.membership_ledger ?? [];
   return (
     <section aria-labelledby="review-workspace-title">
       <h3 id="review-workspace-title">最小工作区（发现优先）</h3>
@@ -423,6 +447,66 @@ function WorkspaceSection({
           </dd>
         </div>
       </dl>
+      {membershipLedger.length > 0 && (
+        <section data-testid="review-membership-ledger" aria-labelledby="review-membership-ledger-title">
+          <h4 id="review-membership-ledger-title">单据页归属账本（服务端权威）</h4>
+          <ol>
+            {membershipLedger.map((page) => {
+              const correctable = workspace.data.mandatory_blockers.find(
+                (blocker) => blocker.finding_id === page.finding_id,
+              );
+              const target =
+                correctable?.membership != null
+                  ? {
+                      findingId: correctable.finding_id,
+                      membership: correctable.membership,
+                    }
+                  : page.finding_id != null
+                    ? { findingId: page.finding_id, membership: page }
+                    : null;
+              return (
+                <li
+                  key={`${page.attachment_id}:${page.page_ordinal}`}
+                  data-testid="review-membership-ledger-page"
+                >
+                  {page.attachment_id} · 页 {page.page_ordinal} · {page.state} ·{" "}
+                  {page.page_source_sha256.slice(0, 12)}…
+                  {target !== null && claimed && !controlsDisabled && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => onStartMembership(target)}
+                      aria-label={`选择附件 ${page.attachment_id} 第 ${page.page_ordinal} 页`}
+                    >
+                      选择
+                    </Button>
+                  )}
+                  <ul>
+                    {page.candidates.map((candidate) => (
+                      <li key={candidate.claim_id} data-testid="review-membership-ledger-candidate">
+                        claim {candidate.claim_id} · {candidate.document_instance_id} ·{" "}
+                        {candidate.document_role} ·{" "}
+                        {Object.entries(candidate.provenance ?? {})
+                          .map(([key, value]) => `${key}=${value}`)
+                          .join(" · ")}
+                      </li>
+                    ))}
+                    {page.decisions.map((decision) => (
+                      <li key={decision.decision_id} data-testid="review-membership-ledger-decision">
+                        {decision.record_kind} · {decision.decision_id} · {decision.status} ·{" "}
+                        {decision.document_instance_id ?? "未归属"} ·{" "}
+                        {decision.document_role ?? "未归属"} · {decision.reason_code} ·{" "}
+                        supersedes {decision.supersedes.join(", ") || "None"} ·{" "}
+                        {JSON.stringify(decision.source_evidence)}
+                      </li>
+                    ))}
+                  </ul>
+                </li>
+              );
+            })}
+          </ol>
+        </section>
+      )}
       {finding === null || findingId === null ? (
         <p data-testid="review-workspace-empty" className="text-sm text-muted-foreground">
           无可复核发现
@@ -471,6 +555,12 @@ function WorkspaceSection({
                         <span className="text-xs text-muted-foreground">
                           {" "}
                           claim {candidate.claim_id}
+                          {" · "}
+                          <span data-testid="review-membership-candidate-provenance">
+                            {Object.entries(candidate.provenance ?? {})
+                              .map(([key, value]) => `${key}=${value}`)
+                              .join(" · ")}
+                          </span>
                         </span>
                       </li>
                     ))}
@@ -488,7 +578,12 @@ function WorkspaceSection({
                       size="sm"
                       data-testid="review-membership-start"
                       disabled={controlsDisabled}
-                      onClick={() => onStartMembership(finding)}
+                      onClick={() =>
+                        onStartMembership({
+                          findingId: finding.finding_id,
+                          membership,
+                        })
+                      }
                     >
                       开始页归属修正
                     </Button>
@@ -519,18 +614,17 @@ function WorkspaceSection({
                       </label>
                       {membershipDraft.decision === "accept" ? (
                         <select
-                          value={`${membershipDraft.instanceId ?? ""}::${membershipDraft.role ?? ""}`}
-                          onChange={(event) => {
-                            const [instanceId, role] =
-                              event.target.value.split("::");
-                            onMembershipCandidate(instanceId, role);
-                          }}
+                          aria-label="候选实例"
+                          value={membershipDraft.claimId ?? ""}
+                          onChange={(event) =>
+                            onMembershipCandidate(event.target.value)
+                          }
                           data-testid="review-membership-candidate-select"
                         >
                           {membership.candidates.map((candidate) => (
                             <option
                               key={candidate.claim_id}
-                              value={`${candidate.document_instance_id}::${candidate.document_role}`}
+                              value={candidate.claim_id}
                             >
                               {candidate.document_role} ·{" "}
                               {candidate.document_instance_id}
@@ -543,6 +637,7 @@ function WorkspaceSection({
                         </p>
                       )}
                       <select
+                        aria-label="原因"
                         value={membershipDraft.reason}
                         onChange={(event) =>
                           onMembershipReasonChange(
@@ -551,7 +646,10 @@ function WorkspaceSection({
                         }
                         data-testid="review-membership-reason"
                       >
-                        {MEMBERSHIP_REASONS.map((reason) => (
+                        {(membershipDraft.decision === "accept"
+                          ? MEMBERSHIP_ACCEPT_REASONS
+                          : MEMBERSHIP_UNASSIGN_REASONS
+                        ).map((reason) => (
                           <option key={reason} value={reason}>
                             {reason}
                           </option>
@@ -885,6 +983,51 @@ function HistorySection({
                 {correction.actor}
                 {" · "}
                 证据修订 {correction.evidence_revision}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      {(history.data.memberships?.length ?? 0) > 0 && (
+        <>
+          <h4>单据页归属账本</h4>
+          <ul data-testid="review-history-memberships">
+            {history.data.memberships?.map((record, index) => (
+              <li
+                key={record.membership_id ?? record.decision_id ?? record.claim_id ?? index}
+                data-testid="review-history-membership"
+              >
+                {record.record_kind} · {record.page.attachment_id} · 页{" "}
+                {record.page.page_ordinal} · {record.claim_id ?? record.decision_id ?? "None"} ·{" "}
+                {record.candidate_document?.document_instance_id ??
+                  record.document_instance_id ??
+                  "未归属"} ·{" "}
+                {record.candidate_document?.document_role ??
+                  record.document_role ??
+                  "未归属"} · {record.status ?? "claim"} · supersedes{" "}
+                {record.supersedes?.join(", ") || "None"} ·{" "}
+                {JSON.stringify(record.provenance ?? record.source_evidence ?? {})}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      {(history.data.membership_history?.length ?? 0) > 0 && (
+        <>
+          <h4>单据页归属修正</h4>
+          <ul data-testid="review-history-membership-corrections">
+            {history.data.membership_history?.map((correction) => (
+              <li
+                key={correction.correction_id}
+                data-testid="review-history-membership-correction"
+              >
+                {correction.correction_id} · {correction.decision_id} ·{" "}
+                {correction.decision} · claim {correction.candidate_claim_id} ·{" "}
+                {correction.attachment_id} · 页 {correction.page_ordinal} ·{" "}
+                {correction.document_instance_id ?? "未归属"} ·{" "}
+                {correction.document_role ?? "未归属"} · {correction.reason_code} ·{" "}
+                supersedes {correction.supersedes?.join(", ") || "None"} ·{" "}
+                {JSON.stringify(correction.source_evidence)}
               </li>
             ))}
           </ul>
@@ -1938,14 +2081,11 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
    * coexisting candidate document instance and role, or explicitly unassigns
    * the page, with a registered reason.  The draft is the server-owned finding
    * data only; eligibility comes exclusively from explicit accepted facts. */
-  const handleStartMembership = (finding: S01WorkspaceFinding) => {
-    if (finding.membership === null || finding.membership === undefined) return;
+  const handleStartMembership = (target: MembershipTarget) => {
     setMembershipDraft({
-      finding,
+      target,
       decision: "accept",
-      instanceId:
-        (finding.membership.candidates[0]?.document_instance_id ?? null),
-      role: finding.membership.candidates[0]?.document_role ?? null,
+      claimId: target.membership.candidates[0]?.claim_id ?? null,
       reason: "MEMBERSHIP_SOURCE_VERIFIED",
     });
     setMembershipKey(newIdempotencyKey());
@@ -1963,12 +2103,9 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     );
   };
 
-  const handleMembershipCandidate = (
-    instanceId: string,
-    role: string,
-  ) => {
+  const handleMembershipCandidate = (claimId: string) => {
     setMembershipDraft((draft) =>
-      draft === null ? draft : { ...draft, instanceId, role },
+      draft === null ? draft : { ...draft, claimId },
     );
   };
 
@@ -1981,35 +2118,52 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
   const handleMembershipSubmit = () => {
     if (work.data === undefined || anyPending || pendingCommand !== null) return;
     if (requiresReload || work.isError || !owningReadsCurrent) return;
-    if (membershipDraft === null || membershipDraft.finding.membership == null) return;
-    const member = membershipDraft.finding.membership;
+    if (membershipDraft === null) return;
+    const member = membershipDraft.target.membership;
+    const candidate = member.candidates.find(
+      (item) => item.claim_id === membershipDraft.claimId,
+    );
+    const eventId = member.source_evidence.event_id;
+    const sourceEvidenceRevision = member.source_evidence.evidence_revision;
     if (
-      membershipDraft.decision === "accept" &&
-      (membershipDraft.instanceId === null || membershipDraft.role === null)
-    ) {
-      return;
-    }
+      candidate === undefined ||
+      typeof eventId !== "string" ||
+      typeof sourceEvidenceRevision !== "number"
+    ) return;
+    const sourceEvidence = {
+      event_id: eventId,
+      evidence_revision: sourceEvidenceRevision,
+    };
+    const common = {
+      schema_version: "page-membership-correction/2" as const,
+      finding_id: membershipDraft.target.findingId,
+      candidate_claim_id: candidate.claim_id,
+      attachment_id: member.attachment_id,
+      page_source_sha256: member.page_source_sha256,
+      page_ordinal: member.page_ordinal,
+      source_evidence: sourceEvidence,
+      expected_active_decision_ids: member.active_decision_ids ?? [],
+    };
+    const membership: MembershipPayload =
+      membershipDraft.decision === "accept"
+        ? {
+            ...common,
+            decision: "accept",
+            document_instance_id: candidate.document_instance_id,
+            document_role: candidate.document_role,
+            reason_code: membershipDraft.reason as MembershipAccept["reason_code"],
+          }
+        : {
+            ...common,
+            decision: "unassign",
+            reason_code: membershipDraft.reason as MembershipUnassign["reason_code"],
+          };
     const command: MembershipCommand = {
       application_id: work.data.application_id,
       expected_fence: work.data.claim_fence,
       expected_context: work.data.command_context,
       idempotency_key: membershipKey,
-      membership: {
-        schema_version: "page-membership-correction/1",
-        finding_id: membershipDraft.finding.finding_id,
-        page_source_sha256: member.page_source_sha256,
-        page_ordinal: member.page_ordinal,
-        decision: membershipDraft.decision,
-        document_instance_id:
-          membershipDraft.decision === "accept"
-            ? membershipDraft.instanceId
-            : null,
-        document_role:
-          membershipDraft.decision === "accept"
-            ? membershipDraft.role
-            : null,
-        reason_code: membershipDraft.reason,
-      },
+      membership,
     };
     setPendingCommand({ action: "membership", command });
     setLastAccepted(null);

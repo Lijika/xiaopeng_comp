@@ -2711,6 +2711,10 @@ export interface components {
         S01HistoryMembershipCorrection: {
             /** Actor */
             actor: string;
+            /** Attachment Id */
+            attachment_id: string;
+            /** Candidate Claim Id */
+            candidate_claim_id: string;
             /** Correction Id */
             correction_id: string;
             /** Decision */
@@ -2733,11 +2737,41 @@ export interface components {
             reason_code: string;
             /** Recorded At */
             recorded_at: number;
+            /** Source Evidence */
+            source_evidence: {
+                [key: string]: unknown;
+            };
             /** Supersedes */
             supersedes?: string[];
         };
+        /** S01HistoryMembershipDecisionPin */
+        S01HistoryMembershipDecisionPin: {
+            /** Attachment Id */
+            attachment_id: string;
+            /** Candidate Claim Id */
+            candidate_claim_id: string;
+            /**
+             * Decision
+             * @enum {string}
+             */
+            decision: "accept" | "unassign";
+            /** Decision Id */
+            decision_id: string;
+            /** Document Instance Id */
+            document_instance_id?: string | null;
+            /** Document Role */
+            document_role?: string | null;
+            /** Evidence Revision */
+            evidence_revision: number;
+            /** Page Ordinal */
+            page_ordinal: number;
+            /** Page Source Sha256 */
+            page_source_sha256: string;
+        };
         /** S01HistoryMembershipPage */
         S01HistoryMembershipPage: {
+            /** Attachment Id */
+            attachment_id: string;
             /** Page Ordinal */
             page_ordinal: number;
             /** Source Sha256 */
@@ -2790,6 +2824,8 @@ export interface components {
             cycle: number;
             /** Decision Ids */
             decision_ids: string[];
+            /** Evidence Document Instance Ids */
+            evidence_document_instance_ids?: string[];
             /** Evidence Revision */
             evidence_revision: number;
             /** Evidence Snapshot Digest */
@@ -2810,6 +2846,8 @@ export interface components {
             manifest_digest?: string | null;
             /** Manifest Id */
             manifest_id?: string | null;
+            /** Membership Decisions */
+            membership_decisions?: components["schemas"]["S01HistoryMembershipDecisionPin"][];
             /** Policy Scope */
             policy_scope?: string | null;
             reconciliation?: components["schemas"]["S01HistoryReconciliation"] | null;
@@ -3022,6 +3060,10 @@ export interface components {
         S01MembershipCorrectionResult: {
             /** Application Id */
             application_id: string;
+            /** Attachment Id */
+            attachment_id: string;
+            /** Candidate Claim Id */
+            candidate_claim_id: string;
             /** Correction Id */
             correction_id: string;
             /** Decision */
@@ -3040,6 +3082,8 @@ export interface components {
             lifecycle_revision: number;
             /** Membership Decision Id */
             membership_decision_id: string;
+            /** Page Ordinal */
+            page_ordinal: number;
             /** Page Source Sha256 */
             page_source_sha256: string;
             /** Phase */
@@ -3668,14 +3712,20 @@ export interface components {
          *     effective decision state and every coexisting candidate claim/provenance.
          */
         S01WorkspaceMembership: {
-            /** Accepted Decision Ids */
-            accepted_decision_ids?: string[];
+            /** Active Decision Ids */
+            active_decision_ids?: string[];
+            /** Attachment Id */
+            attachment_id: string;
             /** Candidates */
             candidates: components["schemas"]["S01WorkspaceMembershipCandidate"][];
             /** Page Ordinal */
             page_ordinal: number;
             /** Page Source Sha256 */
             page_source_sha256: string;
+            /** Source Evidence */
+            source_evidence: {
+                [key: string]: unknown;
+            };
             /**
              * State
              * @enum {string}
@@ -3704,6 +3754,63 @@ export interface components {
                 [key: string]: string;
             };
         };
+        /** S01WorkspaceMembershipDecision */
+        S01WorkspaceMembershipDecision: {
+            /** Actor */
+            actor: string;
+            /** Decision Id */
+            decision_id: string;
+            /** Document Instance Id */
+            document_instance_id?: string | null;
+            /** Document Role */
+            document_role?: string | null;
+            /** Reason Code */
+            reason_code: string;
+            /**
+             * Record Kind
+             * @enum {string}
+             */
+            record_kind: "accepted" | "unassigned";
+            /** Source Evidence */
+            source_evidence: {
+                [key: string]: unknown;
+            };
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "active" | "superseded";
+            /** Supersedes */
+            supersedes: string[];
+            /** Time */
+            time: number;
+        };
+        /** S01WorkspaceMembershipPage */
+        S01WorkspaceMembershipPage: {
+            /** Active Decision Ids */
+            active_decision_ids?: string[];
+            /** Attachment Id */
+            attachment_id: string;
+            /** Candidates */
+            candidates: components["schemas"]["S01WorkspaceMembershipCandidate"][];
+            /** Decisions */
+            decisions: components["schemas"]["S01WorkspaceMembershipDecision"][];
+            /** Finding Id */
+            finding_id?: string | null;
+            /** Page Ordinal */
+            page_ordinal: number;
+            /** Page Source Sha256 */
+            page_source_sha256: string;
+            /** Source Evidence */
+            source_evidence: {
+                [key: string]: unknown;
+            };
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "unresolved" | "ambiguous" | "selected" | "unassigned";
+        };
         /** S01WorkspaceResponse */
         S01WorkspaceResponse: {
             /** Actions */
@@ -3731,6 +3838,8 @@ export interface components {
             lifecycle_revision: number;
             /** Mandatory Blockers */
             mandatory_blockers: components["schemas"]["S01WorkspaceFinding"][];
+            /** Membership Ledger */
+            membership_ledger?: components["schemas"]["S01WorkspaceMembershipPage"][];
             /** Phase */
             phase: string;
             /** Projection Watermark */
@@ -7663,23 +7772,23 @@ export interface operations {
                     expected_fence: number;
                     /** Idempotency Key */
                     idempotency_key: string;
-                    /**
-                     * S01PageMembershipCorrection
-                     * @description The closed source-backed page-membership payload (S10).  An ``accept``
-                     *     decision requires an explicit document instance and role; an ``unassign``
-                     *     decision explicitly disposes the page.  Ambiguous role input is rejected by
-                     *     the domain with no successor.
-                     */
+                    /** Membership */
                     membership: {
+                        /** Attachment Id */
+                        attachment_id: string;
+                        /** Candidate Claim Id */
+                        candidate_claim_id: string;
                         /**
                          * Decision
-                         * @enum {string}
+                         * @constant
                          */
-                        decision: "accept" | "unassign";
+                        decision: "accept";
                         /** Document Instance Id */
-                        document_instance_id?: string | null;
+                        document_instance_id: string;
                         /** Document Role */
-                        document_role?: string | null;
+                        document_role: string;
+                        /** Expected Active Decision Ids */
+                        expected_active_decision_ids: string[];
                         /** Finding Id */
                         finding_id: string;
                         /** Page Ordinal */
@@ -7690,12 +7799,54 @@ export interface operations {
                          * Reason Code
                          * @enum {string}
                          */
-                        reason_code: "MEMBERSHIP_SOURCE_VERIFIED" | "MEMBERSHIP_SOURCE_MISASSIGNED" | "MEMBERSHIP_INSTANCE_WRONG" | "MEMBERSHIP_PAGE_UNASSIGNED";
+                        reason_code: "MEMBERSHIP_SOURCE_VERIFIED" | "MEMBERSHIP_SOURCE_MISASSIGNED" | "MEMBERSHIP_INSTANCE_WRONG";
                         /**
                          * Schema Version
                          * @constant
                          */
-                        schema_version: "page-membership-correction/1";
+                        schema_version: "page-membership-correction/2";
+                        /** S01MembershipSourceEvidence */
+                        source_evidence: {
+                            /** Event Id */
+                            event_id: string;
+                            /** Evidence Revision */
+                            evidence_revision: number;
+                        };
+                    } | {
+                        /** Attachment Id */
+                        attachment_id: string;
+                        /** Candidate Claim Id */
+                        candidate_claim_id: string;
+                        /**
+                         * Decision
+                         * @constant
+                         */
+                        decision: "unassign";
+                        /** Expected Active Decision Ids */
+                        expected_active_decision_ids: string[];
+                        /** Finding Id */
+                        finding_id: string;
+                        /** Page Ordinal */
+                        page_ordinal: number;
+                        /** Page Source Sha256 */
+                        page_source_sha256: string;
+                        /**
+                         * Reason Code
+                         * @enum {string}
+                         */
+                        reason_code: "MEMBERSHIP_SOURCE_VERIFIED" | "MEMBERSHIP_SOURCE_MISASSIGNED" | "MEMBERSHIP_PAGE_UNASSIGNED";
+                        /**
+                         * Schema Version
+                         * @constant
+                         */
+                        schema_version: "page-membership-correction/2";
+                        /** S01MembershipSourceEvidence */
+                        source_evidence: {
+                            /** Event Id */
+                            event_id: string;
+                            /** Evidence Revision */
+                            evidence_revision: number;
+                        };
                     };
                 };
             };

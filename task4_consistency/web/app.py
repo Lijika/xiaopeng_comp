@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass
 from email.message import Message
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Annotated, Any, Callable, Literal
 from urllib.parse import urlparse
 
 import yaml
@@ -1178,11 +1178,13 @@ class S01WorkspaceMembership(BaseModel):
     """The membership blocker projection (S10): the page identity, its current
     effective decision state and every coexisting candidate claim/provenance."""
 
+    attachment_id: str
     page_source_sha256: str
     page_ordinal: int
     state: Literal["unresolved", "ambiguous"]
     candidates: list[S01WorkspaceMembershipCandidate]
-    accepted_decision_ids: list[str] = Field(default_factory=list)
+    active_decision_ids: list[str] = Field(default_factory=list)
+    source_evidence: dict[str, Any]
     unassigned: bool = False
 
 
@@ -1224,6 +1226,31 @@ class S01BusinessExceptionEligibility(BaseModel):
         }
 
 
+class S01WorkspaceMembershipDecision(BaseModel):
+    record_kind: Literal["accepted", "unassigned"]
+    decision_id: str
+    document_instance_id: str | None = None
+    document_role: str | None = None
+    actor: str
+    reason_code: str
+    time: int
+    source_evidence: dict[str, Any]
+    supersedes: list[str]
+    status: Literal["active", "superseded"]
+
+
+class S01WorkspaceMembershipPage(BaseModel):
+    attachment_id: str
+    page_source_sha256: str
+    page_ordinal: int
+    state: Literal["unresolved", "ambiguous", "selected", "unassigned"]
+    finding_id: str | None = None
+    active_decision_ids: list[str] = Field(default_factory=list)
+    source_evidence: dict[str, Any]
+    candidates: list[S01WorkspaceMembershipCandidate]
+    decisions: list[S01WorkspaceMembershipDecision]
+
+
 class S01WorkspaceResponse(BaseModel):
     application_id: str
     work_item_id: str
@@ -1242,6 +1269,7 @@ class S01WorkspaceResponse(BaseModel):
     projection_watermark: int
     mandatory_blockers: list[S01WorkspaceFinding]
     selected_finding: S01WorkspaceFinding | None = None
+    membership_ledger: list[S01WorkspaceMembershipPage] = Field(default_factory=list)
     business_exception_eligibility: S01BusinessExceptionEligibility | None = None
     actions: list[str]
 
@@ -1316,6 +1344,18 @@ class S01HistoryRunComponent(BaseModel):
     digest: str
 
 
+class S01HistoryMembershipDecisionPin(BaseModel):
+    decision_id: str
+    candidate_claim_id: str
+    attachment_id: str
+    page_source_sha256: str
+    page_ordinal: int
+    decision: Literal["accept", "unassign"]
+    evidence_revision: int
+    document_instance_id: str | None = None
+    document_role: str | None = None
+
+
 class S01HistoryRun(BaseModel):
     run_id: str
     status: str
@@ -1327,6 +1367,10 @@ class S01HistoryRun(BaseModel):
     evidence_revision: int
     evidence_snapshot_id: str | None = None
     evidence_snapshot_digest: str | None = None
+    membership_decisions: list[S01HistoryMembershipDecisionPin] = Field(
+        default_factory=list
+    )
+    evidence_document_instance_ids: list[str] = Field(default_factory=list)
     release_id: str | None = None
     release_digest: str | None = None
     checker_build: str | None = None
@@ -1368,6 +1412,7 @@ class S01ApplicationHistoryResponse(BaseModel):
 
 
 class S01HistoryMembershipPage(BaseModel):
+    attachment_id: str
     source_sha256: str
     page_ordinal: int
 
@@ -1401,8 +1446,11 @@ class S01HistoryMembershipCorrection(BaseModel):
     event_id: str
     correction_id: str
     decision_id: str
+    candidate_claim_id: str
+    attachment_id: str
     page_source_sha256: str
     page_ordinal: int
+    source_evidence: dict[str, Any]
     decision: str
     document_instance_id: str | None = None
     document_role: str | None = None
@@ -1611,25 +1659,46 @@ class S01CorrectionResult(BaseModel):
     invalidated_exception_ids: list[str] | None = None
 
 
-class S01PageMembershipCorrection(BaseModel):
-    """The closed source-backed page-membership payload (S10).  An ``accept``
-    decision requires an explicit document instance and role; an ``unassign``
-    decision explicitly disposes the page.  Ambiguous role input is rejected by
-    the domain with no successor."""
+class S01MembershipSourceEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str = Field(min_length=1, max_length=200, strict=True)
+    evidence_revision: int = Field(ge=1, strict=True)
+
+
+class S01PageMembershipCorrectionBase(BaseModel):
+    """Fields shared by both closed S10 membership decisions."""
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal["page-membership-correction/1"]
-    finding_id: str
-    page_source_sha256: str
+    schema_version: Literal["page-membership-correction/2"]
+    finding_id: str = Field(min_length=1, max_length=200, strict=True)
+    candidate_claim_id: str = Field(min_length=1, max_length=200, strict=True)
+    attachment_id: str = Field(min_length=1, max_length=200, strict=True)
+    page_source_sha256: str = Field(
+        min_length=64, max_length=64, pattern="^[0-9a-f]{64}$", strict=True
+    )
     page_ordinal: int = Field(ge=1, strict=True)
-    decision: Literal["accept", "unassign"]
-    document_instance_id: str | None = None
-    document_role: str | None = None
+    source_evidence: S01MembershipSourceEvidence
+    expected_active_decision_ids: list[str]
+
+
+class S01PageMembershipAccept(S01PageMembershipCorrectionBase):
+    decision: Literal["accept"]
+    document_instance_id: str = Field(min_length=1, max_length=200, strict=True)
+    document_role: str = Field(min_length=1, max_length=200, strict=True)
     reason_code: Literal[
         "MEMBERSHIP_SOURCE_VERIFIED",
         "MEMBERSHIP_SOURCE_MISASSIGNED",
         "MEMBERSHIP_INSTANCE_WRONG",
+    ]
+
+
+class S01PageMembershipUnassign(S01PageMembershipCorrectionBase):
+    decision: Literal["unassign"]
+    reason_code: Literal[
+        "MEMBERSHIP_SOURCE_VERIFIED",
+        "MEMBERSHIP_SOURCE_MISASSIGNED",
         "MEMBERSHIP_PAGE_UNASSIGNED",
     ]
 
@@ -1640,7 +1709,10 @@ class S01ReviewMembershipBody(S01ReviewFencedBody):
 
     expected_fence: int = Field(ge=1, strict=True)
     application_id: str = Field(min_length=1, max_length=200, strict=True)
-    membership: S01PageMembershipCorrection
+    membership: Annotated[
+        S01PageMembershipAccept | S01PageMembershipUnassign,
+        Field(discriminator="decision"),
+    ]
 
 
 class S01MembershipCorrectionResult(BaseModel):
@@ -1656,7 +1728,10 @@ class S01MembershipCorrectionResult(BaseModel):
     work_item_id: str
     correction_id: str
     membership_decision_id: str
+    candidate_claim_id: str
+    attachment_id: str
     page_source_sha256: str
+    page_ordinal: int
     decision: str
     document_instance_id: str | None = None
     document_role: str | None = None
@@ -2534,11 +2609,15 @@ def _inline_openapi_schema(schema: dict[str, Any]) -> dict[str, Any]:
             if isinstance(ref, str) and ref.startswith("#/$defs/"):
                 name = ref.rsplit("/", 1)[-1]
                 return resolve(defs[name])
-            return {
+            resolved = {
                 key: resolve(value)
                 for key, value in node.items()
                 if key != "$defs"
             }
+            discriminator = resolved.get("discriminator")
+            if isinstance(discriminator, dict):
+                discriminator.pop("mapping", None)
+            return resolved
         if isinstance(node, list):
             return [resolve(item) for item in node]
         return node

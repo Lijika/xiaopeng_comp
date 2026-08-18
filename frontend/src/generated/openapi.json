@@ -2570,6 +2570,14 @@
             "title": "Actor",
             "type": "string"
           },
+          "attachment_id": {
+            "title": "Attachment Id",
+            "type": "string"
+          },
+          "candidate_claim_id": {
+            "title": "Candidate Claim Id",
+            "type": "string"
+          },
           "correction_id": {
             "title": "Correction Id",
             "type": "string"
@@ -2628,6 +2636,11 @@
             "title": "Recorded At",
             "type": "integer"
           },
+          "source_evidence": {
+            "additionalProperties": true,
+            "title": "Source Evidence",
+            "type": "object"
+          },
           "supersedes": {
             "items": {
               "type": "string"
@@ -2641,8 +2654,11 @@
           "event_id",
           "correction_id",
           "decision_id",
+          "candidate_claim_id",
+          "attachment_id",
           "page_source_sha256",
           "page_ordinal",
+          "source_evidence",
           "decision",
           "reason_code",
           "actor",
@@ -2651,8 +2667,81 @@
         "title": "S01HistoryMembershipCorrection",
         "type": "object"
       },
+      "S01HistoryMembershipDecisionPin": {
+        "properties": {
+          "attachment_id": {
+            "title": "Attachment Id",
+            "type": "string"
+          },
+          "candidate_claim_id": {
+            "title": "Candidate Claim Id",
+            "type": "string"
+          },
+          "decision": {
+            "enum": [
+              "accept",
+              "unassign"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "decision_id": {
+            "title": "Decision Id",
+            "type": "string"
+          },
+          "document_instance_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Instance Id"
+          },
+          "document_role": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Role"
+          },
+          "evidence_revision": {
+            "title": "Evidence Revision",
+            "type": "integer"
+          },
+          "page_ordinal": {
+            "title": "Page Ordinal",
+            "type": "integer"
+          },
+          "page_source_sha256": {
+            "title": "Page Source Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "decision_id",
+          "candidate_claim_id",
+          "attachment_id",
+          "page_source_sha256",
+          "page_ordinal",
+          "decision",
+          "evidence_revision"
+        ],
+        "title": "S01HistoryMembershipDecisionPin",
+        "type": "object"
+      },
       "S01HistoryMembershipPage": {
         "properties": {
+          "attachment_id": {
+            "title": "Attachment Id",
+            "type": "string"
+          },
           "page_ordinal": {
             "title": "Page Ordinal",
             "type": "integer"
@@ -2663,6 +2752,7 @@
           }
         },
         "required": [
+          "attachment_id",
           "source_sha256",
           "page_ordinal"
         ],
@@ -2850,6 +2940,13 @@
             "title": "Decision Ids",
             "type": "array"
           },
+          "evidence_document_instance_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Evidence Document Instance Ids",
+            "type": "array"
+          },
           "evidence_revision": {
             "title": "Evidence Revision",
             "type": "integer"
@@ -2929,6 +3026,13 @@
               }
             ],
             "title": "Manifest Id"
+          },
+          "membership_decisions": {
+            "items": {
+              "$ref": "#/components/schemas/S01HistoryMembershipDecisionPin"
+            },
+            "title": "Membership Decisions",
+            "type": "array"
           },
           "policy_scope": {
             "anyOf": [
@@ -3552,6 +3656,14 @@
             "title": "Application Id",
             "type": "string"
           },
+          "attachment_id": {
+            "title": "Attachment Id",
+            "type": "string"
+          },
+          "candidate_claim_id": {
+            "title": "Candidate Claim Id",
+            "type": "string"
+          },
           "correction_id": {
             "title": "Correction Id",
             "type": "string"
@@ -3602,6 +3714,10 @@
             "title": "Membership Decision Id",
             "type": "string"
           },
+          "page_ordinal": {
+            "title": "Page Ordinal",
+            "type": "integer"
+          },
           "page_source_sha256": {
             "title": "Page Source Sha256",
             "type": "string"
@@ -3634,7 +3750,10 @@
           "work_item_id",
           "correction_id",
           "membership_decision_id",
+          "candidate_claim_id",
+          "attachment_id",
           "page_source_sha256",
+          "page_ordinal",
           "decision",
           "invalidated_run_id",
           "job_id",
@@ -5219,12 +5338,16 @@
       "S01WorkspaceMembership": {
         "description": "The membership blocker projection (S10): the page identity, its current\neffective decision state and every coexisting candidate claim/provenance.",
         "properties": {
-          "accepted_decision_ids": {
+          "active_decision_ids": {
             "items": {
               "type": "string"
             },
-            "title": "Accepted Decision Ids",
+            "title": "Active Decision Ids",
             "type": "array"
+          },
+          "attachment_id": {
+            "title": "Attachment Id",
+            "type": "string"
           },
           "candidates": {
             "items": {
@@ -5241,6 +5364,11 @@
             "title": "Page Source Sha256",
             "type": "string"
           },
+          "source_evidence": {
+            "additionalProperties": true,
+            "title": "Source Evidence",
+            "type": "object"
+          },
           "state": {
             "enum": [
               "unresolved",
@@ -5256,10 +5384,12 @@
           }
         },
         "required": [
+          "attachment_id",
           "page_source_sha256",
           "page_ordinal",
           "state",
-          "candidates"
+          "candidates",
+          "source_evidence"
         ],
         "title": "S01WorkspaceMembership",
         "type": "object"
@@ -5293,6 +5423,162 @@
           "claim_id"
         ],
         "title": "S01WorkspaceMembershipCandidate",
+        "type": "object"
+      },
+      "S01WorkspaceMembershipDecision": {
+        "properties": {
+          "actor": {
+            "title": "Actor",
+            "type": "string"
+          },
+          "decision_id": {
+            "title": "Decision Id",
+            "type": "string"
+          },
+          "document_instance_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Instance Id"
+          },
+          "document_role": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Role"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "record_kind": {
+            "enum": [
+              "accepted",
+              "unassigned"
+            ],
+            "title": "Record Kind",
+            "type": "string"
+          },
+          "source_evidence": {
+            "additionalProperties": true,
+            "title": "Source Evidence",
+            "type": "object"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "superseded"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "supersedes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Supersedes",
+            "type": "array"
+          },
+          "time": {
+            "title": "Time",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "record_kind",
+          "decision_id",
+          "actor",
+          "reason_code",
+          "time",
+          "source_evidence",
+          "supersedes",
+          "status"
+        ],
+        "title": "S01WorkspaceMembershipDecision",
+        "type": "object"
+      },
+      "S01WorkspaceMembershipPage": {
+        "properties": {
+          "active_decision_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Active Decision Ids",
+            "type": "array"
+          },
+          "attachment_id": {
+            "title": "Attachment Id",
+            "type": "string"
+          },
+          "candidates": {
+            "items": {
+              "$ref": "#/components/schemas/S01WorkspaceMembershipCandidate"
+            },
+            "title": "Candidates",
+            "type": "array"
+          },
+          "decisions": {
+            "items": {
+              "$ref": "#/components/schemas/S01WorkspaceMembershipDecision"
+            },
+            "title": "Decisions",
+            "type": "array"
+          },
+          "finding_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finding Id"
+          },
+          "page_ordinal": {
+            "title": "Page Ordinal",
+            "type": "integer"
+          },
+          "page_source_sha256": {
+            "title": "Page Source Sha256",
+            "type": "string"
+          },
+          "source_evidence": {
+            "additionalProperties": true,
+            "title": "Source Evidence",
+            "type": "object"
+          },
+          "state": {
+            "enum": [
+              "unresolved",
+              "ambiguous",
+              "selected",
+              "unassigned"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "attachment_id",
+          "page_source_sha256",
+          "page_ordinal",
+          "state",
+          "source_evidence",
+          "candidates",
+          "decisions"
+        ],
+        "title": "S01WorkspaceMembershipPage",
         "type": "object"
       },
       "S01WorkspaceResponse": {
@@ -5380,6 +5666,13 @@
               "$ref": "#/components/schemas/S01WorkspaceFinding"
             },
             "title": "Mandatory Blockers",
+            "type": "array"
+          },
+          "membership_ledger": {
+            "items": {
+              "$ref": "#/components/schemas/S01WorkspaceMembershipPage"
+            },
+            "title": "Membership Ledger",
             "type": "array"
           },
           "phase": {
@@ -13688,78 +13981,220 @@
                     "type": "string"
                   },
                   "membership": {
-                    "additionalProperties": false,
-                    "description": "The closed source-backed page-membership payload (S10).  An ``accept``\ndecision requires an explicit document instance and role; an ``unassign``\ndecision explicitly disposes the page.  Ambiguous role input is rejected by\nthe domain with no successor.",
-                    "properties": {
-                      "decision": {
-                        "enum": [
-                          "accept",
-                          "unassign"
-                        ],
-                        "title": "Decision",
-                        "type": "string"
-                      },
-                      "document_instance_id": {
-                        "anyOf": [
-                          {
-                            "type": "string"
-                          },
-                          {
-                            "type": "null"
-                          }
-                        ],
-                        "title": "Document Instance Id"
-                      },
-                      "document_role": {
-                        "anyOf": [
-                          {
-                            "type": "string"
-                          },
-                          {
-                            "type": "null"
-                          }
-                        ],
-                        "title": "Document Role"
-                      },
-                      "finding_id": {
-                        "title": "Finding Id",
-                        "type": "string"
-                      },
-                      "page_ordinal": {
-                        "minimum": 1,
-                        "title": "Page Ordinal",
-                        "type": "integer"
-                      },
-                      "page_source_sha256": {
-                        "title": "Page Source Sha256",
-                        "type": "string"
-                      },
-                      "reason_code": {
-                        "enum": [
-                          "MEMBERSHIP_SOURCE_VERIFIED",
-                          "MEMBERSHIP_SOURCE_MISASSIGNED",
-                          "MEMBERSHIP_INSTANCE_WRONG",
-                          "MEMBERSHIP_PAGE_UNASSIGNED"
-                        ],
-                        "title": "Reason Code",
-                        "type": "string"
-                      },
-                      "schema_version": {
-                        "const": "page-membership-correction/1",
-                        "title": "Schema Version",
-                        "type": "string"
-                      }
+                    "discriminator": {
+                      "propertyName": "decision"
                     },
-                    "required": [
-                      "schema_version",
-                      "finding_id",
-                      "page_source_sha256",
-                      "page_ordinal",
-                      "decision",
-                      "reason_code"
+                    "oneOf": [
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "attachment_id": {
+                            "maxLength": 200,
+                            "minLength": 1,
+                            "title": "Attachment Id",
+                            "type": "string"
+                          },
+                          "candidate_claim_id": {
+                            "maxLength": 200,
+                            "minLength": 1,
+                            "title": "Candidate Claim Id",
+                            "type": "string"
+                          },
+                          "decision": {
+                            "const": "accept",
+                            "title": "Decision",
+                            "type": "string"
+                          },
+                          "document_instance_id": {
+                            "maxLength": 200,
+                            "minLength": 1,
+                            "title": "Document Instance Id",
+                            "type": "string"
+                          },
+                          "document_role": {
+                            "maxLength": 200,
+                            "minLength": 1,
+                            "title": "Document Role",
+                            "type": "string"
+                          },
+                          "expected_active_decision_ids": {
+                            "items": {
+                              "type": "string"
+                            },
+                            "title": "Expected Active Decision Ids",
+                            "type": "array"
+                          },
+                          "finding_id": {
+                            "maxLength": 200,
+                            "minLength": 1,
+                            "title": "Finding Id",
+                            "type": "string"
+                          },
+                          "page_ordinal": {
+                            "minimum": 1,
+                            "title": "Page Ordinal",
+                            "type": "integer"
+                          },
+                          "page_source_sha256": {
+                            "maxLength": 64,
+                            "minLength": 64,
+                            "pattern": "^[0-9a-f]{64}$",
+                            "title": "Page Source Sha256",
+                            "type": "string"
+                          },
+                          "reason_code": {
+                            "enum": [
+                              "MEMBERSHIP_SOURCE_VERIFIED",
+                              "MEMBERSHIP_SOURCE_MISASSIGNED",
+                              "MEMBERSHIP_INSTANCE_WRONG"
+                            ],
+                            "title": "Reason Code",
+                            "type": "string"
+                          },
+                          "schema_version": {
+                            "const": "page-membership-correction/2",
+                            "title": "Schema Version",
+                            "type": "string"
+                          },
+                          "source_evidence": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "event_id": {
+                                "maxLength": 200,
+                                "minLength": 1,
+                                "title": "Event Id",
+                                "type": "string"
+                              },
+                              "evidence_revision": {
+                                "minimum": 1,
+                                "title": "Evidence Revision",
+                                "type": "integer"
+                              }
+                            },
+                            "required": [
+                              "event_id",
+                              "evidence_revision"
+                            ],
+                            "title": "S01MembershipSourceEvidence",
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "schema_version",
+                          "finding_id",
+                          "candidate_claim_id",
+                          "attachment_id",
+                          "page_source_sha256",
+                          "page_ordinal",
+                          "source_evidence",
+                          "expected_active_decision_ids",
+                          "decision",
+                          "document_instance_id",
+                          "document_role",
+                          "reason_code"
+                        ],
+                        "title": "S01PageMembershipAccept",
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "attachment_id": {
+                            "maxLength": 200,
+                            "minLength": 1,
+                            "title": "Attachment Id",
+                            "type": "string"
+                          },
+                          "candidate_claim_id": {
+                            "maxLength": 200,
+                            "minLength": 1,
+                            "title": "Candidate Claim Id",
+                            "type": "string"
+                          },
+                          "decision": {
+                            "const": "unassign",
+                            "title": "Decision",
+                            "type": "string"
+                          },
+                          "expected_active_decision_ids": {
+                            "items": {
+                              "type": "string"
+                            },
+                            "title": "Expected Active Decision Ids",
+                            "type": "array"
+                          },
+                          "finding_id": {
+                            "maxLength": 200,
+                            "minLength": 1,
+                            "title": "Finding Id",
+                            "type": "string"
+                          },
+                          "page_ordinal": {
+                            "minimum": 1,
+                            "title": "Page Ordinal",
+                            "type": "integer"
+                          },
+                          "page_source_sha256": {
+                            "maxLength": 64,
+                            "minLength": 64,
+                            "pattern": "^[0-9a-f]{64}$",
+                            "title": "Page Source Sha256",
+                            "type": "string"
+                          },
+                          "reason_code": {
+                            "enum": [
+                              "MEMBERSHIP_SOURCE_VERIFIED",
+                              "MEMBERSHIP_SOURCE_MISASSIGNED",
+                              "MEMBERSHIP_PAGE_UNASSIGNED"
+                            ],
+                            "title": "Reason Code",
+                            "type": "string"
+                          },
+                          "schema_version": {
+                            "const": "page-membership-correction/2",
+                            "title": "Schema Version",
+                            "type": "string"
+                          },
+                          "source_evidence": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "event_id": {
+                                "maxLength": 200,
+                                "minLength": 1,
+                                "title": "Event Id",
+                                "type": "string"
+                              },
+                              "evidence_revision": {
+                                "minimum": 1,
+                                "title": "Evidence Revision",
+                                "type": "integer"
+                              }
+                            },
+                            "required": [
+                              "event_id",
+                              "evidence_revision"
+                            ],
+                            "title": "S01MembershipSourceEvidence",
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "schema_version",
+                          "finding_id",
+                          "candidate_claim_id",
+                          "attachment_id",
+                          "page_source_sha256",
+                          "page_ordinal",
+                          "source_evidence",
+                          "expected_active_decision_ids",
+                          "decision",
+                          "reason_code"
+                        ],
+                        "title": "S01PageMembershipUnassign",
+                        "type": "object"
+                      }
                     ],
-                    "title": "S01PageMembershipCorrection",
-                    "type": "object"
+                    "title": "Membership"
                   }
                 },
                 "required": [
