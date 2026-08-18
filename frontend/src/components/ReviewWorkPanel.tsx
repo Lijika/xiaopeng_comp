@@ -19,6 +19,7 @@ import {
   useApplicationHistory,
   useClaimWorkItem,
   useCorrectFieldObservation,
+  useCorrectPageMembership,
   useCorrectionConvergence,
   useCurrentRoute,
   useEvidenceConvergence,
@@ -38,6 +39,8 @@ import {
   type CorrectionResult,
   type ExceptionRequestCommand,
   type FencedCommand,
+  type MembershipCommand,
+  type MembershipResult,
   type RevealCommand,
   type RevealResult,
   type SubmitCommand,
@@ -82,6 +85,7 @@ function hasGovernedPin(
 }
 
 type S01EvidenceLink = components["schemas"]["S01EvidenceLink"];
+type S01WorkspaceFinding = components["schemas"]["S01WorkspaceFinding"];
 
 type Action =
   | "claim"
@@ -90,6 +94,7 @@ type Action =
   | "submit"
   | "reveal"
   | "correct"
+  | "membership"
   | "supplement"
   | "exception";
 
@@ -110,6 +115,26 @@ const CORRECTION_REASONS: readonly CorrectionReason[] = [
   "SOURCE_VALUE_MISREAD",
   "SOURCE_VALUE_MISSING",
 ];
+
+/** The closed membership-decision reason vocabulary of the S01 domain
+ * authority (S10), bound to the generated OpenAPI literal. */
+type MembershipReason = MembershipCommand["membership"]["reason_code"];
+
+const MEMBERSHIP_REASONS: readonly MembershipReason[] = [
+  "MEMBERSHIP_SOURCE_VERIFIED",
+  "MEMBERSHIP_SOURCE_MISASSIGNED",
+  "MEMBERSHIP_INSTANCE_WRONG",
+  "MEMBERSHIP_PAGE_UNASSIGNED",
+];
+
+/** The open membership decision draft for one selected membership blocker. */
+type MembershipDraft = {
+  finding: S01WorkspaceFinding;
+  decision: "accept" | "unassign";
+  instanceId: string | null;
+  role: string | null;
+  reason: MembershipReason;
+};
 
 /** One indivisible reveal/correction authorization: application, work,
  * observation, the complete generated expected context, evidence/lifecycle
@@ -178,6 +203,7 @@ type PendingCommand =
   | { action: "submit"; command: SubmitCommand }
   | { action: "reveal"; command: RevealCommand }
   | { action: "correct"; command: CorrectionCommand }
+  | { action: "membership"; command: MembershipCommand }
   | { action: "supplement"; command: SupplementRequestCommand }
   | { action: "exception"; command: ExceptionRequestCommand };
 
@@ -188,6 +214,7 @@ const ACTION_LABELS: Record<Action, string> = {
   submit: "核验",
   reveal: "揭示",
   correct: "更正",
+  membership: "页归属",
   supplement: "补充请求",
   exception: "请求业务例外",
 };
@@ -287,12 +314,19 @@ function WorkspaceSection({
   revealPending,
   correctPending,
   controlsDisabled,
+  membershipDraft,
+  membershipPending,
   onReveal,
   onStartCorrection,
   onCorrectionRawChange,
   onCorrectionReasonChange,
   onSubmitCorrection,
   onCancelCorrection,
+  onStartMembership,
+  onMembershipDecision,
+  onMembershipCandidate,
+  onMembershipReasonChange,
+  onSubmitMembership,
 }: {
   work: ReviewWorkResponse;
   workspace: UseQueryResult<WorkspaceResponse>;
@@ -306,12 +340,19 @@ function WorkspaceSection({
   revealPending: boolean;
   correctPending: boolean;
   controlsDisabled: boolean;
+  membershipDraft: MembershipDraft | null;
+  membershipPending: boolean;
   onReveal: (link: S01EvidenceLink) => void;
   onStartCorrection: (link: S01EvidenceLink, findingId: string) => void;
   onCorrectionRawChange: (raw: string) => void;
   onCorrectionReasonChange: (reason: CorrectionReason) => void;
   onSubmitCorrection: () => void;
   onCancelCorrection: () => void;
+  onStartMembership: (finding: S01WorkspaceFinding) => void;
+  onMembershipDecision: (decision: "accept" | "unassign") => void;
+  onMembershipCandidate: (instanceId: string, role: string) => void;
+  onMembershipReasonChange: (reason: MembershipReason) => void;
+  onSubmitMembership: () => void;
 }) {
   if (work.status === "completed") {
     return (
@@ -340,36 +381,37 @@ function WorkspaceSection({
   }
   const finding = workspace.data.selected_finding ?? null;
   const findingId = finding?.finding_id ?? null;
+  const membership = finding === null ? null : (finding.membership ?? null);
   return (
     <section aria-labelledby="review-workspace-title">
       <h3 id="review-workspace-title">最小工作区（发现优先）</h3>
-      <dl className="facts">
-        <div>
-          <dt>认领过期（epoch）</dt>
-          <dd data-testid="review-workspace-expiry">
-            {workspace.data.claim_expires_at}
-          </dd>
-        </div>
-        <div>
-          <dt>生命周期修订</dt>
-          <dd data-testid="review-workspace-lifecycle">
-            {workspace.data.lifecycle_revision}
-          </dd>
-        </div>
-        <div>
-          <dt>证据修订</dt>
-          <dd data-testid="review-workspace-evidence-revision">
-            {workspace.data.evidence_revision}
-          </dd>
-        </div>
-        <div>
-          <dt>投影水位</dt>
-          <dd data-testid="review-workspace-watermark">
-            {workspace.data.projection_watermark}
-          </dd>
-        </div>
-        <div>
-          <dt>当前运行</dt>
+          <dl className="facts" data-testid="review-workspace-facts">
+            <div>
+              <dt>认领过期（epoch）</dt>
+              <dd data-testid="review-workspace-expiry">
+                {workspace.data.claim_expires_at}
+              </dd>
+            </div>
+            <div>
+              <dt>生命周期修订</dt>
+              <dd data-testid="review-workspace-lifecycle">
+                {workspace.data.lifecycle_revision}
+              </dd>
+            </div>
+            <div>
+              <dt>证据修订</dt>
+              <dd data-testid="review-workspace-evidence-revision">
+                {workspace.data.evidence_revision}
+              </dd>
+            </div>
+            <div>
+              <dt>投影水位</dt>
+              <dd data-testid="review-workspace-watermark">
+                {workspace.data.projection_watermark}
+              </dd>
+            </div>
+            <div>
+              <dt>当前运行</dt>
           <dd data-testid="review-workspace-current-run">
             {workspace.data.current_run_id ?? "None"}
           </dd>
@@ -405,6 +447,130 @@ function WorkspaceSection({
               <dd data-testid="review-workspace-reason">{finding.reason_code}</dd>
             </div>
           </dl>
+          {membership != null && (
+            <section
+              className="membership-panes"
+              data-testid="review-membership"
+            >
+              <h4>单据页归属（S10）</h4>
+              <p className="text-sm text-muted-foreground">
+                页 {membership.page_ordinal} ·{" "}
+                {membership.page_source_sha256.slice(0, 12)}… · 状态{" "}
+                {membership.state === "ambiguous" ? "歧义（多候选并存）" : "未解析"}
+              </p>
+              <div className="membership-panes-grid">
+                <div className="membership-pane membership-candidates">
+                  <h5>并存候选（只读，绝不自动选择）</h5>
+                  <ul>
+                    {membership.candidates.map((candidate) => (
+                      <li key={candidate.claim_id} data-testid="review-membership-candidate">
+                        <span>{candidate.document_role}</span> ·{" "}
+                        <span data-testid="review-membership-candidate-instance">
+                          {candidate.document_instance_id}
+                        </span>
+                        <span className="text-xs text-muted-foreground">
+                          {" "}
+                          claim {candidate.claim_id}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+                <div className="membership-pane membership-decide">
+                  <h5>审核员决定</h5>
+                  {!claimed || controlsDisabled ? (
+                    <p className="text-xs text-muted-foreground">
+                      认领后即可决定
+                    </p>
+                  ) : membershipDraft === null ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      data-testid="review-membership-start"
+                      disabled={controlsDisabled}
+                      onClick={() => onStartMembership(finding)}
+                    >
+                      开始页归属修正
+                    </Button>
+                  ) : (
+                    <div
+                      className="membership-form"
+                      data-testid="review-membership-form"
+                    >
+                      <label className="membership-radio">
+                        <input
+                          type="radio"
+                          name="membership-decision"
+                          checked={membershipDraft.decision === "accept"}
+                          onChange={() => onMembershipDecision("accept")}
+                          data-testid="review-membership-accept-radio"
+                        />
+                        接受候选实例
+                      </label>
+                      <label className="membership-radio">
+                        <input
+                          type="radio"
+                          name="membership-decision"
+                          checked={membershipDraft.decision === "unassign"}
+                          onChange={() => onMembershipDecision("unassign")}
+                          data-testid="review-membership-unassign-radio"
+                        />
+                        显式未归集
+                      </label>
+                      {membershipDraft.decision === "accept" ? (
+                        <select
+                          value={`${membershipDraft.instanceId ?? ""}::${membershipDraft.role ?? ""}`}
+                          onChange={(event) => {
+                            const [instanceId, role] =
+                              event.target.value.split("::");
+                            onMembershipCandidate(instanceId, role);
+                          }}
+                          data-testid="review-membership-candidate-select"
+                        >
+                          {membership.candidates.map((candidate) => (
+                            <option
+                              key={candidate.claim_id}
+                              value={`${candidate.document_instance_id}::${candidate.document_role}`}
+                            >
+                              {candidate.document_role} ·{" "}
+                              {candidate.document_instance_id}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <p className="text-xs text-muted-foreground">
+                          该页不再属于任何单据实例，并从校验投影中排除。
+                        </p>
+                      )}
+                      <select
+                        value={membershipDraft.reason}
+                        onChange={(event) =>
+                          onMembershipReasonChange(
+                            event.target.value as MembershipReason,
+                          )
+                        }
+                        data-testid="review-membership-reason"
+                      >
+                        {MEMBERSHIP_REASONS.map((reason) => (
+                          <option key={reason} value={reason}>
+                            {reason}
+                          </option>
+                        ))}
+                      </select>
+                      <Button
+                        size="sm"
+                        data-testid="review-membership-submit"
+                        disabled={membershipPending}
+                        onClick={onSubmitMembership}
+                      >
+                        提交页归属修正
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </section>
+          )}
           <h4>证据（已掩码）</h4>
           <ul data-testid="review-evidence-links">
             {finding.evidence_links.map((link) => {
@@ -1219,6 +1385,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
   const submit = useSubmitVerification(workId);
   const reveal = useRevealFieldObservation(workId);
   const correct = useCorrectFieldObservation(workId);
+  const membershipCorrect = useCorrectPageMembership(workId);
   const supplement = useRequestSupplement(workId);
   const exception = useRequestBusinessException(workId);
 
@@ -1242,6 +1409,9 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
   const [correctionRaw, setCorrectionRaw] = useState("");
   const [correctionReason, setCorrectionReason] =
     useState<CorrectionReason>("SOURCE_VALUE_MISREAD");
+  const [membershipKey, setMembershipKey] = useState(newIdempotencyKey);
+  const [membershipDraft, setMembershipDraft] =
+    useState<MembershipDraft | null>(null);
   // The exact restricted command (and the token it was issued under) retained
   // only while its transport outcome is genuinely unknown, for exact replay.
   const issuedRef = useRef<
@@ -1361,6 +1531,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     submit.isPending ||
     reveal.isPending ||
     correct.isPending ||
+    membershipCorrect.isPending ||
     supplement.isPending ||
     exception.isPending;
 
@@ -1374,6 +1545,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     submit,
     reveal,
     correct,
+    membership: membershipCorrect,
     supplement,
     exception,
   };
@@ -1392,6 +1564,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     submit: () => setSubmitKey(newIdempotencyKey()),
     reveal: () => setRevealKey(newIdempotencyKey()),
     correct: () => setCorrectionKey(newIdempotencyKey()),
+    membership: () => setMembershipKey(newIdempotencyKey()),
     supplement: () => setSupplementKey(newIdempotencyKey()),
     exception: () => {},
   };
@@ -1761,6 +1934,102 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     });
   };
 
+  /** S10 page-membership decisions: the Reviewer explicitly accepts one
+   * coexisting candidate document instance and role, or explicitly unassigns
+   * the page, with a registered reason.  The draft is the server-owned finding
+   * data only; eligibility comes exclusively from explicit accepted facts. */
+  const handleStartMembership = (finding: S01WorkspaceFinding) => {
+    if (finding.membership === null || finding.membership === undefined) return;
+    setMembershipDraft({
+      finding,
+      decision: "accept",
+      instanceId:
+        (finding.membership.candidates[0]?.document_instance_id ?? null),
+      role: finding.membership.candidates[0]?.document_role ?? null,
+      reason: "MEMBERSHIP_SOURCE_VERIFIED",
+    });
+    setMembershipKey(newIdempotencyKey());
+    setLastAccepted(null);
+    setRejectedAction(null);
+  };
+
+  const handleMembershipDecision = (
+    decision: "accept" | "unassign",
+  ) => {
+    setMembershipDraft((draft) =>
+      draft === null
+        ? draft
+        : { ...draft, decision, reason: "MEMBERSHIP_SOURCE_VERIFIED" },
+    );
+  };
+
+  const handleMembershipCandidate = (
+    instanceId: string,
+    role: string,
+  ) => {
+    setMembershipDraft((draft) =>
+      draft === null ? draft : { ...draft, instanceId, role },
+    );
+  };
+
+  const handleMembershipReasonChange = (reason: MembershipReason) => {
+    setMembershipDraft((draft) =>
+      draft === null ? draft : { ...draft, reason },
+    );
+  };
+
+  const handleMembershipSubmit = () => {
+    if (work.data === undefined || anyPending || pendingCommand !== null) return;
+    if (requiresReload || work.isError || !owningReadsCurrent) return;
+    if (membershipDraft === null || membershipDraft.finding.membership == null) return;
+    const member = membershipDraft.finding.membership;
+    if (
+      membershipDraft.decision === "accept" &&
+      (membershipDraft.instanceId === null || membershipDraft.role === null)
+    ) {
+      return;
+    }
+    const command: MembershipCommand = {
+      application_id: work.data.application_id,
+      expected_fence: work.data.claim_fence,
+      expected_context: work.data.command_context,
+      idempotency_key: membershipKey,
+      membership: {
+        schema_version: "page-membership-correction/1",
+        finding_id: membershipDraft.finding.finding_id,
+        page_source_sha256: member.page_source_sha256,
+        page_ordinal: member.page_ordinal,
+        decision: membershipDraft.decision,
+        document_instance_id:
+          membershipDraft.decision === "accept"
+            ? membershipDraft.instanceId
+            : null,
+        document_role:
+          membershipDraft.decision === "accept"
+            ? membershipDraft.role
+            : null,
+        reason_code: membershipDraft.reason,
+      },
+    };
+    setPendingCommand({ action: "membership", command });
+    setLastAccepted(null);
+    setRejectedAction(null);
+    membershipCorrect.mutate(command, {
+      onSuccess: (result: MembershipResult) => {
+        // Like the field correction, the accepted membership successor
+        // invalidates the work item and advances the Evidence revision; the
+        // latch keeps the authoritative route/history reads alive while the
+        // replacement run converges.
+        setAcceptedCorrection({
+          applicationId: result.application_id,
+          evidenceRevision: result.evidence_revision,
+        });
+        accepted("membership")();
+      },
+      onError: rejected("membership"),
+    });
+  };
+
   /** Reconciling retry: a claim has no idempotency key, so its unknown
    * outcome is resolved by an authoritative refetch that identifies the live
    * lease instead of blindly issuing a second business effect. */
@@ -1830,6 +2099,17 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
       exception.mutate(pendingCommand.command, {
         onSuccess: handleExceptionAccepted,
         onError: rejected("exception", isDefinitiveS05Rejection),
+      });
+    } else if (pendingCommand.action === "membership") {
+      membershipCorrect.mutate(pendingCommand.command, {
+        onSuccess: (result: MembershipResult) => {
+          setAcceptedCorrection({
+            applicationId: result.application_id,
+            evidenceRevision: result.evidence_revision,
+          });
+          accepted("membership")();
+        },
+        onError: rejected("membership"),
       });
     } else {
       submit.mutate(pendingCommand.command, {
@@ -2157,6 +2437,13 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
         onCorrectionReasonChange={setCorrectionReason}
         onSubmitCorrection={handleCorrectionSubmit}
         onCancelCorrection={handleCancelCorrection}
+        membershipDraft={membershipDraft}
+        membershipPending={membershipCorrect.isPending}
+        onStartMembership={handleStartMembership}
+        onMembershipDecision={handleMembershipDecision}
+        onMembershipCandidate={handleMembershipCandidate}
+        onMembershipReasonChange={handleMembershipReasonChange}
+        onSubmitMembership={handleMembershipSubmit}
       />
       <GateSection applicationId={data.application_id} />
       <HistorySection history={history} />

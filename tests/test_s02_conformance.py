@@ -126,3 +126,113 @@ def test_environment_materials_have_registered_shapes_and_no_loss_records() -> N
     assert unknown_keys == 0
     assert not expected or observed_shapes == expected
     assert len(aggregate) == 64
+
+
+S10_STEP2_DIR = ROOT / "data" / "step2"
+
+# The complete content-ordered S10 Step2 corpus fact rows.  This is the exact
+# expected content (not a digest-length check): ten page_order files, forty-
+# four pages, 335 detections, 33 ``登记页``, 11 ``注册页`` and zero inferred
+# pages.  Each row is [filename, page_index, page_type, page_ordinal,
+# detection_count, inferred].
+S10_STEP2_CONTENT = [
+    ["JFL25P02L080310-01_page_order.json", 0, "注册页", 1, 16, False],
+    ["JFL25P02L080310-01_page_order.json", 1, "注册页", 2, 16, False],
+    ["JFL25P02L080310-01_page_order.json", 2, "登记页", 3, 5, False],
+    ["JFL25P02L080310-01_page_order.json", 3, "登记页", 4, 5, False],
+    ["JFL25P02L080310-01_page_order.json", 4, "登记页", 5, 5, False],
+    ["JFL25P02L080310-01_page_order.json", 5, "登记页", 6, 5, False],
+    ["JFL25P02L080310-01_page_order.json", 6, "登记页", 7, 4, False],
+    ["JFL25P02L086208-01_page_order.json", 0, "注册页", 1, 17, False],
+    ["JFL25P02L086208-01_page_order.json", 1, "登记页", 2, 5, False],
+    ["JFL25P02L086208-01_page_order.json", 2, "登记页", 3, 4, False],
+    ["JFL25P02L089660-01_page_order.json", 0, "注册页", 1, 16, False],
+    ["JFL25P02L089660-01_page_order.json", 1, "登记页", 2, 5, False],
+    ["JFL25P02L089660-01_page_order.json", 2, "登记页", 3, 5, False],
+    ["JFL25P02L089660-01_page_order.json", 3, "登记页", 4, 4, False],
+    ["JFL25P02L092898-01_page_order.json", 0, "注册页", 1, 18, False],
+    ["JFL25P02L092898-01_page_order.json", 1, "登记页", 2, 5, False],
+    ["JFL25P02L092898-01_page_order.json", 2, "登记页", 3, 6, False],
+    ["JFL25P02L092898-01_page_order.json", 3, "登记页", 4, 4, False],
+    ["JFL25P02L092898-01_page_order.json", 4, "登记页", 5, 2, False],
+    ["JFL25P02L096143-01_page_order.json", 0, "注册页", 1, 18, False],
+    ["JFL25P02L096143-01_page_order.json", 1, "登记页", 2, 5, False],
+    ["JFL25P02L096143-01_page_order.json", 2, "登记页", 3, 5, False],
+    ["JFL25P02L096143-01_page_order.json", 3, "登记页", 4, 4, False],
+    ["JFL25P02L099690-01_page_order.json", 0, "注册页", 1, 18, False],
+    ["JFL25P02L099690-01_page_order.json", 1, "登记页", 2, 6, False],
+    ["JFL25P02L099690-01_page_order.json", 2, "登记页", 3, 6, False],
+    ["JFL25P02L099690-01_page_order.json", 3, "登记页", 4, 4, False],
+    ["JFL25P02L099690-01_page_order.json", 4, "登记页", 5, 2, False],
+    ["JFL25P02L102655-01_page_order.json", 0, "注册页", 1, 16, False],
+    ["JFL25P02L102655-01_page_order.json", 1, "登记页", 2, 5, False],
+    ["JFL25P02L102655-01_page_order.json", 2, "登记页", 3, 4, False],
+    ["JFL25P02L102655-01_page_order.json", 3, "登记页", 4, 4, False],
+    ["JFL26P02L001460-01_page_order.json", 0, "注册页", 1, 17, False],
+    ["JFL26P02L001460-01_page_order.json", 1, "登记页", 2, 5, False],
+    ["JFL26P02L001460-01_page_order.json", 2, "登记页", 3, 5, False],
+    ["JFL26P02L001460-01_page_order.json", 3, "登记页", 4, 4, False],
+    ["JFL26P02L004481-01_page_order.json", 0, "注册页", 1, 17, False],
+    ["JFL26P02L004481-01_page_order.json", 1, "登记页", 2, 5, False],
+    ["JFL26P02L004481-01_page_order.json", 2, "登记页", 3, 5, False],
+    ["JFL26P02L004481-01_page_order.json", 3, "登记页", 4, 4, False],
+    ["JFL26P02L006588-01_page_order.json", 0, "注册页", 1, 17, False],
+    ["JFL26P02L006588-01_page_order.json", 1, "登记页", 2, 5, False],
+    ["JFL26P02L006588-01_page_order.json", 2, "登记页", 3, 5, False],
+    ["JFL26P02L006588-01_page_order.json", 3, "登记页", 4, 2, False],
+]
+
+# Full aggregate sha256 over the 44 mapped candidate claims (content equality,
+# never a digest-length check).
+S10_MEMBERSHIP_CLAIMS_DIGEST = (
+    "a4d7fdad3d94fc29e792197ea669dbd5e907ee3e35cc6c67f9137ddeeb760ae6"
+)
+
+
+def test_s10_step2_page_membership_migration_no_loss() -> None:
+    from task4_consistency.controlled.s02 import step2_page_order_membership_claims
+
+    files = sorted(S10_STEP2_DIR.glob("*_page_order.json"))
+    records: list[list[Any]] = []
+    claims: list[dict[str, Any]] = []
+    for path in files:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        sample_id = str(payload.get("sample_id") or path.stem)
+        claims.extend(
+            step2_page_order_membership_claims(payload, application_id=sample_id)
+        )
+        pages = payload.get("pages") or []
+        for index, page in enumerate(pages):
+            records.append(
+                [
+                    path.name,
+                    index,
+                    page.get("page_type"),
+                    int(page.get("order") or index + 1),
+                    len(page.get("detections") or []),
+                    page.get("inferred") is True,
+                ]
+            )
+
+    # Exact content equality of the corpus fact rows.
+    assert records == S10_STEP2_CONTENT
+    assert len(files) == 10
+    assert len(records) == 44
+    assert sum(row[4] for row in records) == 335
+    assert sum(row[2] == "登记页" for row in records) == 33
+    assert sum(row[2] == "注册页" for row in records) == 11
+    assert sum(row[5] for row in records) == 0
+    # Exactly one provenance-bearing candidate claim per non-inferred page.
+    assert len(claims) == 44
+    assert all(claim["record_kind"] == "candidate" for claim in claims)
+    assert all(claim["page"]["source_sha256"] for claim in claims)
+    assert all(claim["provenance"]["fact"] == "page.page_type" for claim in claims)
+    ordered = sorted(claims, key=lambda claim: (claim["page"]["page_ordinal"], claim["claim_id"]))
+    aggregate = hashlib.sha256(
+        json.dumps(
+            ordered, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+    assert aggregate == S10_MEMBERSHIP_CLAIMS_DIGEST
+    # No inferred page may ever produce a claim.
+    assert all(claim["provenance"]["inferred"] is False for claim in claims)

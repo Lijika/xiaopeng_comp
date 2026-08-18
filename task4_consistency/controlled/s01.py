@@ -230,6 +230,8 @@ class ControlledScenarioService:
             "app_uncertain_ocr_noise.json",
             "app_inconsistent_vin.json",
             "app_missing_vin_docs.json",
+            "app_s10_ambiguous_membership.json",
+            "app_s10_membership_field.json",
         }
     )
     _ALLOWED_PHASE_SUCCESSORS = {
@@ -404,6 +406,25 @@ class ControlledScenarioService:
     _CORRECTION_REASON_CODES = frozenset(
         {"SOURCE_VALUE_MISREAD", "SOURCE_VALUE_MISSING"}
     )
+    # S10: the closed Reviewer membership-decision reason vocabulary and the
+    # closed decision kinds.  An accepted decision selects an explicit document
+    # instance and role; an explicit unassign withdraws or supersedes an
+    # accepted membership.  Eligibility for the checker projection comes only
+    # from these explicit accepted facts -- never from candidate confidence,
+    # order, count, majority or last write.
+    _MEMBERSHIP_REASON_CODES = frozenset(
+        {
+            "MEMBERSHIP_SOURCE_VERIFIED",
+            "MEMBERSHIP_SOURCE_MISASSIGNED",
+            "MEMBERSHIP_INSTANCE_WRONG",
+            "MEMBERSHIP_PAGE_UNASSIGNED",
+        }
+    )
+    _MEMBERSHIP_DECISIONS = frozenset({"accept", "unassign"})
+    _MEMBERSHIP_RULE_IDS = frozenset(
+        {"MEMBERSHIP_UNRESOLVED", "MEMBERSHIP_AMBIGUOUS"}
+    )
+    _MEMBERSHIP_REFUSED = "MEMBERSHIP_REFUSED"
     _EXCEPTION_REQUEST_REASON = "DOCUMENTED_BRAND_VARIANCE"
     _EXCEPTION_APPROVAL_REASONS = frozenset(
         {"DOCUMENTED_VARIANCE_ACCEPTED", "DOCUMENTED_VARIANCE_REJECTED"}
@@ -8970,6 +8991,10 @@ class ControlledScenarioService:
                 evidence_payload = {
                     "schema_version": "s04-corrected-evidence/1",
                     "evidence": evidence,
+                    # The admitted graph (including any S10 page-membership
+                    # ledger) must survive every Evidence successor or the
+                    # correction would silently erase memberships.
+                    "graph": copy.deepcopy(self._admitted_graph(app)),
                     "correction": {
                         "correction_id": correction_id,
                         "observation_id": observation_id,
@@ -9289,6 +9314,546 @@ class ControlledScenarioService:
                 self._store = staged
                 return result
             raise RuntimeError("field correction retry exhausted")
+
+    def correct_page_membership(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        application_id: str,
+        work_item_id: str,
+        expected_fence: int,
+        expected_context: dict[str, Any],
+        idempotency_key: str,
+        membership: dict[str, Any],
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Append one source-backed page-membership successor and enqueue a rerun.
+
+        An accepted decision binds the page, an explicit document instance and
+        role, the actor, reason, time and the withdrawal/supersession
+        predecessors, then advances the Evidence revision and invalidates the
+        affected Lifecycle work and readiness.  An explicit ``unassign`` is a
+        first-class accepted disposition that withdraws or supersedes an
+        accepted membership.  Eligibility for the checker projection comes only
+        from these explicit accepted facts; candidate confidence, order, count,
+        majority and last write never select a page.
+        """
+        membership_time = int(self._clock() if now is None else now)
+        if not self._valid_reviewer_principal(principal, now=membership_time):
+            raise QueryNotFound(work_item_id)
+        if (
+            isinstance(expected_fence, bool)
+            or not isinstance(expected_fence, int)
+            or expected_fence < 1
+        ):
+            raise ValueError("membership claim fence is invalid")
+        if not self._valid_idempotency_key(idempotency_key):
+            raise ValueError("membership idempotency key is invalid")
+        base_contract = {
+            "schema_version",
+            "finding_id",
+            "page_source_sha256",
+            "page_ordinal",
+            "decision",
+            "reason_code",
+        }
+        if not isinstance(membership, dict):
+            raise ValueError("page membership does not match the registered contract")
+        decision = membership.get("decision")
+        if decision not in self._MEMBERSHIP_DECISIONS:
+            raise ValueError("page membership decision is invalid")
+        if decision == "accept":
+            contract = base_contract | {"document_instance_id", "document_role"}
+        else:
+            contract = base_contract
+        if set(membership) != contract:
+            raise ValueError("page membership does not match the registered contract")
+        if membership.get("schema_version") != "page-membership-correction/1":
+            raise ValueError("page membership schema version is unsupported")
+        for key in ("finding_id", "page_source_sha256"):
+            value = membership.get(key)
+            if not isinstance(value, str) or not value or value.strip() != value:
+                raise ValueError(f"page membership {key} is invalid")
+        page_source_sha256 = membership["page_source_sha256"]
+        if len(page_source_sha256) != 64 or any(
+            character not in "0123456789abcdef"
+            for character in page_source_sha256
+        ):
+            raise ValueError("page membership target is invalid")
+        page_ordinal = membership.get("page_ordinal")
+        if (
+            isinstance(page_ordinal, bool)
+            or not isinstance(page_ordinal, int)
+            or page_ordinal < 1
+        ):
+            raise ValueError("page membership target is invalid")
+        reason_code = membership.get("reason_code")
+        if reason_code not in self._MEMBERSHIP_REASON_CODES:
+            raise ValueError("page membership reason is not registered")
+        instance_id: str | None = None
+        role: str | None = None
+        if decision == "accept":
+            instance_id = membership.get("document_instance_id")
+            role = membership.get("document_role")
+            if (
+                not isinstance(instance_id, str)
+                or not instance_id
+                or instance_id.strip() != instance_id
+                or not isinstance(role, str)
+                or not role
+                or role.strip() != role
+            ):
+                # Ambiguous role input is a validation conflict with no revision.
+                raise ValueError("page membership role decision is ambiguous")
+        normalized = copy.deepcopy(membership)
+
+        with self._lock:
+            for attempt in range(2):
+                self._reload_store()
+                work_item, state = self._review_work_item_authority(
+                    principal=principal,
+                    work_item_id=work_item_id,
+                    now=membership_time,
+                )
+                if work_item["application_id"] != application_id:
+                    raise QueryNotFound(work_item_id)
+                app, _, actual_context = self._review_current_context(work_item)
+                fingerprint_bytes = json.dumps(
+                    {
+                        "application_id": application_id,
+                        "membership": normalized,
+                        "expected_context": expected_context,
+                        "expected_fence": expected_fence,
+                        "work_item_id": work_item_id,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                command_fingerprint = hashlib.sha256(fingerprint_bytes).hexdigest()
+                binding_key = self._review_idempotency_binding_key(
+                    principal,
+                    work_item_id,
+                    idempotency_key,
+                    action="correct_page_membership",
+                )
+                previous = self._store.idempotency.get(binding_key)
+                if previous is not None:
+                    previous_fingerprint, previous_result = previous
+                    if previous_fingerprint == command_fingerprint:
+                        return {**copy.deepcopy(previous_result), "replayed": True}
+                    return {
+                        "status": "conflict",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "IDEMPOTENCY_KEY_CONFLICT",
+                    }
+                if not self._review_context_matches(expected_context, actual_context):
+                    return {
+                        "status": "stale",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "STALE_REVIEW_CONTEXT",
+                    }
+                if (
+                    state["status"] != "claimed"
+                    or state["claim_subject"] != principal.subject
+                    or state["claim_fence"] != expected_fence
+                    or float(state["claim_expires_at"]) <= membership_time
+                ):
+                    return {
+                        "status": "stale",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "STALE_WORK_ITEM_CLAIM",
+                    }
+                if (
+                    app.get("phase") != "Manual Review"
+                    or app.get("current_run_id") != work_item["run_id"]
+                    or app.get("lifecycle_revision") != work_item["lifecycle_revision"]
+                    or app.get("evidence_revision") != work_item["evidence_revision"]
+                ):
+                    return {
+                        "status": "stale",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "STALE_REVIEW_CONTEXT",
+                    }
+
+                findings = [
+                    finding
+                    for finding in self._store.findings
+                    if finding.get("application_id") == application_id
+                    and finding.get("run_id") == work_item["run_id"]
+                    and finding.get("finding_id") == normalized["finding_id"]
+                ]
+                if (
+                    len(findings) != 1
+                    or normalized["finding_id"] not in work_item["finding_ids"]
+                    or findings[0].get("mandatory") is not True
+                    or findings[0].get("verdict") == "consistent"
+                    or findings[0].get("rule_id") not in self._MEMBERSHIP_RULE_IDS
+                ):
+                    raise ValueError("page membership finding is not correctable")
+                gate = self._review_write_gate(app=app)
+                if gate is not None:
+                    status, gate_reason_code = gate
+                    return {
+                        "status": status,
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": gate_reason_code,
+                    }
+
+                graph = self._admitted_graph(app)
+                memberships = (
+                    graph.get("page_memberships")
+                    if isinstance(graph, dict)
+                    else None
+                )
+                if not isinstance(memberships, list) or not memberships:
+                    return {
+                        "status": "rejected",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "MEMBERSHIP_LEDGER_UNAVAILABLE",
+                    }
+                # Locality: the target page must belong to this application
+                # boundary -- an admitted attachment page or a declared ledger
+                # page.  A page from another attachment or application cannot
+                # become a target.
+                attachment_shas: set[str] = set()
+                if isinstance(graph, dict):
+                    attachments = graph.get("attachments")
+                    if isinstance(attachments, list):
+                        attachment_shas = {
+                            item.get("source_sha256")
+                            for item in attachments
+                            if isinstance(item, dict)
+                            and isinstance(item.get("source_sha256"), str)
+                        }
+                ledger_pages = {
+                    record["page"]["source_sha256"]
+                    for record in memberships
+                    if isinstance(record, dict)
+                    and isinstance(record.get("page"), dict)
+                    and isinstance(record["page"].get("source_sha256"), str)
+                }
+                if (
+                    page_source_sha256 not in attachment_shas
+                    and page_source_sha256 not in ledger_pages
+                ):
+                    return {
+                        "status": "rejected",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "MEMBERSHIP_PAGE_OUTSIDE_APPLICATION",
+                    }
+                candidates = [
+                    record
+                    for record in memberships
+                    if isinstance(record, dict)
+                    and record.get("record_kind") == "candidate"
+                    and isinstance(record.get("page"), dict)
+                    and record["page"].get("source_sha256") == page_source_sha256
+                ]
+                if not candidates:
+                    return {
+                        "status": "rejected",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "MEMBERSHIP_CLAIM_MISSING",
+                    }
+                finding_membership = findings[0].get("membership")
+                if (
+                    not isinstance(finding_membership, dict)
+                    or finding_membership.get("page_source_sha256")
+                    != page_source_sha256
+                ):
+                    raise ValueError(
+                        "page membership finding does not match the target page"
+                    )
+
+                staged = copy.deepcopy(self._store)
+                staged_app = staged.applications[application_id]
+                next_evidence_revision = int(staged_app["evidence_revision"]) + 1
+                correction_id = self._stable_id(
+                    "membership", f"{binding_key}:{command_fingerprint}"
+                )
+                decision_id = self._stable_id("decision", f"{correction_id}")
+                superseded = sorted(
+                    {
+                        record["decision_id"]
+                        for record in memberships
+                        if isinstance(record, dict)
+                        and record.get("record_kind") in {"accepted", "unassigned"}
+                        and record.get("status") == "active"
+                        and isinstance(record.get("page"), dict)
+                        and record["page"].get("source_sha256") == page_source_sha256
+                        and isinstance(record.get("decision_id"), str)
+                    }
+                )
+                updated_memberships = copy.deepcopy(memberships)
+                for record in updated_memberships:
+                    if (
+                        isinstance(record, dict)
+                        and record.get("decision_id") in set(superseded)
+                    ):
+                        record["status"] = "superseded"
+                successor: dict[str, Any] = {
+                    "record_kind": (
+                        "accepted" if decision == "accept" else "unassigned"
+                    ),
+                    "decision_id": decision_id,
+                    "membership_id": correction_id,
+                    "application_id": application_id,
+                    "page": {
+                        "source_sha256": page_source_sha256,
+                        "page_ordinal": page_ordinal,
+                    },
+                    "actor": principal.subject,
+                    "reason_code": reason_code,
+                    "time": membership_time,
+                    "source_evidence": {
+                        "evidence_revision": next_evidence_revision,
+                        "event_id": self._stable_id(
+                            "evidence",
+                            f"{application_id}:membership:{correction_id}",
+                        ),
+                    },
+                    "supersedes": superseded,
+                    "status": "active",
+                }
+                if decision == "accept":
+                    successor["document_instance_id"] = instance_id
+                    successor["document_role"] = role
+                updated_memberships.append(successor)
+
+                updated_graph = (
+                    copy.deepcopy(graph) if isinstance(graph, dict) else {}
+                )
+                updated_graph["page_memberships"] = updated_memberships
+
+                evidence = self._admitted_evidence(app)
+                evidence_payload = {
+                    "schema_version": "s10-corrected-evidence/1",
+                    "evidence": evidence,
+                    "graph": updated_graph,
+                    "correction": {
+                        "correction_id": correction_id,
+                        "kind": "page_membership",
+                        "decision_id": decision_id,
+                        "page_source_sha256": page_source_sha256,
+                        "page_ordinal": page_ordinal,
+                        "decision": decision,
+                        "document_instance_id": instance_id,
+                        "document_role": role,
+                        "reason_code": reason_code,
+                        "actor": principal.subject,
+                        "recorded_at": membership_time,
+                        "supersedes": superseded,
+                    },
+                }
+                evidence_bytes = json.dumps(
+                    evidence_payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                job_id = self._stable_id(
+                    "job", f"{application_id}:membership:{correction_id}"
+                )
+                sequence = 1 + sum(
+                    record.get("work_item_id") == work_item_id
+                    and str(record.get("record_type", "")).startswith("work_item_")
+                    for record in staged.review_records
+                )
+                old_route = staged_app["route"]
+                invalidated_decision_ids = sorted(
+                    {
+                        record["decision_id"]
+                        for record in staged.review_records
+                        if record.get("application_id") == application_id
+                        and record.get("run_id") == work_item["run_id"]
+                        and isinstance(record.get("decision_id"), str)
+                    }
+                )
+                try:
+                    self._before_write("membership.evidence")
+                    staged.evidence_events.append(
+                        {
+                            "event_id": self._stable_id(
+                                "evidence",
+                                f"{application_id}:membership:{correction_id}",
+                            ),
+                            "application_id": application_id,
+                            "revision": next_evidence_revision,
+                            "kind": "membership_correction",
+                            "content_sha256": hashlib.sha256(
+                                evidence_bytes
+                            ).hexdigest(),
+                            "content_bytes": len(evidence_bytes),
+                            "payload": evidence_payload,
+                        }
+                    )
+                    staged_app["evidence_revision"] = next_evidence_revision
+                    staged_app["evidence_ready"] = False
+                    staged_app["route"] = "pending_check"
+                    staged_app["current_run_id"] = None
+                    staged_app["current_evidence_snapshot_id"] = None
+                    staged_app["current_evidence_snapshot_digest"] = None
+                    staged_app["projection_visible"] = False
+                    staged_app["projection_pending"] = False
+                    self._before_write("membership.lifecycle")
+                    self._transition_lifecycle(
+                        staged_app,
+                        "Assembly",
+                        "MEMBERSHIP_CORRECTION_ACCEPTED",
+                        store=staged,
+                    )
+                    staged.lifecycle_events[-1].update(
+                        {
+                            "correction_id": correction_id,
+                            "membership_decision_id": decision_id,
+                            "page_source_sha256": page_source_sha256,
+                            "invalidated_run_id": work_item["run_id"],
+                            "invalidated_route": old_route,
+                            "invalidated_work_item_id": work_item_id,
+                            "invalidated_decision_ids": invalidated_decision_ids,
+                        }
+                    )
+                    self._before_write("membership.work_item")
+                    staged.review_records.append(
+                        {
+                            "record_id": self._stable_id(
+                                "review_record",
+                                f"{work_item_id}:membership:{sequence}",
+                            ),
+                            "record_type": "work_item_invalidated",
+                            "sequence": sequence,
+                            "work_item_id": work_item_id,
+                            "application_id": application_id,
+                            "run_id": work_item["run_id"],
+                            "claim_subject": principal.subject,
+                            "claim_fence": expected_fence,
+                            "correction_id": correction_id,
+                            "membership_decision_id": decision_id,
+                            "invalidated_at": membership_time,
+                            "recorded_at": membership_time,
+                        }
+                    )
+                    self._before_write("membership.job")
+                    staged.jobs.append(
+                        self._admission_job_record(
+                            job_id, application_id, correction_id
+                        )
+                    )
+                    self._before_write("membership.outbox")
+                    staged.outbox.append(
+                        {
+                            "event_id": self._stable_id("outbox", job_id),
+                            "kind": "controlled_check_requested",
+                            "application_id": application_id,
+                            "job_id": job_id,
+                            "fingerprint": correction_id,
+                            "status": "pending",
+                        }
+                    )
+                    self._before_write("membership.audit")
+                    staged.audit_events.append(
+                        {
+                            "event_id": self._stable_id(
+                                "audit", f"page_membership:{decision_id}"
+                            ),
+                            "action": "page_membership_corrected",
+                            "subject": principal.subject,
+                            "role": principal.role,
+                            "scope": work_item["visibility_scope"],
+                            "source_id": principal.source_id,
+                            "application_id": application_id,
+                            "work_item_id": work_item_id,
+                            "finding_id": normalized["finding_id"],
+                            "page_source_sha256": page_source_sha256,
+                            "invalidated_run_id": work_item["run_id"],
+                            "decision_id": decision_id,
+                            "correction_id": correction_id,
+                            "job_id": job_id,
+                            "reason_code": reason_code,
+                            "claim_fence": expected_fence,
+                            "lifecycle_revision": staged_app[
+                                "lifecycle_revision"
+                            ],
+                            "evidence_revision": staged_app["evidence_revision"],
+                            "result": "accepted",
+                            **self._audit_time_fields(staged, now=membership_time),
+                        }
+                    )
+                    result = {
+                        "status": "accepted",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "correction_id": correction_id,
+                        "membership_decision_id": decision_id,
+                        "page_source_sha256": page_source_sha256,
+                        "decision": decision,
+                        "document_instance_id": instance_id,
+                        "document_role": role,
+                        "invalidated_run_id": work_item["run_id"],
+                        "job_id": job_id,
+                        "phase": "Assembly",
+                        "route": "pending_check",
+                        "lifecycle_revision": staged_app["lifecycle_revision"],
+                        "evidence_revision": staged_app["evidence_revision"],
+                    }
+                    self._before_write("membership.idempotency")
+                    staged.idempotency[binding_key] = (
+                        command_fingerprint,
+                        copy.deepcopy(result),
+                    )
+                    self._before_write("membership.publish")
+                    staged.persist()
+                except _StoreWriteFailure as error:
+                    return {
+                        "status": "unavailable",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": (
+                            "AUDIT_UNAVAILABLE"
+                            if str(error) == "membership.audit"
+                            else "STORAGE_UNAVAILABLE"
+                        ),
+                    }
+                except StaleStoreRevision:
+                    if attempt == 0:
+                        continue
+                    return {
+                        "status": "unavailable",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "STORAGE_UNAVAILABLE",
+                    }
+                except Exception:
+                    return {
+                        "status": "unavailable",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "STORAGE_UNAVAILABLE",
+                    }
+                self._store = staged
+                return result
+            raise RuntimeError("membership correction retry exhausted")
 
     @classmethod
     def _valid_exception_approver_principal(
@@ -12760,9 +13325,11 @@ class ControlledScenarioService:
                 for finding_id in work_item["finding_ids"]
             ):
                 raise RuntimeError("review work-item finding authority is unavailable")
-            automatic_findings = [
-                {
-                    key: findings_by_id[finding_id][key]
+            automatic_findings = []
+            for finding_id in work_item["finding_ids"]:
+                finding = findings_by_id[finding_id]
+                projected_finding = {
+                    key: finding[key]
                     for key in (
                         "finding_id",
                         "rule_id",
@@ -12771,8 +13338,11 @@ class ControlledScenarioService:
                         "reason_code",
                     )
                 }
-                for finding_id in work_item["finding_ids"]
-            ]
+                if isinstance(finding.get("membership"), dict):
+                    projected_finding["membership"] = copy.deepcopy(
+                        finding["membership"]
+                    )
+                automatic_findings.append(projected_finding)
             decision_records = {
                 record["decision_id"]: record
                 for record in self._store.review_records
@@ -13641,6 +14211,96 @@ class ControlledScenarioService:
                 ),
                 key=lambda item: (int(item["version"]), item["attachment_id"]),
             )
+            # S10: preserved page-membership history.  The current ledger is a
+            # projection of the current Evidence graph holding every candidate
+            # claim and every accepted/unassigned decision with its explicit
+            # status; correction events add the chronological successor facts.
+            current_ledger_graph = self._admitted_graph(app)
+            membership_ledger = (
+                current_ledger_graph.get("page_memberships")
+                if isinstance(current_ledger_graph, dict)
+                else None
+            )
+            memberships = []
+            if isinstance(membership_ledger, list):
+                for record in membership_ledger:
+                    if not isinstance(record, dict):
+                        continue
+                    kind = record.get("record_kind")
+                    if kind == "candidate":
+                        memberships.append(
+                            {
+                                "record_kind": kind,
+                                "claim_id": record["claim_id"],
+                                "page": copy.deepcopy(record["page"]),
+                                "candidate_document": copy.deepcopy(
+                                    record["candidate_document"]
+                                ),
+                                "provenance": copy.deepcopy(
+                                    record.get("provenance", {})
+                                ),
+                            }
+                        )
+                    elif kind in {"accepted", "unassigned"}:
+                        item: dict[str, Any] = {
+                            "record_kind": kind,
+                            "decision_id": record["decision_id"],
+                            "membership_id": record.get("membership_id"),
+                            "page": copy.deepcopy(record["page"]),
+                            "actor": record["actor"],
+                            "reason_code": record["reason_code"],
+                            "time": record["time"],
+                            "source_evidence": copy.deepcopy(
+                                record.get("source_evidence", {})
+                            ),
+                            "supersedes": copy.deepcopy(
+                                record.get("supersedes", [])
+                            ),
+                            "status": record["status"],
+                        }
+                        if kind == "accepted":
+                            item["document_instance_id"] = record.get(
+                                "document_instance_id"
+                            )
+                            item["document_role"] = record.get("document_role")
+                        memberships.append(item)
+            membership_history = []
+            for event in sorted(
+                self._store.evidence_events,
+                key=lambda item: int(item.get("revision") or 0),
+            ):
+                if (
+                    event.get("application_id") != application_id
+                    or event.get("kind") != "membership_correction"
+                ):
+                    continue
+                payload = event.get("payload")
+                correction = payload.get("correction") if isinstance(payload, dict) else None
+                if not isinstance(correction, dict):
+                    raise RuntimeError("membership history is unavailable")
+                membership_history.append(
+                    {
+                        "evidence_revision": event.get("revision"),
+                        "event_id": event.get("event_id"),
+                        **{
+                            key: copy.deepcopy(correction[key])
+                            for key in (
+                                "correction_id",
+                                "decision_id",
+                                "page_source_sha256",
+                                "page_ordinal",
+                                "decision",
+                                "document_instance_id",
+                                "document_role",
+                                "reason_code",
+                                "actor",
+                                "recorded_at",
+                                "supersedes",
+                            )
+                            if correction.get(key) is not None
+                        },
+                    }
+                )
             return {
                 "schema_version": "s04-application-history/1",
                 "application_id": application_id,
@@ -13651,6 +14311,8 @@ class ControlledScenarioService:
                 "corrections": corrections,
                 "business_exceptions": business_exceptions,
                 "attachment_versions": attachment_versions,
+                "memberships": memberships,
+                "membership_history": membership_history,
             }
 
     def _reviewer_application_authority(
@@ -13950,6 +14612,15 @@ class ControlledScenarioService:
             "schema_version": "s01-admitted-evidence/1",
             "evidence": copy.deepcopy(envelope.payload["application"]["evidence"]),
         }
+        # S10: a C-DEMO fixture may declare an application-local page-membership
+        # ledger on its graph.  It is admitted verbatim (immutable candidate
+        # claims plus any explicitly accepted/unassigned disposition facts) and
+        # travels with the Evidence payload and revisions.
+        admitted_graph = envelope.payload["application"].get("graph")
+        if isinstance(admitted_graph, dict) and isinstance(
+            admitted_graph.get("page_memberships"), list
+        ):
+            admitted_evidence["graph"] = copy.deepcopy(admitted_graph)
         admitted_evidence_bytes = json.dumps(
             admitted_evidence,
             ensure_ascii=False,
@@ -15078,6 +15749,7 @@ class ControlledScenarioService:
             in {
                 "admitted_snapshot",
                 "field_correction",
+                "membership_correction",
                 "supplement_attachment_version",
             }
         ]
@@ -15090,6 +15762,7 @@ class ControlledScenarioService:
             "s02-admitted-evidence/1",
             "s04-corrected-evidence/1",
             "s06-supplement-evidence/1",
+            "s10-corrected-evidence/1",
         }:
             raise RuntimeError("admitted evidence authority is invalid")
         evidence = payload.get("evidence")
@@ -15104,6 +15777,168 @@ class ControlledScenarioService:
         if hashlib.sha256(encoded).hexdigest() != event.get("content_sha256"):
             raise RuntimeError("admitted evidence content digest does not match")
         return copy.deepcopy(evidence)
+
+    def _admitted_graph(self, app: dict[str, Any]) -> dict[str, Any]:
+        """Return the current admitted graph for the application's evidence
+        revision.  The graph travels inside the same immutable Evidence event
+        payload as the ``evidence`` list, so it shares the same append-only
+        revision and snapshot machinery (S10 hard decision)."""
+        matching = [
+            event
+            for event in self._store.evidence_events
+            if event.get("application_id") == app["application_id"]
+            and event.get("revision") == app["evidence_revision"]
+            and event.get("kind")
+            in {
+                "admitted_snapshot",
+                "field_correction",
+                "membership_correction",
+                "supplement_attachment_version",
+            }
+        ]
+        if len(matching) != 1:
+            raise RuntimeError("admitted graph authority is unavailable")
+        payload = matching[0].get("payload")
+        graph = payload.get("graph") if isinstance(payload, dict) else None
+        if not isinstance(graph, dict):
+            graph = {}
+        return copy.deepcopy(graph)
+
+    @staticmethod
+    def _registrable_candidate_membership(
+        *,
+        record: dict[str, Any],
+        application_id: str,
+    ) -> dict[str, Any] | None:
+        """Validate and normalize one admitted candidate page-membership claim."""
+        if not isinstance(record, dict):
+            return None
+        page = record.get("page")
+        candidate_document = record.get("candidate_document")
+        provenance = record.get("provenance")
+        if not isinstance(page, dict) or not isinstance(candidate_document, dict):
+            return None
+        source_sha256 = page.get("source_sha256")
+        page_ordinal = page.get("page_ordinal")
+        claim_id = record.get("claim_id")
+        candidate_instance = candidate_document.get("document_instance_id")
+        candidate_role = candidate_document.get("document_role")
+        if (
+            not isinstance(claim_id, str)
+            or not claim_id
+            or not isinstance(source_sha256, str)
+            or len(source_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in source_sha256)
+            or isinstance(page_ordinal, bool)
+            or not isinstance(page_ordinal, int)
+            or page_ordinal < 1
+            or not isinstance(candidate_instance, str)
+            or not candidate_instance
+            or not isinstance(candidate_role, str)
+            or not candidate_role
+        ):
+            return None
+        return {
+            "record_kind": "candidate",
+            "claim_id": claim_id,
+            "application_id": application_id,
+            "page": {
+                "source_sha256": source_sha256,
+                "page_ordinal": page_ordinal,
+            },
+            "candidate_document": {
+                "document_instance_id": candidate_instance,
+                "document_role": candidate_role,
+            },
+            "provenance": copy.deepcopy(provenance or {}),
+        }
+
+    def _registrable_membership_ledger(
+        self,
+        graph: Any,
+        *,
+        application_id: str,
+    ) -> list[dict[str, Any]]:
+        """Build the normalized append-only ledger admitted on the graph.
+
+        Only well-formed candidate claims are admitted; accepted/unassigned
+        dispositions inside a fixture are trusted only when they point at a
+        declared candidate claim of the same application boundary.  Nothing is
+        inferred from candidate confidence, order or count."""
+        if not isinstance(graph, dict):
+            return []
+        registrations = graph.get("page_memberships")
+        if not isinstance(registrations, list):
+            return []
+        if not registrations:
+            return []
+        ledger: list[dict[str, Any]] = []
+        candidate_pages: dict[str, int] = {}
+        for record in registrations:
+            if not isinstance(record, dict):
+                continue
+            kind = record.get("record_kind")
+            if kind == "candidate":
+                normalized = self._registrable_candidate_membership(
+                    record=record, application_id=application_id
+                )
+                if normalized is None:
+                    continue
+                source_sha256 = normalized["page"]["source_sha256"]
+                if source_sha256 in candidate_pages:
+                    # One ledger page may carry many coexisting candidate
+                    # claims; the denied check below is only for identical
+                    # claim identity of the same page.
+                    pass
+                ledger.append(normalized)
+            elif kind in {"accepted", "unassigned"}:
+                page = record.get("page")
+                source_sha256 = page.get("source_sha256") if isinstance(page, dict) else None
+                if not isinstance(source_sha256, str):
+                    continue
+                if any(
+                    item.get("record_kind") == "candidate"
+                    and isinstance(item.get("page"), dict)
+                    and item["page"].get("source_sha256") == source_sha256
+                    for item in ledger
+                ):
+                    decision_id = record.get("decision_id")
+                    decision_kind = kind
+                    successor = {
+                        "record_kind": decision_kind,
+                        "decision_id": (
+                            decision_id
+                            if isinstance(decision_id, str) and decision_id
+                            else self._stable_id(
+                                "decision", f"{application_id}:{source_sha256}:{kind}"
+                            )
+                        ),
+                        "application_id": application_id,
+                        "page": copy.deepcopy(page),
+                        "actor": str(record.get("actor") or "fixture-admitted"),
+                        "reason_code": str(record.get("reason_code") or "MEMBERSHIP_SOURCE_VERIFIED"),
+                        "time": int(record.get("time") or 0),
+                        "source_evidence": copy.deepcopy(
+                            record.get("source_evidence") or {}
+                        ),
+                        "supersedes": sorted(
+                            str(item)
+                            for item in (record.get("supersedes") or [])
+                            if isinstance(item, str) and item
+                        ),
+                        "status": "active",
+                    }
+                    if decision_kind == "accepted":
+                        successor["document_instance_id"] = str(
+                            record.get("document_instance_id") or ""
+                        )
+                        successor["document_role"] = str(
+                            record.get("document_role") or ""
+                        )
+                        if not successor["document_instance_id"] or not successor["document_role"]:
+                            continue
+                    ledger.append(successor)
+        return ledger
 
     @staticmethod
     def _assemble_evidence(evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -15172,6 +16007,230 @@ class ControlledScenarioService:
             or document["attachment"].get("attachment_id")
             not in superseded_attachment_ids
         ]
+
+    @staticmethod
+    def _effective_page_memberships(
+        memberships: Any,
+    ) -> dict[str, dict[str, Any]]:
+        """Compute each ledger page's current effective decision from the
+        append-only membership records.
+
+        Only explicit accepted facts can select a page: an ``accepted`` record
+        with status ``active`` selects one document instance and role; an
+        ``unassigned`` record is an explicit disposition that keeps the page
+        outside the projection.  Conflict among active accepted decisions makes
+        the page ambiguous.  Presence of candidate claims without any active
+        decision leaves the page unresolved.  Confidence, order, count, majority
+        and last write never select a winner."""
+        if not isinstance(memberships, list):
+            return {}
+        by_sha: dict[str, dict[str, Any]] = {}
+        for record in memberships:
+            if not isinstance(record, dict):
+                continue
+            page = record.get("page")
+            source_sha = page.get("source_sha256") if isinstance(page, dict) else None
+            if not isinstance(source_sha, str) or not source_sha:
+                continue
+            entry = by_sha.setdefault(
+                source_sha, {"candidates": [], "decisions": []}
+            )
+            kind = record.get("record_kind")
+            if kind == "candidate":
+                entry["candidates"].append(record)
+            elif kind in {"accepted", "unassigned"}:
+                entry["decisions"].append(record)
+        out: dict[str, dict[str, Any]] = {}
+        for source_sha, entry in by_sha.items():
+            if not entry["candidates"]:
+                continue
+            active = [
+                decision
+                for decision in entry["decisions"]
+                if decision.get("status") == "active"
+            ]
+            accepted = [
+                decision
+                for decision in active
+                if decision.get("record_kind") == "accepted"
+            ]
+            unassigned = [
+                decision
+                for decision in active
+                if decision.get("record_kind") == "unassigned"
+            ]
+            if accepted:
+                selections = {
+                    (decision.get("document_instance_id"), decision.get("document_role"))
+                    for decision in accepted
+                    if isinstance(decision.get("document_instance_id"), str)
+                    and isinstance(decision.get("document_role"), str)
+                    and decision["document_instance_id"]
+                    and decision["document_role"]
+                }
+                if len(selections) == 1:
+                    instance_id, role = next(iter(selections))
+                    out[source_sha] = {
+                        "kind": "selected",
+                        "document_instance_id": instance_id,
+                        "document_role": role,
+                    }
+                else:
+                    out[source_sha] = {"kind": "ambiguous"}
+            elif unassigned:
+                out[source_sha] = {"kind": "unassigned"}
+            else:
+                out[source_sha] = {"kind": "unresolved"}
+        return out
+
+    def _project_membership_evidence(
+        self, app: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Project checker evidence after applying only explicit accepted
+        page-membership decisions (S10).
+
+        A page is included only when its effective decision selects one
+        document instance and role; unresolved, explicitly unassigned and
+        ambiguous pages stay outside the checker projection.  Pages with no
+        membership ledger entry are unaffected, so non-membership fixtures keep
+        their exact current evidence."""
+        evidence = self._admitted_evidence(app)
+        memberships = self._admitted_graph(app).get("page_memberships")
+        selected = self._effective_page_memberships(memberships)
+        if not selected:
+            return evidence
+        projected = copy.deepcopy(evidence)
+        for document in projected:
+            role = document.get("document_role")
+            kept_observations = []
+            found_change = False
+            for observation in document.get("observations", []):
+                if not isinstance(observation, dict):
+                    kept_observations.append(observation)
+                    continue
+                state = selected.get(observation.get("source_sha256"))
+                if state is None or (
+                    state["kind"] == "selected"
+                    and state["document_role"] == role
+                ):
+                    kept_observations.append(observation)
+                    continue
+                found_change = True
+            if found_change:
+                document["observations"] = kept_observations
+                fields = document.get("fields")
+                if isinstance(fields, dict):
+                    for name in list(fields):
+                        value = fields[name]
+                        if not isinstance(value, dict):
+                            continue
+                        state = selected.get(value.get("source_sha256"))
+                        if state is not None and not (
+                            state["kind"] == "selected"
+                            and state["document_role"] == role
+                        ):
+                            del fields[name]
+        return projected
+
+    def _membership_findings(
+        self, app: dict[str, Any], run_spec: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Surface unresolved and ambiguous membership pages as mandatory
+        review blockers.  Explicitly unassigned pages are not blockers (their
+        disposition is decided); selected pages are not blockers.  Every
+        coexisting candidate claim stays visible for the Reviewer."""
+        graph = self._admitted_graph(app)
+        memberships = graph.get("page_memberships") if isinstance(graph, dict) else None
+        if not memberships:
+            return []
+        effective = self._effective_page_memberships(memberships)
+        run_id = run_spec["run_id"]
+        findings: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for record in memberships:
+            if not isinstance(record, dict) or record.get("record_kind") != "candidate":
+                continue
+            page = record.get("page")
+            source_sha = page.get("source_sha256") if isinstance(page, dict) else None
+            if not isinstance(source_sha, str) or not source_sha or source_sha in seen:
+                continue
+            state = effective.get(source_sha)
+            if state is None or state.get("kind") in {"selected", "unassigned"}:
+                continue
+            seen.add(source_sha)
+            candidates = []
+            for item in memberships:
+                if (
+                    not isinstance(item, dict)
+                    or item.get("record_kind") != "candidate"
+                    or not isinstance(item.get("page"), dict)
+                    or item["page"].get("source_sha256") != source_sha
+                ):
+                    continue
+                candidate_document = item.get("candidate_document")
+                candidates.append(
+                    {
+                        "document_instance_id": candidate_document.get(
+                            "document_instance_id"
+                        ),
+                        "document_role": candidate_document.get("document_role"),
+                        "claim_id": item.get("claim_id"),
+                        "provenance": copy.deepcopy(
+                            item.get("provenance") or {}
+                        ),
+                    }
+                )
+            rule_id = (
+                "MEMBERSHIP_UNRESOLVED"
+                if state["kind"] == "unresolved"
+                else "MEMBERSHIP_AMBIGUOUS"
+            )
+            finding_id = self._stable_id(
+                "finding", f"{run_id}:{rule_id}:{source_sha}"
+            )
+            accepted = [
+                decision.get("decision_id")
+                for decision in memberships
+                if isinstance(decision, dict)
+                and decision.get("record_kind") == "accepted"
+                and decision.get("status") == "active"
+                and isinstance(decision.get("page"), dict)
+                and decision["page"].get("source_sha256") == source_sha
+            ]
+            unassigned = any(
+                isinstance(decision, dict)
+                and decision.get("record_kind") == "unassigned"
+                and decision.get("status") == "active"
+                and isinstance(decision.get("page"), dict)
+                and decision["page"].get("source_sha256") == source_sha
+                for decision in memberships
+            )
+            findings.append(
+                {
+                    "finding_id": finding_id,
+                    "application_id": app["application_id"],
+                    "run_id": run_id,
+                    "rule_id": rule_id,
+                    "verdict": "uncertain",
+                    "severity": "critical",
+                    "reason_code": rule_id,
+                    "mandatory": True,
+                    "membership": {
+                        "page_source_sha256": source_sha,
+                        "page_ordinal": page.get("page_ordinal"),
+                        "state": state["kind"],
+                        "candidates": candidates,
+                        "accepted_decision_ids": accepted,
+                        "unassigned": unassigned,
+                    },
+                    # Membership blockers reference pages and candidate document
+                    # instances, not field observations, so they carry no
+                    # S01 evidence links; the coexisting candidates/provenance
+                    # travel on the ``membership`` projection.
+                    "evidence_links": [],
+                }
+            )
+        return findings
 
     @classmethod
     def _verified_provenance_entries(
@@ -15380,7 +16439,17 @@ class ControlledScenarioService:
             evidence.append(evidence_document)
         if not evidence or any(not x["document_id"] or not x["document_role"] for x in evidence):
             raise ValueError("evidence requires document IDs and roles")
-        return {"evidence": evidence}
+        application: dict[str, Any] = {"evidence": evidence}
+        # S10: pass through an explicitly declared application-local
+        # page-membership ledger.  Only a fixture that explicitly declares
+        # ``page_memberships`` carries the ledger; a non-membership fixture
+        # stays graph-free and the projection is a no-op for it.
+        fixture_graph = payload.get("graph")
+        if isinstance(fixture_graph, dict) and isinstance(
+            fixture_graph.get("page_memberships"), list
+        ):
+            application["graph"] = copy.deepcopy(fixture_graph)
+        return application
 
     def _claim_s07_failure_publication(
         self, worker_id: str, now: int
@@ -15744,7 +16813,11 @@ class ControlledScenarioService:
                     for event in self._store.evidence_events
                     if event.get("application_id") == application_id
                     and event.get("kind")
-                    in {"field_correction", "supplement_attachment_version"}
+                    in {
+                        "field_correction",
+                        "membership_correction",
+                        "supplement_attachment_version",
+                    }
                 ),
                 key=lambda event: int(event["revision"]),
             )
@@ -15813,7 +16886,9 @@ class ControlledScenarioService:
             )
         snapshot_payload = {
             "schema_version": "s01-evidence-snapshot/1",
-            "evidence": self._assemble_evidence(self._admitted_evidence(app)),
+            "evidence": self._assemble_evidence(
+                self._project_membership_evidence(app)
+            ),
         }
         snapshot_bytes = json.dumps(
             snapshot_payload,
@@ -17150,6 +18225,11 @@ class ControlledScenarioService:
                     ],
                 }
             )
+        # S10: unresolved and ambiguous membership pages surface as mandatory
+        # review blockers; explicitly unassigned and selected pages do not.
+        # The membership selection is already frozen inside the Evidence
+        # snapshot, and any later membership edit fails the CAS fence below.
+        findings.extend(self._membership_findings(app, run_spec))
         route = self.verification_route_for_checks(run_result.checks, findings)
         has_mandatory_blocker = route == "manual_review"
         review_assignee = (
@@ -17863,7 +18943,7 @@ class ControlledScenarioService:
                     f"region:{regions.index(raw_region) + 1}"
                 )
             links.append(projected)
-        return {
+        projection: dict[str, Any] = {
             "finding_id": finding["finding_id"],
             "run_id": finding["run_id"],
             "rule_id": finding["rule_id"],
@@ -17873,6 +18953,11 @@ class ControlledScenarioService:
             "mandatory": finding["mandatory"],
             "evidence_links": links,
         }
+        # S10: membership blockers carry their coexisting candidate/provenance
+        # facts (never any inferred selection) so the Reviewer can decide.
+        if isinstance(finding.get("membership"), dict):
+            projection["membership"] = copy.deepcopy(finding["membership"])
+        return projection
 
     def _mandatory_blocker_projections(
         self, application_id: str, run_id: str
@@ -17992,7 +19077,8 @@ class ControlledScenarioService:
             correction_events_by_job: dict[str, dict[str, Any]] = {}
             for event in self._store.audit_events:
                 if (
-                    event.get("action") != "evidence_correction"
+                    event.get("action")
+                    not in {"evidence_correction", "page_membership_corrected"}
                     or event.get("result") != "accepted"
                 ):
                     continue

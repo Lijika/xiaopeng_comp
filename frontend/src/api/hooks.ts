@@ -49,6 +49,7 @@ import {
  * client.ts without extending that file). */
 export type RevealResult = components["schemas"]["S01RevealResult"];
 export type CorrectionResult = components["schemas"]["S01CorrectionResult"];
+export type MembershipResult = components["schemas"]["S01MembershipCorrectionResult"];
 export type SupplementRequestResult =
   components["schemas"]["S01SupplementRequestResult"];
 export type SupplementRequestView =
@@ -118,6 +119,7 @@ export type FencedCommand = paths["/controlled/s01/api/commands/review-work-item
 export type SubmitCommand = paths["/controlled/s01/api/commands/review-work-items/{work_item_id}/submit"]["post"]["requestBody"]["content"]["application/json"];
 export type RevealCommand = paths["/controlled/s01/api/commands/review-work-items/{work_item_id}/reveal-field-observation"]["post"]["requestBody"]["content"]["application/json"];
 export type CorrectionCommand = paths["/controlled/s01/api/commands/review-work-items/{work_item_id}/correct-field-observation"]["post"]["requestBody"]["content"]["application/json"];
+export type MembershipCommand = paths["/controlled/s01/api/commands/review-work-items/{work_item_id}/correct-page-membership"]["post"]["requestBody"]["content"]["application/json"];
 
 /**
  * The T04 commands are bound to the generated OpenAPI request schemas; a
@@ -323,6 +325,30 @@ export function useCorrectFieldObservation(
     // own acceptance callback has to run against the still-live issued token
     // before that refetch lands, or the context guard would scrub the
     // settling command and lose the acceptance.
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["s01"] });
+    },
+  });
+}
+
+/**
+ * The S10 page-membership correction command.  Acceptance invalidates the
+ * server-owned S01 queries; the successor run converges through
+ * current-route/history.  ``gcTime: 0`` so a correction cannot survive in the
+ * MutationCache after the panel resets it.
+ */
+export function useCorrectPageMembership(
+  workId: string,
+): UseMutationResult<MembershipResult, Error, MembershipCommand> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (command: MembershipCommand) =>
+      request<MembershipResult>(
+        `/controlled/s01/api/commands/review-work-items/${encodeURIComponent(workId)}/correct-page-membership`,
+        { method: "POST", body: JSON.stringify(command) },
+      ),
+    retry: false,
+    gcTime: 0,
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["s01"] });
     },

@@ -1018,6 +1018,7 @@ class S01AutomaticFinding(BaseModel):
     verdict: str
     severity: str
     reason_code: str
+    membership: S01WorkspaceMembership | None = None
 
 
 class S01RunAuthority(BaseModel):
@@ -1163,6 +1164,28 @@ class S01EvidenceLink(BaseModel):
     source_region: str | None = None
 
 
+class S01WorkspaceMembershipCandidate(BaseModel):
+    """One immutable coexisting page-membership candidate claim (S10).  No
+    candidate is selected by the authority; the Reviewer decides explicitly."""
+
+    document_instance_id: str
+    document_role: str
+    claim_id: str
+    provenance: dict[str, str] = Field(default_factory=dict)
+
+
+class S01WorkspaceMembership(BaseModel):
+    """The membership blocker projection (S10): the page identity, its current
+    effective decision state and every coexisting candidate claim/provenance."""
+
+    page_source_sha256: str
+    page_ordinal: int
+    state: Literal["unresolved", "ambiguous"]
+    candidates: list[S01WorkspaceMembershipCandidate]
+    accepted_decision_ids: list[str] = Field(default_factory=list)
+    unassigned: bool = False
+
+
 class S01WorkspaceFinding(BaseModel):
     finding_id: str
     run_id: str
@@ -1172,6 +1195,7 @@ class S01WorkspaceFinding(BaseModel):
     reason_code: str
     mandatory: bool
     evidence_links: list[S01EvidenceLink]
+    membership: S01WorkspaceMembership | None = None
 
 
 class S01BusinessExceptionEligibility(BaseModel):
@@ -1337,6 +1361,55 @@ class S01ApplicationHistoryResponse(BaseModel):
     corrections: list[S01HistoryCorrection]
     business_exceptions: list[S01HistoryBusinessException]
     attachment_versions: list[S01HistoryAttachmentVersion]
+    memberships: list[S01HistoryMembership] = Field(default_factory=list)
+    membership_history: list[S01HistoryMembershipCorrection] = Field(
+        default_factory=list
+    )
+
+
+class S01HistoryMembershipPage(BaseModel):
+    source_sha256: str
+    page_ordinal: int
+
+
+class S01HistoryMembership(BaseModel):
+    """One append-only ledger record of the preserved page-membership history
+    (S10): candidate claims and every accepted/unassigned decision with its
+    explicit status."""
+
+    record_kind: str
+    page: S01HistoryMembershipPage
+    decision_id: str | None = None
+    membership_id: str | None = None
+    actor: str | None = None
+    reason_code: str | None = None
+    time: int | None = None
+    source_evidence: dict[str, Any] = Field(default_factory=dict)
+    supersedes: list[str] = Field(default_factory=list)
+    status: str | None = None
+    document_instance_id: str | None = None
+    document_role: str | None = None
+    claim_id: str | None = None
+    candidate_document: dict[str, str] | None = None
+    provenance: dict[str, Any] = Field(default_factory=dict)
+
+
+class S01HistoryMembershipCorrection(BaseModel):
+    """One chronologically committed page-membership correction (S10)."""
+
+    evidence_revision: int
+    event_id: str
+    correction_id: str
+    decision_id: str
+    page_source_sha256: str
+    page_ordinal: int
+    decision: str
+    document_instance_id: str | None = None
+    document_role: str | None = None
+    reason_code: str
+    actor: str
+    recorded_at: int
+    supersedes: list[str] = Field(default_factory=list)
 
 
 class S09ImpactDispositionMember(BaseModel):
@@ -1536,6 +1609,63 @@ class S01CorrectionResult(BaseModel):
     lifecycle_revision: int
     evidence_revision: int
     invalidated_exception_ids: list[str] | None = None
+
+
+class S01PageMembershipCorrection(BaseModel):
+    """The closed source-backed page-membership payload (S10).  An ``accept``
+    decision requires an explicit document instance and role; an ``unassign``
+    decision explicitly disposes the page.  Ambiguous role input is rejected by
+    the domain with no successor."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["page-membership-correction/1"]
+    finding_id: str
+    page_source_sha256: str
+    page_ordinal: int = Field(ge=1, strict=True)
+    decision: Literal["accept", "unassign"]
+    document_instance_id: str | None = None
+    document_role: str | None = None
+    reason_code: Literal[
+        "MEMBERSHIP_SOURCE_VERIFIED",
+        "MEMBERSHIP_SOURCE_MISASSIGNED",
+        "MEMBERSHIP_INSTANCE_WRONG",
+        "MEMBERSHIP_PAGE_UNASSIGNED",
+    ]
+
+
+class S01ReviewMembershipBody(S01ReviewFencedBody):
+    """The migrated S10 page-membership command.  ``expected_fence`` is bounded
+    at 1 because the domain rejects a fence below 1 as invalid."""
+
+    expected_fence: int = Field(ge=1, strict=True)
+    application_id: str = Field(min_length=1, max_length=200, strict=True)
+    membership: S01PageMembershipCorrection
+
+
+class S01MembershipCorrectionResult(BaseModel):
+    """Command acceptance of a page-membership correction.  Acceptance is not
+    proof the successor run is already current; the client must read
+    current-route/history for convergence."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: str
+    replayed: bool
+    application_id: str
+    work_item_id: str
+    correction_id: str
+    membership_decision_id: str
+    page_source_sha256: str
+    decision: str
+    document_instance_id: str | None = None
+    document_role: str | None = None
+    invalidated_run_id: str
+    job_id: str
+    phase: str
+    route: str
+    lifecycle_revision: int
+    evidence_revision: int
 
 
 class S02SubmitBody(BaseModel):
@@ -3927,6 +4057,58 @@ async def controlled_s04_demo_correct_field_observation(
             expected_context=body.expected_context.model_dump(mode="json"),
             idempotency_key=body.idempotency_key,
             correction=body.correction.model_dump(mode="json"),
+            now=S01_SESSION_CLOCK(),
+        )
+    except QueryNotFound as error:
+        raise _s03_not_found(error) from error
+    except ValueError as error:
+        raise _s03_invalid_command(error) from error
+    return _s03_command_result(result)
+
+
+@app.post(
+    "/controlled/s01/api/commands/review-work-items/"
+    "{work_item_id}/correct-page-membership",
+    response_model=S01MembershipCorrectionResult,
+    response_model_exclude_none=True,
+    responses={
+        404: {"model": S01ErrorResponse},
+        409: {"model": S01ErrorResponse},
+        413: {"model": S01ErrorResponse},
+        422: {"model": S01VerifyErrorResponse},
+        503: {"model": S01ErrorResponse},
+    },
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": _inline_openapi_schema(
+                        S01ReviewMembershipBody.model_json_schema()
+                    ),
+                }
+            },
+        },
+    },
+)
+async def controlled_s10_demo_correct_page_membership(
+    work_item_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s04_demo_reviewer_principal(request)
+    body = await _s03_command_body(request, S01ReviewMembershipBody)
+    assert isinstance(body, S01ReviewMembershipBody)
+    try:
+        result = _s01_service().correct_page_membership(
+            principal=principal,
+            application_id=body.application_id,
+            work_item_id=work_item_id,
+            expected_fence=body.expected_fence,
+            expected_context=body.expected_context.model_dump(mode="json"),
+            idempotency_key=body.idempotency_key,
+            membership=body.membership.model_dump(mode="json", exclude_none=True),
             now=S01_SESSION_CLOCK(),
         )
     except QueryNotFound as error:

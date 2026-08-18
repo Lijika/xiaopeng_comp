@@ -10,13 +10,15 @@
       "occurrence_counter": "pages[].detections[]",
       "accepted_top_level": ["pages"],
       "unsupported_top_level": ["generated_time", "sample_id", "statistics", "warnings"],
+      "mapped_facts": [
+        "page.page_type -> graph.page_memberships candidate claim (S10; never from confidence/order/count)"
+      ],
       "unsupported_facts": [
         "detection.class_id",
         "page.has_rec_marker",
         "page.has_reg_marker",
         "page.inferred",
-        "page.page_numbers",
-        "page.page_type"
+        "page.page_numbers"
       ]
     },
     {

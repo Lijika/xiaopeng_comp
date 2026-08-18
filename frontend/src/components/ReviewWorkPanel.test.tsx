@@ -32,6 +32,8 @@ const REVEAL_PATH =
   "/controlled/s01/api/commands/review-work-items/work_t02panel1234567890abcdef/reveal-field-observation";
 const CORRECT_PATH =
   "/controlled/s01/api/commands/review-work-items/work_t02panel1234567890abcdef/correct-field-observation";
+const MEMBERSHIP_PATH =
+  "/controlled/s01/api/commands/review-work-items/work_t02panel1234567890abcdef/correct-page-membership";
 
 const SOURCE_SENTINEL = `restricted-source:${randomUUID()}`;
 const CORRECTION_SENTINEL = `restricted-correction:${randomUUID()}`;
@@ -455,6 +457,160 @@ describe("ReviewWorkPanel (T02)", () => {
     expect(screen.getByTestId("review-evidence-eligibility")).toHaveTextContent(
       "REGISTERED_SOURCE_PROVENANCE_VERIFIED",
     );
+  });
+
+  it("presents S10 membership candidates and submits an explicit accept decision", async () => {
+    const MEMBERSHIP_FINDING_ID = "finding_s10panel0000000000000002";
+    const membershipWorkspace = workspacePayload({
+      claim_fence: 1,
+      claim_expires_at: LIVE_CLAIM_EXPIRES_AT,
+      mandatory_blockers: [
+        {
+          finding_id: MEMBERSHIP_FINDING_ID,
+          run_id: "run_t02panel",
+          rule_id: "MEMBERSHIP_AMBIGUOUS",
+          verdict: "uncertain",
+          severity: "critical",
+          reason_code: "MEMBERSHIP_AMBIGUOUS",
+          mandatory: true,
+          evidence_links: [],
+          membership: {
+            page_source_sha256: "10".repeat(32),
+            page_ordinal: 1,
+            state: "ambiguous",
+            candidates: [
+              {
+                document_instance_id: "reg_cert_instance_a",
+                document_role: "机动车登记证书",
+                claim_id: "s10_claim_a",
+                provenance: {
+                  adapter_id: "c-demo-s10-fixture",
+                  adapter_version: "1",
+                  source_pointer: "/pages/0",
+                },
+              },
+              {
+                document_instance_id: "reg_cert_instance_b",
+                document_role: "机动车登记证书",
+                claim_id: "s10_claim_b",
+                provenance: {
+                  adapter_id: "c-demo-s10-fixture",
+                  adapter_version: "1",
+                  source_pointer: "/pages/0",
+                },
+              },
+            ],
+            accepted_decision_ids: [],
+            unassigned: false,
+          },
+        },
+      ],
+      selected_finding: {
+        finding_id: MEMBERSHIP_FINDING_ID,
+        run_id: "run_t02panel",
+        rule_id: "MEMBERSHIP_AMBIGUOUS",
+        verdict: "uncertain",
+        severity: "critical",
+        reason_code: "MEMBERSHIP_AMBIGUOUS",
+        mandatory: true,
+        evidence_links: [],
+        membership: {
+          page_source_sha256: "10".repeat(32),
+          page_ordinal: 1,
+          state: "ambiguous",
+          candidates: [
+            {
+              document_instance_id: "reg_cert_instance_a",
+              document_role: "机动车登记证书",
+              claim_id: "s10_claim_a",
+              provenance: {
+                adapter_id: "c-demo-s10-fixture",
+                adapter_version: "1",
+                source_pointer: "/pages/0",
+              },
+            },
+            {
+              document_instance_id: "reg_cert_instance_b",
+              document_role: "机动车登记证书",
+              claim_id: "s10_claim_b",
+              provenance: {
+                adapter_id: "c-demo-s10-fixture",
+                adapter_version: "1",
+                source_pointer: "/pages/0",
+              },
+            },
+          ],
+          accepted_decision_ids: [],
+          unassigned: false,
+        },
+      },
+    });
+    const router = fetchRouter({
+      ...baseRoutes(),
+      [`GET ${WORK_PATH}`]: () => jsonResponse(claimedWorkPayload()),
+      [`GET ${WORKSPACE_PATH}`]: () => jsonResponse(membershipWorkspace),
+      [`POST ${MEMBERSHIP_PATH}`]: () =>
+        jsonResponse({
+          status: "accepted",
+          replayed: false,
+          application_id: APP_ID,
+          work_item_id: WORK_ID,
+          correction_id: "membership_s10panel",
+          membership_decision_id: "decision_s10panel",
+          page_source_sha256: "10".repeat(32),
+          decision: "accept",
+          document_instance_id: "reg_cert_instance_a",
+          document_role: "机动车登记证书",
+          invalidated_run_id: "run_t02panel",
+          job_id: "job_s10panel",
+          phase: "Assembly",
+          route: "pending_check",
+          lifecycle_revision: 7,
+          evidence_revision: 2,
+        }),
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    // The membership section shows every coexisting candidate claim.
+    expect(screen.getByTestId("review-membership")).toBeInTheDocument();
+    expect(screen.getAllByTestId("review-membership-candidate")).toHaveLength(2);
+    expect(
+      screen.getAllByTestId("review-membership-candidate-instance")[0],
+    ).toHaveTextContent("reg_cert_instance_a");
+    await userEvent.click(
+      screen.getByTestId("review-membership-start"),
+    );
+    await screen.findByTestId("review-membership-form");
+    await userEvent.click(screen.getByTestId("review-membership-submit"));
+    await vi.waitFor(() =>
+      expect(
+        router.calls.some(
+          (call) =>
+            call.method === "POST" &&
+            call.url === MEMBERSHIP_PATH,
+        ),
+      ).toBe(true),
+    );
+    const call = router.calls.find(
+      (candidate) =>
+        candidate.method === "POST" && candidate.url === MEMBERSHIP_PATH,
+    );
+    expect(call?.body).toEqual({
+      application_id: APP_ID,
+      expected_fence: 1,
+      expected_context: CONTEXT,
+      idempotency_key: expect.any(String),
+      membership: {
+        schema_version: "page-membership-correction/1",
+        finding_id: MEMBERSHIP_FINDING_ID,
+        page_source_sha256: "10".repeat(32),
+        page_ordinal: 1,
+        decision: "accept",
+        document_instance_id: "reg_cert_instance_a",
+        document_role: "机动车登记证书",
+        reason_code: "MEMBERSHIP_SOURCE_VERIFIED",
+      },
+    });
   });
 
   it("claims with exactly the generated claim contract and acknowledges the accepted fence", async () => {

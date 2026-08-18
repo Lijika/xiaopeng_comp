@@ -14,6 +14,7 @@ import {
   useCandidateWorkspace,
   useClaimWorkItem,
   useCorrectFieldObservation,
+  useCorrectPageMembership,
   useCorrectionConvergence,
   useCurrentRoute,
   useIntegratorSupplementRequest,
@@ -34,6 +35,7 @@ import {
   useRecoverHold,
   type ClaimCommand,
   type CorrectionCommand,
+  type MembershipCommand,
   type FencedCommand,
   type RevealCommand,
   type S08ApproveCommand,
@@ -445,6 +447,50 @@ const T03_REVEAL_PATH =
   "/controlled/s01/api/commands/review-work-items/recovery_work_t01retry1234567890abcdef/reveal-field-observation";
 const T03_CORRECT_PATH =
   "/controlled/s01/api/commands/review-work-items/recovery_work_t01retry1234567890abcdef/correct-field-observation";
+const T10_MEMBERSHIP_PATH =
+  "/controlled/s01/api/commands/review-work-items/recovery_work_t01retry1234567890abcdef/correct-page-membership";
+
+const T10_MEMBERSHIP_COMMAND: MembershipCommand = {
+  application_id: "app_t01hook",
+  expected_fence: 1,
+  expected_context: {
+    lifecycle_revision: 7,
+    evidence_revision: 2,
+    run_id: "run_t01hook",
+    projection_watermark: 1,
+    current_context: "current-context-hash",
+  },
+  idempotency_key: "s10-hook-key",
+  membership: {
+    schema_version: "page-membership-correction/1",
+    finding_id: "finding_s10hook",
+    page_source_sha256: "10".repeat(32),
+    page_ordinal: 1,
+    decision: "accept",
+    document_instance_id: "reg_cert_instance_a",
+    document_role: "机动车登记证书",
+    reason_code: "MEMBERSHIP_SOURCE_VERIFIED",
+  },
+};
+
+const T10_MEMBERSHIP_RESULT = {
+  status: "accepted",
+  replayed: false,
+  application_id: "app_t01hook",
+  work_item_id: WORK_ID,
+  correction_id: "membership_s10hook",
+  membership_decision_id: "decision_s10hook",
+  page_source_sha256: "10".repeat(32),
+  decision: "accept",
+  document_instance_id: "reg_cert_instance_a",
+  document_role: "机动车登记证书",
+  invalidated_run_id: "run_t01hook",
+  job_id: "job_s10hook",
+  phase: "Assembly",
+  route: "pending_check",
+  lifecycle_revision: 8,
+  evidence_revision: 3,
+};
 
 function routePayload(overrides: Record<string, unknown> = {}) {
   return {
@@ -997,6 +1043,40 @@ describe("reveal and correction mutations (T03)", () => {
     await waitFor(() => expect(result.current.correct.isSuccess).toBe(true));
     expect(correctPosts).toBe(1);
     expect(result.current.correct.data?.evidence_revision).toBe(2);
+    // Acceptance invalidates the server-owned S01 queries: the queue refetches.
+    await waitFor(() => expect(queueRequests).toBeGreaterThan(1));
+  });
+
+  it("posts the S10 membership correction and invalidates S01 reads", async () => {
+    let membershipPosts = 0;
+    let queueRequests = 0;
+    fetchRouter({
+      [`POST ${T10_MEMBERSHIP_PATH}`]: () => {
+        membershipPosts += 1;
+        return jsonResponse(T10_MEMBERSHIP_RESULT);
+      },
+      "GET /controlled/s01/api/queries/queue": () => {
+        queueRequests += 1;
+        return jsonResponse({
+          items: [],
+          recovery_items: [],
+          projection_watermark: 0,
+        });
+      },
+    });
+    const client = createQueryClient();
+    const { result } = renderHook(
+      () => ({
+        membership: useCorrectPageMembership(WORK_ID),
+        queue: useQueue(),
+      }),
+      { wrapper: wrap(client) },
+    );
+    result.current.membership.mutate(T10_MEMBERSHIP_COMMAND);
+    await waitFor(() => expect(result.current.membership.isSuccess).toBe(true));
+    expect(membershipPosts).toBe(1);
+    expect(result.current.membership.data?.evidence_revision).toBe(3);
+    expect(result.current.membership.data?.decision).toBe("accept");
     // Acceptance invalidates the server-owned S01 queries: the queue refetches.
     await waitFor(() => expect(queueRequests).toBeGreaterThan(1));
   });

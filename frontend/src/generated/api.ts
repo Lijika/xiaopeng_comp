@@ -629,6 +629,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/controlled/s01/api/commands/review-work-items/{work_item_id}/correct-page-membership": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Controlled S10 Demo Correct Page Membership */
+        post: operations["controlled_s10_demo_correct_page_membership_controlled_s01_api_commands_review_work_items__work_item_id__correct_page_membership_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/controlled/s01/api/commands/review-work-items/{work_item_id}/release": {
         parameters: {
             query?: never;
@@ -2277,6 +2294,10 @@ export interface components {
             corrections: components["schemas"]["S01HistoryCorrection"][];
             /** Current Run Id */
             current_run_id?: string | null;
+            /** Membership History */
+            membership_history?: components["schemas"]["S01HistoryMembershipCorrection"][];
+            /** Memberships */
+            memberships?: components["schemas"]["S01HistoryMembership"][];
             /** Runs */
             runs: components["schemas"]["S01HistoryRun"][];
             /** Schema Version */
@@ -2381,6 +2402,7 @@ export interface components {
         S01AutomaticFinding: {
             /** Finding Id */
             finding_id: string;
+            membership?: components["schemas"]["S01WorkspaceMembership"] | null;
             /** Reason Code */
             reason_code: string;
             /** Rule Id */
@@ -2638,6 +2660,88 @@ export interface components {
             successor_observation_id: string;
             /** Superseded Observation Id */
             superseded_observation_id: string;
+        };
+        /**
+         * S01HistoryMembership
+         * @description One append-only ledger record of the preserved page-membership history
+         *     (S10): candidate claims and every accepted/unassigned decision with its
+         *     explicit status.
+         */
+        S01HistoryMembership: {
+            /** Actor */
+            actor?: string | null;
+            /** Candidate Document */
+            candidate_document?: {
+                [key: string]: string;
+            } | null;
+            /** Claim Id */
+            claim_id?: string | null;
+            /** Decision Id */
+            decision_id?: string | null;
+            /** Document Instance Id */
+            document_instance_id?: string | null;
+            /** Document Role */
+            document_role?: string | null;
+            /** Membership Id */
+            membership_id?: string | null;
+            page: components["schemas"]["S01HistoryMembershipPage"];
+            /** Provenance */
+            provenance?: {
+                [key: string]: unknown;
+            };
+            /** Reason Code */
+            reason_code?: string | null;
+            /** Record Kind */
+            record_kind: string;
+            /** Source Evidence */
+            source_evidence?: {
+                [key: string]: unknown;
+            };
+            /** Status */
+            status?: string | null;
+            /** Supersedes */
+            supersedes?: string[];
+            /** Time */
+            time?: number | null;
+        };
+        /**
+         * S01HistoryMembershipCorrection
+         * @description One chronologically committed page-membership correction (S10).
+         */
+        S01HistoryMembershipCorrection: {
+            /** Actor */
+            actor: string;
+            /** Correction Id */
+            correction_id: string;
+            /** Decision */
+            decision: string;
+            /** Decision Id */
+            decision_id: string;
+            /** Document Instance Id */
+            document_instance_id?: string | null;
+            /** Document Role */
+            document_role?: string | null;
+            /** Event Id */
+            event_id: string;
+            /** Evidence Revision */
+            evidence_revision: number;
+            /** Page Ordinal */
+            page_ordinal: number;
+            /** Page Source Sha256 */
+            page_source_sha256: string;
+            /** Reason Code */
+            reason_code: string;
+            /** Recorded At */
+            recorded_at: number;
+            /** Supersedes */
+            supersedes?: string[];
+        };
+        /** S01HistoryMembershipPage */
+        S01HistoryMembershipPage: {
+            /** Page Ordinal */
+            page_ordinal: number;
+            /** Source Sha256 */
+            source_sha256: string;
         };
         /** S01HistoryReconciliation */
         S01HistoryReconciliation: {
@@ -2908,6 +3012,46 @@ export interface components {
             status: string;
             /** Upstream Application Ref */
             upstream_application_ref: string;
+        };
+        /**
+         * S01MembershipCorrectionResult
+         * @description Command acceptance of a page-membership correction.  Acceptance is not
+         *     proof the successor run is already current; the client must read
+         *     current-route/history for convergence.
+         */
+        S01MembershipCorrectionResult: {
+            /** Application Id */
+            application_id: string;
+            /** Correction Id */
+            correction_id: string;
+            /** Decision */
+            decision: string;
+            /** Document Instance Id */
+            document_instance_id?: string | null;
+            /** Document Role */
+            document_role?: string | null;
+            /** Evidence Revision */
+            evidence_revision: number;
+            /** Invalidated Run Id */
+            invalidated_run_id: string;
+            /** Job Id */
+            job_id: string;
+            /** Lifecycle Revision */
+            lifecycle_revision: number;
+            /** Membership Decision Id */
+            membership_decision_id: string;
+            /** Page Source Sha256 */
+            page_source_sha256: string;
+            /** Phase */
+            phase: string;
+            /** Replayed */
+            replayed: boolean;
+            /** Route */
+            route: string;
+            /** Status */
+            status: string;
+            /** Work Item Id */
+            work_item_id: string;
         };
         /** S01NoteMetadata */
         S01NoteMetadata: {
@@ -3506,6 +3650,7 @@ export interface components {
             finding_id: string;
             /** Mandatory */
             mandatory: boolean;
+            membership?: components["schemas"]["S01WorkspaceMembership"] | null;
             /** Reason Code */
             reason_code: string;
             /** Rule Id */
@@ -3516,6 +3661,48 @@ export interface components {
             severity: string;
             /** Verdict */
             verdict: string;
+        };
+        /**
+         * S01WorkspaceMembership
+         * @description The membership blocker projection (S10): the page identity, its current
+         *     effective decision state and every coexisting candidate claim/provenance.
+         */
+        S01WorkspaceMembership: {
+            /** Accepted Decision Ids */
+            accepted_decision_ids?: string[];
+            /** Candidates */
+            candidates: components["schemas"]["S01WorkspaceMembershipCandidate"][];
+            /** Page Ordinal */
+            page_ordinal: number;
+            /** Page Source Sha256 */
+            page_source_sha256: string;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "unresolved" | "ambiguous";
+            /**
+             * Unassigned
+             * @default false
+             */
+            unassigned: boolean;
+        };
+        /**
+         * S01WorkspaceMembershipCandidate
+         * @description One immutable coexisting page-membership candidate claim (S10).  No
+         *     candidate is selected by the authority; the Reviewer decides explicitly.
+         */
+        S01WorkspaceMembershipCandidate: {
+            /** Claim Id */
+            claim_id: string;
+            /** Document Instance Id */
+            document_instance_id: string;
+            /** Document Role */
+            document_role: string;
+            /** Provenance */
+            provenance?: {
+                [key: string]: string;
+            };
         };
         /** S01WorkspaceResponse */
         S01WorkspaceResponse: {
@@ -7390,6 +7577,137 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["S01CorrectionResult"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01VerifyErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+        };
+    };
+    controlled_s10_demo_correct_page_membership_controlled_s01_api_commands_review_work_items__work_item_id__correct_page_membership_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                work_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** Application Id */
+                    application_id: string;
+                    /**
+                     * S01ReviewCommandContext
+                     * @description The closed review command context.  The domain compares it by exact
+                     *     equality (``_review_context_matches``), so a partial context is a semantic
+                     *     staleness; the schema here closes the shape so no arbitrary keys can hide
+                     *     a missing revision inside a migrated request or response.
+                     */
+                    expected_context: {
+                        /** Current Context */
+                        current_context: string;
+                        /** Evidence Revision */
+                        evidence_revision: number;
+                        /** Lifecycle Revision */
+                        lifecycle_revision: number;
+                        /** Projection Watermark */
+                        projection_watermark: number;
+                        /** Run Id */
+                        run_id: string;
+                    };
+                    /** Expected Fence */
+                    expected_fence: number;
+                    /** Idempotency Key */
+                    idempotency_key: string;
+                    /**
+                     * S01PageMembershipCorrection
+                     * @description The closed source-backed page-membership payload (S10).  An ``accept``
+                     *     decision requires an explicit document instance and role; an ``unassign``
+                     *     decision explicitly disposes the page.  Ambiguous role input is rejected by
+                     *     the domain with no successor.
+                     */
+                    membership: {
+                        /**
+                         * Decision
+                         * @enum {string}
+                         */
+                        decision: "accept" | "unassign";
+                        /** Document Instance Id */
+                        document_instance_id?: string | null;
+                        /** Document Role */
+                        document_role?: string | null;
+                        /** Finding Id */
+                        finding_id: string;
+                        /** Page Ordinal */
+                        page_ordinal: number;
+                        /** Page Source Sha256 */
+                        page_source_sha256: string;
+                        /**
+                         * Reason Code
+                         * @enum {string}
+                         */
+                        reason_code: "MEMBERSHIP_SOURCE_VERIFIED" | "MEMBERSHIP_SOURCE_MISASSIGNED" | "MEMBERSHIP_INSTANCE_WRONG" | "MEMBERSHIP_PAGE_UNASSIGNED";
+                        /**
+                         * Schema Version
+                         * @constant
+                         */
+                        schema_version: "page-membership-correction/1";
+                    };
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01MembershipCorrectionResult"];
                 };
             };
             /** @description Not Found */

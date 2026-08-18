@@ -1043,6 +1043,20 @@
             ],
             "title": "Current Run Id"
           },
+          "membership_history": {
+            "items": {
+              "$ref": "#/components/schemas/S01HistoryMembershipCorrection"
+            },
+            "title": "Membership History",
+            "type": "array"
+          },
+          "memberships": {
+            "items": {
+              "$ref": "#/components/schemas/S01HistoryMembership"
+            },
+            "title": "Memberships",
+            "type": "array"
+          },
           "runs": {
             "items": {
               "$ref": "#/components/schemas/S01HistoryRun"
@@ -1543,6 +1557,16 @@
           "finding_id": {
             "title": "Finding Id",
             "type": "string"
+          },
+          "membership": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/S01WorkspaceMembership"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "reason_code": {
             "title": "Reason Code",
@@ -2389,6 +2413,260 @@
           "evidence_revision"
         ],
         "title": "S01HistoryCorrection",
+        "type": "object"
+      },
+      "S01HistoryMembership": {
+        "description": "One append-only ledger record of the preserved page-membership history\n(S10): candidate claims and every accepted/unassigned decision with its\nexplicit status.",
+        "properties": {
+          "actor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actor"
+          },
+          "candidate_document": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Candidate Document"
+          },
+          "claim_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Claim Id"
+          },
+          "decision_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decision Id"
+          },
+          "document_instance_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Instance Id"
+          },
+          "document_role": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Role"
+          },
+          "membership_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Membership Id"
+          },
+          "page": {
+            "$ref": "#/components/schemas/S01HistoryMembershipPage"
+          },
+          "provenance": {
+            "additionalProperties": true,
+            "title": "Provenance",
+            "type": "object"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Code"
+          },
+          "record_kind": {
+            "title": "Record Kind",
+            "type": "string"
+          },
+          "source_evidence": {
+            "additionalProperties": true,
+            "title": "Source Evidence",
+            "type": "object"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "supersedes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Supersedes",
+            "type": "array"
+          },
+          "time": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Time"
+          }
+        },
+        "required": [
+          "record_kind",
+          "page"
+        ],
+        "title": "S01HistoryMembership",
+        "type": "object"
+      },
+      "S01HistoryMembershipCorrection": {
+        "description": "One chronologically committed page-membership correction (S10).",
+        "properties": {
+          "actor": {
+            "title": "Actor",
+            "type": "string"
+          },
+          "correction_id": {
+            "title": "Correction Id",
+            "type": "string"
+          },
+          "decision": {
+            "title": "Decision",
+            "type": "string"
+          },
+          "decision_id": {
+            "title": "Decision Id",
+            "type": "string"
+          },
+          "document_instance_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Instance Id"
+          },
+          "document_role": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Role"
+          },
+          "event_id": {
+            "title": "Event Id",
+            "type": "string"
+          },
+          "evidence_revision": {
+            "title": "Evidence Revision",
+            "type": "integer"
+          },
+          "page_ordinal": {
+            "title": "Page Ordinal",
+            "type": "integer"
+          },
+          "page_source_sha256": {
+            "title": "Page Source Sha256",
+            "type": "string"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "recorded_at": {
+            "title": "Recorded At",
+            "type": "integer"
+          },
+          "supersedes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Supersedes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "evidence_revision",
+          "event_id",
+          "correction_id",
+          "decision_id",
+          "page_source_sha256",
+          "page_ordinal",
+          "decision",
+          "reason_code",
+          "actor",
+          "recorded_at"
+        ],
+        "title": "S01HistoryMembershipCorrection",
+        "type": "object"
+      },
+      "S01HistoryMembershipPage": {
+        "properties": {
+          "page_ordinal": {
+            "title": "Page Ordinal",
+            "type": "integer"
+          },
+          "source_sha256": {
+            "title": "Source Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_sha256",
+          "page_ordinal"
+        ],
+        "title": "S01HistoryMembershipPage",
         "type": "object"
       },
       "S01HistoryReconciliation": {
@@ -3264,6 +3542,108 @@
           "batch"
         ],
         "title": "S01IntegratorSupplementRequestView",
+        "type": "object"
+      },
+      "S01MembershipCorrectionResult": {
+        "additionalProperties": false,
+        "description": "Command acceptance of a page-membership correction.  Acceptance is not\nproof the successor run is already current; the client must read\ncurrent-route/history for convergence.",
+        "properties": {
+          "application_id": {
+            "title": "Application Id",
+            "type": "string"
+          },
+          "correction_id": {
+            "title": "Correction Id",
+            "type": "string"
+          },
+          "decision": {
+            "title": "Decision",
+            "type": "string"
+          },
+          "document_instance_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Instance Id"
+          },
+          "document_role": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Role"
+          },
+          "evidence_revision": {
+            "title": "Evidence Revision",
+            "type": "integer"
+          },
+          "invalidated_run_id": {
+            "title": "Invalidated Run Id",
+            "type": "string"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "lifecycle_revision": {
+            "title": "Lifecycle Revision",
+            "type": "integer"
+          },
+          "membership_decision_id": {
+            "title": "Membership Decision Id",
+            "type": "string"
+          },
+          "page_source_sha256": {
+            "title": "Page Source Sha256",
+            "type": "string"
+          },
+          "phase": {
+            "title": "Phase",
+            "type": "string"
+          },
+          "replayed": {
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "route": {
+            "title": "Route",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "work_item_id": {
+            "title": "Work Item Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "replayed",
+          "application_id",
+          "work_item_id",
+          "correction_id",
+          "membership_decision_id",
+          "page_source_sha256",
+          "decision",
+          "invalidated_run_id",
+          "job_id",
+          "phase",
+          "route",
+          "lifecycle_revision",
+          "evidence_revision"
+        ],
+        "title": "S01MembershipCorrectionResult",
         "type": "object"
       },
       "S01NoteMetadata": {
@@ -4792,6 +5172,16 @@
             "title": "Mandatory",
             "type": "boolean"
           },
+          "membership": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/S01WorkspaceMembership"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "reason_code": {
             "title": "Reason Code",
             "type": "string"
@@ -4824,6 +5214,85 @@
           "evidence_links"
         ],
         "title": "S01WorkspaceFinding",
+        "type": "object"
+      },
+      "S01WorkspaceMembership": {
+        "description": "The membership blocker projection (S10): the page identity, its current\neffective decision state and every coexisting candidate claim/provenance.",
+        "properties": {
+          "accepted_decision_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Accepted Decision Ids",
+            "type": "array"
+          },
+          "candidates": {
+            "items": {
+              "$ref": "#/components/schemas/S01WorkspaceMembershipCandidate"
+            },
+            "title": "Candidates",
+            "type": "array"
+          },
+          "page_ordinal": {
+            "title": "Page Ordinal",
+            "type": "integer"
+          },
+          "page_source_sha256": {
+            "title": "Page Source Sha256",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "unresolved",
+              "ambiguous"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "unassigned": {
+            "default": false,
+            "title": "Unassigned",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "page_source_sha256",
+          "page_ordinal",
+          "state",
+          "candidates"
+        ],
+        "title": "S01WorkspaceMembership",
+        "type": "object"
+      },
+      "S01WorkspaceMembershipCandidate": {
+        "description": "One immutable coexisting page-membership candidate claim (S10).  No\ncandidate is selected by the authority; the Reviewer decides explicitly.",
+        "properties": {
+          "claim_id": {
+            "title": "Claim Id",
+            "type": "string"
+          },
+          "document_instance_id": {
+            "title": "Document Instance Id",
+            "type": "string"
+          },
+          "document_role": {
+            "title": "Document Role",
+            "type": "string"
+          },
+          "provenance": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Provenance",
+            "type": "object"
+          }
+        },
+        "required": [
+          "document_instance_id",
+          "document_role",
+          "claim_id"
+        ],
+        "title": "S01WorkspaceMembershipCandidate",
         "type": "object"
       },
       "S01WorkspaceResponse": {
@@ -13145,6 +13614,231 @@
           }
         },
         "summary": "Controlled S04 Demo Correct Field Observation"
+      }
+    },
+    "/controlled/s01/api/commands/review-work-items/{work_item_id}/correct-page-membership": {
+      "post": {
+        "operationId": "controlled_s10_demo_correct_page_membership_controlled_s01_api_commands_review_work_items__work_item_id__correct_page_membership_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "work_item_id",
+            "required": true,
+            "schema": {
+              "title": "Work Item Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "The migrated S10 page-membership command.  ``expected_fence`` is bounded\nat 1 because the domain rejects a fence below 1 as invalid.",
+                "properties": {
+                  "application_id": {
+                    "maxLength": 200,
+                    "minLength": 1,
+                    "title": "Application Id",
+                    "type": "string"
+                  },
+                  "expected_context": {
+                    "additionalProperties": false,
+                    "description": "The closed review command context.  The domain compares it by exact\nequality (``_review_context_matches``), so a partial context is a semantic\nstaleness; the schema here closes the shape so no arbitrary keys can hide\na missing revision inside a migrated request or response.",
+                    "properties": {
+                      "current_context": {
+                        "title": "Current Context",
+                        "type": "string"
+                      },
+                      "evidence_revision": {
+                        "title": "Evidence Revision",
+                        "type": "integer"
+                      },
+                      "lifecycle_revision": {
+                        "title": "Lifecycle Revision",
+                        "type": "integer"
+                      },
+                      "projection_watermark": {
+                        "title": "Projection Watermark",
+                        "type": "integer"
+                      },
+                      "run_id": {
+                        "title": "Run Id",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "lifecycle_revision",
+                      "evidence_revision",
+                      "run_id",
+                      "projection_watermark",
+                      "current_context"
+                    ],
+                    "title": "S01ReviewCommandContext",
+                    "type": "object"
+                  },
+                  "expected_fence": {
+                    "minimum": 1,
+                    "title": "Expected Fence",
+                    "type": "integer"
+                  },
+                  "idempotency_key": {
+                    "title": "Idempotency Key",
+                    "type": "string"
+                  },
+                  "membership": {
+                    "additionalProperties": false,
+                    "description": "The closed source-backed page-membership payload (S10).  An ``accept``\ndecision requires an explicit document instance and role; an ``unassign``\ndecision explicitly disposes the page.  Ambiguous role input is rejected by\nthe domain with no successor.",
+                    "properties": {
+                      "decision": {
+                        "enum": [
+                          "accept",
+                          "unassign"
+                        ],
+                        "title": "Decision",
+                        "type": "string"
+                      },
+                      "document_instance_id": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Document Instance Id"
+                      },
+                      "document_role": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Document Role"
+                      },
+                      "finding_id": {
+                        "title": "Finding Id",
+                        "type": "string"
+                      },
+                      "page_ordinal": {
+                        "minimum": 1,
+                        "title": "Page Ordinal",
+                        "type": "integer"
+                      },
+                      "page_source_sha256": {
+                        "title": "Page Source Sha256",
+                        "type": "string"
+                      },
+                      "reason_code": {
+                        "enum": [
+                          "MEMBERSHIP_SOURCE_VERIFIED",
+                          "MEMBERSHIP_SOURCE_MISASSIGNED",
+                          "MEMBERSHIP_INSTANCE_WRONG",
+                          "MEMBERSHIP_PAGE_UNASSIGNED"
+                        ],
+                        "title": "Reason Code",
+                        "type": "string"
+                      },
+                      "schema_version": {
+                        "const": "page-membership-correction/1",
+                        "title": "Schema Version",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "schema_version",
+                      "finding_id",
+                      "page_source_sha256",
+                      "page_ordinal",
+                      "decision",
+                      "reason_code"
+                    ],
+                    "title": "S01PageMembershipCorrection",
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "expected_context",
+                  "expected_fence",
+                  "idempotency_key",
+                  "application_id",
+                  "membership"
+                ],
+                "title": "S01ReviewMembershipBody",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01MembershipCorrectionResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01VerifyErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Controlled S10 Demo Correct Page Membership"
       }
     },
     "/controlled/s01/api/commands/review-work-items/{work_item_id}/release": {
