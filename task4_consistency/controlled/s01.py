@@ -412,19 +412,28 @@ class ControlledScenarioService:
     # accepted membership.  Eligibility for the checker projection comes only
     # from these explicit accepted facts -- never from candidate confidence,
     # order, count, majority or last write.
-    _MEMBERSHIP_REASON_CODES = frozenset(
-        {
-            "MEMBERSHIP_SOURCE_VERIFIED",
-            "MEMBERSHIP_SOURCE_MISASSIGNED",
-            "MEMBERSHIP_INSTANCE_WRONG",
-            "MEMBERSHIP_PAGE_UNASSIGNED",
-        }
-    )
     _MEMBERSHIP_DECISIONS = frozenset({"accept", "unassign"})
     _MEMBERSHIP_RULE_IDS = frozenset(
         {"MEMBERSHIP_UNRESOLVED", "MEMBERSHIP_AMBIGUOUS"}
     )
-    _MEMBERSHIP_REFUSED = "MEMBERSHIP_REFUSED"
+    # S10: the closed per-decision reason vocabulary.  An ``accept`` may never
+    # carry an unassign reason and an ``unassign`` may never carry an
+    # accept/instance reason; contradictory pairings are validation conflicts
+    # with no successor.
+    _MEMBERSHIP_ACCEPT_REASON_CODES = frozenset(
+        {
+            "MEMBERSHIP_SOURCE_VERIFIED",
+            "MEMBERSHIP_SOURCE_MISASSIGNED",
+            "MEMBERSHIP_INSTANCE_WRONG",
+        }
+    )
+    _MEMBERSHIP_UNASSIGN_REASON_CODES = frozenset(
+        {
+            "MEMBERSHIP_SOURCE_VERIFIED",
+            "MEMBERSHIP_SOURCE_MISASSIGNED",
+            "MEMBERSHIP_PAGE_UNASSIGNED",
+        }
+    )
     _EXCEPTION_REQUEST_REASON = "DOCUMENTED_BRAND_VARIANCE"
     _EXCEPTION_APPROVAL_REASONS = frozenset(
         {"DOCUMENTED_VARIANCE_ACCEPTED", "DOCUMENTED_VARIANCE_REJECTED"}
@@ -9388,7 +9397,12 @@ class ControlledScenarioService:
         ):
             raise ValueError("page membership target is invalid")
         reason_code = membership.get("reason_code")
-        if reason_code not in self._MEMBERSHIP_REASON_CODES:
+        allowed_reasons = (
+            self._MEMBERSHIP_ACCEPT_REASON_CODES
+            if decision == "accept"
+            else self._MEMBERSHIP_UNASSIGN_REASON_CODES
+        )
+        if reason_code not in allowed_reasons:
             raise ValueError("page membership reason is not registered")
         instance_id: str | None = None
         role: str | None = None
@@ -9571,6 +9585,24 @@ class ControlledScenarioService:
                         "application_id": application_id,
                         "work_item_id": work_item_id,
                         "reason_code": "MEMBERSHIP_CLAIM_MISSING",
+                    }
+                # An accepted decision must reference one of the page's
+                # coexisting candidate claims: the Reviewer resolves ambiguity
+                # among the visible candidates and never invents an instance or
+                # role that has no source evidence in this application.
+                if decision == "accept" and not any(
+                    isinstance(candidate.get("candidate_document"), dict)
+                    and candidate["candidate_document"].get("document_instance_id")
+                    == instance_id
+                    and candidate["candidate_document"].get("document_role") == role
+                    for candidate in candidates
+                ):
+                    return {
+                        "status": "rejected",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "MEMBERSHIP_ACCEPT_NOT_CANDIDATE",
                     }
                 finding_membership = findings[0].get("membership")
                 if (
@@ -15873,7 +15905,6 @@ class ControlledScenarioService:
         if not registrations:
             return []
         ledger: list[dict[str, Any]] = []
-        candidate_pages: dict[str, int] = {}
         for record in registrations:
             if not isinstance(record, dict):
                 continue
@@ -15884,12 +15915,6 @@ class ControlledScenarioService:
                 )
                 if normalized is None:
                     continue
-                source_sha256 = normalized["page"]["source_sha256"]
-                if source_sha256 in candidate_pages:
-                    # One ledger page may carry many coexisting candidate
-                    # claims; the denied check below is only for identical
-                    # claim identity of the same page.
-                    pass
                 ledger.append(normalized)
             elif kind in {"accepted", "unassigned"}:
                 page = record.get("page")

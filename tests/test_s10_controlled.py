@@ -657,3 +657,172 @@ def test_field_correction_preserves_page_membership_ledger(tmp_path: Path) -> No
         and event["application_id"] == admitted.application_id
     )
     assert event["payload"]["graph"]["page_memberships"]
+
+
+def test_membership_accept_must_reference_a_candidate(tmp_path: Path) -> None:
+    """An accepted decision must reference one of the page's coexisting
+    candidate claims; accepting an instance/role with no source evidence in the
+    application is rejected with no successor."""
+    service, application_id, state = _ready_membership(tmp_path)
+    ambiguous = next(
+        item for item in state["blockers"] if item["rule_id"] == "MEMBERSHIP_AMBIGUOUS"
+    )
+    accepted = service.correct_page_membership(
+        principal=REVIEWER,
+        application_id=application_id,
+        work_item_id=state["work_item_id"],
+        expected_fence=state["claimed"]["claim_fence"],
+        expected_context=state["work_item"]["command_context"],
+        idempotency_key="s10-accept-non-candidate",
+        membership=_accept_command(
+            ambiguous,
+            instance_id="invented_instance_not_in_ledger",
+            reason_code="MEMBERSHIP_SOURCE_MISASSIGNED",
+        ),
+        now=101,
+    )
+    assert accepted["status"] == "rejected"
+    assert accepted["reason_code"] == "MEMBERSHIP_ACCEPT_NOT_CANDIDATE"
+    history = service.application_history_view(
+        principal=REVIEWER,
+        application_id=application_id,
+    )
+    assert history["membership_history"] == []
+
+
+def test_membership_reason_must_match_decision(tmp_path: Path) -> None:
+    """An ``accept`` may not carry an unassign reason and an ``unassign`` may
+    not carry an accept/instance reason: contradictory pairings are validation
+    conflicts with no successor."""
+    service, application_id, state = _ready_membership(tmp_path)
+    ambiguous = next(
+        item for item in state["blockers"] if item["rule_id"] == "MEMBERSHIP_AMBIGUOUS"
+    )
+    with pytest.raises(ValueError):
+        service.correct_page_membership(
+            principal=REVIEWER,
+            application_id=application_id,
+            work_item_id=state["work_item_id"],
+            expected_fence=state["claimed"]["claim_fence"],
+            expected_context=state["work_item"]["command_context"],
+            idempotency_key="s10-accept-unassign-reason",
+            membership=_accept_command(
+                ambiguous,
+                instance_id="reg_cert_instance_a",
+                reason_code="MEMBERSHIP_PAGE_UNASSIGNED",
+            ),
+            now=101,
+        )
+    unresolved = next(
+        item for item in state["blockers"] if item["rule_id"] == "MEMBERSHIP_UNRESOLVED"
+    )
+    with pytest.raises(ValueError):
+        service.correct_page_membership(
+            principal=REVIEWER,
+            application_id=application_id,
+            work_item_id=state["work_item_id"],
+            expected_fence=state["claimed"]["claim_fence"],
+            expected_context=state["work_item"]["command_context"],
+            idempotency_key="s10-unassign-instance-reason",
+            membership=_unassign_command(
+                unresolved, reason_code="MEMBERSHIP_INSTANCE_WRONG"
+            ),
+            now=101,
+        )
+    history = service.application_history_view(
+        principal=REVIEWER,
+        application_id=application_id,
+    )
+    assert history["membership_history"] == []
+
+
+def test_membership_late_terminal_cycle_edit_is_rejected(tmp_path: Path) -> None:
+    """After the application reaches automatic completion, a late membership
+    edit against the sealed cycle is rejected with a stable code and never
+    changes the current route."""
+    service, application_id, state = _ready_membership(tmp_path)
+    ambiguous = next(
+        item for item in state["blockers"] if item["rule_id"] == "MEMBERSHIP_AMBIGUOUS"
+    )
+    service.correct_page_membership(
+        principal=REVIEWER,
+        application_id=application_id,
+        work_item_id=state["work_item_id"],
+        expected_fence=state["claimed"]["claim_fence"],
+        expected_context=state["work_item"]["command_context"],
+        idempotency_key="s10-accept",
+        membership=_accept_command(ambiguous, instance_id="reg_cert_instance_a"),
+        now=101,
+    )
+    service.process_next_job()
+    service.refresh_projection()
+    queue = service.queue_view(
+        role="reviewer", scope=REVIEWER.scope, subject=REVIEWER.subject, now=102
+    )
+    work_item2_id = queue["items"][0]["work_item_id"]
+    work_item2 = service.review_work_item_view(
+        principal=REVIEWER, work_item_id=work_item2_id, now=102
+    )
+    claimed2 = service.claim_review_work_item(
+        principal=REVIEWER,
+        work_item_id=work_item2_id,
+        expected_context=work_item2["command_context"],
+        now=102,
+    )
+    workspace2 = service.workspace_view(
+        application_id,
+        role="reviewer",
+        scope=REVIEWER.scope,
+        subject=REVIEWER.subject,
+        now=102,
+    )
+    unresolved = next(
+        item
+        for item in workspace2["mandatory_blockers"]
+        if item["rule_id"] == "MEMBERSHIP_UNRESOLVED"
+    )
+    service.correct_page_membership(
+        principal=REVIEWER,
+        application_id=application_id,
+        work_item_id=work_item2_id,
+        expected_fence=claimed2["claim_fence"],
+        expected_context=work_item2["command_context"],
+        idempotency_key="s10-unassign",
+        membership=_unassign_command(unresolved, reason_code="MEMBERSHIP_PAGE_UNASSIGNED"),
+        now=103,
+    )
+    replaced = service.process_next_job()
+    assert replaced.status == "complete"
+    current = service.current_route_view(
+        principal=REVIEWER,
+        application_id=application_id,
+    )
+    assert current["route"] == "auto_complete"
+
+    # A late edit against the last (completed) work item of the sealed cycle is
+    # rejected with a stable code and leaves the current route unchanged.
+    late = service.correct_page_membership(
+        principal=REVIEWER,
+        application_id=application_id,
+        work_item_id=work_item2_id,
+        expected_fence=claimed2["claim_fence"],
+        expected_context=work_item2["command_context"],
+        idempotency_key="s10-late-terminal",
+        membership=_unassign_command(unresolved, reason_code="MEMBERSHIP_PAGE_UNASSIGNED"),
+        now=104,
+    )
+    assert late["status"] == "stale"
+    assert late["reason_code"] in {
+        "STALE_WORK_ITEM_CLAIM",
+        "STALE_REVIEW_CONTEXT",
+    }
+    unchanged = service.current_route_view(
+        principal=REVIEWER,
+        application_id=application_id,
+    )
+    assert unchanged == current
+    history = service.application_history_view(
+        principal=REVIEWER,
+        application_id=application_id,
+    )
+    assert len(history["membership_history"]) == 2  # no late successor recorded

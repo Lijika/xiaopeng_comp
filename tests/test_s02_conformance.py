@@ -192,6 +192,12 @@ S10_MEMBERSHIP_CLAIMS_DIGEST = (
 def test_s10_step2_page_membership_migration_no_loss() -> None:
     from task4_consistency.controlled.s02 import step2_page_order_membership_claims
 
+    # The corpus-level migration pins candidate-claim counts and provenance at
+    # the stable source-name page identity (the Step2 corpus ships no image
+    # objects, so the real attachment-page hashes are not reproducible here).
+    # Production canonicalize binds the same claims to the admitted
+    # attachment-page hash via ``resolve_page_sha256``, which the S10
+    # HTTP/controlled and browser (Playwright) evidence exercise end to end.
     files = sorted(S10_STEP2_DIR.glob("*_page_order.json"))
     records: list[list[Any]] = []
     claims: list[dict[str, Any]] = []
