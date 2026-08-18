@@ -277,7 +277,7 @@ test("S10 membership dual-pane correction reruns and changes only via a fresh cu
     resources.server = await startServer();
     const server = resources.server;
     resources.reviewerContext = await browser.newContext({
-      viewport: { width: 1280, height: 800 },
+      viewport: { width: 390, height: 844 },
       extraHTTPHeaders: { Authorization: `Bearer ${DEMO_CREDENTIAL}` },
     });
     const reviewer = await resources.reviewerContext.newPage();
@@ -301,6 +301,18 @@ test("S10 membership dual-pane correction reruns and changes only via a fresh cu
     await expect(reviewer.getByTestId("review-membership-candidate-provenance").first()).toContainText(
       "source_pointer=/pages/0",
     );
+    expect(reviewer.viewportSize()).toEqual({ width: 390, height: 844 });
+    expect(
+      await reviewer.evaluate(() => {
+        const fits = (element) => element.scrollWidth <= element.clientWidth;
+        return {
+          document: fits(document.documentElement),
+          ledger: fits(document.querySelector('[data-testid="review-membership-ledger"]')),
+          membership: fits(document.querySelector('[data-testid="review-membership"]')),
+        };
+      }),
+    ).toEqual({ document: true, ledger: true, membership: true });
+    await reviewer.setViewportSize({ width: 1280, height: 800 });
 
     // Read the authoritative route before the correction.
     const routeBefore = await (

@@ -48,29 +48,35 @@ def _descriptor(ref: str, media_type: str, content: bytes) -> dict[str, Any]:
     }
 
 
-def _configured_http_source(tmp_path: Path) -> tuple[dict[str, str], dict[str, Any]]:
+def _configured_http_source(
+    tmp_path: Path,
+    *,
+    result: dict[str, Any] | None = None,
+    source_shape: str = "ocr-detection/unversioned",
+) -> tuple[dict[str, str], dict[str, Any]]:
     object_root = tmp_path / "objects"
     object_root.mkdir()
     page_bytes = _png()
-    result = {
-        "per_image_results": [
-            {
-                "image_path": "page.png",
-                "image_size": {"width": 1, "height": 1},
-                "detections": [
-                    {
-                        "bbox": [0, 0, 1, 1],
-                        "class_id": 1,
-                        "class_name": "vehicle_identifier",
-                        "confidence": 0.91,
-                        "field_key": "vin",
-                        "ocr_text": "SAFE-VIN-A",
-                        "value": "SAFE-VIN-A",
-                    }
-                ],
-            }
-        ]
-    }
+    if result is None:
+        result = {
+            "per_image_results": [
+                {
+                    "image_path": "page.png",
+                    "image_size": {"width": 1, "height": 1},
+                    "detections": [
+                        {
+                            "bbox": [0, 0, 1, 1],
+                            "class_id": 1,
+                            "class_name": "vehicle_identifier",
+                            "confidence": 0.91,
+                            "field_key": "vin",
+                            "ocr_text": "SAFE-VIN-A",
+                            "value": "SAFE-VIN-A",
+                        }
+                    ],
+                }
+            ]
+        }
     result_bytes = json.dumps(
         result, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
@@ -85,7 +91,7 @@ def _configured_http_source(tmp_path: Path) -> tuple[dict[str, str], dict[str, A
                 "workload_identity_id": "http-workload",
                 "adapter_id": "http-detection-adapter",
                 "adapter_version": "1",
-                "source_shape": "ocr-detection/unversioned",
+                "source_shape": source_shape,
                 "producer_family": "http-ocr",
                 "enabled": True,
             }
@@ -306,6 +312,105 @@ def test_integrator_receipt_reaches_minimized_reviewer_trace_over_http(
         assert hidden_queue.status == 200
         assert hidden_queue.json() == {"items": [], "recovery_items": [], "projection_watermark": 0}
         assert hidden_workspace.status == 404
+
+
+def test_step2_membership_provenance_reaches_typed_workspace_and_history(
+    tmp_path: Path,
+) -> None:
+    environment, submission = _configured_http_source(
+        tmp_path,
+        source_shape="step2-page-order/unversioned",
+        result={
+            "sample_id": "http-step2-membership",
+            "pages": [
+                {
+                    "filename": "page.png",
+                    "order": 1,
+                    "page_type": "登记页",
+                    "detections": [
+                        {
+                            "bbox": [0, 0, 1, 1],
+                            "class_name_cn": "车辆识别代号/车架号",
+                            "confidence": 0.9,
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+    with UvicornLoopback(
+        environment,
+        app_target="task4_consistency.web.app:create_s02_test_app",
+        app_factory=True,
+    ) as server:
+        request_headers = {"Cookie": _open_session(server)}
+        admission = server.request(
+            "POST",
+            "/controlled/s02/api/commands/submit",
+            body={"idempotency_key": "http-step2-command", "submission": submission},
+            headers=request_headers,
+            use_session=False,
+        )
+        application_id = admission.json()["application_id"]
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            queue = server.request(
+                "GET",
+                "/controlled/s02/api/queries/queue",
+                headers=request_headers,
+                use_session=False,
+            ).json()
+            if queue["items"]:
+                break
+            time.sleep(0.05)
+        workspace_response = server.request(
+            "GET",
+            f"/controlled/s02/api/queries/applications/{application_id}/workspace",
+            headers=request_headers,
+            use_session=False,
+        )
+        history_response = server.request(
+            "GET",
+            f"/controlled/s02/api/queries/applications/{application_id}/history",
+            headers=request_headers,
+            use_session=False,
+        )
+        openapi = server.request("GET", "/openapi.json").json()
+
+    assert admission.status == 200
+    assert queue["items"]
+    assert workspace_response.status == 200, workspace_response.text
+    assert history_response.status == 200, history_response.text
+    expected_provenance = {
+        "adapter_id": "step2-page-order",
+        "adapter_version": "1",
+        "source_filename": "page.png",
+        "source_pointer": "/pages/0",
+        "fact": "page.page_type",
+        "page_type": "登记页",
+        "inferred": False,
+    }
+    workspace = workspace_response.json()
+    assert workspace["membership_ledger"][0]["candidates"][0]["provenance"] == (
+        expected_provenance
+    )
+    candidate_history = next(
+        record
+        for record in history_response.json()["memberships"]
+        if record["record_kind"] == "candidate"
+    )
+    assert candidate_history["provenance"] == expected_provenance
+    paths = openapi["paths"]
+    assert paths[
+        "/controlled/s02/api/queries/applications/{application_id}/workspace"
+    ]["get"]["responses"]["200"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/S01WorkspaceResponse"
+    }
+    assert paths[
+        "/controlled/s02/api/queries/applications/{application_id}/history"
+    ]["get"]["responses"]["200"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/S01ApplicationHistoryResponse"
+    }
 
 
 @pytest.mark.parametrize(

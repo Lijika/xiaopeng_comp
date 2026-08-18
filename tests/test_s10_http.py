@@ -463,3 +463,28 @@ def test_membership_http_openapi_contract_is_closed(tmp_path) -> None:
     success = operation["responses"]["200"]["content"]["application/json"]["schema"]
     assert "$ref" in success
     assert set(operation["responses"]) == {"200", "404", "409", "413", "422", "503"}
+
+    components = document["components"]["schemas"]
+    provenance = components["S01MembershipProvenance"]
+    assert provenance["additionalProperties"] is False
+    assert set(provenance["properties"]) == {
+        "adapter_id",
+        "adapter_version",
+        "source_filename",
+        "source_pointer",
+        "fact",
+        "page_type",
+        "inferred",
+    }
+    assert {item.get("type") for item in provenance["properties"]["inferred"]["anyOf"]} == {
+        "boolean",
+        "null",
+    }
+    candidate = components["S01WorkspaceMembershipCandidate"]
+    assert candidate["additionalProperties"] is False
+    assert candidate["properties"]["provenance"] == {
+        "$ref": "#/components/schemas/S01MembershipProvenance"
+    }
+    assert components["S01MembershipCandidateDocument"]["additionalProperties"] is False
+    assert components["S01MembershipSourceEvidence"]["additionalProperties"] is False
+    assert components["S01MembershipDecisionSourceEvidence"]["additionalProperties"] is False

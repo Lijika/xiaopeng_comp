@@ -2555,14 +2555,26 @@ export interface components {
             evidence_eligible: boolean;
             /** Field */
             field: string;
+            /** Model Id */
+            model_id?: string | null;
+            /** Model Version */
+            model_version?: string | null;
             /** Observation Id */
             observation_id: string;
+            /** Producer Family */
+            producer_family?: string | null;
+            /** Producer Id */
+            producer_id?: string | null;
+            /** Producer Run Id */
+            producer_run_id?: string | null;
             /** Provenance Manifest Digest */
             provenance_manifest_digest?: string | null;
             /** Raw Masked */
             raw_masked?: string | null;
             /** Source Page */
             source_page?: number | null;
+            /** Source Receipt Id */
+            source_receipt_id?: string | null;
             /** Source Region */
             source_region?: string | null;
             /** Source Sha256 */
@@ -2670,10 +2682,7 @@ export interface components {
         S01HistoryMembership: {
             /** Actor */
             actor?: string | null;
-            /** Candidate Document */
-            candidate_document?: {
-                [key: string]: string;
-            } | null;
+            candidate_document?: components["schemas"]["S01MembershipCandidateDocument"] | null;
             /** Claim Id */
             claim_id?: string | null;
             /** Cycle */
@@ -2687,18 +2696,12 @@ export interface components {
             /** Membership Id */
             membership_id?: string | null;
             page: components["schemas"]["S01HistoryMembershipPage"];
-            /** Provenance */
-            provenance?: {
-                [key: string]: unknown;
-            };
+            provenance?: components["schemas"]["S01MembershipProvenance"] | null;
             /** Reason Code */
             reason_code?: string | null;
             /** Record Kind */
             record_kind: string;
-            /** Source Evidence */
-            source_evidence?: {
-                [key: string]: unknown;
-            };
+            source_evidence?: components["schemas"]["S01MembershipDecisionSourceEvidence"] | null;
             /** Status */
             status?: string | null;
             /** Supersedes */
@@ -2741,10 +2744,7 @@ export interface components {
             reason_code: string;
             /** Recorded At */
             recorded_at: number;
-            /** Source Evidence */
-            source_evidence: {
-                [key: string]: unknown;
-            };
+            source_evidence: components["schemas"]["S01MembershipSourceEvidence"];
             /** Supersedes */
             supersedes?: string[];
         };
@@ -3055,6 +3055,13 @@ export interface components {
             /** Upstream Application Ref */
             upstream_application_ref: string;
         };
+        /** S01MembershipCandidateDocument */
+        S01MembershipCandidateDocument: {
+            /** Document Instance Id */
+            document_instance_id: string;
+            /** Document Role */
+            document_role: string;
+        };
         /**
          * S01MembershipCorrectionResult
          * @description Command acceptance of a page-membership correction.  Acceptance is not
@@ -3102,6 +3109,39 @@ export interface components {
             status: string;
             /** Work Item Id */
             work_item_id: string;
+        };
+        /** S01MembershipDecisionSourceEvidence */
+        S01MembershipDecisionSourceEvidence: {
+            /** Candidate Claim Id */
+            candidate_claim_id: string;
+            /** Event Id */
+            event_id: string;
+            /** Evidence Revision */
+            evidence_revision: number;
+        };
+        /** S01MembershipProvenance */
+        S01MembershipProvenance: {
+            /** Adapter Id */
+            adapter_id: string;
+            /** Adapter Version */
+            adapter_version: string;
+            /** Fact */
+            fact?: string | null;
+            /** Inferred */
+            inferred?: boolean | null;
+            /** Page Type */
+            page_type?: string | null;
+            /** Source Filename */
+            source_filename?: string | null;
+            /** Source Pointer */
+            source_pointer: string;
+        };
+        /** S01MembershipSourceEvidence */
+        S01MembershipSourceEvidence: {
+            /** Event Id */
+            event_id: string;
+            /** Evidence Revision */
+            evidence_revision: number;
         };
         /** S01NoteMetadata */
         S01NoteMetadata: {
@@ -3728,10 +3768,7 @@ export interface components {
             page_ordinal: number;
             /** Page Source Sha256 */
             page_source_sha256: string;
-            /** Source Evidence */
-            source_evidence: {
-                [key: string]: unknown;
-            };
+            source_evidence: components["schemas"]["S01MembershipSourceEvidence"];
             /**
              * State
              * @enum {string}
@@ -3755,10 +3792,7 @@ export interface components {
             document_instance_id: string;
             /** Document Role */
             document_role: string;
-            /** Provenance */
-            provenance?: {
-                [key: string]: string;
-            };
+            provenance: components["schemas"]["S01MembershipProvenance"];
         };
         /** S01WorkspaceMembershipDecision */
         S01WorkspaceMembershipDecision: {
@@ -3779,10 +3813,7 @@ export interface components {
              * @enum {string}
              */
             record_kind: "accepted" | "unassigned";
-            /** Source Evidence */
-            source_evidence: {
-                [key: string]: unknown;
-            };
+            source_evidence: components["schemas"]["S01MembershipDecisionSourceEvidence"];
             /**
              * Status
              * @enum {string}
@@ -3809,10 +3840,7 @@ export interface components {
             page_ordinal: number;
             /** Page Source Sha256 */
             page_source_sha256: string;
-            /** Source Evidence */
-            source_evidence: {
-                [key: string]: unknown;
-            };
+            source_evidence: components["schemas"]["S01MembershipSourceEvidence"];
             /**
              * State
              * @enum {string}
@@ -9397,9 +9425,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["S01ApplicationHistoryResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
                 };
             };
             /** @description Validation Error */
@@ -9432,9 +9467,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["S01WorkspaceResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
                 };
             };
             /** @description Validation Error */

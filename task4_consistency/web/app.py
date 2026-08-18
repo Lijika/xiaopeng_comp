@@ -1162,16 +1162,54 @@ class S01EvidenceLink(BaseModel):
     eligibility_reason: str | None = None
     source_page: int | None = None
     source_region: str | None = None
+    producer_id: str | None = None
+    producer_family: str | None = None
+    producer_run_id: str | None = None
+    model_id: str | None = None
+    model_version: str | None = None
+    source_receipt_id: str | None = None
+
+
+class S01MembershipProvenance(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    adapter_id: str
+    adapter_version: str
+    source_pointer: str
+    source_filename: str | None = None
+    fact: str | None = None
+    page_type: str | None = None
+    inferred: bool | None = None
+
+
+class S01MembershipCandidateDocument(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    document_instance_id: str
+    document_role: str
+
+
+class S01MembershipSourceEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str = Field(min_length=1, max_length=200, strict=True)
+    evidence_revision: int = Field(ge=1, strict=True)
+
+
+class S01MembershipDecisionSourceEvidence(S01MembershipSourceEvidence):
+    candidate_claim_id: str = Field(min_length=1, max_length=200, strict=True)
 
 
 class S01WorkspaceMembershipCandidate(BaseModel):
     """One immutable coexisting page-membership candidate claim (S10).  No
     candidate is selected by the authority; the Reviewer decides explicitly."""
 
+    model_config = ConfigDict(extra="forbid")
+
     document_instance_id: str
     document_role: str
     claim_id: str
-    provenance: dict[str, str] = Field(default_factory=dict)
+    provenance: S01MembershipProvenance
 
 
 class S01WorkspaceMembership(BaseModel):
@@ -1184,7 +1222,7 @@ class S01WorkspaceMembership(BaseModel):
     state: Literal["unresolved", "ambiguous"]
     candidates: list[S01WorkspaceMembershipCandidate]
     active_decision_ids: list[str] = Field(default_factory=list)
-    source_evidence: dict[str, Any]
+    source_evidence: S01MembershipSourceEvidence
     unassigned: bool = False
 
 
@@ -1235,7 +1273,7 @@ class S01WorkspaceMembershipDecision(BaseModel):
     reason_code: str
     time: int
     cycle: int
-    source_evidence: dict[str, Any]
+    source_evidence: S01MembershipDecisionSourceEvidence
     supersedes: list[str]
     status: Literal["active", "superseded"]
 
@@ -1247,7 +1285,7 @@ class S01WorkspaceMembershipPage(BaseModel):
     state: Literal["unresolved", "ambiguous", "selected", "unassigned"]
     finding_id: str | None = None
     active_decision_ids: list[str] = Field(default_factory=list)
-    source_evidence: dict[str, Any]
+    source_evidence: S01MembershipSourceEvidence
     candidates: list[S01WorkspaceMembershipCandidate]
     decisions: list[S01WorkspaceMembershipDecision]
 
@@ -1431,14 +1469,14 @@ class S01HistoryMembership(BaseModel):
     reason_code: str | None = None
     time: int | None = None
     cycle: int | None = None
-    source_evidence: dict[str, Any] = Field(default_factory=dict)
+    source_evidence: S01MembershipDecisionSourceEvidence | None = None
     supersedes: list[str] = Field(default_factory=list)
     status: str | None = None
     document_instance_id: str | None = None
     document_role: str | None = None
     claim_id: str | None = None
-    candidate_document: dict[str, str] | None = None
-    provenance: dict[str, Any] = Field(default_factory=dict)
+    candidate_document: S01MembershipCandidateDocument | None = None
+    provenance: S01MembershipProvenance | None = None
 
 
 class S01HistoryMembershipCorrection(BaseModel):
@@ -1452,7 +1490,7 @@ class S01HistoryMembershipCorrection(BaseModel):
     attachment_id: str
     page_source_sha256: str
     page_ordinal: int
-    source_evidence: dict[str, Any]
+    source_evidence: S01MembershipSourceEvidence
     decision: str
     document_instance_id: str | None = None
     document_role: str | None = None
@@ -1660,13 +1698,6 @@ class S01CorrectionResult(BaseModel):
     lifecycle_revision: int
     evidence_revision: int
     invalidated_exception_ids: list[str] | None = None
-
-
-class S01MembershipSourceEvidence(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    event_id: str = Field(min_length=1, max_length=200, strict=True)
-    evidence_revision: int = Field(ge=1, strict=True)
 
 
 class S01PageMembershipCorrectionBase(BaseModel):
@@ -3142,7 +3173,12 @@ def controlled_s02_queue(request: Request, response: Response) -> dict[str, Any]
     )
 
 
-@app.get("/controlled/s02/api/queries/applications/{application_id}/workspace")
+@app.get(
+    "/controlled/s02/api/queries/applications/{application_id}/workspace",
+    response_model=S01WorkspaceResponse,
+    response_model_exclude_none=True,
+    responses={404: {"model": S01ErrorResponse}},
+)
 def controlled_s02_workspace(
     application_id: str,
     request: Request,
@@ -3205,7 +3241,12 @@ def controlled_s04_current_route(
         raise _s03_not_found(error) from error
 
 
-@app.get("/controlled/s02/api/queries/applications/{application_id}/history")
+@app.get(
+    "/controlled/s02/api/queries/applications/{application_id}/history",
+    response_model=S01ApplicationHistoryResponse,
+    response_model_exclude_none=True,
+    responses={404: {"model": S01ErrorResponse}},
+)
 def controlled_s04_application_history(
     application_id: str,
     request: Request,

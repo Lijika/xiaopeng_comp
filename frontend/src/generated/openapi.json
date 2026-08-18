@@ -2057,9 +2057,64 @@
             "title": "Field",
             "type": "string"
           },
+          "model_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Id"
+          },
+          "model_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Version"
+          },
           "observation_id": {
             "title": "Observation Id",
             "type": "string"
+          },
+          "producer_family": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Producer Family"
+          },
+          "producer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Producer Id"
+          },
+          "producer_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Producer Run Id"
           },
           "provenance_manifest_digest": {
             "anyOf": [
@@ -2093,6 +2148,17 @@
               }
             ],
             "title": "Source Page"
+          },
+          "source_receipt_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Receipt Id"
           },
           "source_region": {
             "anyOf": [
@@ -2432,16 +2498,12 @@
           "candidate_document": {
             "anyOf": [
               {
-                "additionalProperties": {
-                  "type": "string"
-                },
-                "type": "object"
+                "$ref": "#/components/schemas/S01MembershipCandidateDocument"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Candidate Document"
+            ]
           },
           "claim_id": {
             "anyOf": [
@@ -2513,9 +2575,14 @@
             "$ref": "#/components/schemas/S01HistoryMembershipPage"
           },
           "provenance": {
-            "additionalProperties": true,
-            "title": "Provenance",
-            "type": "object"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/S01MembershipProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "reason_code": {
             "anyOf": [
@@ -2533,9 +2600,14 @@
             "type": "string"
           },
           "source_evidence": {
-            "additionalProperties": true,
-            "title": "Source Evidence",
-            "type": "object"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/S01MembershipDecisionSourceEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "status": {
             "anyOf": [
@@ -2652,9 +2724,7 @@
             "type": "integer"
           },
           "source_evidence": {
-            "additionalProperties": true,
-            "title": "Source Evidence",
-            "type": "object"
+            "$ref": "#/components/schemas/S01MembershipSourceEvidence"
           },
           "supersedes": {
             "items": {
@@ -3664,6 +3734,25 @@
         "title": "S01IntegratorSupplementRequestView",
         "type": "object"
       },
+      "S01MembershipCandidateDocument": {
+        "additionalProperties": false,
+        "properties": {
+          "document_instance_id": {
+            "title": "Document Instance Id",
+            "type": "string"
+          },
+          "document_role": {
+            "title": "Document Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "document_instance_id",
+          "document_role"
+        ],
+        "title": "S01MembershipCandidateDocument",
+        "type": "object"
+      },
       "S01MembershipCorrectionResult": {
         "additionalProperties": false,
         "description": "Command acceptance of a page-membership correction.  Acceptance is not\nproof the successor run is already current; the client must read\ncurrent-route/history for convergence.",
@@ -3784,6 +3873,125 @@
           "evidence_revision"
         ],
         "title": "S01MembershipCorrectionResult",
+        "type": "object"
+      },
+      "S01MembershipDecisionSourceEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_claim_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Candidate Claim Id",
+            "type": "string"
+          },
+          "event_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Event Id",
+            "type": "string"
+          },
+          "evidence_revision": {
+            "minimum": 1.0,
+            "title": "Evidence Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "event_id",
+          "evidence_revision",
+          "candidate_claim_id"
+        ],
+        "title": "S01MembershipDecisionSourceEvidence",
+        "type": "object"
+      },
+      "S01MembershipProvenance": {
+        "additionalProperties": false,
+        "properties": {
+          "adapter_id": {
+            "title": "Adapter Id",
+            "type": "string"
+          },
+          "adapter_version": {
+            "title": "Adapter Version",
+            "type": "string"
+          },
+          "fact": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fact"
+          },
+          "inferred": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inferred"
+          },
+          "page_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Page Type"
+          },
+          "source_filename": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Filename"
+          },
+          "source_pointer": {
+            "title": "Source Pointer",
+            "type": "string"
+          }
+        },
+        "required": [
+          "adapter_id",
+          "adapter_version",
+          "source_pointer"
+        ],
+        "title": "S01MembershipProvenance",
+        "type": "object"
+      },
+      "S01MembershipSourceEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "event_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Event Id",
+            "type": "string"
+          },
+          "evidence_revision": {
+            "minimum": 1.0,
+            "title": "Evidence Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "event_id",
+          "evidence_revision"
+        ],
+        "title": "S01MembershipSourceEvidence",
         "type": "object"
       },
       "S01NoteMetadata": {
@@ -5386,9 +5594,7 @@
             "type": "string"
           },
           "source_evidence": {
-            "additionalProperties": true,
-            "title": "Source Evidence",
-            "type": "object"
+            "$ref": "#/components/schemas/S01MembershipSourceEvidence"
           },
           "state": {
             "enum": [
@@ -5416,6 +5622,7 @@
         "type": "object"
       },
       "S01WorkspaceMembershipCandidate": {
+        "additionalProperties": false,
         "description": "One immutable coexisting page-membership candidate claim (S10).  No\ncandidate is selected by the authority; the Reviewer decides explicitly.",
         "properties": {
           "claim_id": {
@@ -5431,17 +5638,14 @@
             "type": "string"
           },
           "provenance": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "title": "Provenance",
-            "type": "object"
+            "$ref": "#/components/schemas/S01MembershipProvenance"
           }
         },
         "required": [
           "document_instance_id",
           "document_role",
-          "claim_id"
+          "claim_id",
+          "provenance"
         ],
         "title": "S01WorkspaceMembershipCandidate",
         "type": "object"
@@ -5495,9 +5699,7 @@
             "type": "string"
           },
           "source_evidence": {
-            "additionalProperties": true,
-            "title": "Source Evidence",
-            "type": "object"
+            "$ref": "#/components/schemas/S01MembershipDecisionSourceEvidence"
           },
           "status": {
             "enum": [
@@ -5580,9 +5782,7 @@
             "type": "string"
           },
           "source_evidence": {
-            "additionalProperties": true,
-            "title": "Source Evidence",
-            "type": "object"
+            "$ref": "#/components/schemas/S01MembershipSourceEvidence"
           },
           "state": {
             "enum": [
@@ -16251,13 +16451,21 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Controlled S04 Application History Controlled S02 Api Queries Applications  Application Id  History Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/S01ApplicationHistoryResponse"
                 }
               }
             },
             "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
           },
           "422": {
             "content": {
@@ -16308,13 +16516,21 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Controlled S02 Workspace Controlled S02 Api Queries Applications  Application Id  Workspace Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/S01WorkspaceResponse"
                 }
               }
             },
             "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
           },
           "422": {
             "content": {

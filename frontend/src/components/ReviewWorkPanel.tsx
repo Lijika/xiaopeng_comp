@@ -1002,7 +1002,7 @@ function HistorySection({
       {(history.data.memberships?.length ?? 0) > 0 && (
         <>
           <h4>单据页归属账本</h4>
-          <ul data-testid="review-history-memberships">
+          <ul className="history-list" data-testid="review-history-memberships">
             {history.data.memberships?.map((record, index) => (
               <li
                 key={record.membership_id ?? record.decision_id ?? record.claim_id ?? index}
@@ -1027,7 +1027,7 @@ function HistorySection({
       {(history.data.membership_history?.length ?? 0) > 0 && (
         <>
           <h4>单据页归属修正</h4>
-          <ul data-testid="review-history-membership-corrections">
+          <ul className="history-list" data-testid="review-history-membership-corrections">
             {history.data.membership_history?.map((correction) => (
               <li
                 key={correction.correction_id}

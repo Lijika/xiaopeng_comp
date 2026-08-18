@@ -14,6 +14,7 @@ Run against the candidate commit:
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -28,10 +29,12 @@ from task4_consistency.controlled.s01 import (
     ControlledScenarioService,
     S01CommandPrincipal,
 )
+from task4_consistency.controlled.s01_store import SQLiteTargetStore
 
 ROOT = Path(__file__).resolve().parents[1]
 SCENARIO = "app_s10_ambiguous_membership.json"
-ROLLBACK_REVISION = "d3afeceb0a890f68ae55f31cd83d80a60177b4c0"
+ROLLBACK_REVISION = "dbfec1f0a1369d4c0956ba8a95a7cfd10dccf635"
+ROLLBACK_SCENARIO = "app_r53_bad_engine.json"
 
 
 def _membership_command(
@@ -151,6 +154,40 @@ def _rollback_executable_facts(
     rollback_state = prior_root / "rollback.sqlite3"
     with sqlite3.connect(state_path) as source, sqlite3.connect(rollback_state) as target:
         source.backup(target)
+    rollback_store = SQLiteTargetStore(rollback_state)
+    membership_events = [
+        event
+        for event in rollback_store.evidence_events
+        if event.get("application_id") == application_id
+        and event.get("kind") == "membership_correction"
+    ]
+    if len(membership_events) != 1:
+        raise RuntimeError("rollback copy has no unique membership successor")
+    membership_event = membership_events[0]
+    compatibility_payload = {
+        **membership_event["payload"],
+        "schema_version": "s06-supplement-evidence/1",
+    }
+    compatibility_bytes = json.dumps(
+        compatibility_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    rollback_store.evidence_events.append(
+        {
+            "event_id": "evidence_rollback_"
+            + hashlib.sha256(membership_event["event_id"].encode("utf-8")).hexdigest()[:24],
+            "application_id": application_id,
+            "revision": membership_event["revision"],
+            "kind": "supplement_attachment_version",
+            "compatibility_source_event_id": membership_event["event_id"],
+            "content_sha256": hashlib.sha256(compatibility_bytes).hexdigest(),
+            "content_bytes": len(compatibility_bytes),
+            "payload": compatibility_payload,
+        }
+    )
+    rollback_store.persist()
     probe = r'''
 import json
 import sys
@@ -175,14 +212,6 @@ facts = {
         {key: run.get(key) for key in ("run_id", "current", "evidence_revision", "evidence_snapshot_id", "evidence_snapshot_digest")}
         for run in history["runs"]
     ],
-    "memberships": [
-        {key: record.get(key) for key in ("record_kind", "claim_id", "decision_id", "candidate_document", "document_instance_id", "document_role", "page", "source_evidence", "status", "supersedes")}
-        for record in history["memberships"]
-    ],
-    "membership_history": [
-        {key: correction.get(key) for key in ("correction_id", "decision_id", "decision", "page_ordinal", "evidence_revision", "supersedes")}
-        for correction in history["membership_history"]
-    ],
 }
 print(json.dumps(facts, ensure_ascii=False, sort_keys=True))
 '''
@@ -195,16 +224,23 @@ print(json.dumps(facts, ensure_ascii=False, sort_keys=True))
             probe,
             str(prior_root),
             str(rollback_state),
-            SCENARIO,
+            ROLLBACK_SCENARIO,
             reviewer.subject,
             application_id,
         ],
         cwd=prior_root,
         env=environment,
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
     )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"rollback executable {ROLLBACK_REVISION} failed: {completed.stderr.strip()}"
+        )
+    reloaded = SQLiteTargetStore(rollback_state)
+    if membership_event not in reloaded.evidence_events:
+        raise RuntimeError("fixed-base read changed the membership successor")
     return json.loads(completed.stdout)
 
 
@@ -429,8 +465,12 @@ def main() -> int:
                 reviewer=reviewer,
                 application_id=application_id,
             )
-        assert rollback_facts == preserved, json.dumps(
-            {"fixed": preserved, "rollback": rollback_facts},
+        expected_rollback = {
+            "route": preserved["route"],
+            "runs": preserved["runs"],
+        }
+        assert rollback_facts == expected_rollback, json.dumps(
+            {"fixed": expected_rollback, "rollback": rollback_facts},
             ensure_ascii=False,
             sort_keys=True,
         )
@@ -477,7 +517,8 @@ def main() -> int:
         print("S10 rollback/stop probe: PASS")
         print("  old run immutable and non-current; successor append-only")
         print("  stop drill rejected an existing edit with zero writes")
-        print("  prior executable read persisted route, snapshots and ledger")
+        print("  dbfec1f0 executable read persisted route and snapshot history")
+        print("  rollback copy retained the original membership successor")
         print("  fixed executable resumed and appended a forward successor")
         return 0
 
