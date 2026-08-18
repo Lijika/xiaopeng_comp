@@ -29,7 +29,11 @@ from task4_consistency.controlled.s01 import (
     ControlledScenarioService,
     S01CommandPrincipal,
 )
-from task4_consistency.controlled.s01_store import SQLiteTargetStore
+from task4_consistency.controlled.s01_store import (
+    SQLiteTargetStore,
+    _encode,
+    _integrity_digest,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 SCENARIO = "app_s10_ambiguous_membership.json"
@@ -129,10 +133,32 @@ def _preserved_facts(
     }
 
 
+def _replace_rollback_evidence_event(
+    state_path: Path, event: dict[str, object]
+) -> None:
+    event_id = str(event["event_id"])
+    payload = _encode(event)
+    digest = _integrity_digest("evidence_events", event_id, payload)
+    with sqlite3.connect(state_path) as connection:
+        event_update = connection.execute(
+            "UPDATE evidence_events SET payload = ?, integrity_sha256 = ? "
+            "WHERE item_id = ?",
+            (payload, digest, event_id),
+        )
+        catalog_update = connection.execute(
+            "UPDATE s01_immutable_catalog SET integrity_sha256 = ? "
+            "WHERE table_name = 'evidence_events' AND item_id = ?",
+            (digest, event_id),
+        )
+        if event_update.rowcount != 1 or catalog_update.rowcount != 1:
+            raise RuntimeError("rollback compatibility event is unavailable")
+
+
 def _rollback_executable_facts(
     *,
     state_path: Path,
     prior_root: Path,
+    rollback_state: Path,
     reviewer: S01CommandPrincipal,
     application_id: str,
 ) -> dict[str, object]:
@@ -151,7 +177,6 @@ def _rollback_executable_facts(
     )
     with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode="r:") as bundle:
         bundle.extractall(prior_root)
-    rollback_state = prior_root / "rollback.sqlite3"
     with sqlite3.connect(state_path) as source, sqlite3.connect(rollback_state) as target:
         source.backup(target)
     rollback_store = SQLiteTargetStore(rollback_state)
@@ -164,6 +189,7 @@ def _rollback_executable_facts(
     if len(membership_events) != 1:
         raise RuntimeError("rollback copy has no unique membership successor")
     membership_event = membership_events[0]
+    original_events = rollback_store.evidence_events
     compatibility_payload = {
         **membership_event["payload"],
         "schema_version": "s06-supplement-evidence/1",
@@ -174,20 +200,14 @@ def _rollback_executable_facts(
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
-    rollback_store.evidence_events.append(
-        {
-            "event_id": "evidence_rollback_"
-            + hashlib.sha256(membership_event["event_id"].encode("utf-8")).hexdigest()[:24],
-            "application_id": application_id,
-            "revision": membership_event["revision"],
-            "kind": "supplement_attachment_version",
-            "compatibility_source_event_id": membership_event["event_id"],
-            "content_sha256": hashlib.sha256(compatibility_bytes).hexdigest(),
-            "content_bytes": len(compatibility_bytes),
-            "payload": compatibility_payload,
-        }
-    )
-    rollback_store.persist()
+    compatibility_event = {
+        **membership_event,
+        "kind": "supplement_attachment_version",
+        "content_sha256": hashlib.sha256(compatibility_bytes).hexdigest(),
+        "content_bytes": len(compatibility_bytes),
+        "payload": compatibility_payload,
+    }
+    _replace_rollback_evidence_event(rollback_state, compatibility_event)
     probe = r'''
 import json
 import sys
@@ -200,6 +220,7 @@ service = ControlledScenarioService(
     rules_path=root / "configs" / "rules_auto_lease.yaml",
     state_path=Path(sys.argv[2]),
     scenario_id=sys.argv[3],
+    audit_available=False,
 )
 reviewer = S01CommandPrincipal(
     subject=sys.argv[4], role="reviewer", scope="C-DEMO", source_id="s10-probe-console"
@@ -217,30 +238,33 @@ print(json.dumps(facts, ensure_ascii=False, sort_keys=True))
 '''
     environment = os.environ.copy()
     environment.update(PYTHONPATH=str(prior_root), PYTHONDONTWRITEBYTECODE="1")
-    completed = subprocess.run(
-        [
-            str(ROOT / ".venv" / "bin" / "python"),
-            "-c",
-            probe,
-            str(prior_root),
-            str(rollback_state),
-            ROLLBACK_SCENARIO,
-            reviewer.subject,
-            application_id,
-        ],
-        cwd=prior_root,
-        env=environment,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        completed = subprocess.run(
+            [
+                str(ROOT / ".venv" / "bin" / "python"),
+                "-c",
+                probe,
+                str(prior_root),
+                str(rollback_state),
+                ROLLBACK_SCENARIO,
+                reviewer.subject,
+                application_id,
+            ],
+            cwd=prior_root,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        _replace_rollback_evidence_event(rollback_state, membership_event)
     if completed.returncode != 0:
         raise RuntimeError(
             f"rollback executable {ROLLBACK_REVISION} failed: {completed.stderr.strip()}"
         )
     reloaded = SQLiteTargetStore(rollback_state)
-    if membership_event not in reloaded.evidence_events:
-        raise RuntimeError("fixed-base read changed the membership successor")
+    if reloaded.evidence_events != original_events:
+        raise RuntimeError("fixed-base read changed persisted Evidence")
     return json.loads(completed.stdout)
 
 
@@ -458,10 +482,12 @@ def main() -> int:
         # A prior executable reads a SQLite copy without mutating the live
         # authority.  Route, snapshots, claims and decisions must survive.
         preserved = _preserved_facts(service, reviewer, application_id)
+        rollback_state = Path(td) / "rollback.sqlite3"
         with tempfile.TemporaryDirectory() as rollback_dir:
             rollback_facts = _rollback_executable_facts(
                 state_path=Path(td) / "target.sqlite3",
                 prior_root=Path(rollback_dir),
+                rollback_state=rollback_state,
                 reviewer=reviewer,
                 application_id=application_id,
             )
@@ -474,15 +500,27 @@ def main() -> int:
             ensure_ascii=False,
             sort_keys=True,
         )
+        rollback_service = ControlledScenarioService(
+            fixture_root=ROOT / "fixtures" / "applications",
+            rules_path=ROOT / "configs" / "rules_auto_lease.yaml",
+            state_path=rollback_state,
+            scenario_id=SCENARIO,
+        )
+        restored = _preserved_facts(rollback_service, reviewer, application_id)
+        assert restored == preserved, json.dumps(
+            {"fixed": preserved, "restored": restored},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
 
         # Restore the fixed executable, verify the repair, and append a forward
         # successor from the still-claimed page 2 work item.
-        recovered = service.recover_runtime(
+        recovered = rollback_service.recover_runtime(
             expected_failure_reason_code=service._REVIEW_SOURCE_FAILURE,
             principal=operator,
         )
         assert recovered["recovery"] == "scheduled", recovered
-        forwarded = service.correct_page_membership(
+        forwarded = rollback_service.correct_page_membership(
             principal=reviewer,
             application_id=application_id,
             work_item_id=successor_item["work_item_id"],
@@ -496,9 +534,9 @@ def main() -> int:
             ),
         )
         assert forwarded["status"] == "accepted", forwarded
-        forward_run = service.process_next_job()
+        forward_run = rollback_service.process_next_job()
         assert forward_run.status == "complete", forward_run.status
-        final_history = service.application_history_view(
+        final_history = rollback_service.application_history_view(
             principal=reviewer, application_id=application_id
         )
         assert len(final_history["membership_history"]) == 2

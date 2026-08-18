@@ -460,7 +460,7 @@ function WorkspaceSection({
       {membershipLedger.length > 0 && (
         <section data-testid="review-membership-ledger" aria-labelledby="review-membership-ledger-title">
           <h4 id="review-membership-ledger-title">单据页归属账本（服务端权威）</h4>
-          <ol>
+          <ol className="history-list">
             {membershipLedger.map((page) => {
               const correctable = workspace.data.mandatory_blockers.find(
                 (blocker) => blocker.finding_id === page.finding_id,

@@ -301,6 +301,9 @@ test("S10 membership dual-pane correction reruns and changes only via a fresh cu
     await expect(reviewer.getByTestId("review-membership-candidate-provenance").first()).toContainText(
       "source_pointer=/pages/0",
     );
+    await expect(reviewer.getByTestId("review-membership-candidate-provenance").first()).toContainText(
+      "inferred=false",
+    );
     expect(reviewer.viewportSize()).toEqual({ width: 390, height: 844 });
     expect(
       await reviewer.evaluate(() => {
@@ -312,7 +315,6 @@ test("S10 membership dual-pane correction reruns and changes only via a fresh cu
         };
       }),
     ).toEqual({ document: true, ledger: true, membership: true });
-    await reviewer.setViewportSize({ width: 1280, height: 800 });
 
     // Read the authoritative route before the correction.
     const routeBefore = await (
@@ -325,6 +327,23 @@ test("S10 membership dual-pane correction reruns and changes only via a fresh cu
     // the legacy UI.  The claim id remains byte-for-byte intact.
     await reviewer.getByTestId("review-membership-start").click();
     await expect(reviewer.getByTestId("review-membership-form")).toBeVisible();
+    expect(
+      await reviewer.evaluate(() => {
+        const form = document.querySelector('[data-testid="review-membership-form"]');
+        const fits = (element) => {
+          const box = element.getBoundingClientRect();
+          return (
+            element.scrollWidth <= element.clientWidth &&
+            box.left >= 0 &&
+            box.right <= window.innerWidth
+          );
+        };
+        return {
+          form: fits(form),
+          controls: [...form.querySelectorAll("select, button")].every(fits),
+        };
+      }),
+    ).toEqual({ form: true, controls: true });
     const candidateSelect = reviewer.getByRole("combobox", { name: "候选实例" });
     const reasonSelect = reviewer.getByRole("combobox", { name: "原因" });
     await expect(reasonSelect.locator("option")).toHaveCount(3);
@@ -514,6 +533,30 @@ test("S10 membership dual-pane correction reruns and changes only via a fresh cu
     await expect(
       reviewer.getByTestId("review-history-membership-corrections"),
     ).toContainText("MEMBERSHIP_PAGE_UNASSIGNED");
+    expect(reviewer.viewportSize()).toEqual({ width: 390, height: 844 });
+    expect(
+      await reviewer.evaluate(() => {
+        const fits = (testId) => {
+          const element = document.querySelector(`[data-testid="${testId}"]`);
+          if (element === null) return false;
+          const box = element.getBoundingClientRect();
+          return (
+            element.scrollWidth <= element.clientWidth &&
+            box.left >= 0 &&
+            box.right <= window.innerWidth
+          );
+        };
+        return {
+          document: document.documentElement.scrollWidth <= window.innerWidth,
+          history: fits("review-history-memberships"),
+          corrections: fits("review-history-membership-corrections"),
+        };
+      }),
+    ).toEqual({
+      document: true,
+      history: true,
+      corrections: true,
+    });
   } catch (error) {
     failure = error;
     throw error;

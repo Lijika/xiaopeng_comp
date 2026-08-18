@@ -129,9 +129,13 @@
           "document_role": "机动车登记证书"
         },
         "provenance": {
-          "adapter_id": "c-demo-s10-fixture",
+          "adapter_id": "step2-page-order",
           "adapter_version": "1",
-          "source_pointer": "/pages/0"
+          "source_pointer": "/pages/0",
+          "source_filename": "registration-page-pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp.png",
+          "fact": "page.page_type",
+          "page_type": "登记页",
+          "inferred": false
         }
       },
       {
@@ -148,9 +152,13 @@
           "document_role": "机动车登记证书"
         },
         "provenance": {
-          "adapter_id": "c-demo-s10-fixture",
+          "adapter_id": "step2-page-order",
           "adapter_version": "1",
-          "source_pointer": "/pages/0"
+          "source_pointer": "/pages/0",
+          "source_filename": "page-1-alternate.png",
+          "fact": "page.page_type",
+          "page_type": "登记页",
+          "inferred": false
         }
       },
       {
@@ -167,9 +175,13 @@
           "document_role": "机动车登记证书"
         },
         "provenance": {
-          "adapter_id": "c-demo-s10-fixture",
+          "adapter_id": "step2-page-order",
           "adapter_version": "1",
-          "source_pointer": "/pages/1"
+          "source_pointer": "/pages/1",
+          "source_filename": "page-2.png",
+          "fact": "page.page_type",
+          "page_type": "登记页",
+          "inferred": false
         }
       }
     ]

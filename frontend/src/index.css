@@ -335,6 +335,7 @@ body {
 .membership-pane li {
   padding-block: 0.25rem;
   border-bottom: 1px solid var(--border);
+  overflow-wrap: anywhere;
 }
 .membership-form {
   display: grid;
