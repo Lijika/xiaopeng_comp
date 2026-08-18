@@ -218,6 +218,59 @@ def test_integrator_membership_decisions_have_no_reviewer_authority(
     assert history["membership_history"] == []
 
 
+@pytest.mark.parametrize("invalid_kind", ["malformed", "duplicate"])
+def test_invalid_candidate_claim_rejects_admission_without_application(
+    tmp_path: Path,
+    invalid_kind: str,
+) -> None:
+    payload = json.loads(
+        (ROOT / "fixtures" / "applications" / SCENARIO).read_text(encoding="utf-8")
+    )
+    candidates = payload["graph"]["page_memberships"]
+    if invalid_kind == "malformed":
+        candidates[0]["page"]["source_sha256"] = "unknown"
+    else:
+        candidates.append(copy.deepcopy(candidates[0]))
+    fixture_root = tmp_path / "fixtures"
+    fixture_root.mkdir()
+    (fixture_root / SCENARIO).write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+    service = ControlledScenarioService(
+        fixture_root=fixture_root,
+        rules_path=ROOT / "configs" / "rules_auto_lease.yaml",
+        state_path=tmp_path / "target.sqlite3",
+        scenario_id=SCENARIO,
+    )
+
+    rejected = service.submit_demo(
+        scenario_id=SCENARIO,
+        idempotency_key=f"s10-invalid-candidate-{invalid_kind}",
+        principal=INTEGRATOR,
+    )
+
+    assert rejected.disposition is AdmissionDisposition.REJECTED
+    assert rejected.reason_code == "INVALID_CANONICAL_ENVELOPE"
+    assert rejected.application_id is None
+    assert service.fact_counts() == {
+        "applications": 0,
+        "receipts": 0,
+        "lifecycle_events": 0,
+        "evidence_events": 0,
+        "audit_events": 0,
+        "jobs": 0,
+        "attempts": 0,
+        "runs": 0,
+        "findings": 0,
+        "outbox": 0,
+    }
+    assert service.queue_view(
+        role="reviewer",
+        scope=REVIEWER.scope,
+        subject=REVIEWER.subject,
+    )["items"] == []
+
+
 def test_membership_blockers_surface_every_candidate_without_selection(
     tmp_path: Path,
 ) -> None:
@@ -482,6 +535,17 @@ def test_membership_successor_requires_fresh_current_run(tmp_path: Path) -> None
     }
     assert ledger[accepted["membership_decision_id"]]["status"] == "active"
     assert ledger[accepted["membership_decision_id"]]["supersedes"] == []
+    assert ledger[accepted["membership_decision_id"]]["cycle"] == 1
+    assert history["membership_history"][0]["cycle"] == 1
+    membership_audit = next(
+        event
+        for event in service.audit_timeline(
+            principal=AUDITOR,
+            application_id=application_id,
+        )["events"]
+        if event["action"] == "page_membership_corrected"
+    )
+    assert membership_audit["context"]["cycle"] == 1
 
 
 def test_accepted_instance_changes_and_pins_the_frozen_snapshot(

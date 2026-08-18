@@ -972,6 +972,7 @@ def test_layout_only_and_raw_null_observations_never_become_field_values(
         "provenance": {
             "adapter_id": "step2-page-order",
             "adapter_version": "1",
+            "source_filename": "page.png",
             "source_pointer": "/pages/0",
             "fact": "page.page_type",
             "page_type": "登记页",

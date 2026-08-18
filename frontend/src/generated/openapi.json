@@ -2454,6 +2454,17 @@
             ],
             "title": "Claim Id"
           },
+          "cycle": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cycle"
+          },
           "decision_id": {
             "anyOf": [
               {
@@ -2582,6 +2593,10 @@
             "title": "Correction Id",
             "type": "string"
           },
+          "cycle": {
+            "title": "Cycle",
+            "type": "integer"
+          },
           "decision": {
             "title": "Decision",
             "type": "string"
@@ -2662,7 +2677,8 @@
           "decision",
           "reason_code",
           "actor",
-          "recorded_at"
+          "recorded_at",
+          "cycle"
         ],
         "title": "S01HistoryMembershipCorrection",
         "type": "object"
@@ -3668,6 +3684,10 @@
             "title": "Correction Id",
             "type": "string"
           },
+          "cycle": {
+            "title": "Cycle",
+            "type": "integer"
+          },
           "decision": {
             "title": "Decision",
             "type": "string"
@@ -3755,6 +3775,7 @@
           "page_source_sha256",
           "page_ordinal",
           "decision",
+          "cycle",
           "invalidated_run_id",
           "job_id",
           "phase",
@@ -5431,6 +5452,10 @@
             "title": "Actor",
             "type": "string"
           },
+          "cycle": {
+            "title": "Cycle",
+            "type": "integer"
+          },
           "decision_id": {
             "title": "Decision Id",
             "type": "string"
@@ -5500,6 +5525,7 @@
           "actor",
           "reason_code",
           "time",
+          "cycle",
           "source_evidence",
           "supersedes",
           "status"

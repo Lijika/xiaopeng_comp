@@ -2676,6 +2676,8 @@ export interface components {
             } | null;
             /** Claim Id */
             claim_id?: string | null;
+            /** Cycle */
+            cycle?: number | null;
             /** Decision Id */
             decision_id?: string | null;
             /** Document Instance Id */
@@ -2717,6 +2719,8 @@ export interface components {
             candidate_claim_id: string;
             /** Correction Id */
             correction_id: string;
+            /** Cycle */
+            cycle: number;
             /** Decision */
             decision: string;
             /** Decision Id */
@@ -3066,6 +3070,8 @@ export interface components {
             candidate_claim_id: string;
             /** Correction Id */
             correction_id: string;
+            /** Cycle */
+            cycle: number;
             /** Decision */
             decision: string;
             /** Document Instance Id */
@@ -3758,6 +3764,8 @@ export interface components {
         S01WorkspaceMembershipDecision: {
             /** Actor */
             actor: string;
+            /** Cycle */
+            cycle: number;
             /** Decision Id */
             decision_id: string;
             /** Document Instance Id */

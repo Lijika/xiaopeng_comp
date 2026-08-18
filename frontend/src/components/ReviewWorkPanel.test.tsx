@@ -517,6 +517,35 @@ describe("ReviewWorkPanel (T02)", () => {
               actor: "t02-reviewer",
               reason_code: "MEMBERSHIP_SOURCE_VERIFIED",
               time: 100,
+              cycle: 1,
+              source_evidence: {
+                ...SOURCE_EVIDENCE,
+                candidate_claim_id: "s10_claim_a",
+              },
+              supersedes: [],
+              status: "active",
+            },
+          ],
+        },
+        {
+          attachment_id: "s10-attachment-2",
+          page_source_sha256: "20".repeat(32),
+          page_ordinal: 2,
+          state: "unassigned",
+          finding_id: "finding_s10panel0000000000000003",
+          active_decision_ids: ["decision_s10panel_unassigned"],
+          source_evidence: SOURCE_EVIDENCE,
+          candidates: [CANDIDATES[0]],
+          decisions: [
+            {
+              record_kind: "unassigned",
+              decision_id: "decision_s10panel_unassigned",
+              document_instance_id: null,
+              document_role: null,
+              actor: "t02-reviewer",
+              reason_code: "MEMBERSHIP_PAGE_UNASSIGNED",
+              time: 101,
+              cycle: 1,
               source_evidence: {
                 ...SOURCE_EVIDENCE,
                 candidate_claim_id: "s10_claim_a",
@@ -548,6 +577,48 @@ describe("ReviewWorkPanel (T02)", () => {
                 evidence_revision: 2,
               },
             ],
+            memberships: [
+              {
+                record_kind: "accepted",
+                decision_id: PREDECESSOR_DECISION_ID,
+                membership_id: "membership_s10panel_prior",
+                page: {
+                  attachment_id: "s10-attachment-1",
+                  source_sha256: "10".repeat(32),
+                  page_ordinal: 1,
+                },
+                actor: "t02-reviewer",
+                reason_code: "MEMBERSHIP_SOURCE_VERIFIED",
+                time: 100,
+                cycle: 1,
+                source_evidence: SOURCE_EVIDENCE,
+                supersedes: [],
+                status: "active",
+                document_instance_id: "reg_cert_instance_a",
+                document_role: "机动车登记证书",
+              },
+            ],
+            membership_history: [
+              {
+                evidence_revision: 2,
+                event_id: "evidence_s10panel",
+                correction_id: "membership_s10panel_prior",
+                decision_id: PREDECESSOR_DECISION_ID,
+                candidate_claim_id: "s10_claim_a",
+                attachment_id: "s10-attachment-1",
+                page_source_sha256: "10".repeat(32),
+                page_ordinal: 1,
+                source_evidence: SOURCE_EVIDENCE,
+                decision: "accept",
+                document_instance_id: "reg_cert_instance_a",
+                document_role: "机动车登记证书",
+                reason_code: "MEMBERSHIP_SOURCE_VERIFIED",
+                actor: "t02-reviewer",
+                recorded_at: 100,
+                cycle: 1,
+                supersedes: [],
+              },
+            ],
           }),
         ),
       [`POST ${MEMBERSHIP_PATH}`]: () =>
@@ -565,6 +636,7 @@ describe("ReviewWorkPanel (T02)", () => {
           decision: "accept",
           document_instance_id: "reg::cert_instance_b",
           document_role: "机动车登记证书",
+          cycle: 1,
           invalidated_run_id: "run_t02panel",
           job_id: "job_s10panel",
           phase: "Assembly",
@@ -578,12 +650,37 @@ describe("ReviewWorkPanel (T02)", () => {
     expect(screen.getByTestId("review-membership-ledger")).toHaveTextContent(
       "/pages/0",
     );
+    expect(screen.getByTestId("review-membership-ledger")).toHaveTextContent(
+      "周期 1",
+    );
+    expect(screen.getByTestId("review-history-memberships")).toHaveTextContent(
+      "周期 1",
+    );
+    expect(
+      screen.getByTestId("review-history-membership-corrections"),
+    ).toHaveTextContent("周期 1");
     await userEvent.click(
       screen.getByRole("button", {
         name: "选择附件 s10-attachment-1 第 1 页",
       }),
     );
     await screen.findByTestId("review-membership-form");
+    expect(screen.getByTestId("review-membership")).toHaveTextContent(
+      "状态 已归属",
+    );
+    await userEvent.click(
+      screen.getByRole("button", {
+        name: "选择附件 s10-attachment-2 第 2 页",
+      }),
+    );
+    expect(screen.getByTestId("review-membership")).toHaveTextContent(
+      "状态 显式未归集",
+    );
+    await userEvent.click(
+      screen.getByRole("button", {
+        name: "选择附件 s10-attachment-1 第 1 页",
+      }),
+    );
     const candidateSelect = screen.getByRole("combobox", {
       name: "候选实例",
     });

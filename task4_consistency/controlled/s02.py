@@ -2072,17 +2072,17 @@ def step2_page_order_membership_claims(
         if page_type not in {"登记页", "注册页"}:
             continue
         source_name = _source_name(source_page.get("filename"))
-        default_sha256 = hashlib.sha256(source_name.encode("utf-8")).hexdigest()
         attachment_id, source_sha256 = (
             resolve_page_binding(source_page)
             if resolve_page_binding is not None
-            else ("unknown", default_sha256)
+            else ("unknown", "unknown")
         )
         if (
             not isinstance(attachment_id, str)
             or not attachment_id
             or not isinstance(source_sha256, str)
-            or len(source_sha256) != 64
+            or not source_sha256
+            or (resolve_page_binding is not None and len(source_sha256) != 64)
         ):
             continue
         page_ordinal = source_page.get("order")
@@ -2098,6 +2098,7 @@ def step2_page_order_membership_claims(
             "page_type": page_type,
             "document_instance_id": document_instance_id or "unknown",
             "document_role": document_role or "unknown",
+            "source_filename": source_name,
             "source_pointer": f"/pages/{page_index}",
         }
         claims.append(
@@ -2118,6 +2119,7 @@ def step2_page_order_membership_claims(
                 "provenance": {
                     "adapter_id": "step2-page-order",
                     "adapter_version": "1",
+                    "source_filename": source_name,
                     "source_pointer": f"/pages/{page_index}",
                     "fact": "page.page_type",
                     "page_type": page_type,

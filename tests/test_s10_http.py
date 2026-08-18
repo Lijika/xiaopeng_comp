@@ -197,6 +197,7 @@ def test_membership_successor_requires_fresh_current_run(tmp_path) -> None:
         assert payload["status"] == "accepted"
         assert payload["evidence_revision"] == 2
         assert payload["route"] == "pending_check"
+        assert payload["cycle"] == 1
 
         # While the replacement run is pending the stale old result must not be
         # re-issued: no current run, route held pending.
@@ -258,6 +259,13 @@ def test_membership_successor_requires_fresh_current_run(tmp_path) -> None:
         assert old_run_id in run_ids  # old run retained immutable
         assert len(history["membership_history"]) == 1
         assert len(history["memberships"]) == 4
+        decision = next(
+            record
+            for record in history["memberships"]
+            if record["record_kind"] == "accepted"
+        )
+        assert decision["cycle"] == 1
+        assert history["membership_history"][0]["cycle"] == 1
         assert {record["record_kind"] for record in history["memberships"]} == {
             "candidate",
             "accepted",

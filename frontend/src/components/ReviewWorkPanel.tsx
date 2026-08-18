@@ -135,6 +135,16 @@ const MEMBERSHIP_UNASSIGN_REASONS: readonly MembershipUnassign["reason_code"][] 
   "MEMBERSHIP_PAGE_UNASSIGNED",
 ];
 
+const MEMBERSHIP_STATE_LABELS: Record<
+  S01WorkspaceMembershipPage["state"],
+  string
+> = {
+  unresolved: "未解析",
+  ambiguous: "歧义（多候选并存）",
+  selected: "已归属",
+  unassigned: "显式未归集",
+};
+
 type MembershipTarget = {
   findingId: string;
   membership: Pick<
@@ -496,6 +506,7 @@ function WorkspaceSection({
                         {decision.record_kind} · {decision.decision_id} · {decision.status} ·{" "}
                         {decision.document_instance_id ?? "未归属"} ·{" "}
                         {decision.document_role ?? "未归属"} · {decision.reason_code} ·{" "}
+                        周期 {decision.cycle} ·{" "}
                         supersedes {decision.supersedes.join(", ") || "None"} ·{" "}
                         {JSON.stringify(decision.source_evidence)}
                       </li>
@@ -540,7 +551,7 @@ function WorkspaceSection({
               <p className="text-sm text-muted-foreground">
                 页 {membership.page_ordinal} ·{" "}
                 {membership.page_source_sha256.slice(0, 12)}… · 状态{" "}
-                {membership.state === "ambiguous" ? "歧义（多候选并存）" : "未解析"}
+                {MEMBERSHIP_STATE_LABELS[membership.state]}
               </p>
               <div className="membership-panes-grid">
                 <div className="membership-pane membership-candidates">
@@ -1004,7 +1015,8 @@ function HistorySection({
                   "未归属"} ·{" "}
                 {record.candidate_document?.document_role ??
                   record.document_role ??
-                  "未归属"} · {record.status ?? "claim"} · supersedes{" "}
+                  "未归属"} · {record.status ?? "claim"}
+                {record.cycle != null && <> · 周期 {record.cycle}</>} · supersedes{" "}
                 {record.supersedes?.join(", ") || "None"} ·{" "}
                 {JSON.stringify(record.provenance ?? record.source_evidence ?? {})}
               </li>
@@ -1026,6 +1038,7 @@ function HistorySection({
                 {correction.attachment_id} · 页 {correction.page_ordinal} ·{" "}
                 {correction.document_instance_id ?? "未归属"} ·{" "}
                 {correction.document_role ?? "未归属"} · {correction.reason_code} ·{" "}
+                周期 {correction.cycle} ·{" "}
                 supersedes {correction.supersedes?.join(", ") || "None"} ·{" "}
                 {JSON.stringify(correction.source_evidence)}
               </li>

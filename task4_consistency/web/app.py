@@ -1234,6 +1234,7 @@ class S01WorkspaceMembershipDecision(BaseModel):
     actor: str
     reason_code: str
     time: int
+    cycle: int
     source_evidence: dict[str, Any]
     supersedes: list[str]
     status: Literal["active", "superseded"]
@@ -1429,6 +1430,7 @@ class S01HistoryMembership(BaseModel):
     actor: str | None = None
     reason_code: str | None = None
     time: int | None = None
+    cycle: int | None = None
     source_evidence: dict[str, Any] = Field(default_factory=dict)
     supersedes: list[str] = Field(default_factory=list)
     status: str | None = None
@@ -1457,6 +1459,7 @@ class S01HistoryMembershipCorrection(BaseModel):
     reason_code: str
     actor: str
     recorded_at: int
+    cycle: int
     supersedes: list[str] = Field(default_factory=list)
 
 
@@ -1735,6 +1738,7 @@ class S01MembershipCorrectionResult(BaseModel):
     decision: str
     document_instance_id: str | None = None
     document_role: str | None = None
+    cycle: int
     invalidated_run_id: str
     job_id: str
     phase: str

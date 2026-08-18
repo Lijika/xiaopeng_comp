@@ -9752,6 +9752,7 @@ class ControlledScenarioService:
                     "actor": principal.subject,
                     "reason_code": reason_code,
                     "time": membership_time,
+                    "cycle": app["cycle"],
                     "source_evidence": {
                         **copy.deepcopy(current_source_evidence),
                         "candidate_claim_id": candidate_claim_id,
@@ -9789,6 +9790,7 @@ class ControlledScenarioService:
                         "reason_code": reason_code,
                         "actor": principal.subject,
                         "recorded_at": membership_time,
+                        "cycle": app["cycle"],
                         "supersedes": superseded,
                     },
                 }
@@ -9958,6 +9960,7 @@ class ControlledScenarioService:
                         "decision": decision,
                         "document_instance_id": instance_id,
                         "document_role": role,
+                        "cycle": app["cycle"],
                         "invalidated_run_id": work_item["run_id"],
                         "job_id": job_id,
                         "phase": "Assembly",
@@ -13741,6 +13744,7 @@ class ControlledScenarioService:
             "attempt_id",
             "run_id",
             "route",
+            "cycle",
             "lifecycle_revision",
             "evidence_revision",
             "evidence_snapshot_id",
@@ -14419,6 +14423,7 @@ class ControlledScenarioService:
                             "actor": record["actor"],
                             "reason_code": record["reason_code"],
                             "time": record["time"],
+                            "cycle": record["cycle"],
                             "source_evidence": copy.deepcopy(
                                 record.get("source_evidence", {})
                             ),
@@ -14467,6 +14472,7 @@ class ControlledScenarioService:
                                 "reason_code",
                                 "actor",
                                 "recorded_at",
+                                "cycle",
                                 "supersedes",
                             )
                             if correction.get(key) is not None
@@ -14793,8 +14799,12 @@ class ControlledScenarioService:
             claims: list[dict[str, Any]] = []
             claim_ids: set[str] = set()
             for record in admitted_graph["page_memberships"]:
-                if not isinstance(record, dict) or record.get("record_kind") != "candidate":
+                if not isinstance(record, dict):
+                    return self._rejected("INVALID_CANONICAL_ENVELOPE")
+                if record.get("record_kind") in {"accepted", "unassigned"}:
                     continue
+                if record.get("record_kind") != "candidate":
+                    return self._rejected("INVALID_CANONICAL_ENVELOPE")
                 page = record.get("page")
                 candidate = record.get("candidate_document")
                 claim_id = record.get("claim_id")
@@ -14838,7 +14848,7 @@ class ControlledScenarioService:
                     or not document_role
                     or not isinstance(record.get("provenance"), dict)
                 ):
-                    continue
+                    return self._rejected("INVALID_CANONICAL_ENVELOPE")
                 claim_ids.add(claim_id)
                 normalized_claim = copy.deepcopy(record)
                 normalized_claim["application_id"] = app_id
@@ -16434,6 +16444,7 @@ class ControlledScenarioService:
                             "actor",
                             "reason_code",
                             "time",
+                            "cycle",
                             "source_evidence",
                             "supersedes",
                             "status",

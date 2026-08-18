@@ -185,16 +185,16 @@ S10_STEP2_CONTENT = [
 # Full aggregate sha256 over the 44 mapped candidate claims (content equality,
 # never a digest-length check).
 S10_MEMBERSHIP_CLAIMS_DIGEST = (
-    "c39fb815c646186c52e67e34da7b4d79ad60479ff981cc49f226e7024e69c67d"
+    "7e3a737ecd7efca6c86abce92eef9cc19ea838cff0d693ee17807df000a9eacd"
 )
 
 
 def test_s10_step2_page_membership_migration_no_loss() -> None:
     from task4_consistency.controlled.s02 import step2_page_order_membership_claims
 
-    # The corpus-level migration pins candidate-claim counts and provenance at
-    # the stable source-name page identity (the Step2 corpus ships no image
-    # objects, so the real attachment-page hashes are not reproducible here).
+    # The corpus-level migration pins candidate-claim counts and provenance.
+    # The Step2 corpus ships no image objects, so attachment/content identity
+    # remains explicitly unknown while the original filename/pointer survives.
     # Production canonicalize binds the same claims to the admitted
     # attachment reference/hash via ``resolve_page_binding``, which the S10
     # HTTP/controlled and browser (Playwright) evidence exercise end to end.
@@ -231,7 +231,7 @@ def test_s10_step2_page_membership_migration_no_loss() -> None:
     # Exactly one provenance-bearing candidate claim per non-inferred page.
     assert len(claims) == 44
     assert all(claim["record_kind"] == "candidate" for claim in claims)
-    assert all(claim["page"]["source_sha256"] for claim in claims)
+    assert all(claim["page"]["source_sha256"] == "unknown" for claim in claims)
     assert all(claim["page"]["attachment_id"] == "unknown" for claim in claims)
     assert all(
         claim["candidate_document"]
@@ -239,6 +239,11 @@ def test_s10_step2_page_membership_migration_no_loss() -> None:
         for claim in claims
     )
     assert all(claim["provenance"]["fact"] == "page.page_type" for claim in claims)
+    assert all(claim["provenance"]["source_filename"] for claim in claims)
+    assert all(
+        claim["provenance"]["source_pointer"].startswith("/pages/")
+        for claim in claims
+    )
     assert sum(claim["provenance"]["page_type"] == "登记页" for claim in claims) == 33
     assert sum(claim["provenance"]["page_type"] == "注册页" for claim in claims) == 11
     ordered = sorted(claims, key=lambda claim: (claim["page"]["page_ordinal"], claim["claim_id"]))
