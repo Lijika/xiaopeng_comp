@@ -232,6 +232,7 @@ class ControlledScenarioService:
             "app_missing_vin_docs.json",
             "app_s10_ambiguous_membership.json",
             "app_s10_membership_field.json",
+            "app_s11_entity_ambiguity.json",
         }
     )
     _ALLOWED_PHASE_SUCCESSORS = {
@@ -432,6 +433,32 @@ class ControlledScenarioService:
             "MEMBERSHIP_SOURCE_VERIFIED",
             "MEMBERSHIP_SOURCE_MISASSIGNED",
             "MEMBERSHIP_PAGE_UNASSIGNED",
+        }
+    )
+    # S11: the closed Reviewer entity-link decision vocabulary.  An accepted
+    # decision selects one explicit application-local entity (id, type and
+    # label) and relationship for the mention, bound to the matcher and
+    # knowledge-release provenance of the chosen candidate.  Eligibility for
+    # the projection comes only from these explicit accepted facts -- never
+    # from candidate confidence, order, count, majority, alias projection or
+    # last write.
+    _ENTITY_LINK_DECISIONS = frozenset({"accept"})
+    _ENTITY_LINK_RELATIONSHIPS = frozenset({"same_as"})
+    _ENTITY_LINK_RULE_IDS = frozenset(
+        {
+            "ENTITY_LINK_UNRESOLVED",
+            "ENTITY_LINK_AMBIGUOUS",
+            "ENTITY_LINK_CONFLICT",
+        }
+    )
+    # Confidence below this threshold is low-confidence evidence: it surfaces
+    # as an explicit reviewable fact and never auto-links.
+    _ENTITY_LINK_CONFIDENCE_THRESHOLD = 0.6
+    _ENTITY_LINK_ACCEPT_REASON_CODES = frozenset(
+        {
+            "ENTITY_LINK_SOURCE_VERIFIED",
+            "ENTITY_LINK_SOURCE_MISASSIGNED",
+            "ENTITY_LINK_AMBIGUITY_RESOLVED",
         }
     )
     _EXCEPTION_REQUEST_REASON = "DOCUMENTED_BRAND_VARIANCE"
@@ -10023,6 +10050,703 @@ class ControlledScenarioService:
                 return result
             raise RuntimeError("membership correction retry exhausted")
 
+    def correct_entity_link(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        application_id: str,
+        work_item_id: str,
+        expected_fence: int,
+        expected_context: dict[str, Any],
+        idempotency_key: str,
+        entity_link: dict[str, Any],
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Append one source-backed entity-link successor and enqueue a rerun.
+
+        An accepted decision binds the mention, an explicit application-local
+        entity (id, type and label) and relationship, the matcher and
+        knowledge-release provenance of the chosen candidate, the actor,
+        reason, time and the superseded predecessors, then advances the
+        Evidence revision and invalidates the affected Lifecycle work and
+        readiness.  Eligibility for the checker projection comes only from
+        these explicit accepted facts; candidate confidence, order, count,
+        majority, alias projection and last write never select an entity, and
+        links never cross application boundaries.
+        """
+        link_time = int(self._clock() if now is None else now)
+        if not self._valid_reviewer_principal(principal, now=link_time):
+            raise QueryNotFound(work_item_id)
+        if (
+            isinstance(expected_fence, bool)
+            or not isinstance(expected_fence, int)
+            or expected_fence < 1
+        ):
+            raise ValueError("entity link claim fence is invalid")
+        if not self._valid_idempotency_key(idempotency_key):
+            raise ValueError("entity link idempotency key is invalid")
+        contract = {
+            "schema_version",
+            "finding_id",
+            "candidate_claim_id",
+            "mention_id",
+            "source_evidence",
+            "expected_active_decision_ids",
+            "decision",
+            "entity_id",
+            "entity_type",
+            "label",
+            "relationship",
+            "matcher_id",
+            "matcher_version",
+            "knowledge_release_id",
+            "reason_code",
+        }
+        if not isinstance(entity_link, dict):
+            raise ValueError("entity link does not match the registered contract")
+        if entity_link.get("decision") not in self._ENTITY_LINK_DECISIONS:
+            raise ValueError("entity link decision is invalid")
+        if set(entity_link) != contract:
+            raise ValueError("entity link does not match the registered contract")
+        if entity_link.get("schema_version") != "entity-link-correction/1":
+            raise ValueError("entity link schema version is unsupported")
+        for key in ("finding_id", "candidate_claim_id", "mention_id"):
+            value = entity_link.get(key)
+            if not isinstance(value, str) or not value or value.strip() != value:
+                raise ValueError(f"entity link {key} is invalid")
+        candidate_claim_id = entity_link["candidate_claim_id"]
+        mention_id = entity_link["mention_id"]
+        source_evidence = entity_link.get("source_evidence")
+        if (
+            not isinstance(source_evidence, dict)
+            or set(source_evidence) != {"event_id", "evidence_revision"}
+            or not isinstance(source_evidence.get("event_id"), str)
+            or not source_evidence["event_id"]
+            or isinstance(source_evidence.get("evidence_revision"), bool)
+            or not isinstance(source_evidence["evidence_revision"], int)
+            or source_evidence["evidence_revision"] < 1
+        ):
+            raise ValueError("entity link source evidence is invalid")
+        expected_active_decision_ids = entity_link.get(
+            "expected_active_decision_ids"
+        )
+        if (
+            not isinstance(expected_active_decision_ids, list)
+            or any(
+                not isinstance(item, str) or not item or item.strip() != item
+                for item in expected_active_decision_ids
+            )
+            or expected_active_decision_ids
+            != sorted(set(expected_active_decision_ids))
+        ):
+            raise ValueError("entity link predecessors are invalid")
+        reason_code = entity_link.get("reason_code")
+        if reason_code not in self._ENTITY_LINK_ACCEPT_REASON_CODES:
+            raise ValueError("entity link reason is not registered")
+        relationship = entity_link.get("relationship")
+        if relationship not in self._ENTITY_LINK_RELATIONSHIPS:
+            raise ValueError("entity link relationship is not registered")
+        for key in (
+            "entity_id",
+            "entity_type",
+            "label",
+            "matcher_id",
+            "matcher_version",
+            "knowledge_release_id",
+        ):
+            value = entity_link.get(key)
+            if not isinstance(value, str) or not value or value.strip() != value:
+                raise ValueError(f"entity link {key} is invalid")
+        normalized = copy.deepcopy(entity_link)
+
+        with self._lock:
+            for attempt in range(2):
+                self._reload_store()
+                work_item, state = self._review_work_item_authority(
+                    principal=principal,
+                    work_item_id=work_item_id,
+                    now=link_time,
+                )
+                if work_item["application_id"] != application_id:
+                    raise QueryNotFound(work_item_id)
+                app, _, actual_context = self._review_current_context(work_item)
+                fingerprint_bytes = json.dumps(
+                    {
+                        "application_id": application_id,
+                        "entity_link": normalized,
+                        "expected_context": expected_context,
+                        "expected_fence": expected_fence,
+                        "work_item_id": work_item_id,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                command_fingerprint = hashlib.sha256(
+                    fingerprint_bytes
+                ).hexdigest()
+                binding_key = self._review_idempotency_binding_key(
+                    principal,
+                    work_item_id,
+                    idempotency_key,
+                    action="correct_entity_link",
+                )
+                previous = self._store.idempotency.get(binding_key)
+                if previous is not None:
+                    previous_fingerprint, previous_result = previous
+                    if previous_fingerprint == command_fingerprint:
+                        return {
+                            **copy.deepcopy(previous_result),
+                            "replayed": True,
+                        }
+                    return {
+                        "status": "conflict",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "IDEMPOTENCY_KEY_CONFLICT",
+                    }
+                if not self._review_context_matches(
+                    expected_context, actual_context
+                ):
+                    return {
+                        "status": "stale",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "STALE_REVIEW_CONTEXT",
+                    }
+                if (
+                    state["status"] != "claimed"
+                    or state["claim_subject"] != principal.subject
+                    or state["claim_fence"] != expected_fence
+                    or float(state["claim_expires_at"]) <= link_time
+                ):
+                    return {
+                        "status": "stale",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "STALE_WORK_ITEM_CLAIM",
+                    }
+                if (
+                    app.get("phase") != "Manual Review"
+                    or app.get("current_run_id") != work_item["run_id"]
+                    or app.get("lifecycle_revision")
+                    != work_item["lifecycle_revision"]
+                    or app.get("evidence_revision")
+                    != work_item["evidence_revision"]
+                ):
+                    return {
+                        "status": "stale",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "STALE_REVIEW_CONTEXT",
+                    }
+
+                findings = [
+                    finding
+                    for finding in self._store.findings
+                    if finding.get("application_id") == application_id
+                    and finding.get("run_id") == work_item["run_id"]
+                    and finding.get("finding_id") == normalized["finding_id"]
+                ]
+                finding_is_correctable = (
+                    len(findings) == 1
+                    and normalized["finding_id"] in work_item["finding_ids"]
+                    and findings[0].get("mandatory") is True
+                    and findings[0].get("verdict") != "consistent"
+                    and findings[0].get("rule_id") in self._ENTITY_LINK_RULE_IDS
+                )
+                gate = self._review_write_gate(app=app)
+                if gate is not None:
+                    status, gate_reason_code = gate
+                    return {
+                        "status": status,
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": gate_reason_code,
+                    }
+
+                graph = self._admitted_graph(app)
+                links = (
+                    graph.get("entity_links")
+                    if isinstance(graph, dict)
+                    else None
+                )
+                if not isinstance(links, list) or not links:
+                    return {
+                        "status": "rejected",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "ENTITY_LINK_LEDGER_UNAVAILABLE",
+                    }
+                ledger_mentions = {
+                    record["mention"].get("mention_id")
+                    for record in links
+                    if isinstance(record, dict)
+                    and isinstance(record.get("mention"), dict)
+                }
+                if mention_id not in ledger_mentions:
+                    return {
+                        "status": "rejected",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": (
+                            "ENTITY_LINK_MENTION_OUTSIDE_APPLICATION"
+                        ),
+                    }
+                candidates = [
+                    record
+                    for record in links
+                    if isinstance(record, dict)
+                    and record.get("record_kind") == "candidate"
+                    and isinstance(record.get("mention"), dict)
+                    and record["mention"].get("mention_id") == mention_id
+                ]
+                if not candidates:
+                    return {
+                        "status": "rejected",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "ENTITY_LINK_CLAIM_MISSING",
+                    }
+                selected_claims = [
+                    candidate
+                    for candidate in candidates
+                    if candidate.get("claim_id") == candidate_claim_id
+                ]
+                if len(selected_claims) != 1:
+                    return {
+                        "status": "rejected",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "ENTITY_LINK_CLAIM_MISMATCH",
+                    }
+                selected_claim = selected_claims[0]
+                candidate_entity = selected_claim.get("candidate_entity")
+                if (
+                    not isinstance(candidate_entity, dict)
+                    or candidate_entity.get("entity_id")
+                    != normalized["entity_id"]
+                    or candidate_entity.get("entity_type")
+                    != normalized["entity_type"]
+                    or candidate_entity.get("label") != normalized["label"]
+                ):
+                    return {
+                        "status": "rejected",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "ENTITY_LINK_ACCEPT_NOT_CANDIDATE",
+                    }
+                claim_provenance = selected_claim.get("provenance")
+                if (
+                    not isinstance(claim_provenance, dict)
+                    or claim_provenance.get("matcher_id")
+                    != normalized["matcher_id"]
+                    or claim_provenance.get("matcher_version")
+                    != normalized["matcher_version"]
+                    or claim_provenance.get("knowledge_release_id")
+                    != normalized["knowledge_release_id"]
+                ):
+                    return {
+                        "status": "rejected",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "ENTITY_LINK_RELEASE_MISMATCH",
+                    }
+                current_source_evidence = self._current_evidence_reference(app)
+                if source_evidence != current_source_evidence:
+                    return {
+                        "status": "stale",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "STALE_ENTITY_LINK_SOURCE_EVIDENCE",
+                    }
+                active_decision_ids = sorted(
+                    record["decision_id"]
+                    for record in links
+                    if isinstance(record, dict)
+                    and record.get("record_kind") == "accepted"
+                    and record.get("status") == "active"
+                    and isinstance(record.get("mention"), dict)
+                    and record["mention"].get("mention_id") == mention_id
+                    and isinstance(record.get("decision_id"), str)
+                )
+                if expected_active_decision_ids != active_decision_ids:
+                    return {
+                        "status": "stale",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "STALE_ENTITY_LINK_PREDECESSORS",
+                    }
+                successor_target = (
+                    not finding_is_correctable
+                    and bool(active_decision_ids)
+                    and any(
+                        isinstance(record, dict)
+                        and record.get("decision_id") in active_decision_ids
+                        and record.get("finding_id")
+                        == normalized["finding_id"]
+                        for record in links
+                    )
+                )
+                if not finding_is_correctable and not successor_target:
+                    raise ValueError("entity link finding is not correctable")
+                if finding_is_correctable:
+                    finding_entity_link = findings[0].get("entity_link")
+                    if (
+                        not isinstance(finding_entity_link, dict)
+                        or finding_entity_link.get("mention_id") != mention_id
+                        or finding_entity_link.get("source_evidence")
+                        != source_evidence
+                        or finding_entity_link.get("active_decision_ids")
+                        != expected_active_decision_ids
+                    ):
+                        raise ValueError(
+                            "entity link finding does not match the target "
+                            "mention"
+                        )
+
+                staged = copy.deepcopy(self._store)
+                staged_app = staged.applications[application_id]
+                next_evidence_revision = (
+                    int(staged_app["evidence_revision"]) + 1
+                )
+                correction_id = self._stable_id(
+                    "entity_link", f"{binding_key}:{command_fingerprint}"
+                )
+                decision_id = self._stable_id("decision", f"{correction_id}")
+                superseded = sorted(
+                    {
+                        record["decision_id"]
+                        for record in links
+                        if isinstance(record, dict)
+                        and record.get("record_kind") == "accepted"
+                        and record.get("status") == "active"
+                        and isinstance(record.get("mention"), dict)
+                        and record["mention"].get("mention_id") == mention_id
+                        and isinstance(record.get("decision_id"), str)
+                    }
+                )
+                updated_links = copy.deepcopy(links)
+                for record in updated_links:
+                    if (
+                        isinstance(record, dict)
+                        and record.get("decision_id") in set(superseded)
+                    ):
+                        record["status"] = "superseded"
+                successor: dict[str, Any] = {
+                    "record_kind": "accepted",
+                    "decision_id": decision_id,
+                    "link_id": correction_id,
+                    "finding_id": normalized["finding_id"],
+                    "application_id": application_id,
+                    "mention": copy.deepcopy(selected_claim.get("mention")),
+                    "candidate_entity": copy.deepcopy(candidate_entity),
+                    "relationship": relationship,
+                    "actor": principal.subject,
+                    "reason_code": reason_code,
+                    "time": link_time,
+                    "cycle": app["cycle"],
+                    "source_evidence": {
+                        **copy.deepcopy(current_source_evidence),
+                        "candidate_claim_id": candidate_claim_id,
+                    },
+                    "matcher_id": normalized["matcher_id"],
+                    "matcher_version": normalized["matcher_version"],
+                    "knowledge_release_id": normalized["knowledge_release_id"],
+                    "supersedes": superseded,
+                    "status": "active",
+                }
+                updated_links.append(successor)
+
+                updated_graph = (
+                    copy.deepcopy(graph) if isinstance(graph, dict) else {}
+                )
+                updated_graph["entity_links"] = updated_links
+
+                evidence = self._admitted_evidence(app)
+                evidence_payload = {
+                    "schema_version": "s11-corrected-evidence/1",
+                    "evidence": evidence,
+                    "graph": updated_graph,
+                    "correction": {
+                        "correction_id": correction_id,
+                        "kind": "entity_link",
+                        "decision_id": decision_id,
+                        "candidate_claim_id": candidate_claim_id,
+                        "mention_id": mention_id,
+                        "mention": copy.deepcopy(
+                            selected_claim.get("mention")
+                        ),
+                        "entity_id": normalized["entity_id"],
+                        "entity_type": normalized["entity_type"],
+                        "label": normalized["label"],
+                        "relationship": relationship,
+                        "matcher_id": normalized["matcher_id"],
+                        "matcher_version": normalized["matcher_version"],
+                        "knowledge_release_id": normalized[
+                            "knowledge_release_id"
+                        ],
+                        "source_evidence": copy.deepcopy(
+                            current_source_evidence
+                        ),
+                        "decision": "accept",
+                        "reason_code": reason_code,
+                        "actor": principal.subject,
+                        "recorded_at": link_time,
+                        "cycle": app["cycle"],
+                        "supersedes": superseded,
+                    },
+                }
+                evidence_bytes = json.dumps(
+                    evidence_payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                job_id = self._stable_id(
+                    "job", f"{application_id}:entity_link:{correction_id}"
+                )
+                sequence = 1 + sum(
+                    record.get("work_item_id") == work_item_id
+                    and str(record.get("record_type", "")).startswith(
+                        "work_item_"
+                    )
+                    for record in staged.review_records
+                )
+                old_route = staged_app["route"]
+                invalidated_decision_ids = sorted(
+                    {
+                        record["decision_id"]
+                        for record in staged.review_records
+                        if record.get("application_id") == application_id
+                        and record.get("run_id") == work_item["run_id"]
+                        and isinstance(record.get("decision_id"), str)
+                    }
+                )
+                try:
+                    self._before_write("entity_link.evidence")
+                    staged.evidence_events.append(
+                        {
+                            "event_id": self._stable_id(
+                                "evidence",
+                                f"{application_id}:entity_link:"
+                                f"{correction_id}",
+                            ),
+                            "application_id": application_id,
+                            "revision": next_evidence_revision,
+                            "kind": "entity_link_correction",
+                            "content_sha256": hashlib.sha256(
+                                evidence_bytes
+                            ).hexdigest(),
+                            "content_bytes": len(evidence_bytes),
+                            "payload": evidence_payload,
+                        }
+                    )
+                    staged_app["evidence_revision"] = next_evidence_revision
+                    staged_app["evidence_ready"] = False
+                    staged_app["route"] = "pending_check"
+                    staged_app["current_run_id"] = None
+                    staged_app["current_evidence_snapshot_id"] = None
+                    staged_app["current_evidence_snapshot_digest"] = None
+                    staged_app["projection_visible"] = False
+                    staged_app["projection_pending"] = False
+                    self._before_write("entity_link.lifecycle")
+                    self._transition_lifecycle(
+                        staged_app,
+                        "Assembly",
+                        "ENTITY_LINK_CORRECTION_ACCEPTED",
+                        store=staged,
+                    )
+                    staged.lifecycle_events[-1].update(
+                        {
+                            "correction_id": correction_id,
+                            "entity_link_decision_id": decision_id,
+                            "candidate_claim_id": candidate_claim_id,
+                            "mention_id": mention_id,
+                            "entity_id": normalized["entity_id"],
+                            "entity_type": normalized["entity_type"],
+                            "label": normalized["label"],
+                            "relationship": relationship,
+                            "matcher_id": normalized["matcher_id"],
+                            "matcher_version": normalized["matcher_version"],
+                            "knowledge_release_id": normalized[
+                                "knowledge_release_id"
+                            ],
+                            "supersedes": copy.deepcopy(superseded),
+                            "invalidated_run_id": work_item["run_id"],
+                            "invalidated_route": old_route,
+                            "invalidated_work_item_id": work_item_id,
+                            "invalidated_decision_ids": (
+                                invalidated_decision_ids
+                            ),
+                        }
+                    )
+                    self._before_write("entity_link.work_item")
+                    staged.review_records.append(
+                        {
+                            "record_id": self._stable_id(
+                                "review_record",
+                                f"{work_item_id}:entity_link:{sequence}",
+                            ),
+                            "record_type": "work_item_invalidated",
+                            "sequence": sequence,
+                            "work_item_id": work_item_id,
+                            "application_id": application_id,
+                            "run_id": work_item["run_id"],
+                            "claim_subject": principal.subject,
+                            "claim_fence": expected_fence,
+                            "correction_id": correction_id,
+                            "entity_link_decision_id": decision_id,
+                            "invalidated_at": link_time,
+                            "recorded_at": link_time,
+                        }
+                    )
+                    self._before_write("entity_link.job")
+                    staged.jobs.append(
+                        self._admission_job_record(
+                            job_id, application_id, correction_id
+                        )
+                    )
+                    self._before_write("entity_link.outbox")
+                    staged.outbox.append(
+                        {
+                            "event_id": self._stable_id("outbox", job_id),
+                            "kind": "controlled_check_requested",
+                            "application_id": application_id,
+                            "job_id": job_id,
+                            "fingerprint": correction_id,
+                            "status": "pending",
+                        }
+                    )
+                    self._before_write("entity_link.audit")
+                    staged.audit_events.append(
+                        {
+                            "event_id": self._stable_id(
+                                "audit", f"entity_link:{decision_id}"
+                            ),
+                            "action": "entity_link_corrected",
+                            "subject": principal.subject,
+                            "role": principal.role,
+                            "scope": work_item["visibility_scope"],
+                            "source_id": principal.source_id,
+                            "application_id": application_id,
+                            "work_item_id": work_item_id,
+                            "finding_id": normalized["finding_id"],
+                            "candidate_claim_id": candidate_claim_id,
+                            "mention_id": mention_id,
+                            "entity_id": normalized["entity_id"],
+                            "entity_type": normalized["entity_type"],
+                            "label": normalized["label"],
+                            "relationship": relationship,
+                            "matcher_id": normalized["matcher_id"],
+                            "matcher_version": normalized["matcher_version"],
+                            "knowledge_release_id": normalized[
+                                "knowledge_release_id"
+                            ],
+                            "source_evidence_event_id": (
+                                current_source_evidence["event_id"]
+                            ),
+                            "source_evidence_revision": (
+                                current_source_evidence["evidence_revision"]
+                            ),
+                            "supersedes": copy.deepcopy(superseded),
+                            "decision": "accept",
+                            "cycle": app["cycle"],
+                            "invalidated_run_id": work_item["run_id"],
+                            "decision_id": decision_id,
+                            "correction_id": correction_id,
+                            "job_id": job_id,
+                            "reason_code": reason_code,
+                            "claim_fence": expected_fence,
+                            "lifecycle_revision": staged_app[
+                                "lifecycle_revision"
+                            ],
+                            "evidence_revision": staged_app[
+                                "evidence_revision"
+                            ],
+                            "result": "accepted",
+                            **self._audit_time_fields(
+                                staged, now=link_time
+                            ),
+                        }
+                    )
+                    result = {
+                        "status": "accepted",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "correction_id": correction_id,
+                        "entity_link_decision_id": decision_id,
+                        "candidate_claim_id": candidate_claim_id,
+                        "mention_id": mention_id,
+                        "entity_id": normalized["entity_id"],
+                        "entity_type": normalized["entity_type"],
+                        "label": normalized["label"],
+                        "relationship": relationship,
+                        "cycle": app["cycle"],
+                        "invalidated_run_id": work_item["run_id"],
+                        "job_id": job_id,
+                        "phase": "Assembly",
+                        "route": "pending_check",
+                        "lifecycle_revision": staged_app[
+                            "lifecycle_revision"
+                        ],
+                        "evidence_revision": staged_app["evidence_revision"],
+                    }
+                    self._before_write("entity_link.idempotency")
+                    staged.idempotency[binding_key] = (
+                        command_fingerprint,
+                        copy.deepcopy(result),
+                    )
+                    self._before_write("entity_link.publish")
+                    staged.persist()
+                except _StoreWriteFailure as error:
+                    return {
+                        "status": "unavailable",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": (
+                            "AUDIT_UNAVAILABLE"
+                            if str(error) == "entity_link.audit"
+                            else "STORAGE_UNAVAILABLE"
+                        ),
+                    }
+                except StaleStoreRevision:
+                    if attempt == 0:
+                        continue
+                    return {
+                        "status": "unavailable",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "STORAGE_UNAVAILABLE",
+                    }
+                except Exception:
+                    return {
+                        "status": "unavailable",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "STORAGE_UNAVAILABLE",
+                    }
+                self._store = staged
+                return result
+            raise RuntimeError("entity link correction retry exhausted")
+
     @classmethod
     def _valid_exception_approver_principal(
         cls, principal: S01CommandPrincipal, *, now: float
@@ -13931,6 +14655,9 @@ class ControlledScenarioService:
                 "membership_ledger": self._workspace_membership_ledger(
                     self._store.applications[application_id], findings
                 ),
+                "entity_link_ledger": self._workspace_entity_link_ledger(
+                    self._store.applications[application_id], findings
+                ),
                 "actions": ["read_evidence"],
             }
             if projection["track"] == "R-OBSERVED":
@@ -14228,6 +14955,11 @@ class ControlledScenarioService:
                                 "membership_decisions", []
                             )
                         ),
+                        "entity_link_decisions": copy.deepcopy(
+                            spec.get("evidence_snapshot", {}).get(
+                                "entity_link_decisions", []
+                            )
+                        ),
                         "evidence_document_instance_ids": sorted(
                             document["document_instance_id"]
                             for document in spec.get("evidence_snapshot", {}).get(
@@ -14493,6 +15225,112 @@ class ControlledScenarioService:
                         },
                     }
                 )
+            # S11: preserved entity-link history.  The current ledger is a
+            # projection of the current Evidence graph holding every candidate
+            # claim and every accepted decision with its explicit status;
+            # correction events add the chronological successor facts.
+            current_ledger_graph = self._admitted_graph(app)
+            entity_link_ledger = (
+                current_ledger_graph.get("entity_links")
+                if isinstance(current_ledger_graph, dict)
+                else None
+            )
+            entity_links = []
+            if isinstance(entity_link_ledger, list):
+                for record in entity_link_ledger:
+                    if not isinstance(record, dict):
+                        continue
+                    kind = record.get("record_kind")
+                    if kind == "candidate":
+                        entity_links.append(
+                            {
+                                "record_kind": kind,
+                                "claim_id": record["claim_id"],
+                                "mention": copy.deepcopy(record["mention"]),
+                                "candidate_entity": copy.deepcopy(
+                                    record["candidate_entity"]
+                                ),
+                                "confidence": record["confidence"],
+                                "provenance": copy.deepcopy(
+                                    record.get("provenance", {})
+                                ),
+                                "knowledge": copy.deepcopy(
+                                    record.get("knowledge", {})
+                                ),
+                            }
+                        )
+                    elif kind == "accepted":
+                        item: dict[str, Any] = {
+                            "record_kind": kind,
+                            "decision_id": record["decision_id"],
+                            "link_id": record.get("link_id"),
+                            "mention": copy.deepcopy(record["mention"]),
+                            "candidate_entity": copy.deepcopy(
+                                record["candidate_entity"]
+                            ),
+                            "relationship": record["relationship"],
+                            "actor": record["actor"],
+                            "reason_code": record["reason_code"],
+                            "time": record["time"],
+                            "cycle": record["cycle"],
+                            "source_evidence": copy.deepcopy(
+                                record.get("source_evidence", {})
+                            ),
+                            "supersedes": copy.deepcopy(
+                                record.get("supersedes", [])
+                            ),
+                            "status": record["status"],
+                        }
+                        entity_links.append(item)
+            entity_link_history = []
+            for event in sorted(
+                self._store.evidence_events,
+                key=lambda item: int(item.get("revision") or 0),
+            ):
+                if (
+                    event.get("application_id") != application_id
+                    or event.get("kind") != "entity_link_correction"
+                ):
+                    continue
+                payload = event.get("payload")
+                correction = (
+                    payload.get("correction")
+                    if isinstance(payload, dict)
+                    else None
+                )
+                if not isinstance(correction, dict):
+                    raise RuntimeError("entity-link history is unavailable")
+                entity_link_history.append(
+                    {
+                        "evidence_revision": event.get("revision"),
+                        "event_id": event.get("event_id"),
+                        **{
+                            key: copy.deepcopy(correction[key])
+                            for key in (
+                                "correction_id",
+                                "decision_id",
+                                "candidate_claim_id",
+                                "mention_id",
+                                "mention",
+                                "entity_id",
+                                "entity_type",
+                                "label",
+                                "relationship",
+                                "source_evidence",
+                                "decision",
+                                "matcher_id",
+                                "matcher_version",
+                                "knowledge_release_id",
+                                "reason_code",
+                                "actor",
+                                "recorded_at",
+                                "cycle",
+                                "supersedes",
+                            )
+                            if correction.get(key) is not None
+                        },
+                    }
+                )
             return {
                 "schema_version": "s04-application-history/1",
                 "application_id": application_id,
@@ -14505,6 +15343,8 @@ class ControlledScenarioService:
                 "attachment_versions": attachment_versions,
                 "memberships": memberships,
                 "membership_history": membership_history,
+                "entity_links": entity_links,
+                "entity_link_history": entity_link_history,
             }
 
     def _reviewer_application_authority(
@@ -14807,68 +15647,155 @@ class ControlledScenarioService:
         # Integrators may register immutable membership claims. Reviewer
         # decisions enter Evidence only through correct_page_membership().
         admitted_graph = envelope.payload["application"].get("graph")
-        if isinstance(admitted_graph, dict) and isinstance(
-            admitted_graph.get("page_memberships"), list
+        if isinstance(admitted_graph, dict) and (
+            isinstance(admitted_graph.get("page_memberships"), list)
+            or isinstance(admitted_graph.get("entity_links"), list)
         ):
-            claims: list[dict[str, Any]] = []
-            claim_ids: set[str] = set()
-            for record in admitted_graph["page_memberships"]:
-                if not isinstance(record, dict):
-                    return self._rejected("INVALID_CANONICAL_ENVELOPE")
-                if record.get("record_kind") in {"accepted", "unassigned"}:
-                    continue
-                if record.get("record_kind") != "candidate":
-                    return self._rejected("INVALID_CANONICAL_ENVELOPE")
-                page = record.get("page")
-                candidate = record.get("candidate_document")
-                claim_id = record.get("claim_id")
-                source_sha256 = (
-                    page.get("source_sha256") if isinstance(page, dict) else None
-                )
-                attachment_id = (
-                    page.get("attachment_id") if isinstance(page, dict) else None
-                )
-                page_ordinal = (
-                    page.get("page_ordinal") if isinstance(page, dict) else None
-                )
-                document_instance_id = (
-                    candidate.get("document_instance_id")
-                    if isinstance(candidate, dict)
-                    else None
-                )
-                document_role = (
-                    candidate.get("document_role")
-                    if isinstance(candidate, dict)
-                    else None
-                )
-                if (
-                    not isinstance(claim_id, str)
-                    or not claim_id
-                    or claim_id in claim_ids
-                    or not isinstance(attachment_id, str)
-                    or not attachment_id
-                    or not isinstance(source_sha256, str)
-                    or len(source_sha256) != 64
-                    or any(
-                        character not in "0123456789abcdef"
-                        for character in source_sha256
-                    )
-                    or isinstance(page_ordinal, bool)
-                    or not isinstance(page_ordinal, int)
-                    or page_ordinal < 1
-                    or not isinstance(document_instance_id, str)
-                    or not document_instance_id
-                    or not isinstance(document_role, str)
-                    or not document_role
-                    or not isinstance(record.get("provenance"), dict)
-                ):
-                    return self._rejected("INVALID_CANONICAL_ENVELOPE")
-                claim_ids.add(claim_id)
-                normalized_claim = copy.deepcopy(record)
-                normalized_claim["application_id"] = app_id
-                claims.append(normalized_claim)
             normalized_graph = copy.deepcopy(admitted_graph)
-            normalized_graph["page_memberships"] = claims
+            if isinstance(admitted_graph.get("page_memberships"), list):
+                claims: list[dict[str, Any]] = []
+                claim_ids: set[str] = set()
+                for record in admitted_graph["page_memberships"]:
+                    if not isinstance(record, dict):
+                        return self._rejected("INVALID_CANONICAL_ENVELOPE")
+                    if record.get("record_kind") in {"accepted", "unassigned"}:
+                        continue
+                    if record.get("record_kind") != "candidate":
+                        return self._rejected("INVALID_CANONICAL_ENVELOPE")
+                    page = record.get("page")
+                    candidate = record.get("candidate_document")
+                    claim_id = record.get("claim_id")
+                    source_sha256 = (
+                        page.get("source_sha256") if isinstance(page, dict) else None
+                    )
+                    attachment_id = (
+                        page.get("attachment_id") if isinstance(page, dict) else None
+                    )
+                    page_ordinal = (
+                        page.get("page_ordinal") if isinstance(page, dict) else None
+                    )
+                    document_instance_id = (
+                        candidate.get("document_instance_id")
+                        if isinstance(candidate, dict)
+                        else None
+                    )
+                    document_role = (
+                        candidate.get("document_role")
+                        if isinstance(candidate, dict)
+                        else None
+                    )
+                    if (
+                        not isinstance(claim_id, str)
+                        or not claim_id
+                        or claim_id in claim_ids
+                        or not isinstance(attachment_id, str)
+                        or not attachment_id
+                        or not isinstance(source_sha256, str)
+                        or len(source_sha256) != 64
+                        or any(
+                            character not in "0123456789abcdef"
+                            for character in source_sha256
+                        )
+                        or isinstance(page_ordinal, bool)
+                        or not isinstance(page_ordinal, int)
+                        or page_ordinal < 1
+                        or not isinstance(document_instance_id, str)
+                        or not document_instance_id
+                        or not isinstance(document_role, str)
+                        or not document_role
+                        or not isinstance(record.get("provenance"), dict)
+                    ):
+                        return self._rejected("INVALID_CANONICAL_ENVELOPE")
+                    claim_ids.add(claim_id)
+                    normalized_claim = copy.deepcopy(record)
+                    normalized_claim["application_id"] = app_id
+                    claims.append(normalized_claim)
+                normalized_graph["page_memberships"] = claims
+            # Integrators may register immutable application-local entity-link
+            # candidate claims. Reviewer decisions enter Evidence only through
+            # correct_entity_link().  Every candidate binds its mention, the
+            # proposed entity, confidence, matcher provenance and the frozen
+            # knowledge-release conflict/same-as facts.
+            if isinstance(admitted_graph.get("entity_links"), list):
+                entity_claims: list[dict[str, Any]] = []
+                entity_claim_ids: set[str] = set()
+                for record in admitted_graph["entity_links"]:
+                    if not isinstance(record, dict):
+                        return self._rejected("INVALID_CANONICAL_ENVELOPE")
+                    if record.get("record_kind") == "accepted":
+                        continue
+                    if record.get("record_kind") != "candidate":
+                        return self._rejected("INVALID_CANONICAL_ENVELOPE")
+                    claim_id = record.get("claim_id")
+                    mention = record.get("mention")
+                    candidate_entity = record.get("candidate_entity")
+                    confidence = record.get("confidence")
+                    provenance = record.get("provenance")
+                    knowledge = record.get("knowledge")
+                    mention_keys = {
+                        "mention_id",
+                        "entity_type",
+                        "document_id",
+                        "document_role",
+                        "field",
+                        "raw",
+                    }
+                    if (
+                        not isinstance(claim_id, str)
+                        or not claim_id
+                        or claim_id in entity_claim_ids
+                        or not isinstance(mention, dict)
+                        or set(mention) != mention_keys
+                        or any(
+                            not isinstance(mention.get(key), str) or not mention[key]
+                            for key in (
+                                "mention_id",
+                                "entity_type",
+                                "document_id",
+                                "document_role",
+                                "field",
+                                "raw",
+                            )
+                        )
+                        or not isinstance(candidate_entity, dict)
+                        or set(candidate_entity)
+                        != {"entity_id", "entity_type", "label"}
+                        or any(
+                            not isinstance(candidate_entity.get(key), str)
+                            or not candidate_entity[key]
+                            for key in ("entity_id", "entity_type", "label")
+                        )
+                        or isinstance(confidence, bool)
+                        or not isinstance(confidence, (int, float))
+                        or not (0.0 <= float(confidence) <= 1.0)
+                        or not isinstance(provenance, dict)
+                        or any(
+                            not isinstance(provenance.get(key), str)
+                            or not provenance[key]
+                            for key in (
+                                "matcher_id",
+                                "matcher_version",
+                                "knowledge_release_id",
+                            )
+                        )
+                        or not isinstance(knowledge, dict)
+                        or not isinstance(knowledge.get("same_as"), list)
+                        or not isinstance(knowledge.get("conflict_with"), list)
+                        or any(
+                            not isinstance(item, str) or not item
+                            for item in knowledge.get("same_as", [])
+                        )
+                        or any(
+                            not isinstance(item, str) or not item
+                            for item in knowledge.get("conflict_with", [])
+                        )
+                    ):
+                        return self._rejected("INVALID_CANONICAL_ENVELOPE")
+                    entity_claim_ids.add(claim_id)
+                    normalized_claim = copy.deepcopy(record)
+                    normalized_claim["application_id"] = app_id
+                    entity_claims.append(normalized_claim)
+                normalized_graph["entity_links"] = entity_claims
             admitted_evidence["graph"] = normalized_graph
         admitted_evidence_bytes = json.dumps(
             admitted_evidence,
@@ -15999,6 +16926,7 @@ class ControlledScenarioService:
                 "admitted_snapshot",
                 "field_correction",
                 "membership_correction",
+                "entity_link_correction",
                 "supplement_attachment_version",
             }
         ]
@@ -16012,6 +16940,7 @@ class ControlledScenarioService:
             "s04-corrected-evidence/1",
             "s06-supplement-evidence/1",
             "s10-corrected-evidence/1",
+            "s11-corrected-evidence/1",
         }:
             raise RuntimeError("admitted evidence authority is invalid")
         evidence = payload.get("evidence")
@@ -16042,6 +16971,7 @@ class ControlledScenarioService:
                 "admitted_snapshot",
                 "field_correction",
                 "membership_correction",
+                "entity_link_correction",
                 "supplement_attachment_version",
             }
         ]
@@ -16064,6 +16994,7 @@ class ControlledScenarioService:
                 "admitted_snapshot",
                 "field_correction",
                 "membership_correction",
+                "entity_link_correction",
                 "supplement_attachment_version",
             }
         ]
@@ -16492,6 +17423,353 @@ class ControlledScenarioService:
                 page["finding_id"] = next(iter(predecessor_finding_ids))
         return [pages[key] for key in sorted(pages)]
 
+    @staticmethod
+    def _effective_entity_links(
+        links: Any,
+    ) -> dict[str, dict[str, Any]]:
+        """Compute each ledger mention's current effective link decision from
+        the append-only entity-link records.
+
+        Only explicit accepted facts can select a mention: an ``accepted``
+        record with status ``active`` selects one entity and relationship.
+        Conflict among active accepted decisions makes the mention ambiguous.
+        Presence of candidate claims without any active decision leaves the
+        mention unresolved, ambiguous, or conflicting when the frozen
+        knowledge release marks coexisting candidates ``conflict_with`` each
+        other (alias cycle / no-brand-collapse).  Candidate confidence, order,
+        count, majority, alias projection and last write never select a
+        winner."""
+        if not isinstance(links, list):
+            return {}
+        by_mention: dict[str, dict[str, Any]] = {}
+        for record in links:
+            if not isinstance(record, dict):
+                continue
+            mention = record.get("mention")
+            mention_id = (
+                mention.get("mention_id") if isinstance(mention, dict) else None
+            )
+            if not isinstance(mention_id, str) or not mention_id:
+                continue
+            entry = by_mention.setdefault(
+                mention_id, {"candidates": [], "decisions": []}
+            )
+            kind = record.get("record_kind")
+            if kind == "candidate":
+                entry["candidates"].append(record)
+            elif kind == "accepted":
+                entry["decisions"].append(record)
+        out: dict[str, dict[str, Any]] = {}
+        for mention_id, entry in by_mention.items():
+            if not entry["candidates"]:
+                continue
+            active = [
+                decision
+                for decision in entry["decisions"]
+                if decision.get("status") == "active"
+            ]
+            accepted = [
+                decision
+                for decision in active
+                if decision.get("record_kind") == "accepted"
+            ]
+            if accepted:
+                selections = {
+                    (
+                        decision.get("candidate_entity", {}).get("entity_id")
+                        if isinstance(decision.get("candidate_entity"), dict)
+                        else None,
+                        decision.get("relationship"),
+                    )
+                    for decision in accepted
+                    if isinstance(decision.get("candidate_entity"), dict)
+                    and isinstance(
+                        decision["candidate_entity"].get("entity_id"), str
+                    )
+                    and decision["candidate_entity"]["entity_id"]
+                    and isinstance(decision.get("relationship"), str)
+                    and decision["relationship"]
+                }
+                if len(selections) == 1:
+                    entity_id, relationship = next(iter(selections))
+                    out[mention_id] = {
+                        "kind": "selected",
+                        "entity_id": entity_id,
+                        "relationship": relationship,
+                    }
+                else:
+                    out[mention_id] = {"kind": "ambiguous"}
+            elif len(entry["candidates"]) > 1:
+                conflict = any(
+                    any(
+                        other.get("candidate_entity", {}).get("entity_id")
+                        in candidate.get("knowledge", {}).get(
+                            "conflict_with", []
+                        )
+                        for other in entry["candidates"]
+                        if other is not candidate
+                        and isinstance(other.get("candidate_entity"), dict)
+                    )
+                    for candidate in entry["candidates"]
+                    if isinstance(candidate.get("candidate_entity"), dict)
+                    and isinstance(candidate.get("knowledge"), dict)
+                )
+                out[mention_id] = {
+                    "kind": "conflict" if conflict else "ambiguous"
+                }
+            else:
+                out[mention_id] = {"kind": "unresolved"}
+        return out
+
+    @classmethod
+    def _entity_link_low_confidence(
+        cls, candidates: list[dict[str, Any]]
+    ) -> bool:
+        """Every coexisting candidate below the confidence threshold is
+        low-confidence evidence: reviewable, never auto-linked."""
+        return bool(candidates) and all(
+            isinstance(candidate.get("confidence"), (int, float))
+            and candidate["confidence"] < cls._ENTITY_LINK_CONFIDENCE_THRESHOLD
+            for candidate in candidates
+        )
+
+    def _entity_link_findings(
+        self, app: dict[str, Any], run_spec: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Surface unresolved, ambiguous and conflicting entity mentions as
+        mandatory review blockers.  Selected mentions are not blockers.  Every
+        coexisting candidate claim with its confidence, matcher provenance and
+        frozen knowledge facts stays visible for the Reviewer; low-confidence
+        mentions are flagged explicitly and never auto-link."""
+        graph = self._admitted_graph(app)
+        links = graph.get("entity_links") if isinstance(graph, dict) else None
+        if not links:
+            return []
+        effective = self._effective_entity_links(links)
+        source_evidence = self._current_evidence_reference(app)
+        run_id = run_spec["run_id"]
+        findings: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for record in links:
+            if (
+                not isinstance(record, dict)
+                or record.get("record_kind") != "candidate"
+            ):
+                continue
+            mention = record.get("mention")
+            mention_id = (
+                mention.get("mention_id") if isinstance(mention, dict) else None
+            )
+            if (
+                not isinstance(mention_id, str)
+                or not mention_id
+                or mention_id in seen
+            ):
+                continue
+            state = effective.get(mention_id)
+            if state is None or state.get("kind") == "selected":
+                continue
+            seen.add(mention_id)
+            candidates = []
+            for item in links:
+                if (
+                    not isinstance(item, dict)
+                    or item.get("record_kind") != "candidate"
+                    or not isinstance(item.get("mention"), dict)
+                    or item["mention"].get("mention_id") != mention_id
+                ):
+                    continue
+                candidate_entity = item.get("candidate_entity")
+                provenance = item.get("provenance")
+                knowledge = item.get("knowledge")
+                candidates.append(
+                    {
+                        "claim_id": item.get("claim_id"),
+                        "entity_id": (
+                            candidate_entity.get("entity_id")
+                            if isinstance(candidate_entity, dict)
+                            else None
+                        ),
+                        "entity_type": (
+                            candidate_entity.get("entity_type")
+                            if isinstance(candidate_entity, dict)
+                            else None
+                        ),
+                        "label": (
+                            candidate_entity.get("label")
+                            if isinstance(candidate_entity, dict)
+                            else None
+                        ),
+                        "confidence": item.get("confidence"),
+                        "provenance": copy.deepcopy(
+                            provenance if isinstance(provenance, dict) else {}
+                        ),
+                        "knowledge": copy.deepcopy(
+                            knowledge if isinstance(knowledge, dict) else {}
+                        ),
+                    }
+                )
+            rule_id = {
+                "unresolved": "ENTITY_LINK_UNRESOLVED",
+                "ambiguous": "ENTITY_LINK_AMBIGUOUS",
+                "conflict": "ENTITY_LINK_CONFLICT",
+            }[state["kind"]]
+            finding_id = self._stable_id(
+                "finding", f"{run_id}:{rule_id}:{mention_id}"
+            )
+            findings.append(
+                {
+                    "finding_id": finding_id,
+                    "application_id": app["application_id"],
+                    "run_id": run_id,
+                    "rule_id": rule_id,
+                    "verdict": "uncertain",
+                    "severity": "critical",
+                    "reason_code": rule_id,
+                    "mandatory": True,
+                    "entity_link": {
+                        "mention_id": mention_id,
+                        "mention": copy.deepcopy(mention),
+                        "state": state["kind"],
+                        "candidates": candidates,
+                        "active_decision_ids": sorted(
+                            decision.get("decision_id")
+                            for decision in links
+                            if isinstance(decision, dict)
+                            and decision.get("record_kind") == "accepted"
+                            and decision.get("status") == "active"
+                            and isinstance(decision.get("mention"), dict)
+                            and decision["mention"].get("mention_id")
+                            == mention_id
+                            and isinstance(decision.get("decision_id"), str)
+                        ),
+                        "source_evidence": copy.deepcopy(source_evidence),
+                        "low_confidence": self._entity_link_low_confidence(
+                            candidates
+                        ),
+                    },
+                    # Entity-link blockers reference mention/entity identity,
+                    # not field observations, so they carry no S01 evidence
+                    # links; the coexisting candidates/provenance travel on
+                    # the ``entity_link`` projection.
+                    "evidence_links": [],
+                }
+            )
+        return findings
+
+    def _workspace_entity_link_ledger(
+        self,
+        app: dict[str, Any],
+        findings: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        links = self._admitted_graph(app).get("entity_links")
+        if not isinstance(links, list):
+            return []
+        effective = self._effective_entity_links(links)
+        source_evidence = self._current_evidence_reference(app)
+        finding_ids = {
+            finding["entity_link"].get("mention_id"): finding.get("finding_id")
+            for finding in findings
+            if isinstance(finding.get("entity_link"), dict)
+        }
+        mentions: dict[str, dict[str, Any]] = {}
+        for record in links:
+            if (
+                not isinstance(record, dict)
+                or not isinstance(record.get("mention"), dict)
+            ):
+                continue
+            mention = record["mention"]
+            mention_id = mention.get("mention_id")
+            if not isinstance(mention_id, str) or not mention_id:
+                continue
+            item = mentions.setdefault(
+                mention_id,
+                {
+                    "mention_id": mention_id,
+                    "mention": copy.deepcopy(mention),
+                    "state": (effective.get(mention_id) or {}).get(
+                        "kind", "unresolved"
+                    ),
+                    "finding_id": finding_ids.get(mention_id),
+                    "active_decision_ids": [],
+                    "source_evidence": copy.deepcopy(source_evidence),
+                    "candidates": [],
+                    "decisions": [],
+                    "low_confidence": False,
+                },
+            )
+            if record.get("record_kind") == "candidate":
+                candidate_entity = record.get("candidate_entity") or {}
+                provenance = record.get("provenance") or {}
+                knowledge = record.get("knowledge") or {}
+                item["candidates"].append(
+                    {
+                        "claim_id": record.get("claim_id"),
+                        "entity_id": candidate_entity.get("entity_id"),
+                        "entity_type": candidate_entity.get("entity_type"),
+                        "label": candidate_entity.get("label"),
+                        "confidence": record.get("confidence"),
+                        "provenance": copy.deepcopy(provenance),
+                        "knowledge": copy.deepcopy(knowledge),
+                    }
+                )
+            elif record.get("record_kind") == "accepted":
+                item["decisions"].append(
+                    {
+                        key: copy.deepcopy(record.get(key))
+                        for key in (
+                            "record_kind",
+                            "decision_id",
+                            "link_id",
+                            "finding_id",
+                            "candidate_entity",
+                            "relationship",
+                            "actor",
+                            "reason_code",
+                            "time",
+                            "cycle",
+                            "source_evidence",
+                            "supersedes",
+                            "status",
+                        )
+                    }
+                )
+        for mention in mentions.values():
+            mention["candidates"].sort(
+                key=lambda item: str(item.get("claim_id") or "")
+            )
+            mention["decisions"].sort(
+                key=lambda item: (
+                    int(item.get("time") or 0),
+                    str(item.get("decision_id") or ""),
+                )
+            )
+            active = [
+                item
+                for item in mention["decisions"]
+                if item.get("status") == "active"
+                and isinstance(item.get("decision_id"), str)
+            ]
+            mention["active_decision_ids"] = sorted(
+                item["decision_id"] for item in active
+            )
+            mention["low_confidence"] = self._entity_link_low_confidence(
+                mention["candidates"]
+            )
+            predecessor_finding_ids = {
+                item["finding_id"]
+                for item in active
+                if isinstance(item.get("finding_id"), str)
+                and item["finding_id"]
+            }
+            if (
+                mention["finding_id"] is None
+                and len(predecessor_finding_ids) == 1
+            ):
+                mention["finding_id"] = next(iter(predecessor_finding_ids))
+        return [mentions[key] for key in sorted(mentions)]
+
     @classmethod
     def _verified_provenance_entries(
         cls,
@@ -16725,13 +18003,14 @@ class ControlledScenarioService:
         if not evidence or any(not x["document_id"] or not x["document_role"] for x in evidence):
             raise ValueError("evidence requires document IDs and roles")
         application: dict[str, Any] = {"evidence": evidence}
-        # S10: pass through an explicitly declared application-local
-        # page-membership ledger.  Only a fixture that explicitly declares
-        # ``page_memberships`` carries the ledger; a non-membership fixture
-        # stays graph-free and the projection is a no-op for it.
+        # S10/S11: pass through an explicitly declared application-local
+        # page-membership ledger and/or entity-link ledger.  Only a fixture
+        # that explicitly declares one of them carries the graph; a fixture
+        # without either stays graph-free and the projections are no-ops.
         fixture_graph = payload.get("graph")
-        if isinstance(fixture_graph, dict) and isinstance(
-            fixture_graph.get("page_memberships"), list
+        if isinstance(fixture_graph, dict) and (
+            isinstance(fixture_graph.get("page_memberships"), list)
+            or isinstance(fixture_graph.get("entity_links"), list)
         ):
             application["graph"] = copy.deepcopy(fixture_graph)
         return application
@@ -17101,6 +18380,7 @@ class ControlledScenarioService:
                     in {
                         "field_correction",
                         "membership_correction",
+                        "entity_link_correction",
                         "supplement_attachment_version",
                     }
                 ),
@@ -17215,6 +18495,41 @@ class ControlledScenarioService:
                 key=lambda item: (
                     str(item.get("attachment_id") or ""),
                     int(item.get("page_ordinal") or 0),
+                    str(item.get("decision_id") or ""),
+                ),
+            )
+        entity_links = graph.get("entity_links") if isinstance(graph, dict) else None
+        if isinstance(entity_links, list):
+            entity_link_decisions = []
+            for record in entity_links:
+                if (
+                    not isinstance(record, dict)
+                    or record.get("record_kind") != "accepted"
+                    or record.get("status") != "active"
+                    or not isinstance(record.get("mention"), dict)
+                    or not isinstance(record.get("candidate_entity"), dict)
+                    or not isinstance(record.get("source_evidence"), dict)
+                ):
+                    continue
+                mention = record["mention"]
+                candidate_entity = record["candidate_entity"]
+                pin = {
+                    "decision_id": record.get("decision_id"),
+                    "candidate_claim_id": record["source_evidence"].get(
+                        "candidate_claim_id"
+                    ),
+                    "mention_id": mention.get("mention_id"),
+                    "entity_id": candidate_entity.get("entity_id"),
+                    "entity_type": candidate_entity.get("entity_type"),
+                    "label": candidate_entity.get("label"),
+                    "relationship": record.get("relationship"),
+                    "evidence_revision": app["evidence_revision"],
+                }
+                entity_link_decisions.append(pin)
+            snapshot_payload["entity_link_decisions"] = sorted(
+                entity_link_decisions,
+                key=lambda item: (
+                    str(item.get("mention_id") or ""),
                     str(item.get("decision_id") or ""),
                 ),
             )
@@ -18558,6 +19873,11 @@ class ControlledScenarioService:
         # The membership selection is already frozen inside the Evidence
         # snapshot, and any later membership edit fails the CAS fence below.
         findings.extend(self._membership_findings(app, run_spec))
+        # S11: unresolved, ambiguous and conflicting entity mentions surface
+        # as mandatory review blockers; selected mentions do not.  The link
+        # decisions are already frozen inside the Evidence snapshot, and any
+        # later entity-link edit fails the CAS fence below.
+        findings.extend(self._entity_link_findings(app, run_spec))
         route = self.verification_route_for_checks(run_result.checks, findings)
         has_mandatory_blocker = route == "manual_review"
         review_assignee = (
@@ -19285,6 +20605,11 @@ class ControlledScenarioService:
         # facts (never any inferred selection) so the Reviewer can decide.
         if isinstance(finding.get("membership"), dict):
             projection["membership"] = copy.deepcopy(finding["membership"])
+        # S11: entity-link blockers carry their coexisting candidate,
+        # confidence, conflict/provenance and knowledge facts (never any
+        # inferred selection) so the Reviewer can decide.
+        if isinstance(finding.get("entity_link"), dict):
+            projection["entity_link"] = copy.deepcopy(finding["entity_link"])
         return projection
 
     def _mandatory_blocker_projections(
@@ -19406,7 +20731,11 @@ class ControlledScenarioService:
             for event in self._store.audit_events:
                 if (
                     event.get("action")
-                    not in {"evidence_correction", "page_membership_corrected"}
+                    not in {
+                        "evidence_correction",
+                        "page_membership_corrected",
+                        "entity_link_corrected",
+                    }
                     or event.get("result") != "accepted"
                 ):
                     continue

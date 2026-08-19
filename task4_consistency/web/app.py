@@ -1226,6 +1226,81 @@ class S01WorkspaceMembership(BaseModel):
     unassigned: bool = False
 
 
+class S01EntityLinkMention(BaseModel):
+    """The application-local entity mention (S11): which document field the
+    mention was read from and the raw value that needs a link decision."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mention_id: str
+    entity_type: str
+    document_id: str
+    document_role: str
+    field: str
+    raw: str
+
+
+class S01EntityLinkCandidateEntity(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    entity_id: str
+    entity_type: str
+    label: str
+
+
+class S01EntityLinkProvenance(BaseModel):
+    """The matcher and frozen knowledge-release provenance of one candidate
+    claim (S11).  The command must reproduce it exactly; an expired or wrong
+    release metadata pair is rejected with no successor."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    matcher_id: str
+    matcher_version: str
+    knowledge_release_id: str
+    method: str | None = None
+    source_pointer: str | None = None
+
+
+class S01EntityLinkKnowledge(BaseModel):
+    """The frozen knowledge-release facts carried by one candidate claim
+    (S11): same-as projection and explicit not-same-as conflict targets."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    same_as: list[str] = Field(default_factory=list)
+    conflict_with: list[str] = Field(default_factory=list)
+
+
+class S01WorkspaceEntityLinkCandidate(BaseModel):
+    """One immutable coexisting entity-link candidate claim (S11).  No
+    candidate is selected by the authority; the Reviewer decides explicitly."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    claim_id: str
+    entity_id: str
+    entity_type: str
+    label: str
+    confidence: float
+    provenance: S01EntityLinkProvenance
+    knowledge: S01EntityLinkKnowledge
+
+
+class S01WorkspaceEntityLink(BaseModel):
+    """The entity-link blocker projection (S11): the mention identity, its
+    current effective decision state and every coexisting candidate claim
+    with confidence, provenance and frozen knowledge facts."""
+
+    mention_id: str
+    mention: S01EntityLinkMention
+    state: Literal["unresolved", "ambiguous", "conflict"]
+    candidates: list[S01WorkspaceEntityLinkCandidate]
+    active_decision_ids: list[str] = Field(default_factory=list)
+    source_evidence: S01MembershipSourceEvidence
+    low_confidence: bool = False
+
+
 class S01WorkspaceFinding(BaseModel):
     finding_id: str
     run_id: str
@@ -1236,6 +1311,7 @@ class S01WorkspaceFinding(BaseModel):
     mandatory: bool
     evidence_links: list[S01EvidenceLink]
     membership: S01WorkspaceMembership | None = None
+    entity_link: S01WorkspaceEntityLink | None = None
 
 
 class S01BusinessExceptionEligibility(BaseModel):
@@ -1290,6 +1366,34 @@ class S01WorkspaceMembershipPage(BaseModel):
     decisions: list[S01WorkspaceMembershipDecision]
 
 
+class S01WorkspaceEntityLinkDecision(BaseModel):
+    record_kind: Literal["accepted"]
+    decision_id: str
+    link_id: str | None = None
+    finding_id: str | None = None
+    candidate_entity: S01EntityLinkCandidateEntity
+    relationship: str
+    actor: str
+    reason_code: str
+    time: int
+    cycle: int
+    source_evidence: S01MembershipDecisionSourceEvidence
+    supersedes: list[str]
+    status: Literal["active", "superseded"]
+
+
+class S01WorkspaceEntityLinkMentionPage(BaseModel):
+    mention_id: str
+    mention: S01EntityLinkMention
+    state: Literal["unresolved", "ambiguous", "conflict", "selected"]
+    finding_id: str | None = None
+    active_decision_ids: list[str] = Field(default_factory=list)
+    source_evidence: S01MembershipSourceEvidence
+    candidates: list[S01WorkspaceEntityLinkCandidate]
+    decisions: list[S01WorkspaceEntityLinkDecision]
+    low_confidence: bool = False
+
+
 class S01WorkspaceResponse(BaseModel):
     application_id: str
     work_item_id: str
@@ -1309,6 +1413,9 @@ class S01WorkspaceResponse(BaseModel):
     mandatory_blockers: list[S01WorkspaceFinding]
     selected_finding: S01WorkspaceFinding | None = None
     membership_ledger: list[S01WorkspaceMembershipPage] = Field(default_factory=list)
+    entity_link_ledger: list[S01WorkspaceEntityLinkMentionPage] = Field(
+        default_factory=list
+    )
     business_exception_eligibility: S01BusinessExceptionEligibility | None = None
     actions: list[str]
 
@@ -1395,6 +1502,17 @@ class S01HistoryMembershipDecisionPin(BaseModel):
     document_role: str | None = None
 
 
+class S01HistoryEntityLinkDecisionPin(BaseModel):
+    decision_id: str
+    candidate_claim_id: str
+    mention_id: str
+    entity_id: str
+    entity_type: str
+    label: str
+    relationship: str
+    evidence_revision: int
+
+
 class S01HistoryRun(BaseModel):
     run_id: str
     status: str
@@ -1407,6 +1525,9 @@ class S01HistoryRun(BaseModel):
     evidence_snapshot_id: str | None = None
     evidence_snapshot_digest: str | None = None
     membership_decisions: list[S01HistoryMembershipDecisionPin] = Field(
+        default_factory=list
+    )
+    entity_link_decisions: list[S01HistoryEntityLinkDecisionPin] = Field(
         default_factory=list
     )
     evidence_document_instance_ids: list[str] = Field(default_factory=list)
@@ -1446,6 +1567,10 @@ class S01ApplicationHistoryResponse(BaseModel):
     attachment_versions: list[S01HistoryAttachmentVersion]
     memberships: list[S01HistoryMembership] = Field(default_factory=list)
     membership_history: list[S01HistoryMembershipCorrection] = Field(
+        default_factory=list
+    )
+    entity_links: list[S01HistoryEntityLink] = Field(default_factory=list)
+    entity_link_history: list[S01HistoryEntityLinkCorrection] = Field(
         default_factory=list
     )
 
@@ -1494,6 +1619,56 @@ class S01HistoryMembershipCorrection(BaseModel):
     decision: str
     document_instance_id: str | None = None
     document_role: str | None = None
+    reason_code: str
+    actor: str
+    recorded_at: int
+    cycle: int
+    supersedes: list[str] = Field(default_factory=list)
+
+
+class S01HistoryEntityLink(BaseModel):
+    """One append-only ledger record of the preserved entity-link history
+    (S11): candidate claims and every accepted decision with its explicit
+    status."""
+
+    record_kind: str
+    mention: S01EntityLinkMention
+    decision_id: str | None = None
+    link_id: str | None = None
+    candidate_entity: S01EntityLinkCandidateEntity | None = None
+    relationship: str | None = None
+    actor: str | None = None
+    reason_code: str | None = None
+    time: int | None = None
+    cycle: int | None = None
+    source_evidence: S01MembershipDecisionSourceEvidence | None = None
+    supersedes: list[str] = Field(default_factory=list)
+    status: str | None = None
+    claim_id: str | None = None
+    confidence: float | None = None
+    provenance: S01EntityLinkProvenance | None = None
+    knowledge: S01EntityLinkKnowledge | None = None
+
+
+class S01HistoryEntityLinkCorrection(BaseModel):
+    """One chronologically committed entity-link correction (S11)."""
+
+    evidence_revision: int
+    event_id: str
+    correction_id: str
+    decision_id: str
+    candidate_claim_id: str
+    mention_id: str
+    mention: S01EntityLinkMention
+    entity_id: str
+    entity_type: str
+    label: str
+    relationship: str
+    source_evidence: S01MembershipSourceEvidence
+    decision: str
+    matcher_id: str
+    matcher_version: str
+    knowledge_release_id: str
     reason_code: str
     actor: str
     recorded_at: int
@@ -1769,6 +1944,75 @@ class S01MembershipCorrectionResult(BaseModel):
     decision: str
     document_instance_id: str | None = None
     document_role: str | None = None
+    cycle: int
+    invalidated_run_id: str
+    job_id: str
+    phase: str
+    route: str
+    lifecycle_revision: int
+    evidence_revision: int
+
+
+class S01EntityLinkCorrectionBase(BaseModel):
+    """Fields shared by the closed S11 entity-link decision."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["entity-link-correction/1"]
+    finding_id: str = Field(min_length=1, max_length=200, strict=True)
+    candidate_claim_id: str = Field(min_length=1, max_length=200, strict=True)
+    mention_id: str = Field(min_length=1, max_length=200, strict=True)
+    source_evidence: S01MembershipSourceEvidence
+    expected_active_decision_ids: list[str]
+
+
+class S01EntityLinkAccept(S01EntityLinkCorrectionBase):
+    decision: Literal["accept"]
+    entity_id: str = Field(min_length=1, max_length=200, strict=True)
+    entity_type: str = Field(min_length=1, max_length=200, strict=True)
+    label: str = Field(min_length=1, max_length=200, strict=True)
+    relationship: Literal["same_as"]
+    matcher_id: str = Field(min_length=1, max_length=200, strict=True)
+    matcher_version: str = Field(min_length=1, max_length=200, strict=True)
+    knowledge_release_id: str = Field(min_length=1, max_length=200, strict=True)
+    reason_code: Literal[
+        "ENTITY_LINK_SOURCE_VERIFIED",
+        "ENTITY_LINK_SOURCE_MISASSIGNED",
+        "ENTITY_LINK_AMBIGUITY_RESOLVED",
+    ]
+
+
+class S01ReviewEntityLinkBody(S01ReviewFencedBody):
+    """The S11 entity-link command.  ``expected_fence`` is bounded at 1
+    because the domain rejects a fence below 1 as invalid."""
+
+    expected_fence: int = Field(ge=1, strict=True)
+    application_id: str = Field(min_length=1, max_length=200, strict=True)
+    entity_link: Annotated[
+        S01EntityLinkAccept,
+        Field(discriminator="decision"),
+    ]
+
+
+class S01EntityLinkCorrectionResult(BaseModel):
+    """Command acceptance of an entity-link correction.  Acceptance is not
+    proof the successor run is already current; the client must read
+    current-route/history for convergence."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: str
+    replayed: bool
+    application_id: str
+    work_item_id: str
+    correction_id: str
+    entity_link_decision_id: str
+    candidate_claim_id: str
+    mention_id: str
+    entity_id: str
+    entity_type: str
+    label: str
+    relationship: str
     cycle: int
     invalidated_run_id: str
     job_id: str
@@ -4233,6 +4477,60 @@ async def controlled_s10_demo_correct_page_membership(
             expected_context=body.expected_context.model_dump(mode="json"),
             idempotency_key=body.idempotency_key,
             membership=body.membership.model_dump(mode="json", exclude_none=True),
+            now=S01_SESSION_CLOCK(),
+        )
+    except QueryNotFound as error:
+        raise _s03_not_found(error) from error
+    except ValueError as error:
+        raise _s03_invalid_command(error) from error
+    return _s03_command_result(result)
+
+
+@app.post(
+    "/controlled/s01/api/commands/review-work-items/"
+    "{work_item_id}/correct-entity-link",
+    response_model=S01EntityLinkCorrectionResult,
+    response_model_exclude_none=True,
+    responses={
+        404: {"model": S01ErrorResponse},
+        409: {"model": S01ErrorResponse},
+        413: {"model": S01ErrorResponse},
+        422: {"model": S01VerifyErrorResponse},
+        503: {"model": S01ErrorResponse},
+    },
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": _inline_openapi_schema(
+                        S01ReviewEntityLinkBody.model_json_schema()
+                    ),
+                }
+            },
+        },
+    },
+)
+async def controlled_s11_demo_correct_entity_link(
+    work_item_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    _s01_disable_cache(response)
+    principal = _s04_demo_reviewer_principal(request)
+    body = await _s03_command_body(request, S01ReviewEntityLinkBody)
+    assert isinstance(body, S01ReviewEntityLinkBody)
+    try:
+        result = _s01_service().correct_entity_link(
+            principal=principal,
+            application_id=body.application_id,
+            work_item_id=work_item_id,
+            expected_fence=body.expected_fence,
+            expected_context=body.expected_context.model_dump(mode="json"),
+            idempotency_key=body.idempotency_key,
+            entity_link=body.entity_link.model_dump(
+                mode="json", exclude_none=True
+            ),
             now=S01_SESSION_CLOCK(),
         )
     except QueryNotFound as error:

@@ -1,0 +1,235 @@
+{
+  "application_id": "APP-S11-ENTITY-AMBIGUITY",
+  "label": "S11 应用内实体链接歧义/未解析/冲突 一致性 C-DEMO fixture",
+  "meta": {
+    "source": "semi_real_step2",
+    "step2_sample_id": "JFL25P02L080310-01",
+    "step2_file": "JFL25P02L080310-01_page_order.json",
+    "step2_pages": 7,
+    "field_source": "synthetic",
+    "round": 69,
+    "s11_note": "Documents are mutually consistent on checked fields; the only mandatory blockers are entity-link decisions (ambiguous org mention, unresolved low-confidence city mention, and a not_same_as brand conflict). Candidate confidence, matcher provenance and frozen knowledge-release facts are immutable application-local facts; no candidate auto-links."
+  },
+  "documents": [
+    {
+      "doc_id": "reg",
+      "doc_type": "机动车登记证书",
+      "fields": {
+        "vin": { "raw": "LSVAA4182N5000054", "confidence": 0.99 },
+        "engine_no": { "raw": "S2ENG54A", "confidence": 0.99 },
+        "owner_name": { "raw": "半真壬", "confidence": 0.99 },
+        "plate_no": { "raw": "苏A92054", "confidence": 0.99 },
+        "reg_cert_no": { "raw": "RC54", "confidence": 0.99 },
+        "reg_date": { "raw": "2024-12-12", "confidence": 0.99 },
+        "address": { "raw": "江苏省南京市建邺区半真实路54号", "confidence": 0.99 },
+        "brand": { "raw": "比亚迪汽车工业有限公司", "confidence": 0.99 },
+        "model": { "raw": "汉EV", "confidence": 0.99 }
+      }
+    },
+    {
+      "doc_id": "pol",
+      "doc_type": "交强险保单",
+      "fields": {
+        "vin": { "raw": "LSVAA4182N5000054", "confidence": 0.99 },
+        "engine_no": { "raw": "S2ENG54A", "confidence": 0.99 },
+        "insured_name": { "raw": "半真壬", "confidence": 0.99 },
+        "plate_no": { "raw": "苏A92054", "confidence": 0.99 },
+        "plate_list": { "raw": "苏A92054", "confidence": 0.99 },
+        "brand": { "raw": "比亚迪汽车工业有限公司", "confidence": 0.99 },
+        "model": { "raw": "汉EV", "confidence": 0.99 },
+        "insured_org": { "raw": "人保财险", "confidence": 0.99 }
+      }
+    },
+    {
+      "doc_id": "lease",
+      "doc_type": "融资租赁合同",
+      "fields": {
+        "vin": { "raw": "LSVAA4182N5000054", "confidence": 0.99 },
+        "lessee_name": { "raw": "半真壬", "confidence": 0.99 },
+        "id_number": { "raw": "320102199001012016", "confidence": 0.99 },
+        "financed_amount": { "raw": "182000", "confidence": 0.99 },
+        "reg_cert_no": { "raw": "RC54", "confidence": 0.99 },
+        "reg_date": { "raw": "2024-12-12", "confidence": 0.99 },
+        "brand": { "raw": "比亚迪汽车工业有限公司", "confidence": 0.99 },
+        "model": { "raw": "汉EV", "confidence": 0.99 },
+        "city": { "raw": "南京", "confidence": 0.6 }
+      }
+    },
+    {
+      "doc_id": "inv",
+      "doc_type": "发票",
+      "fields": {
+        "vin": { "raw": "LSVAA4182N5000054", "confidence": 0.99 },
+        "engine_no": { "raw": "S2ENG54A", "confidence": 0.99 },
+        "invoice_amount": { "raw": "182000", "confidence": 0.99 },
+        "brand": { "raw": "比亚迪汽车工业有限公司", "confidence": 0.99 },
+        "model": { "raw": "汉EV", "confidence": 0.99 },
+        "brand_short": { "raw": "一汽大众", "confidence": 0.99 }
+      }
+    },
+    {
+      "doc_id": "id",
+      "doc_type": "身份证",
+      "fields": {
+        "id_number": { "raw": "320102199001012016", "confidence": 0.99 },
+        "owner_name": { "raw": "半真壬", "confidence": 0.99 },
+        "address": { "raw": "江苏省南京市建邺区半真实路54号", "confidence": 0.99 }
+      }
+    }
+  ],
+  "graph": {
+    "entity_links": [
+      {
+        "record_kind": "candidate",
+        "claim_id": "s11_claim_org_picc",
+        "application_id": "APP-S11-ENTITY-AMBIGUITY",
+        "mention": {
+          "mention_id": "s11_mention_org_pol",
+          "entity_type": "insurer",
+          "document_id": "pol",
+          "document_role": "交强险保单",
+          "field": "insured_org",
+          "raw": "人保财险"
+        },
+        "candidate_entity": {
+          "entity_id": "org:picc_full",
+          "entity_type": "insurer",
+          "label": "中国人民财产保险股份有限公司"
+        },
+        "confidence": 0.97,
+        "provenance": {
+          "matcher_id": "c-demo-entity-matcher/1",
+          "matcher_version": "1",
+          "knowledge_release_id": "c-demo-entity-knowledge/1",
+          "method": "alias-longest-key",
+          "source_pointer": "/documents/1/fields/insured_org"
+        },
+        "knowledge": {
+          "same_as": ["org:picc"],
+          "conflict_with": []
+        }
+      },
+      {
+        "record_kind": "candidate",
+        "claim_id": "s11_claim_org_pingan",
+        "application_id": "APP-S11-ENTITY-AMBIGUITY",
+        "mention": {
+          "mention_id": "s11_mention_org_pol",
+          "entity_type": "insurer",
+          "document_id": "pol",
+          "document_role": "交强险保单",
+          "field": "insured_org",
+          "raw": "人保财险"
+        },
+        "candidate_entity": {
+          "entity_id": "org:pingan_full",
+          "entity_type": "insurer",
+          "label": "中国平安财产保险股份有限公司"
+        },
+        "confidence": 0.94,
+        "provenance": {
+          "matcher_id": "c-demo-entity-matcher/1",
+          "matcher_version": "1",
+          "knowledge_release_id": "c-demo-entity-knowledge/1",
+          "method": "alias-fuzzy",
+          "source_pointer": "/documents/1/fields/insured_org"
+        },
+        "knowledge": {
+          "same_as": ["org:pingan"],
+          "conflict_with": []
+        }
+      },
+      {
+        "record_kind": "candidate",
+        "claim_id": "s11_claim_city_nanjing",
+        "application_id": "APP-S11-ENTITY-AMBIGUITY",
+        "mention": {
+          "mention_id": "s11_mention_city_lease",
+          "entity_type": "city",
+          "document_id": "lease",
+          "document_role": "融资租赁合同",
+          "field": "city",
+          "raw": "南京"
+        },
+        "candidate_entity": {
+          "entity_id": "addr:nanjing",
+          "entity_type": "city",
+          "label": "南京市"
+        },
+        "confidence": 0.5,
+        "provenance": {
+          "matcher_id": "c-demo-entity-matcher/1",
+          "matcher_version": "1",
+          "knowledge_release_id": "c-demo-entity-knowledge/1",
+          "method": "alias-longest-key",
+          "source_pointer": "/documents/2/fields/city"
+        },
+        "knowledge": {
+          "same_as": [],
+          "conflict_with": []
+        }
+      },
+      {
+        "record_kind": "candidate",
+        "claim_id": "s11_claim_brand_faw",
+        "application_id": "APP-S11-ENTITY-AMBIGUITY",
+        "mention": {
+          "mention_id": "s11_mention_brand_inv",
+          "entity_type": "brand",
+          "document_id": "inv",
+          "document_role": "发票",
+          "field": "brand_short",
+          "raw": "一汽大众"
+        },
+        "candidate_entity": {
+          "entity_id": "brand:faw-vw",
+          "entity_type": "brand",
+          "label": "一汽-大众汽车有限公司"
+        },
+        "confidence": 0.98,
+        "provenance": {
+          "matcher_id": "c-demo-entity-matcher/1",
+          "matcher_version": "1",
+          "knowledge_release_id": "c-demo-entity-knowledge/1",
+          "method": "alias-longest-key",
+          "source_pointer": "/documents/3/fields/brand_short"
+        },
+        "knowledge": {
+          "same_as": [],
+          "conflict_with": ["brand:saic-vw"]
+        }
+      },
+      {
+        "record_kind": "candidate",
+        "claim_id": "s11_claim_brand_saic",
+        "application_id": "APP-S11-ENTITY-AMBIGUITY",
+        "mention": {
+          "mention_id": "s11_mention_brand_inv",
+          "entity_type": "brand",
+          "document_id": "inv",
+          "document_role": "发票",
+          "field": "brand_short",
+          "raw": "一汽大众"
+        },
+        "candidate_entity": {
+          "entity_id": "brand:saic-vw",
+          "entity_type": "brand",
+          "label": "上汽大众汽车有限公司"
+        },
+        "confidence": 0.71,
+        "provenance": {
+          "matcher_id": "c-demo-entity-matcher/1",
+          "matcher_version": "1",
+          "knowledge_release_id": "c-demo-entity-knowledge/1",
+          "method": "alias-fuzzy",
+          "source_pointer": "/documents/3/fields/brand_short"
+        },
+        "knowledge": {
+          "same_as": [],
+          "conflict_with": ["brand:faw-vw"]
+        }
+      }
+    ]
+  },
+  "expected_verdicts": {}
+}
