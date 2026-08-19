@@ -722,6 +722,12 @@ async function runS10Flow(browser, viewport) {
     await expect(reviewer.getByTestId("review-history-memberships")).toContainText(
       "unassigned",
     );
+    await expect(reviewer.getByTestId("review-history-memberships")).toContainText(
+      "active",
+    );
+    await expect(reviewer.getByTestId("review-history-memberships")).toContainText(
+      "superseded",
+    );
     await expect(
       reviewer.getByTestId("review-history-membership-corrections"),
     ).toContainText("MEMBERSHIP_PAGE_UNASSIGNED");
