@@ -2065,6 +2065,7 @@ def test_concurrent_overlapping_activation_has_one_winner_and_no_mixed_projectio
             source_rules_path=bundle / "rules.yaml",
             source_kb_path=bundle / "entity_kb.json",
             corpus_root=CORPUS,
+            lifecycle_snapshot_provider=_empty_impact_snapshot,
         )
 
     first = make()
@@ -2155,6 +2156,10 @@ def test_concurrent_overlapping_activation_has_one_winner_and_no_mixed_projectio
         activation_time=activation_at,
         recovery_release_id=first.query_active(ADMIN)["candidate_id"],
         idempotency_key=f"a-{time.time_ns()}",
+    )
+    assert all(
+        callable(service._lifecycle_snapshot_provider)
+        for service in (first, second)
     )
     first.schedule(
         principal=ADMIN,
