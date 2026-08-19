@@ -2107,7 +2107,21 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     const membershipLive =
       membershipDraft === null ||
       membershipDraft.authorityKey === workspaceAuthorityKey();
-    if (!revealLive || !draftLive || !issuedLive || !membershipLive) {
+    // The open entity-link draft is bound to the same work + workspace
+    // authority: any successful refetch that changes a covered server fact
+    // (context, fence, lease issuance, or entity-link workspace data)
+    // visibly closes the draft so stale candidates, provenance, source
+    // evidence, predecessors and raw mention data never remain visible.
+    const entityLinkLive =
+      entityLinkDraft === null ||
+      entityLinkDraft.authorityKey === workspaceAuthorityKey();
+    if (
+      !revealLive ||
+      !draftLive ||
+      !issuedLive ||
+      !membershipLive ||
+      !entityLinkLive
+    ) {
       invalidateRestricted();
     }
   }, [work.data, workspace.data, workId, owningReadsCurrent]);

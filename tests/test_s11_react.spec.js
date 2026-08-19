@@ -9,6 +9,7 @@
  * identity.
  */
 const { spawn } = require("node:child_process");
+const { once } = require("node:events");
 const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
@@ -27,6 +28,9 @@ const REACT_URL = "/controlled/s01/react";
 const MENTION_ORG = "s11_mention_org_pol";
 const MENTION_CITY = "s11_mention_city_lease";
 const MENTION_BRAND = "s11_mention_brand_inv";
+const STATE_PREFIX = `xiaopeng-task4-s11-react-${process.pid}-`;
+const S02_PREFIX = `xiaopeng-task4-s11-react-s02-${process.pid}-`;
+const FIXTURE_PREFIX = `xiaopeng-task4-s11-react-${process.pid}-fixture-`;
 
 function createS02Fixture() {
   const root = fs.mkdtempSync(
@@ -88,12 +92,47 @@ function reservePort() {
   });
 }
 
-async function startServer(extraEnv = {}) {
+/** Removes exactly this server's owned SQLite state and its -wal/-shm
+ * siblings; every artifact is attempted even if one removal rejects. */
+function cleanupStatePath(statePath) {
+  let firstError;
+  for (const suffix of ["", "-wal", "-shm"]) {
+    try {
+      fs.rmSync(`${statePath}${suffix}`, { force: true });
+    } catch (error) {
+      if (firstError === undefined) firstError = error;
+    }
+  }
+  if (firstError !== undefined) throw firstError;
+}
+
+/** The unique owned artifacts this worker process creates in /tmp: the S11
+ * SQLite state (with siblings), the S02 fixture root, and the runtime
+ * reciprocal fixture root. */
+function listOwnedArtifacts() {
+  const state = fs
+    .readdirSync("/tmp")
+    .filter(
+      (name) => name.startsWith(STATE_PREFIX) && name.includes(".sqlite3"),
+    )
+    .sort();
+  const s02 = fs
+    .readdirSync("/tmp")
+    .filter((name) => name.startsWith(S02_PREFIX))
+    .sort();
+  const fixture = fs
+    .readdirSync("/tmp")
+    .filter((name) => name.startsWith(FIXTURE_PREFIX))
+    .sort();
+  return { state, s02, fixture };
+}
+
+async function startServer({ appTarget, ...extraEnv } = {}) {
   const port = await reservePort();
   const s02Fixture = createS02Fixture();
   const statePath = path.join(
     "/tmp",
-    `xiaopeng-task4-s11-react-${process.pid}-${port}-${Date.now()}.sqlite3`,
+    `${STATE_PREFIX}${port}-${Date.now()}.sqlite3`,
   );
   const output = [];
   const child = spawn(
@@ -101,7 +140,7 @@ async function startServer(extraEnv = {}) {
     [
       "-m",
       "uvicorn",
-      "tests.test_s11_http:create_s11_react_test_app",
+      appTarget ?? "tests.test_s11_http:create_s11_react_test_app",
       "--factory",
       "--host",
       "127.0.0.1",
@@ -143,46 +182,68 @@ async function startServer(extraEnv = {}) {
   child.stderr.on("data", (chunk) => output.push(chunk.toString()));
   const baseURL = `http://127.0.0.1:${port}`;
   const deadline = Date.now() + 30_000;
+  let ready = false;
   while (Date.now() < deadline && child.exitCode === null) {
     try {
-      if ((await fetch(`${baseURL}/api/health`)).ok) break;
+      if ((await fetch(`${baseURL}/api/health`)).ok) {
+        ready = true;
+        break;
+      }
     } catch (_) {
       /* bounded readiness retry */
     }
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  if (child.exitCode !== null) {
-    throw new Error(`S11 React server did not start: ${output.join("")}`);
+  if (ready) {
+    return { baseURL, child, output, statePath, s02Fixture };
   }
-  return { baseURL, child, output, statePath, s02Fixture };
+  // Startup failure fully owns its child and its exact temp state: register
+  // the exit promise before killing, reap the process, then remove the owned
+  // database/-wal/-shm artifacts and the owned S02 root before throwing.
+  const exited = once(child, "exit");
+  if (child.exitCode === null) {
+    child.kill("SIGKILL");
+    await exited;
+  }
+  cleanupStatePath(statePath);
+  try {
+    fs.rmSync(s02Fixture.root, { recursive: true, force: true });
+  } catch (_) {
+    /* best effort */
+  }
+  throw new Error(`S11 React server did not start: ${output.join("")}`);
 }
 
 async function stopServer(server) {
+  const failures = [];
   try {
-    const exited = new Promise((resolve) => server.child.once("exit", resolve));
-    if (server.child.exitCode === null) server.child.kill("SIGTERM");
-    await Promise.race([
-      exited,
-      new Promise((resolve) => setTimeout(resolve, 5000)),
-    ]);
-  } catch (_) {
-    /* best effort */
+    const exited = once(server.child, "exit");
+    if (server.child.exitCode === null) {
+      server.child.kill("SIGTERM");
+      if (
+        (await Promise.race([
+          exited,
+          new Promise((resolve) => setTimeout(resolve, 5_000, "timeout")),
+        ])) === "timeout"
+      ) {
+        server.child.kill("SIGKILL");
+        await exited;
+      }
+    }
+  } catch (error) {
+    failures.push(error);
   }
   try {
-    if (server.child.exitCode === null) server.child.kill("SIGKILL");
-  } catch (_) {
-    /* already gone */
-  }
-  try {
-    fs.rmSync(server.statePath, { force: true });
-  } catch (_) {
-    /* best effort */
+    cleanupStatePath(server.statePath);
+  } catch (error) {
+    failures.push(error);
   }
   try {
     fs.rmSync(server.s02Fixture.root, { recursive: true, force: true });
-  } catch (_) {
-    /* best effort */
+  } catch (error) {
+    failures.push(error);
   }
+  if (failures.length > 0) throw failures[0];
 }
 
 /** Advance the S01 worker explicitly through the test-driver boundary and
@@ -360,6 +421,37 @@ async function settleCleanup(cleanups) {
   if (failures.length > 0) throw failures[0];
 }
 
+/** Runtime-only copy of the S11 fixture with the exact reciprocal same-as
+ * cycle the controlled suite exercises: PICC and Ping An each include the
+ * other's full entity id in their frozen ``same_as`` knowledge.  No fixture
+ * file is committed; the copy lives under the S11-owned temporary root. */
+function createReciprocalFixtureRoot() {
+  const root = fs.mkdtempSync(
+    path.join("/tmp", `xiaopeng-task4-s11-react-${process.pid}-fixture-`),
+  );
+  const payload = JSON.parse(
+    fs.readFileSync(
+      path.join(ROOT, "fixtures", "applications", SCENARIO),
+      "utf8",
+    ),
+  );
+  const links = payload.graph.entity_links;
+  const picc = links.find((record) => record.claim_id === "s11_claim_org_picc");
+  const pingan = links.find(
+    (record) => record.claim_id === "s11_claim_org_pingan",
+  );
+  if (picc === undefined || pingan === undefined) {
+    throw new Error("S11 reciprocal fixture records missing");
+  }
+  picc.knowledge.same_as = ["org:picc", "org:pingan_full"];
+  pingan.knowledge.same_as = ["org:pingan", "org:picc_full"];
+  fs.writeFileSync(
+    path.join(root, SCENARIO),
+    JSON.stringify(payload, null, 2),
+  );
+  return root;
+}
+
 /** Every pane, the form controls, and the history remain inside the active
  * viewport with no horizontal document overflow. */
 async function expectContained(reviewer, testIds) {
@@ -383,6 +475,59 @@ async function expectContained(reviewer, testIds) {
     document: true,
     ...Object.fromEntries(testIds.map((id) => [id, true])),
   });
+}
+
+/** Every rendered candidate row stays inside the viewport and the document
+ * has no horizontal overflow. */
+async function expectCandidateRowsContained(reviewer) {
+  const result = await reviewer.evaluate(() => {
+    const fits = (element) => {
+      const box = element.getBoundingClientRect();
+      return (
+        element.scrollWidth <= element.clientWidth &&
+        box.left >= 0 &&
+        box.right <= window.innerWidth
+      );
+    };
+    const rows = Array.from(
+      document.querySelectorAll('[data-testid="review-entity-link-candidate"]'),
+    );
+    return {
+      document: document.documentElement.scrollWidth <= window.innerWidth,
+      rows: rows.length > 0 && rows.every(fits),
+    };
+  });
+  expect(result).toEqual({ document: true, rows: true });
+}
+
+/** The comparison form controls and the live status region do not overlap
+ * each other at the active viewport. */
+async function expectNoFormStatusOverlap(reviewer) {
+  const noOverlap = await reviewer.evaluate(() => {
+    const elements = Array.from(
+      document.querySelectorAll(
+        '[data-testid="review-entity-link-candidate-select"], ' +
+          '[data-testid="review-entity-link-reason"], ' +
+          '[data-testid="review-entity-link-submit"], ' +
+          '[data-testid="review-command-status"]',
+      ),
+    );
+    const boxes = elements.map((element) => element.getBoundingClientRect());
+    const intersects = (a, b) =>
+      !(
+        a.right <= b.left ||
+        a.left >= b.right ||
+        a.bottom <= b.top ||
+        a.top >= b.bottom
+      );
+    for (let i = 0; i < boxes.length; i += 1) {
+      for (let j = i + 1; j < boxes.length; j += 1) {
+        if (intersects(boxes[i], boxes[j])) return false;
+      }
+    }
+    return true;
+  });
+  expect(noOverlap).toBe(true);
 }
 
 /** The S11 accept command exactly as the production panel serializes it:
@@ -427,7 +572,11 @@ async function runS11Flow(browser, viewport) {
   const resources = {};
   let failure;
   try {
-    resources.server = await startServer();
+    const reciprocalRoot = createReciprocalFixtureRoot();
+    resources.reciprocalRoot = reciprocalRoot;
+    resources.server = await startServer({
+      TASK4_S01_TEST_FIXTURE_ROOT: reciprocalRoot,
+    });
     const server = resources.server;
     resources.reviewerContext = await browser.newContext({
       viewport: { width: viewport.width, height: viewport.height },
@@ -473,12 +622,139 @@ async function runS11Flow(browser, viewport) {
     ).toHaveCount(3);
     await expectContained(reviewer, ["review-entity-link-ledger"]);
 
+    // The runtime reciprocal same-as cycle stays an explicit review blocker:
+    // the real FastAPI workspace and the React ledger show both reciprocal
+    // edges, the ambiguous state, both candidates, and zero active decisions
+    // before any Reviewer action.  The browser performs no auto-link or
+    // cycle collapse.
+    const workspace = await (
+      await reviewer.request.get(
+        `${server.baseURL}/controlled/s01/api/queries/applications/${encodeURIComponent(applicationId)}/workspace`,
+      )
+    ).json();
+    const ambiguous = workspace.mandatory_blockers.find(
+      (candidate) => candidate.rule_id === "ENTITY_LINK_AMBIGUOUS",
+    );
+    const orgLink = ambiguous.entity_link;
+    expect(orgLink.mention_id).toBe(MENTION_ORG);
+    expect(orgLink.state).toBe("ambiguous");
+    expect(orgLink.active_decision_ids).toEqual([]);
+    expect(orgLink.candidates).toHaveLength(2);
+    const byEntityId = Object.fromEntries(
+      orgLink.candidates.map((candidate) => [
+        candidate.entity_id,
+        candidate,
+      ]),
+    );
+    expect(byEntityId["org:picc_full"].knowledge.same_as).toContain(
+      "org:pingan_full",
+    );
+    expect(byEntityId["org:pingan_full"].knowledge.same_as).toContain(
+      "org:picc_full",
+    );
+    await expect(reviewer.getByTestId("review-entity-link-ledger")).toContainText(
+      "org:pingan_full",
+    );
+    await expect(reviewer.getByTestId("review-entity-link-ledger")).toContainText(
+      "org:picc_full",
+    );
+
+    // Cross-application attempt before the first accepted correction: the
+    // command is formed entirely from the live work/workspace DTOs with only
+    // the mention id changed to a foreign mention.  The backend rejects it
+    // with zero route/history effects.
+    const workItem = await (
+      await reviewer.request.get(
+        `${server.baseURL}/controlled/s01/api/queries/review-work-items/${encodeURIComponent(workId)}`,
+      )
+    ).json();
+    const crossCandidate = orgLink.candidates[0];
+    const crossCommand = {
+      application_id: applicationId,
+      expected_fence: workItem.claim_fence,
+      expected_context: workItem.command_context,
+      idempotency_key: "s11-react-cross-app-attempt",
+      entity_link: {
+        schema_version: "entity-link-correction/1",
+        finding_id: ambiguous.finding_id,
+        candidate_claim_id: crossCandidate.claim_id,
+        mention_id: "mention_from_another_application",
+        source_evidence: orgLink.source_evidence,
+        expected_active_decision_ids: orgLink.active_decision_ids,
+        decision: "accept",
+        entity_id: crossCandidate.entity_id,
+        entity_type: crossCandidate.entity_type,
+        label: crossCandidate.label,
+        relationship: "same_as",
+        matcher_id: crossCandidate.provenance.matcher_id,
+        matcher_version: crossCandidate.provenance.matcher_version,
+        knowledge_release_id:
+          crossCandidate.provenance.knowledge_release_id,
+        reason_code: "ENTITY_LINK_SOURCE_VERIFIED",
+      },
+    };
+    const routeBeforeCross = await (
+      await reviewer.request.get(
+        `${server.baseURL}/controlled/s01/api/queries/applications/${encodeURIComponent(applicationId)}/current-route`,
+      )
+    ).json();
+    const historyBeforeCross = await (
+      await reviewer.request.get(
+        `${server.baseURL}/controlled/s01/api/queries/applications/${encodeURIComponent(applicationId)}/history`,
+      )
+    ).json();
+    const cross = await reviewer.request.post(
+      `${server.baseURL}/controlled/s01/api/commands/review-work-items/${encodeURIComponent(workId)}/correct-entity-link`,
+      { data: crossCommand },
+    );
+    expect(cross.status()).toBe(409);
+    expect(await cross.json()).toEqual({
+      detail: {
+        error: "S03_REJECTED",
+        reason_code: "ENTITY_LINK_MENTION_OUTSIDE_APPLICATION",
+      },
+    });
+    const routeAfterCross = await (
+      await reviewer.request.get(
+        `${server.baseURL}/controlled/s01/api/queries/applications/${encodeURIComponent(applicationId)}/current-route`,
+      )
+    ).json();
+    const historyAfterCross = await (
+      await reviewer.request.get(
+        `${server.baseURL}/controlled/s01/api/queries/applications/${encodeURIComponent(applicationId)}/history`,
+      )
+    ).json();
+    expect(routeAfterCross).toEqual(routeBeforeCross);
+    expect(historyAfterCross.entity_link_history).toEqual(
+      historyBeforeCross.entity_link_history,
+    );
+    expect(
+      historyAfterCross.entity_links.filter(
+        (record) => record.record_kind === "accepted",
+      ),
+    ).toHaveLength(0);
+
     // The comparison pane shows the server ambiguous state; the opened draft
     // never preselects a candidate and submit stays disabled.
     await expect(reviewer.getByTestId("review-entity-link")).toBeVisible();
+    await expect(reviewer.getByTestId("review-command-status")).toHaveAttribute(
+      "role",
+      "status",
+    );
+    await expectContained(reviewer, [
+      "review-entity-link",
+      "review-command-status",
+    ]);
+    await expectCandidateRowsContained(reviewer);
     await tabToTestId(reviewer, "review-entity-link-start");
     await reviewer.keyboard.press("Enter");
     await expect(reviewer.getByTestId("review-entity-link-form")).toBeVisible();
+    await expectContained(reviewer, [
+      "review-entity-link",
+      "review-entity-link-form",
+      "review-command-status",
+    ]);
+    await expectNoFormStatusOverlap(reviewer);
     const candidateSelect = reviewer.getByRole("combobox", {
       name: "候选实体",
     });
@@ -491,18 +767,35 @@ async function runS11Flow(browser, viewport) {
     // serialized command.
     await reviewer.route("**/correct-entity-link", (route) => route.abort());
     await tabToTestId(reviewer, "review-entity-link-candidate-select");
+    expect(
+      await reviewer.evaluate(() =>
+        document.activeElement?.matches(":focus-visible"),
+      ),
+    ).toBe(true);
     await selectOptionByKeyboard(reviewer, candidateSelect, "s11_claim_org_picc");
     await selectOptionByKeyboard(
       reviewer,
       reviewer.getByRole("combobox", { name: "原因" }),
       "ENTITY_LINK_AMBIGUITY_RESOLVED",
     );
+    await tabToTestId(reviewer, "review-entity-link-submit");
+    expect(
+      await reviewer.evaluate(() =>
+        document.activeElement?.matches(":focus-visible"),
+      ),
+    ).toBe(true);
     await reviewer.keyboard.press("Enter");
     await expect(reviewer.getByTestId("review-command-status")).toContainText(
       "结果未知：网络未确认，重试将使用同一幂等键",
     );
     await reviewer.unroute("**/correct-entity-link");
     await tabToTestId(reviewer, "retry-button");
+    expect(
+      await reviewer.evaluate(() =>
+        document.activeElement?.matches(":focus-visible"),
+      ),
+    ).toBe(true);
+    await expectContained(reviewer, ["retry-button", "review-command-status"]);
     await reviewer.keyboard.press("Enter");
     await expect(reviewer.getByTestId("review-command-status")).toContainText(
       "实体链接已接受",
@@ -551,6 +844,9 @@ async function runS11Flow(browser, viewport) {
     await expect(
       reviewer.getByTestId("review-correction-converged"),
     ).toContainText("manual_review");
+    await expect(
+      reviewer.getByTestId("review-correction-converged"),
+    ).toHaveAttribute("role", "status");
     await expect(
       reviewer.getByTestId("review-history-run").filter({
         hasText: firstWorker.run_id,
@@ -734,6 +1030,9 @@ async function runS11Flow(browser, viewport) {
     );
     await expect(
       reviewer.getByTestId("review-correction-converged"),
+    ).toHaveAttribute("role", "status");
+    await expect(
+      reviewer.getByTestId("review-correction-converged"),
     ).toContainText(brandWorker.run_id);
     await expect(
       reviewer.getByTestId("review-correction-converged"),
@@ -815,6 +1114,13 @@ async function runS11Flow(browser, viewport) {
         resources.reviewerContext
           ? () => resources.reviewerContext.close()
           : () => Promise.resolve(),
+        resources.reciprocalRoot
+          ? () =>
+              fs.rmSync(resources.reciprocalRoot, {
+                recursive: true,
+                force: true,
+              })
+          : () => Promise.resolve(),
         resources.server ? () => stopServer(resources.server) : () => Promise.resolve(),
       ]);
     } catch (cleanupError) {
@@ -836,5 +1142,14 @@ for (const viewport of VIEWPORTS) {
     },
   );
 }
+
+test("failed server startup cleans every owned artifact", async () => {
+  const before = listOwnedArtifacts();
+  await expect(
+    startServer({ appTarget: "tests.test_s11_http:no_such_s11_app" }),
+  ).rejects.toThrow(/S11 React server did not start/);
+  const after = listOwnedArtifacts();
+  expect(after).toEqual(before);
+});
 
 module.exports.__startServerForDebug = startServer;

@@ -41,14 +41,49 @@ def create_s11_react_test_app() -> Any:
     ``/controlled/s01/api/_test/commands/process`` endpoint would 404.  The
     production browser flow needs that boundary to advance each run
     deterministically while the S01 background runtime stays disabled.
+    When ``TASK4_S01_TEST_FIXTURE_ROOT`` is set (the browser-only reciprocal
+    same-as rehearsal), the S01 service's fixture root is repointed at the
+    runtime copy.  This is test wiring only: no production path, contract
+    byte or backend behavior changes, and the S11 HTTP regressions remain
+    green against the committed fixture.
     """
+    import os
+    import tempfile
+    from pathlib import Path
+
     import task4_consistency.web.app as web
-    from task4_consistency.controlled.s01 import ControlledScenarioTestDriver
-    from task4_consistency.web.app import create_s02_test_app
+    from task4_consistency.controlled.s01 import (
+        ControlledScenarioService,
+        ControlledScenarioTestDriver,
+    )
+    from task4_consistency.web.app import DEFAULT_RULES, create_s02_test_app
 
     app = create_s02_test_app()
     if web.S01_SERVICE is None:
         raise RuntimeError("S02 test app did not configure the S01 service")
+    fixture_value = os.environ.get("TASK4_S01_TEST_FIXTURE_ROOT", "").strip()
+    if fixture_value:
+        # The artifact manifest freezes the scenario digest at construction,
+        # so the runtime fixture root must be selected when the service is
+        # built.  Rebuild the S01 service with the same S02 wiring and the
+        # runtime fixture root; production construction stays untouched.
+        state_value = os.environ.get("TASK4_S02_TEST_STATE_PATH", "").strip()
+        scenario_value = os.environ.get("TASK4_S02_TEST_SCENARIO_ID", "").strip()
+        web.S01_SERVICE = ControlledScenarioService(
+            fixture_root=Path(fixture_value).resolve(),
+            rules_path=DEFAULT_RULES,
+            state_path=(
+                Path(state_value)
+                if state_value and Path(state_value).is_absolute()
+                else Path(tempfile.mkdtemp(prefix="xiaopeng-s11-test-"))
+                / "target.sqlite3"
+            ),
+            worker_identity="s02-test-server-worker",
+            clock=lambda: int(web.S01_SESSION_CLOCK()),
+            registered_sources=web.S02_REGISTERED_SOURCES,
+            controlled_objects=web.S02_CONTROLLED_OBJECTS,
+            scenario_id=scenario_value or "app_r53_bad_engine.json",
+        )
     web.S01_BACKGROUND_ENABLED = False
     web.S01_TEST_DRIVER = ControlledScenarioTestDriver(web.S01_SERVICE)
     return app

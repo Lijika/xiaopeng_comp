@@ -4361,17 +4361,17 @@ describe("ReviewWorkPanel S11 entity-link explicit choice (T13)", () => {
           label: "南京市",
           confidence: 0.5,
           provenance: {
-        matcher_id: "c-demo-entity-matcher/1",
-        matcher_version: "1",
-        knowledge_release_id: "c-demo-entity-knowledge/1",
+            matcher_id: "c-demo-entity-matcher/1",
+            matcher_version: "1",
+            knowledge_release_id: "c-demo-entity-knowledge/1",
             method: "alias-longest-key",
             source_pointer: "/documents/2/fields/city",
-      },
+          },
           knowledge: { same_as: [], conflict_with: [] },
-      },
+        },
       ],
       active_decision_ids: [],
-        source_evidence: S11_SOURCE_EVIDENCE,
+      source_evidence: S11_SOURCE_EVIDENCE,
       low_confidence: true,
     };
     const BRAND_ENTITY_LINK = {
@@ -4393,14 +4393,14 @@ describe("ReviewWorkPanel S11 entity-link explicit choice (T13)", () => {
           label: "一汽-大众汽车有限公司",
           confidence: 0.98,
           provenance: {
-        matcher_id: "c-demo-entity-matcher/1",
-        matcher_version: "1",
-        knowledge_release_id: "c-demo-entity-knowledge/1",
+            matcher_id: "c-demo-entity-matcher/1",
+            matcher_version: "1",
+            knowledge_release_id: "c-demo-entity-knowledge/1",
             method: "alias-longest-key",
             source_pointer: "/documents/3/fields/brand_short",
-      },
+          },
           knowledge: { same_as: [], conflict_with: ["brand:saic-vw"] },
-      },
+        },
         {
           claim_id: "s11_claim_brand_saic",
           entity_id: "brand:saic-vw",
@@ -4408,17 +4408,17 @@ describe("ReviewWorkPanel S11 entity-link explicit choice (T13)", () => {
           label: "上汽大众汽车有限公司",
           confidence: 0.71,
           provenance: {
-        matcher_id: "c-demo-entity-matcher/1",
-        matcher_version: "1",
-        knowledge_release_id: "c-demo-entity-knowledge/1",
+            matcher_id: "c-demo-entity-matcher/1",
+            matcher_version: "1",
+            knowledge_release_id: "c-demo-entity-knowledge/1",
             method: "alias-fuzzy",
             source_pointer: "/documents/3/fields/brand_short",
-      },
+          },
           knowledge: { same_as: [], conflict_with: ["brand:faw-vw"] },
-      },
+        },
       ],
       active_decision_ids: [],
-        source_evidence: S11_SOURCE_EVIDENCE,
+      source_evidence: S11_SOURCE_EVIDENCE,
       low_confidence: false,
     };
     const router = fetchRouter({
@@ -4437,7 +4437,7 @@ describe("ReviewWorkPanel S11 entity-link explicit choice (T13)", () => {
                   mandatory: true,
                   evidence_links: [],
                   entity_link: CITY_ENTITY_LINK,
-      },
+                },
                 {
                   finding_id: S11_FINDING_BRAND,
                   run_id: "run_t02panel",
@@ -4448,7 +4448,7 @@ describe("ReviewWorkPanel S11 entity-link explicit choice (T13)", () => {
                   mandatory: true,
                   evidence_links: [],
                   entity_link: BRAND_ENTITY_LINK,
-      },
+                },
               ],
               selected_finding: {
                 finding_id: S11_FINDING_CITY,
@@ -4460,41 +4460,41 @@ describe("ReviewWorkPanel S11 entity-link explicit choice (T13)", () => {
                 mandatory: true,
                 evidence_links: [],
                 entity_link: CITY_ENTITY_LINK,
-      },
+              },
               entity_link_ledger: [
                 {
-        mention_id: S11_MENTION_ORG,
+                  mention_id: S11_MENTION_ORG,
                   mention: S11_ORG_ENTITY_LINK.mention,
                   state: "ambiguous",
-        finding_id: S11_FINDING_ORG,
+                  finding_id: S11_FINDING_ORG,
                   active_decision_ids: [],
-        source_evidence: S11_SOURCE_EVIDENCE,
+                  source_evidence: S11_SOURCE_EVIDENCE,
                   candidates: S11_ORG_CANDIDATES,
                   decisions: [],
                   low_confidence: false,
-      },
+                },
                 {
                   mention_id: S11_MENTION_CITY,
                   mention: CITY_ENTITY_LINK.mention,
                   state: "unresolved",
                   finding_id: S11_FINDING_CITY,
                   active_decision_ids: [],
-        source_evidence: S11_SOURCE_EVIDENCE,
+                  source_evidence: S11_SOURCE_EVIDENCE,
                   candidates: CITY_ENTITY_LINK.candidates,
                   decisions: [],
                   low_confidence: true,
-      },
+                },
                 {
                   mention_id: S11_MENTION_BRAND,
                   mention: BRAND_ENTITY_LINK.mention,
                   state: "conflict",
                   finding_id: S11_FINDING_BRAND,
                   active_decision_ids: [],
-        source_evidence: S11_SOURCE_EVIDENCE,
+                  source_evidence: S11_SOURCE_EVIDENCE,
                   candidates: BRAND_ENTITY_LINK.candidates,
                   decisions: [],
                   low_confidence: false,
-      },
+                },
               ],
             }),
           ),
@@ -4829,4 +4829,160 @@ describe("ReviewWorkPanel S11 entity-link explicit choice (T13)", () => {
     expect(text).not.toContain("org:picc_full");
     expect(text).not.toContain(APP_ID);
   });
+
+  // The refreshed workspace DTO: the first organization candidate gets a new
+  // opaque claim id, entity id, label and a fully different raw mention, so
+  // the refetched server facts are distinguishable from the original ones.
+  const REFRESHED_MENTION = {
+    ...S11_ORG_ENTITY_LINK.mention,
+    raw: "PICC-REFRESHED",
+  };
+  const REFRESHED_CANDIDATES = [
+    {
+      ...S11_ORG_CANDIDATES[0],
+      claim_id: "s11_claim_org_refreshed",
+      entity_id: "org:refreshed_entity",
+      label: "中国人民财产保险股份有限公司（刷新）",
+    },
+    S11_ORG_CANDIDATES[1],
+  ];
+  const REFRESHED_ORG_ENTITY_LINK = {
+    ...S11_ORG_ENTITY_LINK,
+    mention: REFRESHED_MENTION,
+    candidates: REFRESHED_CANDIDATES,
+    // The refetched workspace also carries fresh server source evidence; the
+    // draft must close on it just like on candidate identity changes.
+    source_evidence: {
+      event_id: "evidence_s11panel_refreshed",
+      evidence_revision: 3,
+    },
+  };
+
+  it.each([
+    [
+      "work authority",
+      MANUAL_WORK_KEY(WORK_ID),
+      (counts: { work: number; workspace: number }) => ({
+        [`GET ${WORK_PATH}`]: () => {
+          counts.work += 1;
+          return jsonResponse(
+            counts.work >= 2
+              ? claimedWorkPayload({
+                  evidence_revision: 2,
+                  command_context: {
+                    ...SUCCESSOR_CONTEXT,
+                    current_context: "6".repeat(64),
+                  },
+                })
+              : claimedWorkPayload({
+                  evidence_revision: 2,
+                  command_context: SUCCESSOR_CONTEXT,
+                }),
+          );
+        },
+      }),
+      undefined,
+    ],
+    [
+      "entity-link workspace facts",
+      WORKSPACE_KEY(APP_ID),
+      (counts: { work: number; workspace: number }) => ({
+        [`GET ${WORKSPACE_PATH}`]: () => {
+          counts.workspace += 1;
+          if (counts.workspace >= 2) {
+            const base = s11EntityLinkWorkspacePayload();
+            return jsonResponse(
+              s11EntityLinkWorkspacePayload({
+                selected_finding: {
+                  ...base.selected_finding,
+                  entity_link: REFRESHED_ORG_ENTITY_LINK,
+                },
+                entity_link_ledger: [
+                  {
+                    ...(base.entity_link_ledger ?? [])[0],
+                    mention: REFRESHED_MENTION,
+                    candidates: REFRESHED_CANDIDATES,
+                  },
+                ],
+              }),
+            );
+          }
+          return jsonResponse(s11EntityLinkWorkspacePayload());
+        },
+      }),
+      () => {
+        // Spec P1: after the refetch the visible comparison carries only the
+        // refreshed DTO — the old candidate identity and old raw mention
+        // disappear before any new draft opens.
+        const pane = screen.getByTestId("review-entity-link");
+        expect(pane).not.toHaveTextContent("人保财险");
+        expect(pane).not.toHaveTextContent("s11_claim_org_picc");
+        expect(pane).not.toHaveTextContent("org:picc_full");
+        expect(pane).toHaveTextContent("PICC-REFRESHED");
+        expect(pane).toHaveTextContent("s11_claim_org_refreshed");
+      },
+    ],
+  ])(
+    "%s authoritative refetch closes the open entity-link draft with zero POSTs and fresh rendering",
+    async (
+      _label,
+      queryKey,
+      buildOverrides,
+      assertFresh: (() => void) | undefined,
+    ) => {
+      const counts = { work: 0, workspace: 0 };
+      const router = fetchRouter({
+        ...s11EntityLinkRoutes(buildOverrides(counts)),
+      });
+      const { client } = renderWithQuery(
+        <ReviewWorkPanel workId={WORK_ID} />,
+      );
+      await waitForReviewReady();
+      await userEvent.click(screen.getByTestId("review-entity-link-start"));
+      await screen.findByTestId("review-entity-link-form");
+      await userEvent.selectOptions(
+        screen.getByRole("combobox", { name: "候选实体" }),
+        "s11_claim_org_pingan",
+      );
+      // A successful authoritative refetch changes the issuing authority;
+      // the open entity-link draft must close with the panel staying healthy
+      // and no POST leaving the browser.
+      await act(async () => {
+        await client.refetchQueries({ queryKey });
+      });
+      await vi.waitFor(() =>
+        expect(
+          screen.queryByTestId("review-entity-link-form"),
+        ).not.toBeInTheDocument(),
+      );
+      expect(screen.queryByTestId("review-error")).not.toBeInTheDocument();
+      expect(
+        router.calls.filter(
+          (call) =>
+            call.method === "POST" && call.url === ENTITY_LINK_PATH,
+        ),
+      ).toHaveLength(0);
+      assertFresh?.();
+      // A freshly opened draft renders only the refreshed DTO and starts
+      // from the disabled empty placeholder.
+      await userEvent.click(screen.getByTestId("review-entity-link-start"));
+      await screen.findByTestId("review-entity-link-form");
+      const candidateSelect = screen.getByRole("combobox", {
+        name: "候选实体",
+      });
+      expect(candidateSelect).toHaveValue("");
+      expect(
+        within(candidateSelect).getByRole("option", {
+          name: "请选择候选实体",
+        }),
+      ).toBeDisabled();
+      expect(screen.getByTestId("review-entity-link-submit")).toBeDisabled();
+      expect(
+        router.calls.filter(
+          (call) =>
+            call.method === "POST" && call.url === ENTITY_LINK_PATH,
+        ),
+      ).toHaveLength(0);
+    },
+  );
 });
