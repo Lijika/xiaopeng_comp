@@ -81,7 +81,10 @@ function reservePort() {
   });
 }
 
-async function startServer(extraEnv = {}) {
+async function startServer(
+  extraEnv = {},
+  appTarget = "task4_consistency.web.app:create_s02_test_app",
+) {
   const port = await reservePort();
   const s02Fixture = createS02Fixture();
   const statePath = path.join(
@@ -94,7 +97,7 @@ async function startServer(extraEnv = {}) {
     [
       "-m",
       "uvicorn",
-      "task4_consistency.web.app:create_s02_test_app",
+      appTarget,
       "--factory",
       "--host",
       "127.0.0.1",
@@ -178,6 +181,31 @@ async function stopServer(server) {
   }
 }
 
+/** Advance the S01 worker explicitly through the test-driver boundary and
+ * refresh the minimized projection so the successor work becomes visible.
+ * The background runtime stays disabled so every run transition is
+ * deterministic and observable from React DOM while queued. */
+async function processNextJob(reviewer, server) {
+  const response = await reviewer.request.post(
+    `${server.baseURL}/controlled/s01/api/_test/commands/process`,
+    {
+      data: {
+        worker_id: "s10-react-driver",
+        now: Math.floor(Date.now() / 1000),
+      },
+    },
+  );
+  expect(response.ok()).toBeTruthy();
+  const result = await response.json();
+  expect(result.status).toBe("complete");
+  const projected = await reviewer.request.post(
+    `${server.baseURL}/controlled/s01/api/_test/commands/project`,
+    { data: {} },
+  );
+  expect(projected.ok()).toBeTruthy();
+  return result;
+}
+
 async function installManualWork(baseURL, reviewer) {
   const admission = await reviewer.request.post(
     `${baseURL}/controlled/s01/api/commands/submit`,
@@ -185,6 +213,7 @@ async function installManualWork(baseURL, reviewer) {
   );
   expect(admission.ok()).toBeTruthy();
   const accepted = await admission.json();
+  await processNextJob(reviewer, { baseURL });
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
     const queue = await reviewer.request.get(
@@ -369,7 +398,9 @@ async function runS10Flow(browser, viewport) {
   const resources = {};
   let failure;
   try {
-    resources.server = await startServer();
+    resources.server = await startServer({
+      TASK4_S01_TEST_BACKGROUND_ENABLED: "0",
+    }, "tests.test_s10_http:create_s10_react_test_app");
     const server = resources.server;
     resources.reviewerContext = await browser.newContext({
       viewport: { width: viewport.width, height: viewport.height },
@@ -461,21 +492,35 @@ async function runS10Flow(browser, viewport) {
       "页归属已接受",
     );
 
-    // Acceptance advances Evidence; the successor run converges through
-    // current-route/history and only then replaces the current run.
-    await expect
-      .poll(
-        async () => {
-          const history = await (
-            await reviewer.request.get(
-              `${server.baseURL}/controlled/s01/api/queries/applications/${encodeURIComponent(applicationId)}/history`,
-            )
-          ).json();
-          return history.runs ? history.runs.length : 0;
-        },
-        { timeout: 15_000, message: "successor run did not complete" },
-      )
-      .toBeGreaterThanOrEqual(2);
+    // Deterministic readiness: the accepted mutation invalidated the S01
+    // reads and the replacement job is still queued.  React DOM carries the
+    // pending Evidence revision and the invalidated route facts.
+    await expect(reviewer.getByTestId("review-correction-pending")).toContainText(
+      "证据修订 2",
+    );
+    await expect(reviewer.getByTestId("gate-phase")).toHaveText("Assembly");
+    await expect(reviewer.getByTestId("gate-route")).toHaveText("pending_check");
+    await expect(reviewer.getByTestId("gate-currentness")).toHaveText(
+      "NO_CURRENT_RUN",
+    );
+    const firstWorker = await processNextJob(reviewer, server);
+    // The explicit worker call creates the successor run; React DOM then
+    // converges on the server-created run id and the fresh current route.
+    await expect(reviewer.getByTestId("review-correction-converged")).toContainText(
+      "证据修订 2",
+    );
+    await expect(
+      reviewer.getByTestId("review-correction-converged"),
+    ).toContainText(firstWorker.run_id);
+    await expect(
+      reviewer.getByTestId("review-correction-converged"),
+    ).toContainText("manual_review");
+    await expect(
+      reviewer.getByTestId("review-history-run").filter({
+        hasText: firstWorker.run_id,
+      }),
+    ).toContainText("当前");
+    await expect(reviewer.getByTestId("gate-route")).toHaveText("manual_review");
 
     const firstHistory = await (
       await reviewer.request.get(
@@ -528,19 +573,32 @@ async function runS10Flow(browser, viewport) {
       "页归属已接受",
     );
 
-    await expect
-      .poll(
-        async () => {
-          const history = await (
-            await reviewer.request.get(
-              `${server.baseURL}/controlled/s01/api/queries/applications/${encodeURIComponent(applicationId)}/history`,
-            )
-          ).json();
-          return history.runs ? history.runs.length : 0;
-        },
-        { timeout: 15_000, message: "superseding run did not complete" },
-      )
-      .toBeGreaterThanOrEqual(3);
+    // Deterministic readiness for the superseding correction: the accepted
+    // mutation invalidated the reads and the successor job is still queued.
+    await expect(reviewer.getByTestId("review-correction-pending")).toContainText(
+      "证据修订 3",
+    );
+    await expect(reviewer.getByTestId("gate-phase")).toHaveText("Assembly");
+    await expect(reviewer.getByTestId("gate-route")).toHaveText("pending_check");
+    await expect(reviewer.getByTestId("gate-currentness")).toHaveText(
+      "NO_CURRENT_RUN",
+    );
+    const supersedingWorker = await processNextJob(reviewer, server);
+    await expect(reviewer.getByTestId("review-correction-converged")).toContainText(
+      "证据修订 3",
+    );
+    await expect(
+      reviewer.getByTestId("review-correction-converged"),
+    ).toContainText(supersedingWorker.run_id);
+    await expect(
+      reviewer.getByTestId("review-correction-converged"),
+    ).toContainText("manual_review");
+    await expect(
+      reviewer.getByTestId("review-history-run").filter({
+        hasText: supersedingWorker.run_id,
+      }),
+    ).toContainText("当前");
+    await expect(reviewer.getByTestId("gate-route")).toHaveText("manual_review");
 
     const supersededHistory = await (
       await reviewer.request.get(
@@ -608,19 +666,32 @@ async function runS10Flow(browser, viewport) {
       "页归属已接受",
     );
 
-    await expect
-      .poll(
-        async () => {
-          const history = await (
-            await reviewer.request.get(
-              `${server.baseURL}/controlled/s01/api/queries/applications/${encodeURIComponent(applicationId)}/history`,
-            )
-          ).json();
-          return history.runs ? history.runs.length : 0;
-        },
-        { timeout: 15_000, message: "final successor run did not complete" },
-      )
-      .toBeGreaterThanOrEqual(4);
+    // Final deterministic readiness: the page-2 unassign advanced Evidence
+    // to revision 4 while the successor job stays queued.
+    await expect(reviewer.getByTestId("review-correction-pending")).toContainText(
+      "证据修订 4",
+    );
+    await expect(reviewer.getByTestId("gate-phase")).toHaveText("Assembly");
+    await expect(reviewer.getByTestId("gate-route")).toHaveText("pending_check");
+    await expect(reviewer.getByTestId("gate-currentness")).toHaveText(
+      "NO_CURRENT_RUN",
+    );
+    const finalWorker = await processNextJob(reviewer, server);
+    await expect(reviewer.getByTestId("review-correction-converged")).toContainText(
+      "证据修订 4",
+    );
+    await expect(
+      reviewer.getByTestId("review-correction-converged"),
+    ).toContainText(finalWorker.run_id);
+    await expect(
+      reviewer.getByTestId("review-correction-converged"),
+    ).toContainText("auto_complete");
+    await expect(
+      reviewer.getByTestId("review-history-run").filter({
+        hasText: finalWorker.run_id,
+      }),
+    ).toContainText("当前");
+    await expect(reviewer.getByTestId("gate-route")).toHaveText("auto_complete");
 
     const history = await (
       await reviewer.request.get(

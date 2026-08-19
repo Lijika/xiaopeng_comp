@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import time
+from typing import Any
 
 from tests.test_s01_http import (
     headers,
@@ -22,6 +23,29 @@ from tests.test_s01_http import (
 S10_SCENARIO = "app_s10_ambiguous_membership.json"
 PAGE1 = "1010101010101010101010101010101010101010101010101010101010101010"
 PAGE2 = "2020202020202020202020202020202020202020202020202020202020202020"
+
+
+def create_s10_react_test_app() -> Any:
+    """The S02 test app plus the explicit S01 worker test driver.
+
+    ``create_s02_test_app`` leaves ``S01_TEST_DRIVER`` unset, so the
+    ``/controlled/s01/api/_test/commands/process`` endpoint would 404.  The
+    production browser flow needs that boundary to advance each run
+    deterministically while the S01 background runtime stays disabled.
+    """
+    import task4_consistency.web.app as web
+    from task4_consistency.controlled.s01 import ControlledScenarioTestDriver
+    from task4_consistency.web.app import create_s02_test_app
+
+    app = create_s02_test_app()
+    if web.S01_SERVICE is None:
+        raise RuntimeError("S02 test app did not configure the S01 service")
+    # The S02 factory wires the S01 background from its own env flag; the
+    # production browser flow needs the background disabled so every worker
+    # transition is driven explicitly through /_test/commands/process.
+    web.S01_BACKGROUND_ENABLED = False
+    web.S01_TEST_DRIVER = ControlledScenarioTestDriver(web.S01_SERVICE)
+    return app
 
 
 def _s10_loopback(state_path: Path):
@@ -488,3 +512,16 @@ def test_membership_http_openapi_contract_is_closed(tmp_path) -> None:
     assert components["S01MembershipCandidateDocument"]["additionalProperties"] is False
     assert components["S01MembershipSourceEvidence"]["additionalProperties"] is False
     assert components["S01MembershipDecisionSourceEvidence"]["additionalProperties"] is False
+    import task4_consistency.web.app as web
+    from task4_consistency.controlled.s01 import ControlledScenarioTestDriver
+    from task4_consistency.web.app import create_s02_test_app
+
+    app = create_s02_test_app()
+    if web.S01_SERVICE is None:
+        raise RuntimeError("S02 test app did not configure the S01 service")
+    # The S02 factory wires the S01 background from its own env flag; the
+    # production browser flow needs the background disabled so every worker
+    # transition is driven explicitly through /_test/commands/process.
+    web.S01_BACKGROUND_ENABLED = False
+    web.S01_TEST_DRIVER = ControlledScenarioTestDriver(web.S01_SERVICE)
+    return app

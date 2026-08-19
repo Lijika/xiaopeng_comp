@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import ReviewWorkPanel from "./ReviewWorkPanel";
 import { MANUAL_WORK_KEY, WORKSPACE_KEY } from "../api/hooks";
+import type { WorkspaceResponse } from "../api/client";
 import {
   fetchRouter,
   renderWithQuery,
@@ -323,13 +324,30 @@ const S10_CANDIDATES = [
   },
 ];
 
+/** The page-1 membership carried by the selected finding, mirroring the
+ * production workspace so the membership pane renders from server facts even
+ * before any draft opens. */
+const S10_FINDING_MEMBERSHIP = {
+  attachment_id: "s10-attachment-1",
+  page_source_sha256: "10".repeat(32),
+  page_ordinal: 1,
+  state: "selected",
+  active_decision_ids: [S10_PREDECESSOR_DECISION_ID],
+  source_evidence: S10_SOURCE_EVIDENCE,
+  candidates: S10_CANDIDATES,
+};
+
 function s10MembershipWorkspacePayload(
   overrides: Record<string, unknown> = {},
-) {
+): WorkspaceResponse {
   return workspacePayload({
     claim_fence: 1,
     claim_expires_at: LIVE_CLAIM_EXPIRES_AT,
     evidence_revision: 2,
+    selected_finding: {
+      ...workspacePayload().selected_finding,
+      membership: S10_FINDING_MEMBERSHIP,
+    },
     membership_ledger: [
       {
         attachment_id: "s10-attachment-1",
@@ -1683,6 +1701,161 @@ describe("ReviewWorkPanel S10 page-membership explicit choice (T10)", () => {
     });
   });
 
+  it.each([
+    [
+      "command_context",
+      MANUAL_WORK_KEY(WORK_ID),
+      (counts: { work: number; workspace: number }) => ({
+        [`GET ${WORK_PATH}`]: () => {
+          counts.work += 1;
+          return jsonResponse(
+            counts.work >= 2
+              ? claimedWorkPayload({
+                  evidence_revision: 2,
+                  command_context: {
+                    ...SUCCESSOR_CONTEXT,
+                    current_context: "8".repeat(64),
+                  },
+                })
+              : claimedWorkPayload({
+                  evidence_revision: 2,
+                  command_context: SUCCESSOR_CONTEXT,
+                }),
+          );
+        },
+      }),
+    ],
+    [
+      "claim fence",
+      MANUAL_WORK_KEY(WORK_ID),
+      (counts: { work: number; workspace: number }) => ({
+        [`GET ${WORK_PATH}`]: () => {
+          counts.work += 1;
+          return jsonResponse(
+            counts.work >= 2
+              ? claimedWorkPayload({
+                  evidence_revision: 2,
+                  command_context: SUCCESSOR_CONTEXT,
+                  claim_fence: 2,
+                })
+              : claimedWorkPayload({
+                  evidence_revision: 2,
+                  command_context: SUCCESSOR_CONTEXT,
+                }),
+          );
+        },
+      }),
+    ],
+    [
+      "claim lease issuance",
+      MANUAL_WORK_KEY(WORK_ID),
+      (counts: { work: number; workspace: number }) => ({
+        [`GET ${WORK_PATH}`]: () => {
+          counts.work += 1;
+          return jsonResponse(
+            counts.work >= 2
+              ? claimedWorkPayload({
+                  evidence_revision: 2,
+                  command_context: SUCCESSOR_CONTEXT,
+                  claim_expires_at: Math.floor(Date.now() / 1000) + 1200,
+                })
+              : claimedWorkPayload({
+                  evidence_revision: 2,
+                  command_context: SUCCESSOR_CONTEXT,
+                }),
+          );
+        },
+      }),
+    ],
+    [
+      "membership workspace facts",
+      WORKSPACE_KEY(APP_ID),
+      (counts: { work: number; workspace: number }) => ({
+        [`GET ${WORKSPACE_PATH}`]: () => {
+          counts.workspace += 1;
+          const base = s10MembershipWorkspacePayload();
+          const changedLedger = base.membership_ledger
+            ? [
+                {
+                  ...base.membership_ledger[0],
+                  candidates: [
+                    {
+                      ...S10_CANDIDATES[0],
+                      claim_id: "s10_claim_a_refetched",
+                    },
+                    ...S10_CANDIDATES.slice(1),
+                  ],
+                },
+                ...base.membership_ledger.slice(1),
+              ]
+            : [];
+          return jsonResponse(
+            counts.workspace >= 2
+              ? s10MembershipWorkspacePayload({
+                  membership_ledger: changedLedger,
+                })
+              : s10MembershipWorkspacePayload(),
+          );
+        },
+      }),
+    ],
+  ])(
+    "%s authoritative refetch closes the open membership draft with zero POSTs",
+    async (_label, queryKey, buildOverrides) => {
+      const counts = { work: 0, workspace: 0 };
+      const router = fetchRouter({
+        ...s10MembershipRoutes(buildOverrides(counts)),
+      });
+      const { client } = renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+      await waitForReviewReady();
+      await userEvent.click(
+        screen.getByRole("button", {
+          name: "选择附件 s10-attachment-1 第 1 页",
+        }),
+      );
+      await screen.findByTestId("review-membership-form");
+      await userEvent.selectOptions(
+        screen.getByRole("combobox", { name: "候选实例" }),
+        "s10::claim_b",
+      );
+      // A successful authoritative refetch changes the issuing authority;
+      // the open draft must close with the panel staying healthy and no POST
+      // leaving the browser.
+      await act(async () => {
+        await client.refetchQueries({ queryKey });
+      });
+      await vi.waitFor(() =>
+        expect(
+          screen.queryByTestId("review-membership-form"),
+        ).not.toBeInTheDocument(),
+      );
+      expect(screen.queryByTestId("review-error")).not.toBeInTheDocument();
+      expect(
+        router.calls.filter(
+          (call) =>
+            call.method === "POST" && call.url === MEMBERSHIP_PATH,
+        ),
+      ).toHaveLength(0);
+      // A freshly opened draft starts from the disabled empty placeholder.
+      await userEvent.click(
+        screen.getByRole("button", {
+          name: "选择附件 s10-attachment-1 第 1 页",
+        }),
+      );
+      await screen.findByTestId("review-membership-form");
+      expect(
+        screen.getByRole("combobox", { name: "候选实例" }),
+      ).toHaveValue("");
+      expect(screen.getByTestId("review-membership-submit")).toBeDisabled();
+      expect(
+        router.calls.filter(
+          (call) =>
+            call.method === "POST" && call.url === MEMBERSHIP_PATH,
+        ),
+      ).toHaveLength(0);
+    },
+  );
+
   it("expiry closes an open membership draft and a renewed claim never reopens it", async () => {
     const nearExpiry = Math.floor(Date.now() / 1000) + 3;
     const renewedExpiry = Math.floor(Date.now() / 1000) + 1800;
@@ -1721,7 +1894,9 @@ describe("ReviewWorkPanel S10 page-membership explicit choice (T10)", () => {
     );
     await screen.findByTestId("review-membership-form");
     // The one expiry clock fires without navigation: the open draft closes
-    // and no membership POST may leave under the expired authority.
+    // and the panel enters the explicit reload-required state with the
+    // membership pane, live status region, and reload note all naming the
+    // expiry. No membership POST may leave under the expired authority.
     await vi.waitFor(
       () =>
         expect(
@@ -1729,17 +1904,30 @@ describe("ReviewWorkPanel S10 page-membership explicit choice (T10)", () => {
         ).not.toBeInTheDocument(),
       { timeout: 8_000 },
     );
-    // The renew action stays available after expiry (canFenced excludes the
-    // expiry clock): authoritative renewal through the public flow must
-    // never resurrect the stale draft.
-    await userEvent.click(screen.getByTestId("renew-button"));
+    expect(screen.getByTestId("review-command-status")).toHaveTextContent(
+      "认领已过期：请重新加载权威上下文后再继续",
+    );
+    expect(screen.getByTestId("review-membership-expired")).toHaveTextContent(
+      "认领已过期，请重新加载权威上下文",
+    );
+    expect(screen.getByTestId("review-reload-note")).toBeVisible();
+    // Expiry is an explicit reload-required boundary: every write control
+    // stays disabled (commandBlocked includes requiresReload) until the
+    // Reviewer activates the public reload action.
+    for (const name of ["认领", "续期", "释放", "提交人工核验"]) {
+      expect(screen.getByRole("button", { name })).toBeDisabled();
+    }
+    await userEvent.click(screen.getByTestId("reload-button"));
     await vi.waitFor(() =>
       expect(
         screen.queryByTestId("review-membership-form"),
       ).not.toBeInTheDocument(),
     );
-    // Opening the draft again after renewal starts from scratch: no stale
-    // claim may reappear in the selector.
+    // The authoritative reload clears the latch; the expired draft stays
+    // closed and a next valid draft starts from the empty placeholder.
+    await vi.waitFor(() =>
+      expect(screen.getByRole("button", { name: "续期" })).toBeEnabled(),
+    );
     await userEvent.click(
       screen.getByRole("button", {
         name: "选择附件 s10-attachment-1 第 1 页",

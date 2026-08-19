@@ -159,12 +159,16 @@ type MembershipTarget = {
   >;
 };
 
-/** The open membership decision draft for one server-owned ledger target. */
+/** The open membership decision draft for one server-owned ledger target.
+ * ``authorityKey`` is the ephemeral serialized work + workspace authority the
+ * draft was issued under; a successful refetch that changes any covered
+ * server fact closes the draft. */
 type MembershipDraft = {
   target: MembershipTarget;
   decision: "accept" | "unassign";
   claimId: string | null;
   reason: MembershipReason;
+  authorityKey: string;
 };
 
 /** One indivisible reveal/correction authorization: application, work,
@@ -336,6 +340,7 @@ function WorkspaceSection({
   work,
   workspace,
   claimed,
+  claimExpired,
   liveTokenKey,
   revealed,
   correctionTarget,
@@ -362,6 +367,7 @@ function WorkspaceSection({
   work: ReviewWorkResponse;
   workspace: UseQueryResult<WorkspaceResponse>;
   claimed: boolean;
+  claimExpired: boolean;
   liveTokenKey: (observationId: string) => string | null;
   revealed: RevealState | null;
   correctionTarget: CorrectionTarget | null;
@@ -579,7 +585,14 @@ function WorkspaceSection({
                 </div>
                 <div className="membership-pane membership-decide">
                   <h5>审核员决定</h5>
-                  {!claimed || controlsDisabled ? (
+                  {claimExpired ? (
+                    <p
+                      className="text-xs text-muted-foreground"
+                      data-testid="review-membership-expired"
+                    >
+                      认领已过期，请重新加载权威上下文
+                    </p>
+                  ) : !claimed || controlsDisabled ? (
                     <p className="text-xs text-muted-foreground">
                       认领后即可决定
                     </p>
@@ -1611,6 +1624,56 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     correct.reset();
   };
 
+  /** Claim expiry is an explicit reload-required boundary: close every
+   * restricted surface (including an open membership draft), latch the
+   * authoritative reload state with the local CLAIM_EXPIRED reason, and
+   * clear any stale rejected-action label.  Only the public reload action
+   * clears the latch. */
+  const expireMembershipAuthority = () => {
+    invalidateRestricted();
+    setRequiresReload(true);
+    setConflictReason("CLAIM_EXPIRED");
+    setRejectedAction(null);
+  };
+
+  /** The serialized work + workspace authority a membership draft binds to.
+   * Returns null unless the work item is claimed, its lease is live, and the
+   * work and workspace owning reads are successful.  The plain serialized
+   * tuple covers work identity/authority, workspace identity/authority, and
+   * the membership projections this panel renders (selected-finding
+   * membership, membership-bearing mandatory blockers, and the membership
+   * ledger). */
+  const membershipAuthorityKey = (): string | null => {
+    if (work.data === undefined || work.data.status !== "claimed") return null;
+    if (Date.now() / 1000 >= work.data.claim_expires_at) return null;
+    if (workspace.data === undefined || !work.isSuccess || !workspace.isSuccess) {
+      return null;
+    }
+    const w = work.data;
+    const s = workspace.data;
+    const membershipBlockers = (s.mandatory_blockers ?? [])
+      .filter((blocker) => blocker.membership != null)
+      .map((blocker) => blocker.membership);
+    return JSON.stringify([
+      w.application_id,
+      w.work_item_id,
+      w.command_context,
+      w.evidence_revision,
+      w.lifecycle_revision,
+      w.claim_fence,
+      w.claim_expires_at,
+      s.application_id,
+      s.work_item_id,
+      s.claim_fence,
+      s.claim_expires_at,
+      s.evidence_revision,
+      s.lifecycle_revision,
+      s.selected_finding?.membership ?? null,
+      membershipBlockers,
+      s.membership_ledger ?? [],
+    ]);
+  };
+
   // Unmount boundary: drop every restricted payload with the panel and clear
   // the restricted mutations from the MutationCache.  The mutation objects
   // are captured through refs because their identity changes on state
@@ -1669,10 +1732,17 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
       issuedRef.current === null ||
       issuedRef.current.tokenKey ===
         liveTokenKey(issuedRef.current.observationId);
-    if (!revealLive || !draftLive || !issuedLive) {
+    // The open membership draft is bound to the exact work + workspace
+    // authority it was issued under: any successful refetch that changes a
+    // covered server fact (context, fence, lease issuance, or membership
+    // workspace data) visibly closes the draft.
+    const membershipLive =
+      membershipDraft === null ||
+      membershipDraft.authorityKey === membershipAuthorityKey();
+    if (!revealLive || !draftLive || !issuedLive || !membershipLive) {
       invalidateRestricted();
     }
-  }, [work.data, workId, owningReadsCurrent]);
+  }, [work.data, workspace.data, workId, owningReadsCurrent]);
 
   // One expiry clock: the restricted authorization dies at claim expiry
   // without navigation, and any response arriving after that is discarded
@@ -1681,10 +1751,10 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     if (work.data === undefined || work.data.status !== "claimed") return;
     const delayMs = work.data.claim_expires_at * 1000 - Date.now();
     if (delayMs <= 0) {
-      invalidateRestricted();
+      expireMembershipAuthority();
       return;
     }
-    const timer = setTimeout(() => invalidateRestricted(), delayMs);
+    const timer = setTimeout(() => expireMembershipAuthority(), delayMs);
     return () => clearTimeout(timer);
     // The timer is bound to the authoritative work item data; the scrub
     // closure is recreated each render and stays pure.
@@ -2106,6 +2176,8 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
    * the page, with a registered reason.  The draft is the server-owned finding
    * data only; eligibility comes exclusively from explicit accepted facts. */
   const handleStartMembership = (target: MembershipTarget) => {
+    const authorityKey = membershipAuthorityKey();
+    if (authorityKey === null) return;
     setMembershipDraft({
       target,
       decision: "accept",
@@ -2113,6 +2185,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
       // or any heuristic: the Reviewer must explicitly choose one claim.
       claimId: null,
       reason: "MEMBERSHIP_SOURCE_VERIFIED",
+      authorityKey,
     });
     setMembershipKey(newIdempotencyKey());
     setLastAccepted(null);
@@ -2146,12 +2219,18 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     if (requiresReload || work.isError || !owningReadsCurrent) return;
     if (membershipDraft === null) return;
     // Event-time authority check: the draft is only valid while the rendered
-    // work item is claimed and unexpired.  Expired or invalidated authority
-    // clears the draft and sends no POST.
+    // work item is claimed and unexpired.  Expired authority enters the
+    // explicit reload-required state; a missing or changed authority key
+    // closes the draft.  Either way no POST leaves the browser.
     if (
       work.data.status !== "claimed" ||
       Date.now() / 1000 >= work.data.claim_expires_at
     ) {
+      expireMembershipAuthority();
+      return;
+    }
+    const liveKey = membershipAuthorityKey();
+    if (liveKey === null || liveKey !== membershipDraft.authorityKey) {
       setMembershipDraft(null);
       return;
     }
@@ -2389,6 +2468,8 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     rejectedAction !== null
   ) {
     statusText = `${ACTION_LABELS[rejectedAction]}未接受（${conflictReason}）：请重新加载权威上下文后再试`;
+  } else if (requiresReload && conflictReason === "CLAIM_EXPIRED") {
+    statusText = "认领已过期：请重新加载权威上下文后再继续";
   } else if (transportUnknown) {
     statusText = "结果未知：网络未确认，重试将使用同一幂等键";
   } else if (lastAccepted !== null) {
@@ -2606,6 +2687,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
         work={data}
         workspace={workspace}
         claimed={claimed && !acceptedEvidenceFlow}
+        claimExpired={claimExpired}
         liveTokenKey={liveTokenKey}
         revealed={revealed}
         correctionTarget={correctionTarget}
