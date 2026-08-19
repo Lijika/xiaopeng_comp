@@ -17,6 +17,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from task4_consistency.controlled.s01 import (
     AdmissionDisposition,
@@ -300,6 +301,106 @@ def test_entity_link_successor_requires_fresh_current_run(
         if event["action"] == "entity_link_corrected"
     )
     assert entity_link_audit["context"]["cycle"] == 1
+
+
+def test_entity_link_decision_pin_preserves_accepting_release_across_rerun(
+    tmp_path: Path,
+) -> None:
+    """A successor run may use a newer governed release while its decision
+    pin keeps the release that authorized the immutable correction fact."""
+    service, application_id, state = _ready_entity_links(tmp_path)
+    accepting_release = copy.deepcopy(service._legacy_run_release())
+    ambiguous = next(
+        item
+        for item in state["blockers"]
+        if item["rule_id"] == "ENTITY_LINK_AMBIGUOUS"
+    )
+    accepted = service.correct_entity_link(
+        principal=REVIEWER,
+        application_id=application_id,
+        work_item_id=state["work_item_id"],
+        expected_fence=state["claimed"]["claim_fence"],
+        expected_context=state["work_item"]["command_context"],
+        idempotency_key="s11-release-rollover",
+        entity_link=_accept_link_command(
+            ambiguous,
+            entity_id="org:picc_full",
+            entity_type="insurer",
+            label="中国人民财产保险股份有限公司",
+        ),
+        now=101,
+    )
+    assert accepted["status"] == "accepted"
+
+    rules = yaml.safe_load(
+        (ROOT / "configs" / "rules_auto_lease.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    rules["version"] = "1.9.1-s11-rollover"
+    rollover_rules = tmp_path / "rules_rollover.yaml"
+    rollover_rules.write_text(
+        yaml.safe_dump(rules, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    release_source = ControlledScenarioService(
+        fixture_root=ROOT / "fixtures" / "applications",
+        rules_path=rollover_rules,
+        state_path=tmp_path / "release-source.sqlite3",
+        scenario_id=SCENARIO,
+    )
+    rollover_release = copy.deepcopy(release_source._legacy_run_release())
+    service._run_release = rollover_release
+    service._target_checker = None
+
+    completed = service.process_next_job()
+    assert completed.status == "complete"
+    service.refresh_projection()
+    history = service.application_history_view(
+        principal=REVIEWER,
+        application_id=application_id,
+    )
+    current_run = next(run for run in history["runs"] if run["current"])
+    correction = history["entity_link_history"][0]
+    decision_pin = current_run["entity_link_decisions"][0]
+    provenance_keys = (
+        "matcher_id",
+        "matcher_version",
+        "matcher_digest",
+        "knowledge_release_id",
+        "knowledge_release_digest",
+        "release_id",
+        "release_digest",
+    )
+
+    assert current_run["release_id"] == rollover_release["release_id"]
+    assert current_run["release_id"] != accepting_release["release_id"]
+    assert correction["release_id"] == accepting_release["release_id"]
+    assert {
+        key: decision_pin[key] for key in provenance_keys
+    } == {key: correction[key] for key in provenance_keys}
+    workspace = service.workspace_view(
+        application_id,
+        role="reviewer",
+        scope=REVIEWER.scope,
+        subject=REVIEWER.subject,
+        now=102,
+    )
+    rollover_blocker = next(
+        finding
+        for finding in workspace["mandatory_blockers"]
+        if finding.get("entity_link", {}).get("mention_id") == MENTION_ORG
+    )
+    assert rollover_blocker["rule_id"] == "ENTITY_LINK_AMBIGUOUS"
+    ledger_mention = next(
+        mention
+        for mention in workspace["entity_link_ledger"]
+        if mention["mention_id"] == MENTION_ORG
+    )
+    assert ledger_mention["state"] == "ambiguous"
+    assert ledger_mention["active_decision_ids"] == [
+        accepted["entity_link_decision_id"]
+    ]
 
 
 def test_integrator_entity_link_decisions_have_no_reviewer_authority(

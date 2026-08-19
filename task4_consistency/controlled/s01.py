@@ -17546,6 +17546,8 @@ class ControlledScenarioService:
     @staticmethod
     def _effective_entity_links(
         links: Any,
+        *,
+        release_pin: dict[str, Any] | None = None,
     ) -> dict[str, dict[str, Any]]:
         """Compute each ledger mention's current effective link decision from
         the append-only entity-link records.
@@ -17588,6 +17590,28 @@ class ControlledScenarioService:
                 for decision in entry["decisions"]
                 if decision.get("status") == "active"
             ]
+            if release_pin is not None:
+                matcher = release_pin.get("matcher")
+                knowledge = release_pin.get("knowledge")
+                active = [
+                    decision
+                    for decision in active
+                    if isinstance(matcher, dict)
+                    and isinstance(knowledge, dict)
+                    and decision.get("release_id")
+                    == release_pin.get("release_id")
+                    and decision.get("release_digest")
+                    == release_pin.get("release_digest")
+                    and decision.get("matcher_id") == matcher.get("id")
+                    and decision.get("matcher_version")
+                    == matcher.get("version")
+                    and decision.get("matcher_digest")
+                    == matcher.get("digest")
+                    and decision.get("knowledge_release_id")
+                    == knowledge.get("release_id")
+                    and decision.get("knowledge_release_digest")
+                    == knowledge.get("digest")
+                ]
             accepted = [
                 decision
                 for decision in active
@@ -17706,7 +17730,15 @@ class ControlledScenarioService:
         links = graph.get("entity_links") if isinstance(graph, dict) else None
         if not links:
             return []
-        effective = self._effective_entity_links(links)
+        release_pin = run_spec.get("evidence_snapshot", {}).get(
+            "entity_link_release"
+        )
+        effective = self._effective_entity_links(
+            links,
+            release_pin=(
+                release_pin if isinstance(release_pin, dict) else {}
+            ),
+        )
         source_evidence = self._current_evidence_reference(app)
         run_id = run_spec["run_id"]
         findings: list[dict[str, Any]] = []
@@ -17833,6 +17865,13 @@ class ControlledScenarioService:
             for finding in findings
             if isinstance(finding.get("entity_link"), dict)
         }
+        finding_states = {
+            finding["entity_link"].get("mention_id"): finding["entity_link"].get(
+                "state"
+            )
+            for finding in findings
+            if isinstance(finding.get("entity_link"), dict)
+        }
         mentions: dict[str, dict[str, Any]] = {}
         for record in links:
             if (
@@ -17849,9 +17888,8 @@ class ControlledScenarioService:
                 {
                     "mention_id": mention_id,
                     "mention": copy.deepcopy(mention),
-                    "state": (effective.get(mention_id) or {}).get(
-                        "kind", "unresolved"
-                    ),
+                    "state": finding_states.get(mention_id)
+                    or (effective.get(mention_id) or {}).get("kind", "unresolved"),
                     "finding_id": finding_ids.get(mention_id),
                     "active_decision_ids": [],
                     "source_evidence": copy.deepcopy(source_evidence),
@@ -18726,8 +18764,8 @@ class ControlledScenarioService:
                     "knowledge_release_digest": record.get(
                         "knowledge_release_digest"
                     ),
-                    "release_id": release["release_id"],
-                    "release_digest": release["digest"],
+                    "release_id": record.get("release_id"),
+                    "release_digest": record.get("release_digest"),
                 }
                 entity_link_decisions.append(pin)
             snapshot_payload["entity_link_decisions"] = sorted(
