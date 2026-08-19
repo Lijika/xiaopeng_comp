@@ -6,6 +6,7 @@ module.exports = defineConfig({
     "test_s05_browser.spec.js",
     "test_s06_browser.spec.js",
     "test_s10_react.spec.js",
+    "test_s11_react.spec.js",
     "test_t01_react.spec.js",
     "test_t02_react.spec.js",
     "test_t03_react.spec.js",

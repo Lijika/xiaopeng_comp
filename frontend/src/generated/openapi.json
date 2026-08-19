@@ -1043,6 +1043,20 @@
             ],
             "title": "Current Run Id"
           },
+          "entity_link_history": {
+            "items": {
+              "$ref": "#/components/schemas/S01HistoryEntityLinkCorrection"
+            },
+            "title": "Entity Link History",
+            "type": "array"
+          },
+          "entity_links": {
+            "items": {
+              "$ref": "#/components/schemas/S01HistoryEntityLink"
+            },
+            "title": "Entity Links",
+            "type": "array"
+          },
           "membership_history": {
             "items": {
               "$ref": "#/components/schemas/S01HistoryMembershipCorrection"
@@ -1970,6 +1984,266 @@
         "title": "S01CurrentRouteResponse",
         "type": "object"
       },
+      "S01EntityLinkCandidateEntity": {
+        "additionalProperties": false,
+        "properties": {
+          "entity_id": {
+            "title": "Entity Id",
+            "type": "string"
+          },
+          "entity_type": {
+            "title": "Entity Type",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "entity_id",
+          "entity_type",
+          "label"
+        ],
+        "title": "S01EntityLinkCandidateEntity",
+        "type": "object"
+      },
+      "S01EntityLinkCorrectionResult": {
+        "additionalProperties": false,
+        "description": "Command acceptance of an entity-link correction.  Acceptance is not\nproof the successor run is already current; the client must read\ncurrent-route/history for convergence.",
+        "properties": {
+          "application_id": {
+            "title": "Application Id",
+            "type": "string"
+          },
+          "candidate_claim_id": {
+            "title": "Candidate Claim Id",
+            "type": "string"
+          },
+          "correction_id": {
+            "title": "Correction Id",
+            "type": "string"
+          },
+          "cycle": {
+            "title": "Cycle",
+            "type": "integer"
+          },
+          "entity_id": {
+            "title": "Entity Id",
+            "type": "string"
+          },
+          "entity_link_decision_id": {
+            "title": "Entity Link Decision Id",
+            "type": "string"
+          },
+          "entity_type": {
+            "title": "Entity Type",
+            "type": "string"
+          },
+          "evidence_revision": {
+            "title": "Evidence Revision",
+            "type": "integer"
+          },
+          "invalidated_run_id": {
+            "title": "Invalidated Run Id",
+            "type": "string"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "lifecycle_revision": {
+            "title": "Lifecycle Revision",
+            "type": "integer"
+          },
+          "mention_id": {
+            "title": "Mention Id",
+            "type": "string"
+          },
+          "phase": {
+            "title": "Phase",
+            "type": "string"
+          },
+          "relationship": {
+            "title": "Relationship",
+            "type": "string"
+          },
+          "replayed": {
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "route": {
+            "title": "Route",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "work_item_id": {
+            "title": "Work Item Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "replayed",
+          "application_id",
+          "work_item_id",
+          "correction_id",
+          "entity_link_decision_id",
+          "candidate_claim_id",
+          "mention_id",
+          "entity_id",
+          "entity_type",
+          "label",
+          "relationship",
+          "cycle",
+          "invalidated_run_id",
+          "job_id",
+          "phase",
+          "route",
+          "lifecycle_revision",
+          "evidence_revision"
+        ],
+        "title": "S01EntityLinkCorrectionResult",
+        "type": "object"
+      },
+      "S01EntityLinkKnowledge": {
+        "additionalProperties": false,
+        "description": "The frozen knowledge-release facts carried by one candidate claim\n(S11): same-as projection and explicit not-same-as conflict targets.",
+        "properties": {
+          "conflict_with": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Conflict With",
+            "type": "array"
+          },
+          "same_as": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Same As",
+            "type": "array"
+          }
+        },
+        "title": "S01EntityLinkKnowledge",
+        "type": "object"
+      },
+      "S01EntityLinkMention": {
+        "additionalProperties": false,
+        "description": "The application-local entity mention (S11): which document field the\nmention was read from and the raw value that needs a link decision.",
+        "properties": {
+          "document_id": {
+            "title": "Document Id",
+            "type": "string"
+          },
+          "document_role": {
+            "title": "Document Role",
+            "type": "string"
+          },
+          "entity_type": {
+            "title": "Entity Type",
+            "type": "string"
+          },
+          "field": {
+            "title": "Field",
+            "type": "string"
+          },
+          "mention_id": {
+            "title": "Mention Id",
+            "type": "string"
+          },
+          "raw": {
+            "title": "Raw",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mention_id",
+          "entity_type",
+          "document_id",
+          "document_role",
+          "field",
+          "raw"
+        ],
+        "title": "S01EntityLinkMention",
+        "type": "object"
+      },
+      "S01EntityLinkProvenance": {
+        "additionalProperties": false,
+        "description": "The matcher and frozen knowledge-release provenance of one candidate\nclaim (S11).  The command must reproduce it exactly; an expired or wrong\nrelease metadata pair is rejected with no successor, and the digests must\nequal the fixed RunSpec entity-link release pin (SP-1).",
+        "properties": {
+          "knowledge_release_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Knowledge Release Digest"
+          },
+          "knowledge_release_id": {
+            "title": "Knowledge Release Id",
+            "type": "string"
+          },
+          "matcher_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Matcher Digest"
+          },
+          "matcher_id": {
+            "title": "Matcher Id",
+            "type": "string"
+          },
+          "matcher_version": {
+            "title": "Matcher Version",
+            "type": "string"
+          },
+          "method": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Method"
+          },
+          "source_pointer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Pointer"
+          }
+        },
+        "required": [
+          "matcher_id",
+          "matcher_version",
+          "knowledge_release_id"
+        ],
+        "title": "S01EntityLinkProvenance",
+        "type": "object"
+      },
       "S01ErrorDetail": {
         "properties": {
           "error": {
@@ -2479,6 +2753,544 @@
           "evidence_revision"
         ],
         "title": "S01HistoryCorrection",
+        "type": "object"
+      },
+      "S01HistoryEntityLink": {
+        "additionalProperties": false,
+        "description": "One append-only ledger record of the preserved entity-link history\n(S11): candidate claims and every accepted decision with its explicit\nstatus.",
+        "properties": {
+          "actor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actor"
+          },
+          "candidate_entity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/S01EntityLinkCandidateEntity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "claim_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Claim Id"
+          },
+          "confidence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence"
+          },
+          "cycle": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cycle"
+          },
+          "decision_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decision Id"
+          },
+          "knowledge": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/S01EntityLinkKnowledge"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "knowledge_release_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Knowledge Release Digest"
+          },
+          "knowledge_release_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Knowledge Release Id"
+          },
+          "link_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Link Id"
+          },
+          "matcher_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Matcher Digest"
+          },
+          "matcher_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Matcher Id"
+          },
+          "matcher_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Matcher Version"
+          },
+          "mention": {
+            "$ref": "#/components/schemas/S01EntityLinkMention"
+          },
+          "provenance": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/S01EntityLinkProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Code"
+          },
+          "record_kind": {
+            "title": "Record Kind",
+            "type": "string"
+          },
+          "relationship": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Relationship"
+          },
+          "release_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Release Digest"
+          },
+          "release_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Release Id"
+          },
+          "source_evidence": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/S01MembershipDecisionSourceEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "supersedes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Supersedes",
+            "type": "array"
+          },
+          "time": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Time"
+          }
+        },
+        "required": [
+          "record_kind",
+          "mention"
+        ],
+        "title": "S01HistoryEntityLink",
+        "type": "object"
+      },
+      "S01HistoryEntityLinkCorrection": {
+        "additionalProperties": false,
+        "description": "One chronologically committed entity-link correction (S11).",
+        "properties": {
+          "actor": {
+            "title": "Actor",
+            "type": "string"
+          },
+          "candidate_claim_id": {
+            "title": "Candidate Claim Id",
+            "type": "string"
+          },
+          "correction_id": {
+            "title": "Correction Id",
+            "type": "string"
+          },
+          "cycle": {
+            "title": "Cycle",
+            "type": "integer"
+          },
+          "decision": {
+            "title": "Decision",
+            "type": "string"
+          },
+          "decision_id": {
+            "title": "Decision Id",
+            "type": "string"
+          },
+          "entity_id": {
+            "title": "Entity Id",
+            "type": "string"
+          },
+          "entity_type": {
+            "title": "Entity Type",
+            "type": "string"
+          },
+          "event_id": {
+            "title": "Event Id",
+            "type": "string"
+          },
+          "evidence_revision": {
+            "title": "Evidence Revision",
+            "type": "integer"
+          },
+          "knowledge_release_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Knowledge Release Digest"
+          },
+          "knowledge_release_id": {
+            "title": "Knowledge Release Id",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "matcher_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Matcher Digest"
+          },
+          "matcher_id": {
+            "title": "Matcher Id",
+            "type": "string"
+          },
+          "matcher_version": {
+            "title": "Matcher Version",
+            "type": "string"
+          },
+          "mention": {
+            "$ref": "#/components/schemas/S01EntityLinkMention"
+          },
+          "mention_id": {
+            "title": "Mention Id",
+            "type": "string"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "recorded_at": {
+            "title": "Recorded At",
+            "type": "integer"
+          },
+          "relationship": {
+            "title": "Relationship",
+            "type": "string"
+          },
+          "release_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Release Digest"
+          },
+          "release_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Release Id"
+          },
+          "source_evidence": {
+            "$ref": "#/components/schemas/S01MembershipSourceEvidence"
+          },
+          "supersedes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Supersedes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "evidence_revision",
+          "event_id",
+          "correction_id",
+          "decision_id",
+          "candidate_claim_id",
+          "mention_id",
+          "mention",
+          "entity_id",
+          "entity_type",
+          "label",
+          "relationship",
+          "source_evidence",
+          "decision",
+          "matcher_id",
+          "matcher_version",
+          "knowledge_release_id",
+          "reason_code",
+          "actor",
+          "recorded_at",
+          "cycle"
+        ],
+        "title": "S01HistoryEntityLinkCorrection",
+        "type": "object"
+      },
+      "S01HistoryEntityLinkDecisionPin": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_claim_id": {
+            "title": "Candidate Claim Id",
+            "type": "string"
+          },
+          "decision_id": {
+            "title": "Decision Id",
+            "type": "string"
+          },
+          "entity_id": {
+            "title": "Entity Id",
+            "type": "string"
+          },
+          "entity_type": {
+            "title": "Entity Type",
+            "type": "string"
+          },
+          "evidence_revision": {
+            "title": "Evidence Revision",
+            "type": "integer"
+          },
+          "knowledge_release_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Knowledge Release Digest"
+          },
+          "knowledge_release_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Knowledge Release Id"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "matcher_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Matcher Digest"
+          },
+          "matcher_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Matcher Id"
+          },
+          "matcher_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Matcher Version"
+          },
+          "mention_id": {
+            "title": "Mention Id",
+            "type": "string"
+          },
+          "relationship": {
+            "title": "Relationship",
+            "type": "string"
+          },
+          "release_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Release Digest"
+          },
+          "release_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Release Id"
+          }
+        },
+        "required": [
+          "decision_id",
+          "candidate_claim_id",
+          "mention_id",
+          "entity_id",
+          "entity_type",
+          "label",
+          "relationship",
+          "evidence_revision"
+        ],
+        "title": "S01HistoryEntityLinkDecisionPin",
         "type": "object"
       },
       "S01HistoryMembership": {
@@ -3024,6 +3836,13 @@
               "type": "string"
             },
             "title": "Decision Ids",
+            "type": "array"
+          },
+          "entity_link_decisions": {
+            "items": {
+              "$ref": "#/components/schemas/S01HistoryEntityLinkDecisionPin"
+            },
+            "title": "Entity Link Decisions",
             "type": "array"
           },
           "evidence_document_instance_ids": {
@@ -5503,8 +6322,353 @@
         "title": "S01VerifyRoutingContext",
         "type": "object"
       },
+      "S01WorkspaceEntityLink": {
+        "description": "The entity-link blocker projection (S11): the mention identity, its\ncurrent effective decision state and every coexisting candidate claim\nwith confidence, provenance and frozen knowledge facts.",
+        "properties": {
+          "active_decision_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Active Decision Ids",
+            "type": "array"
+          },
+          "candidates": {
+            "items": {
+              "$ref": "#/components/schemas/S01WorkspaceEntityLinkCandidate"
+            },
+            "title": "Candidates",
+            "type": "array"
+          },
+          "low_confidence": {
+            "default": false,
+            "title": "Low Confidence",
+            "type": "boolean"
+          },
+          "mention": {
+            "$ref": "#/components/schemas/S01EntityLinkMention"
+          },
+          "mention_id": {
+            "title": "Mention Id",
+            "type": "string"
+          },
+          "source_evidence": {
+            "$ref": "#/components/schemas/S01MembershipSourceEvidence"
+          },
+          "state": {
+            "enum": [
+              "unresolved",
+              "ambiguous",
+              "conflict"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mention_id",
+          "mention",
+          "state",
+          "candidates",
+          "source_evidence"
+        ],
+        "title": "S01WorkspaceEntityLink",
+        "type": "object"
+      },
+      "S01WorkspaceEntityLinkCandidate": {
+        "additionalProperties": false,
+        "description": "One immutable coexisting entity-link candidate claim (S11).  No\ncandidate is selected by the authority; the Reviewer decides explicitly.",
+        "properties": {
+          "claim_id": {
+            "title": "Claim Id",
+            "type": "string"
+          },
+          "confidence": {
+            "title": "Confidence",
+            "type": "number"
+          },
+          "entity_id": {
+            "title": "Entity Id",
+            "type": "string"
+          },
+          "entity_type": {
+            "title": "Entity Type",
+            "type": "string"
+          },
+          "knowledge": {
+            "$ref": "#/components/schemas/S01EntityLinkKnowledge"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/S01EntityLinkProvenance"
+          }
+        },
+        "required": [
+          "claim_id",
+          "entity_id",
+          "entity_type",
+          "label",
+          "confidence",
+          "provenance",
+          "knowledge"
+        ],
+        "title": "S01WorkspaceEntityLinkCandidate",
+        "type": "object"
+      },
+      "S01WorkspaceEntityLinkDecision": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "title": "Actor",
+            "type": "string"
+          },
+          "candidate_entity": {
+            "$ref": "#/components/schemas/S01EntityLinkCandidateEntity"
+          },
+          "cycle": {
+            "title": "Cycle",
+            "type": "integer"
+          },
+          "decision_id": {
+            "title": "Decision Id",
+            "type": "string"
+          },
+          "finding_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finding Id"
+          },
+          "knowledge_release_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Knowledge Release Digest"
+          },
+          "knowledge_release_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Knowledge Release Id"
+          },
+          "link_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Link Id"
+          },
+          "matcher_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Matcher Digest"
+          },
+          "matcher_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Matcher Id"
+          },
+          "matcher_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Matcher Version"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "record_kind": {
+            "const": "accepted",
+            "title": "Record Kind",
+            "type": "string"
+          },
+          "relationship": {
+            "title": "Relationship",
+            "type": "string"
+          },
+          "release_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Release Digest"
+          },
+          "release_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Release Id"
+          },
+          "source_evidence": {
+            "$ref": "#/components/schemas/S01MembershipDecisionSourceEvidence"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "superseded"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "supersedes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Supersedes",
+            "type": "array"
+          },
+          "time": {
+            "title": "Time",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "record_kind",
+          "decision_id",
+          "candidate_entity",
+          "relationship",
+          "actor",
+          "reason_code",
+          "time",
+          "cycle",
+          "source_evidence",
+          "supersedes",
+          "status"
+        ],
+        "title": "S01WorkspaceEntityLinkDecision",
+        "type": "object"
+      },
+      "S01WorkspaceEntityLinkMentionPage": {
+        "properties": {
+          "active_decision_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Active Decision Ids",
+            "type": "array"
+          },
+          "candidates": {
+            "items": {
+              "$ref": "#/components/schemas/S01WorkspaceEntityLinkCandidate"
+            },
+            "title": "Candidates",
+            "type": "array"
+          },
+          "decisions": {
+            "items": {
+              "$ref": "#/components/schemas/S01WorkspaceEntityLinkDecision"
+            },
+            "title": "Decisions",
+            "type": "array"
+          },
+          "finding_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finding Id"
+          },
+          "low_confidence": {
+            "default": false,
+            "title": "Low Confidence",
+            "type": "boolean"
+          },
+          "mention": {
+            "$ref": "#/components/schemas/S01EntityLinkMention"
+          },
+          "mention_id": {
+            "title": "Mention Id",
+            "type": "string"
+          },
+          "source_evidence": {
+            "$ref": "#/components/schemas/S01MembershipSourceEvidence"
+          },
+          "state": {
+            "enum": [
+              "unresolved",
+              "ambiguous",
+              "conflict",
+              "selected"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mention_id",
+          "mention",
+          "state",
+          "source_evidence",
+          "candidates",
+          "decisions"
+        ],
+        "title": "S01WorkspaceEntityLinkMentionPage",
+        "type": "object"
+      },
       "S01WorkspaceFinding": {
         "properties": {
+          "entity_link": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/S01WorkspaceEntityLink"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "evidence_links": {
             "items": {
               "$ref": "#/components/schemas/S01EvidenceLink"
@@ -5852,6 +7016,13 @@
               }
             ],
             "title": "Current Run Id"
+          },
+          "entity_link_ledger": {
+            "items": {
+              "$ref": "#/components/schemas/S01WorkspaceEntityLinkMentionPage"
+            },
+            "title": "Entity Link Ledger",
+            "type": "array"
           },
           "evidence_ready": {
             "title": "Evidence Ready",
@@ -13898,6 +15069,296 @@
           }
         },
         "summary": "Controlled S04 Demo Claim Review Work Item"
+      }
+    },
+    "/controlled/s01/api/commands/review-work-items/{work_item_id}/correct-entity-link": {
+      "post": {
+        "operationId": "controlled_s11_demo_correct_entity_link_controlled_s01_api_commands_review_work_items__work_item_id__correct_entity_link_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "work_item_id",
+            "required": true,
+            "schema": {
+              "title": "Work Item Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "The S11 entity-link command.  ``expected_fence`` is bounded at 1\nbecause the domain rejects a fence below 1 as invalid.",
+                "properties": {
+                  "application_id": {
+                    "maxLength": 200,
+                    "minLength": 1,
+                    "title": "Application Id",
+                    "type": "string"
+                  },
+                  "entity_link": {
+                    "discriminator": {
+                      "propertyName": "decision"
+                    },
+                    "oneOf": [
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "candidate_claim_id": {
+                            "maxLength": 200,
+                            "minLength": 1,
+                            "title": "Candidate Claim Id",
+                            "type": "string"
+                          },
+                          "decision": {
+                            "const": "accept",
+                            "title": "Decision",
+                            "type": "string"
+                          },
+                          "entity_id": {
+                            "maxLength": 200,
+                            "minLength": 1,
+                            "title": "Entity Id",
+                            "type": "string"
+                          },
+                          "entity_type": {
+                            "maxLength": 200,
+                            "minLength": 1,
+                            "title": "Entity Type",
+                            "type": "string"
+                          },
+                          "expected_active_decision_ids": {
+                            "items": {
+                              "type": "string"
+                            },
+                            "title": "Expected Active Decision Ids",
+                            "type": "array"
+                          },
+                          "finding_id": {
+                            "maxLength": 200,
+                            "minLength": 1,
+                            "title": "Finding Id",
+                            "type": "string"
+                          },
+                          "knowledge_release_id": {
+                            "maxLength": 200,
+                            "minLength": 1,
+                            "title": "Knowledge Release Id",
+                            "type": "string"
+                          },
+                          "label": {
+                            "maxLength": 200,
+                            "minLength": 1,
+                            "title": "Label",
+                            "type": "string"
+                          },
+                          "matcher_id": {
+                            "maxLength": 200,
+                            "minLength": 1,
+                            "title": "Matcher Id",
+                            "type": "string"
+                          },
+                          "matcher_version": {
+                            "maxLength": 200,
+                            "minLength": 1,
+                            "title": "Matcher Version",
+                            "type": "string"
+                          },
+                          "mention_id": {
+                            "maxLength": 200,
+                            "minLength": 1,
+                            "title": "Mention Id",
+                            "type": "string"
+                          },
+                          "reason_code": {
+                            "enum": [
+                              "ENTITY_LINK_SOURCE_VERIFIED",
+                              "ENTITY_LINK_SOURCE_MISASSIGNED",
+                              "ENTITY_LINK_AMBIGUITY_RESOLVED"
+                            ],
+                            "title": "Reason Code",
+                            "type": "string"
+                          },
+                          "relationship": {
+                            "const": "same_as",
+                            "title": "Relationship",
+                            "type": "string"
+                          },
+                          "schema_version": {
+                            "const": "entity-link-correction/1",
+                            "title": "Schema Version",
+                            "type": "string"
+                          },
+                          "source_evidence": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "event_id": {
+                                "maxLength": 200,
+                                "minLength": 1,
+                                "title": "Event Id",
+                                "type": "string"
+                              },
+                              "evidence_revision": {
+                                "minimum": 1,
+                                "title": "Evidence Revision",
+                                "type": "integer"
+                              }
+                            },
+                            "required": [
+                              "event_id",
+                              "evidence_revision"
+                            ],
+                            "title": "S01MembershipSourceEvidence",
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "schema_version",
+                          "finding_id",
+                          "candidate_claim_id",
+                          "mention_id",
+                          "source_evidence",
+                          "expected_active_decision_ids",
+                          "decision",
+                          "entity_id",
+                          "entity_type",
+                          "label",
+                          "relationship",
+                          "matcher_id",
+                          "matcher_version",
+                          "knowledge_release_id",
+                          "reason_code"
+                        ],
+                        "title": "S01EntityLinkAccept",
+                        "type": "object"
+                      }
+                    ],
+                    "title": "Entity Link"
+                  },
+                  "expected_context": {
+                    "additionalProperties": false,
+                    "description": "The closed review command context.  The domain compares it by exact\nequality (``_review_context_matches``), so a partial context is a semantic\nstaleness; the schema here closes the shape so no arbitrary keys can hide\na missing revision inside a migrated request or response.",
+                    "properties": {
+                      "current_context": {
+                        "title": "Current Context",
+                        "type": "string"
+                      },
+                      "evidence_revision": {
+                        "title": "Evidence Revision",
+                        "type": "integer"
+                      },
+                      "lifecycle_revision": {
+                        "title": "Lifecycle Revision",
+                        "type": "integer"
+                      },
+                      "projection_watermark": {
+                        "title": "Projection Watermark",
+                        "type": "integer"
+                      },
+                      "run_id": {
+                        "title": "Run Id",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "lifecycle_revision",
+                      "evidence_revision",
+                      "run_id",
+                      "projection_watermark",
+                      "current_context"
+                    ],
+                    "title": "S01ReviewCommandContext",
+                    "type": "object"
+                  },
+                  "expected_fence": {
+                    "minimum": 1,
+                    "title": "Expected Fence",
+                    "type": "integer"
+                  },
+                  "idempotency_key": {
+                    "title": "Idempotency Key",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "expected_context",
+                  "expected_fence",
+                  "idempotency_key",
+                  "application_id",
+                  "entity_link"
+                ],
+                "title": "S01ReviewEntityLinkBody",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01EntityLinkCorrectionResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01VerifyErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Controlled S11 Demo Correct Entity Link"
       }
     },
     "/controlled/s01/api/commands/review-work-items/{work_item_id}/correct-field-observation": {

@@ -20,6 +20,7 @@ import {
   useClaimWorkItem,
   useCorrectFieldObservation,
   useCorrectPageMembership,
+  useCorrectEntityLink,
   useCorrectionConvergence,
   useCurrentRoute,
   useEvidenceConvergence,
@@ -37,6 +38,8 @@ import {
   type CorrectionCommand,
   type CorrectionConvergence,
   type CorrectionResult,
+  type EntityLinkCommand,
+  type EntityLinkResult,
   type ExceptionRequestCommand,
   type FencedCommand,
   type MembershipCommand,
@@ -86,6 +89,9 @@ function hasGovernedPin(
 
 type S01EvidenceLink = components["schemas"]["S01EvidenceLink"];
 type S01WorkspaceMembershipPage = components["schemas"]["S01WorkspaceMembershipPage"];
+type S01WorkspaceEntityLink = components["schemas"]["S01WorkspaceEntityLink"];
+type S01WorkspaceEntityLinkMentionPage =
+  components["schemas"]["S01WorkspaceEntityLinkMentionPage"];
 
 type Action =
   | "claim"
@@ -95,6 +101,7 @@ type Action =
   | "reveal"
   | "correct"
   | "membership"
+  | "entityLink"
   | "supplement"
   | "exception";
 
@@ -171,6 +178,58 @@ type MembershipDraft = {
   authorityKey: string;
 };
 
+/** The discriminated entity-link accept vocabulary of the S01 domain
+ * authority (S11), bound to the generated OpenAPI literals. */
+type EntityLinkPayload = EntityLinkCommand["entity_link"];
+type EntityLinkAccept = Extract<EntityLinkPayload, { decision: "accept" }>;
+type EntityLinkReason = EntityLinkPayload["reason_code"];
+
+const ENTITY_LINK_REASONS: readonly EntityLinkAccept["reason_code"][] = [
+  "ENTITY_LINK_SOURCE_VERIFIED",
+  "ENTITY_LINK_SOURCE_MISASSIGNED",
+  "ENTITY_LINK_AMBIGUITY_RESOLVED",
+];
+
+const ENTITY_LINK_STATE_LABELS: Record<
+  S01WorkspaceEntityLinkMentionPage["state"],
+  string
+> = {
+  unresolved: "未解析",
+  ambiguous: "歧义（多候选并存）",
+  conflict: "冲突（别名互斥）",
+  selected: "已归属",
+};
+
+/** The server-owned entity-link target of one workspace finding: the
+ * application-local mention, its state and every coexisting candidate claim
+ * with confidence, matcher/knowledge provenance and source evidence. */
+type EntityLinkTarget = {
+  findingId: string;
+  entityLink: Pick<
+    S01WorkspaceEntityLink,
+    | "mention_id"
+    | "mention"
+    | "state"
+    | "candidates"
+    | "active_decision_ids"
+    | "source_evidence"
+    | "low_confidence"
+  >;
+};
+
+/** The open entity-link decision draft for one server-owned ledger target.
+ * ``authorityKey`` is the ephemeral serialized work + workspace authority the
+ * draft was issued under; a successful refetch that changes any covered
+ * server fact closes the draft.  The browser never selects a candidate by
+ * array order, confidence or any heuristic: the Reviewer must choose one
+ * claim explicitly. */
+type EntityLinkDraft = {
+  target: EntityLinkTarget;
+  claimId: string | null;
+  reason: EntityLinkReason;
+  authorityKey: string;
+};
+
 /** One indivisible reveal/correction authorization: application, work,
  * observation, the complete generated expected context, evidence/lifecycle
  * revisions, claim fence, and claim expiry.  Restricted values may exist
@@ -239,6 +298,7 @@ type PendingCommand =
   | { action: "reveal"; command: RevealCommand }
   | { action: "correct"; command: CorrectionCommand }
   | { action: "membership"; command: MembershipCommand }
+  | { action: "entityLink"; command: EntityLinkCommand }
   | { action: "supplement"; command: SupplementRequestCommand }
   | { action: "exception"; command: ExceptionRequestCommand };
 
@@ -250,6 +310,7 @@ const ACTION_LABELS: Record<Action, string> = {
   reveal: "揭示",
   correct: "更正",
   membership: "页归属",
+  entityLink: "实体链接",
   supplement: "补充请求",
   exception: "请求业务例外",
 };
@@ -352,6 +413,8 @@ function WorkspaceSection({
   controlsDisabled,
   membershipDraft,
   membershipPending,
+  entityLinkDraft,
+  entityLinkPending,
   onReveal,
   onStartCorrection,
   onCorrectionRawChange,
@@ -363,6 +426,10 @@ function WorkspaceSection({
   onMembershipCandidate,
   onMembershipReasonChange,
   onSubmitMembership,
+  onStartEntityLink,
+  onEntityLinkCandidate,
+  onEntityLinkReasonChange,
+  onSubmitEntityLink,
 }: {
   work: ReviewWorkResponse;
   workspace: UseQueryResult<WorkspaceResponse>;
@@ -379,6 +446,8 @@ function WorkspaceSection({
   controlsDisabled: boolean;
   membershipDraft: MembershipDraft | null;
   membershipPending: boolean;
+  entityLinkDraft: EntityLinkDraft | null;
+  entityLinkPending: boolean;
   onReveal: (link: S01EvidenceLink) => void;
   onStartCorrection: (link: S01EvidenceLink, findingId: string) => void;
   onCorrectionRawChange: (raw: string) => void;
@@ -390,6 +459,10 @@ function WorkspaceSection({
   onMembershipCandidate: (claimId: string) => void;
   onMembershipReasonChange: (reason: MembershipReason) => void;
   onSubmitMembership: () => void;
+  onStartEntityLink: (target: EntityLinkTarget) => void;
+  onEntityLinkCandidate: (claimId: string) => void;
+  onEntityLinkReasonChange: (reason: EntityLinkReason) => void;
+  onSubmitEntityLink: () => void;
 }) {
   if (work.status === "completed") {
     return (
@@ -422,6 +495,10 @@ function WorkspaceSection({
     membershipDraft?.target.membership ??
     (finding === null ? null : (finding.membership ?? null));
   const membershipLedger = workspace.data.membership_ledger ?? [];
+  const entityLink =
+    entityLinkDraft?.target.entityLink ??
+    (finding === null ? null : (finding.entity_link ?? null));
+  const entityLinkLedger = workspace.data.entity_link_ledger ?? [];
   return (
     <section aria-labelledby="review-workspace-title">
       <h3 id="review-workspace-title">最小工作区（发现优先）</h3>
@@ -521,6 +598,64 @@ function WorkspaceSection({
                 </li>
               );
             })}
+          </ol>
+        </section>
+      )}
+      {entityLinkLedger.length > 0 && (
+        <section
+          data-testid="review-entity-link-ledger"
+          aria-labelledby="review-entity-link-ledger-title"
+        >
+          <h4 id="review-entity-link-ledger-title">
+            实体链接账本（服务端权威）
+          </h4>
+          <ol className="history-list">
+            {entityLinkLedger.map((mention) => (
+              <li
+                key={mention.mention_id}
+                data-testid="review-entity-link-ledger-page"
+              >
+                {mention.mention_id} · {mention.mention.document_role} ·{" "}
+                {mention.mention.field} · {mention.mention.raw} ·{" "}
+                {ENTITY_LINK_STATE_LABELS[mention.state]}
+                {mention.low_confidence === true && " · 低置信（服务端）"}
+                <ul>
+                  {mention.candidates.map((candidate) => (
+                    <li
+                      key={candidate.claim_id}
+                      data-testid="review-entity-link-ledger-candidate"
+                    >
+                      claim {candidate.claim_id} · {candidate.label} ·{" "}
+                      {candidate.entity_id} · confidence {candidate.confidence}{" "}
+                      · matcher {candidate.provenance.matcher_id}@
+                      {candidate.provenance.matcher_version} · knowledge{" "}
+                      {candidate.provenance.knowledge_release_id} · source{" "}
+                      {candidate.provenance.source_pointer} · method{" "}
+                      {candidate.provenance.method} · same_as{" "}
+                      {(candidate.knowledge.same_as ?? []).join(", ") ||
+                        "None"}{" "}
+                      ·{" "}
+                      conflict_with{" "}
+                      {(candidate.knowledge.conflict_with ?? []).join(", ") ||
+                        "None"}
+                    </li>
+                  ))}
+                  {mention.decisions.map((decision) => (
+                    <li
+                      key={decision.decision_id}
+                      data-testid="review-entity-link-ledger-decision"
+                    >
+                      {decision.record_kind} · {decision.decision_id} ·{" "}
+                      {decision.status} · {decision.candidate_entity.label} ·{" "}
+                      {decision.relationship} · {decision.reason_code} · 周期{" "}
+                      {decision.cycle} · supersedes{" "}
+                      {decision.supersedes.join(", ") || "None"} ·{" "}
+                      {JSON.stringify(decision.source_evidence)}
+                    </li>
+                  ))}
+                </ul>
+              </li>
+            ))}
           </ol>
         </section>
       )}
@@ -690,6 +825,145 @@ function WorkspaceSection({
                         onClick={onSubmitMembership}
                       >
                         提交页归属修正
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </section>
+          )}
+          {entityLink != null && (
+            <section
+              className="membership-panes"
+              data-testid="review-entity-link"
+            >
+              <h4>实体链接（S11）</h4>
+              <p className="text-sm text-muted-foreground">
+                {entityLink.mention_id} · {entityLink.mention.document_role} ·{" "}
+                {entityLink.mention.field} · {entityLink.mention.raw} · 状态{" "}
+                {ENTITY_LINK_STATE_LABELS[entityLink.state]}
+              </p>
+              {entityLink.low_confidence === true && (
+                <p
+                  className="text-sm text-muted-foreground"
+                  data-testid="review-entity-link-low-confidence"
+                >
+                  低置信候选（服务端）
+                </p>
+              )}
+              <div className="membership-panes-grid">
+                <div className="membership-pane membership-candidates">
+                  <h5>并存候选（只读，绝不自动选择）</h5>
+                  <ul>
+                    {entityLink.candidates.map((candidate) => (
+                      <li
+                        key={candidate.claim_id}
+                        data-testid="review-entity-link-candidate"
+                      >
+                        <span data-testid="review-entity-link-candidate-entity">
+                          {candidate.label}
+                        </span>
+                        <span className="text-xs text-muted-foreground">
+                          {" "}
+                          claim {candidate.claim_id} · {candidate.entity_id} ·{" "}
+                          confidence {candidate.confidence} · matcher{" "}
+                          {candidate.provenance.matcher_id}@
+                          {candidate.provenance.matcher_version} · knowledge{" "}
+                          {candidate.provenance.knowledge_release_id} · source{" "}
+                          {candidate.provenance.source_pointer} · method{" "}
+                          {candidate.provenance.method} · same_as{" "}
+                          {(candidate.knowledge.same_as ?? []).join(", ") ||
+                            "None"}{" "}
+                          ·{" "}
+                          conflict_with{" "}
+                          {(candidate.knowledge.conflict_with ?? []).join(
+                            ", ",
+                          ) || "None"}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+                <div className="membership-pane membership-decide">
+                  <h5>审核员决定</h5>
+                  {claimExpired ? (
+                    <p
+                      className="text-xs text-muted-foreground"
+                      data-testid="review-entity-link-expired"
+                    >
+                      认领已过期，请重新加载权威上下文
+                    </p>
+                  ) : !claimed || controlsDisabled ? (
+                    <p className="text-xs text-muted-foreground">
+                      认领后即可决定
+                    </p>
+                  ) : entityLinkDraft === null ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      data-testid="review-entity-link-start"
+                      disabled={controlsDisabled}
+                      onClick={() =>
+                        onStartEntityLink({
+                          findingId: finding.finding_id,
+                          entityLink,
+                        })
+                      }
+                    >
+                      开始实体链接修正
+                    </Button>
+                  ) : (
+                    <div
+                      className="membership-form"
+                      data-testid="review-entity-link-form"
+                    >
+                      <select
+                        aria-label="候选实体"
+                        value={entityLinkDraft.claimId ?? ""}
+                        onChange={(event) =>
+                          onEntityLinkCandidate(event.target.value)
+                        }
+                        data-testid="review-entity-link-candidate-select"
+                      >
+                        <option value="" disabled>
+                          请选择候选实体
+                        </option>
+                        {entityLink.candidates.map((candidate) => (
+                          <option
+                            key={candidate.claim_id}
+                            value={candidate.claim_id}
+                          >
+                            {candidate.label} · {candidate.entity_id}
+                          </option>
+                        ))}
+                      </select>
+                      <select
+                        aria-label="原因"
+                        value={entityLinkDraft.reason}
+                        onChange={(event) =>
+                          onEntityLinkReasonChange(
+                            event.target.value as EntityLinkReason,
+                          )
+                        }
+                        data-testid="review-entity-link-reason"
+                      >
+                        {ENTITY_LINK_REASONS.map((reason) => (
+                          <option key={reason} value={reason}>
+                            {reason}
+                          </option>
+                        ))}
+                      </select>
+                      <Button
+                        size="sm"
+                        data-testid="review-entity-link-submit"
+                        disabled={
+                          entityLinkPending ||
+                          entityLinkDraft.claimId === null ||
+                          entityLinkDraft.claimId === ""
+                        }
+                        onClick={onSubmitEntityLink}
+                      >
+                        提交实体链接修正
                       </Button>
                     </div>
                   )}
@@ -984,6 +1258,29 @@ function HistorySection({
               </dl>
               </div>
             )}
+            {(run.entity_link_decisions ?? []).length > 0 && (
+              <div data-testid="review-run-entity-link-decisions">
+                <h4>实体链接决策（服务端权威）</h4>
+                <ul className="history-list">
+                  {run.entity_link_decisions?.map((decision) => (
+                    <li
+                      key={decision.decision_id}
+                      data-testid="review-run-entity-link-decision"
+                    >
+                      {decision.decision_id} · {decision.mention_id} ·{" "}
+                      {decision.entity_id} · {decision.label} ·{" "}
+                      {decision.relationship} · 证据修订{" "}
+                      {decision.evidence_revision} · matcher{" "}
+                      {pinText(decision.matcher_id)}@
+                      {pinText(decision.matcher_version)} · knowledge{" "}
+                      {pinText(decision.knowledge_release_id)} · release{" "}
+                      {pinText(decision.release_id)}@
+                      {pinText(decision.release_digest)}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </li>
         ))}
       </ol>
@@ -1057,6 +1354,60 @@ function HistorySection({
                 {correction.document_role ?? "未归属"} · {correction.reason_code} ·{" "}
                 周期 {correction.cycle} ·{" "}
                 supersedes {correction.supersedes?.join(", ") || "None"} ·{" "}
+                {JSON.stringify(correction.source_evidence)}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      {(history.data.entity_links?.length ?? 0) > 0 && (
+        <>
+          <h4>实体链接账本</h4>
+          <ul
+            className="history-list"
+            data-testid="review-history-entity-links"
+          >
+            {history.data.entity_links?.map((record, index) => (
+              <li
+                key={
+                  record.decision_id ?? record.claim_id ?? index
+                }
+                data-testid="review-history-entity-link"
+              >
+                {record.record_kind} · {record.mention.mention_id} ·{" "}
+                {record.candidate_entity?.label ?? "None"} ·{" "}
+                {record.claim_id ?? record.decision_id ?? "None"} ·{" "}
+                {record.status ?? "claim"}
+                {record.cycle != null && <> · 周期 {record.cycle}</>} ·
+                supersedes{" "}
+                {record.supersedes?.join(", ") || "None"} ·{" "}
+                {JSON.stringify(
+                  record.provenance ?? record.source_evidence ?? {},
+                )}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      {(history.data.entity_link_history?.length ?? 0) > 0 && (
+        <>
+          <h4>实体链接修正</h4>
+          <ul
+            className="history-list"
+            data-testid="review-history-entity-link-corrections"
+          >
+            {history.data.entity_link_history?.map((correction) => (
+              <li
+                key={correction.correction_id}
+                data-testid="review-history-entity-link-correction"
+              >
+                {correction.correction_id} · {correction.decision_id} ·{" "}
+                {correction.decision} · claim {correction.candidate_claim_id}{" "}
+                · {correction.mention_id} · {correction.entity_id} ·{" "}
+                {correction.label} · {correction.relationship} ·{" "}
+                {correction.reason_code} · 周期 {correction.cycle} ·{" "}
+                supersedes{" "}
+                {correction.supersedes?.join(", ") || "None"} ·{" "}
                 {JSON.stringify(correction.source_evidence)}
               </li>
             ))}
@@ -1559,6 +1910,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
   const reveal = useRevealFieldObservation(workId);
   const correct = useCorrectFieldObservation(workId);
   const membershipCorrect = useCorrectPageMembership(workId);
+  const entityLinkCorrect = useCorrectEntityLink(workId);
   const supplement = useRequestSupplement(workId);
   const exception = useRequestBusinessException(workId);
 
@@ -1588,6 +1940,13 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
   const [membershipKey, setMembershipKey] = useState("");
   const [membershipDraft, setMembershipDraft] =
     useState<MembershipDraft | null>(null);
+  // The entity-link key is minted only when an entity-link draft actually
+  // opens (handleStartEntityLink) and rotates on acceptance/rejection; the
+  // empty initial value is never submitted because submit requires an open
+  // draft.
+  const [entityLinkKey, setEntityLinkKey] = useState("");
+  const [entityLinkDraft, setEntityLinkDraft] =
+    useState<EntityLinkDraft | null>(null);
   // The exact restricted command (and the token it was issued under) retained
   // only while its transport outcome is genuinely unknown, for exact replay.
   const issuedRef = useRef<
@@ -1620,6 +1979,9 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     // whenever the issuing claim authorization ends (expiry, owning-read
     // loss, authoritative reload, or context change).
     setMembershipDraft(null);
+    // The open entity-link draft is bound to the same work + workspace
+    // authority and closes under the same conditions.
+    setEntityLinkDraft(null);
     reveal.reset();
     correct.reset();
   };
@@ -1629,21 +1991,21 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
    * authoritative reload state with the local CLAIM_EXPIRED reason, and
    * clear any stale rejected-action label.  Only the public reload action
    * clears the latch. */
-  const expireMembershipAuthority = () => {
+  const expireReviewAuthority = () => {
     invalidateRestricted();
     setRequiresReload(true);
     setConflictReason("CLAIM_EXPIRED");
     setRejectedAction(null);
   };
 
-  /** The serialized work + workspace authority a membership draft binds to.
-   * Returns null unless the work item is claimed, its lease is live, and the
-   * work and workspace owning reads are successful.  The plain serialized
-   * tuple covers work identity/authority, workspace identity/authority, and
-   * the membership projections this panel renders (selected-finding
-   * membership, membership-bearing mandatory blockers, and the membership
-   * ledger). */
-  const membershipAuthorityKey = (): string | null => {
+  /** The serialized work + workspace authority a restricted decision draft
+   * (membership or entity link) binds to.  Returns null unless the work item
+   * is claimed, its lease is live, and the work and workspace owning reads
+   * are successful.  The plain serialized tuple covers work
+   * identity/authority, workspace identity/authority, and the membership and
+   * entity-link projections this panel renders (selected-finding facts,
+   * blocker projections, and both ledgers). */
+  const workspaceAuthorityKey = (): string | null => {
     if (work.data === undefined || work.data.status !== "claimed") return null;
     if (Date.now() / 1000 >= work.data.claim_expires_at) return null;
     if (workspace.data === undefined || !work.isSuccess || !workspace.isSuccess) {
@@ -1654,6 +2016,9 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     const membershipBlockers = (s.mandatory_blockers ?? [])
       .filter((blocker) => blocker.membership != null)
       .map((blocker) => blocker.membership);
+    const entityLinkBlockers = (s.mandatory_blockers ?? [])
+      .filter((blocker) => blocker.entity_link != null)
+      .map((blocker) => blocker.entity_link);
     return JSON.stringify([
       w.application_id,
       w.work_item_id,
@@ -1671,6 +2036,9 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
       s.selected_finding?.membership ?? null,
       membershipBlockers,
       s.membership_ledger ?? [],
+      s.selected_finding?.entity_link ?? null,
+      entityLinkBlockers,
+      s.entity_link_ledger ?? [],
     ]);
   };
 
@@ -1738,7 +2106,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     // workspace data) visibly closes the draft.
     const membershipLive =
       membershipDraft === null ||
-      membershipDraft.authorityKey === membershipAuthorityKey();
+      membershipDraft.authorityKey === workspaceAuthorityKey();
     if (!revealLive || !draftLive || !issuedLive || !membershipLive) {
       invalidateRestricted();
     }
@@ -1751,10 +2119,10 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     if (work.data === undefined || work.data.status !== "claimed") return;
     const delayMs = work.data.claim_expires_at * 1000 - Date.now();
     if (delayMs <= 0) {
-      expireMembershipAuthority();
+      expireReviewAuthority();
       return;
     }
-    const timer = setTimeout(() => expireMembershipAuthority(), delayMs);
+    const timer = setTimeout(() => expireReviewAuthority(), delayMs);
     return () => clearTimeout(timer);
     // The timer is bound to the authoritative work item data; the scrub
     // closure is recreated each render and stays pure.
@@ -1769,6 +2137,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     reveal.isPending ||
     correct.isPending ||
     membershipCorrect.isPending ||
+    entityLinkCorrect.isPending ||
     supplement.isPending ||
     exception.isPending;
 
@@ -1783,6 +2152,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     reveal,
     correct,
     membership: membershipCorrect,
+    entityLink: entityLinkCorrect,
     supplement,
     exception,
   };
@@ -1802,6 +2172,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     reveal: () => setRevealKey(newIdempotencyKey()),
     correct: () => setCorrectionKey(newIdempotencyKey()),
     membership: () => setMembershipKey(newIdempotencyKey()),
+    entityLink: () => setEntityLinkKey(newIdempotencyKey()),
     supplement: () => setSupplementKey(newIdempotencyKey()),
     exception: () => {},
   };
@@ -2176,7 +2547,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
    * the page, with a registered reason.  The draft is the server-owned finding
    * data only; eligibility comes exclusively from explicit accepted facts. */
   const handleStartMembership = (target: MembershipTarget) => {
-    const authorityKey = membershipAuthorityKey();
+    const authorityKey = workspaceAuthorityKey();
     if (authorityKey === null) return;
     setMembershipDraft({
       target,
@@ -2226,10 +2597,10 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
       work.data.status !== "claimed" ||
       Date.now() / 1000 >= work.data.claim_expires_at
     ) {
-      expireMembershipAuthority();
+      expireReviewAuthority();
       return;
     }
-    const liveKey = membershipAuthorityKey();
+    const liveKey = workspaceAuthorityKey();
     if (liveKey === null || liveKey !== membershipDraft.authorityKey) {
       setMembershipDraft(null);
       return;
@@ -2296,6 +2667,121 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
         accepted("membership")();
       },
       onError: rejected("membership"),
+    });
+  };
+
+  /** S11 entity-link decisions: the Reviewer explicitly accepts one
+   * coexisting candidate claim with a registered reason.  The draft is the
+   * server-owned finding data only; candidate membership, confidence and
+   * provenance come exclusively from the DTO. */
+  const handleStartEntityLink = (target: EntityLinkTarget) => {
+    const authorityKey = workspaceAuthorityKey();
+    if (authorityKey === null) return;
+    setEntityLinkDraft({
+      target,
+      // The browser never selects a candidate by array order, confidence,
+      // or any heuristic: the Reviewer must explicitly choose one claim.
+      claimId: null,
+      reason: "ENTITY_LINK_SOURCE_VERIFIED",
+      authorityKey,
+    });
+    setEntityLinkKey(newIdempotencyKey());
+    setLastAccepted(null);
+    setRejectedAction(null);
+  };
+
+  const handleEntityLinkCandidate = (claimId: string) => {
+    setEntityLinkDraft((draft) =>
+      draft === null ? draft : { ...draft, claimId },
+    );
+  };
+
+  const handleEntityLinkReasonChange = (reason: EntityLinkReason) => {
+    setEntityLinkDraft((draft) =>
+      draft === null ? draft : { ...draft, reason },
+    );
+  };
+
+  const handleEntityLinkSubmit = () => {
+    if (work.data === undefined || anyPending || pendingCommand !== null) return;
+    if (requiresReload || work.isError || !owningReadsCurrent) return;
+    if (entityLinkDraft === null) return;
+    // Event-time authority check: the draft is only valid while the rendered
+    // work item is claimed and unexpired.  Expired authority enters the
+    // explicit reload-required state; a missing or changed authority key
+    // closes the draft.  Either way no POST leaves the browser.
+    if (
+      work.data.status !== "claimed" ||
+      Date.now() / 1000 >= work.data.claim_expires_at
+    ) {
+      expireReviewAuthority();
+      return;
+    }
+    const liveKey = workspaceAuthorityKey();
+    if (liveKey === null || liveKey !== entityLinkDraft.authorityKey) {
+      setEntityLinkDraft(null);
+      return;
+    }
+    const target = entityLinkDraft.target;
+    const candidate = target.entityLink.candidates.find(
+      (item) => item.claim_id === entityLinkDraft.claimId,
+    );
+    const eventId = target.entityLink.source_evidence.event_id;
+    const sourceEvidenceRevision =
+      target.entityLink.source_evidence.evidence_revision;
+    if (
+      candidate === undefined ||
+      typeof eventId !== "string" ||
+      typeof sourceEvidenceRevision !== "number"
+    ) return;
+    // The command copies only server-provided identities and authority
+    // values: the selected candidate's entity identity, the mention/finding
+    // pin, the live source evidence, the active predecessors, and the
+    // matcher/knowledge-release provenance of the chosen claim.  No raw
+    // value, digest, or invented target state is ever sent.
+    const command: EntityLinkCommand = {
+      application_id: work.data.application_id,
+      expected_fence: work.data.claim_fence,
+      expected_context: work.data.command_context,
+      idempotency_key: entityLinkKey,
+      entity_link: {
+        schema_version: "entity-link-correction/1",
+        finding_id: target.findingId,
+        candidate_claim_id: candidate.claim_id,
+        mention_id: target.entityLink.mention_id,
+        source_evidence: {
+          event_id: eventId,
+          evidence_revision: sourceEvidenceRevision,
+        },
+        expected_active_decision_ids:
+          target.entityLink.active_decision_ids ?? [],
+        decision: "accept",
+        entity_id: candidate.entity_id,
+        entity_type: candidate.entity_type,
+        label: candidate.label,
+        relationship: "same_as",
+        matcher_id: candidate.provenance.matcher_id,
+        matcher_version: candidate.provenance.matcher_version,
+        knowledge_release_id: candidate.provenance.knowledge_release_id,
+        reason_code: entityLinkDraft.reason,
+      },
+    };
+    setPendingCommand({ action: "entityLink", command });
+    setLastAccepted(null);
+    setRejectedAction(null);
+    entityLinkCorrect.mutate(command, {
+      onSuccess: (result: EntityLinkResult) => {
+        // The accepted entity-link successor invalidates the work item and
+        // advances the Evidence revision; the shared accepted-correction
+        // latch keeps the authoritative route/history reads alive while the
+        // replacement run converges.
+        setAcceptedCorrection({
+          applicationId: result.application_id,
+          evidenceRevision: result.evidence_revision,
+        });
+        accepted("entityLink")();
+      },
+      onError: rejected("entityLink"),
     });
   };
 
@@ -2379,6 +2865,17 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
           accepted("membership")();
         },
         onError: rejected("membership"),
+      });
+    } else if (pendingCommand.action === "entityLink") {
+      entityLinkCorrect.mutate(pendingCommand.command, {
+        onSuccess: (result: EntityLinkResult) => {
+          setAcceptedCorrection({
+            applicationId: result.application_id,
+            evidenceRevision: result.evidence_revision,
+          });
+          accepted("entityLink")();
+        },
+        onError: rejected("entityLink"),
       });
     } else {
       submit.mutate(pendingCommand.command, {
@@ -2711,11 +3208,17 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
         onCancelCorrection={handleCancelCorrection}
         membershipDraft={membershipDraft}
         membershipPending={membershipCorrect.isPending}
+        entityLinkDraft={entityLinkDraft}
+        entityLinkPending={entityLinkCorrect.isPending}
         onStartMembership={handleStartMembership}
         onMembershipDecision={handleMembershipDecision}
         onMembershipCandidate={handleMembershipCandidate}
         onMembershipReasonChange={handleMembershipReasonChange}
         onSubmitMembership={handleMembershipSubmit}
+        onStartEntityLink={handleStartEntityLink}
+        onEntityLinkCandidate={handleEntityLinkCandidate}
+        onEntityLinkReasonChange={handleEntityLinkReasonChange}
+        onSubmitEntityLink={handleEntityLinkSubmit}
       />
       <GateSection applicationId={data.application_id} />
       <HistorySection history={history} />

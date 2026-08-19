@@ -15,6 +15,7 @@ import {
   useClaimWorkItem,
   useCorrectFieldObservation,
   useCorrectPageMembership,
+  useCorrectEntityLink,
   useCorrectionConvergence,
   useCurrentRoute,
   useIntegratorSupplementRequest,
@@ -35,6 +36,7 @@ import {
   useRecoverHold,
   type ClaimCommand,
   type CorrectionCommand,
+  type EntityLinkCommand,
   type MembershipCommand,
   type FencedCommand,
   type RevealCommand,
@@ -500,6 +502,64 @@ const T10_MEMBERSHIP_RESULT = {
   route: "pending_check",
   lifecycle_revision: 8,
   evidence_revision: 3,
+};
+
+const T13_ENTITY_LINK_PATH =
+  "/controlled/s01/api/commands/review-work-items/recovery_work_t01retry1234567890abcdef/correct-entity-link";
+
+const T13_ENTITY_LINK_COMMAND: EntityLinkCommand = {
+  application_id: "app_t01hook",
+  expected_fence: 1,
+  expected_context: {
+    lifecycle_revision: 7,
+    evidence_revision: 2,
+    run_id: "run_t01hook",
+    projection_watermark: 1,
+    current_context: "current-context-hash",
+  },
+  idempotency_key: "s11-hook-key",
+  entity_link: {
+    schema_version: "entity-link-correction/1",
+    finding_id: "finding_s11hook",
+    candidate_claim_id: "s11_claim_org_pingan",
+    mention_id: "s11_mention_org_pol",
+    source_evidence: {
+      event_id: "evidence_s11hook",
+      evidence_revision: 2,
+    },
+    expected_active_decision_ids: [],
+    decision: "accept",
+    entity_id: "org:pingan_full",
+    entity_type: "insurer",
+    label: "中国平安财产保险股份有限公司",
+    relationship: "same_as",
+    matcher_id: "c-demo-entity-matcher/1",
+    matcher_version: "1",
+    knowledge_release_id: "c-demo-entity-knowledge/1",
+    reason_code: "ENTITY_LINK_AMBIGUITY_RESOLVED",
+  },
+};
+
+const T13_ENTITY_LINK_RESULT = {
+  status: "accepted",
+  replayed: false,
+  application_id: "app_t01hook",
+  work_item_id: WORK_ID,
+  correction_id: "entity_link_s11hook",
+  entity_link_decision_id: "decision_s11hook",
+  candidate_claim_id: "s11_claim_org_pingan",
+  mention_id: "s11_mention_org_pol",
+  entity_id: "org:pingan_full",
+  entity_type: "insurer",
+  label: "中国平安财产保险股份有限公司",
+  relationship: "same_as",
+  cycle: 1,
+  invalidated_run_id: "run_t01hook",
+  job_id: "job_s11hook",
+  phase: "Assembly",
+  route: "pending_check",
+  lifecycle_revision: 8,
+  evidence_revision: 2,
 };
 
 function routePayload(overrides: Record<string, unknown> = {}) {
@@ -1087,6 +1147,42 @@ describe("reveal and correction mutations (T03)", () => {
     expect(membershipPosts).toBe(1);
     expect(result.current.membership.data?.evidence_revision).toBe(3);
     expect(result.current.membership.data?.decision).toBe("accept");
+    // Acceptance invalidates the server-owned S01 queries: the queue refetches.
+    await waitFor(() => expect(queueRequests).toBeGreaterThan(1));
+  });
+
+  it("posts the S11 entity-link correction and invalidates S01 reads", async () => {
+    let entityLinkPosts = 0;
+    let queueRequests = 0;
+    fetchRouter({
+      [`POST ${T13_ENTITY_LINK_PATH}`]: () => {
+        entityLinkPosts += 1;
+        return jsonResponse(T13_ENTITY_LINK_RESULT);
+      },
+      "GET /controlled/s01/api/queries/queue": () => {
+        queueRequests += 1;
+        return jsonResponse({
+          items: [],
+          recovery_items: [],
+          projection_watermark: 0,
+        });
+      },
+    });
+    const client = createQueryClient();
+    const { result } = renderHook(
+      () => ({
+        entityLink: useCorrectEntityLink(WORK_ID),
+        queue: useQueue(),
+      }),
+      { wrapper: wrap(client) },
+    );
+    result.current.entityLink.mutate(T13_ENTITY_LINK_COMMAND);
+    await waitFor(() =>
+      expect(result.current.entityLink.isSuccess).toBe(true),
+    );
+    expect(entityLinkPosts).toBe(1);
+    expect(result.current.entityLink.data?.evidence_revision).toBe(2);
+    expect(result.current.entityLink.data?.entity_id).toBe("org:pingan_full");
     // Acceptance invalidates the server-owned S01 queries: the queue refetches.
     await waitFor(() => expect(queueRequests).toBeGreaterThan(1));
   });

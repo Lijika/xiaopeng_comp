@@ -50,6 +50,8 @@ import {
 export type RevealResult = components["schemas"]["S01RevealResult"];
 export type CorrectionResult = components["schemas"]["S01CorrectionResult"];
 export type MembershipResult = components["schemas"]["S01MembershipCorrectionResult"];
+export type EntityLinkResult =
+  components["schemas"]["S01EntityLinkCorrectionResult"];
 export type SupplementRequestResult =
   components["schemas"]["S01SupplementRequestResult"];
 export type SupplementRequestView =
@@ -120,6 +122,7 @@ export type SubmitCommand = paths["/controlled/s01/api/commands/review-work-item
 export type RevealCommand = paths["/controlled/s01/api/commands/review-work-items/{work_item_id}/reveal-field-observation"]["post"]["requestBody"]["content"]["application/json"];
 export type CorrectionCommand = paths["/controlled/s01/api/commands/review-work-items/{work_item_id}/correct-field-observation"]["post"]["requestBody"]["content"]["application/json"];
 export type MembershipCommand = paths["/controlled/s01/api/commands/review-work-items/{work_item_id}/correct-page-membership"]["post"]["requestBody"]["content"]["application/json"];
+export type EntityLinkCommand = paths["/controlled/s01/api/commands/review-work-items/{work_item_id}/correct-entity-link"]["post"]["requestBody"]["content"]["application/json"];
 
 /**
  * The T04 commands are bound to the generated OpenAPI request schemas; a
@@ -349,6 +352,30 @@ export function useCorrectPageMembership(
       ),
     retry: false,
     gcTime: 0,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["s01"] });
+    },
+  });
+}
+
+/**
+ * The S11 entity-link correction command.  Acceptance invalidates the
+ * server-owned S01 queries; the successor run converges through
+ * current-route/history.  The command carries only server-provided candidate
+ * and authority values, so no restricted raw is retained: like the
+ * membership correction it keeps the default MutationCache lifetime.
+ */
+export function useCorrectEntityLink(
+  workId: string,
+): UseMutationResult<EntityLinkResult, Error, EntityLinkCommand> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (command: EntityLinkCommand) =>
+      request<EntityLinkResult>(
+        `/controlled/s01/api/commands/review-work-items/${encodeURIComponent(workId)}/correct-entity-link`,
+        { method: "POST", body: JSON.stringify(command) },
+      ),
+    retry: false,
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["s01"] });
     },

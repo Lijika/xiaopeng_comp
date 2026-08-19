@@ -4084,3 +4084,749 @@ describe("ReviewWorkPanel governed-release pin (T08)", () => {
     expect(components[2].textContent).toContain("77".repeat(32));
   });
 });
+
+describe("ReviewWorkPanel S11 entity-link explicit choice (T13)", () => {
+  const ENTITY_LINK_PATH =
+    "/controlled/s01/api/commands/review-work-items/work_t02panel1234567890abcdef/correct-entity-link";
+  const S11_MENTION_ORG = "s11_mention_org_pol";
+  const S11_MENTION_CITY = "s11_mention_city_lease";
+  const S11_MENTION_BRAND = "s11_mention_brand_inv";
+  const S11_FINDING_ORG = "finding_s11panel0000000000000004";
+  const S11_FINDING_CITY = "finding_s11panel0000000000000005";
+  const S11_FINDING_BRAND = "finding_s11panel0000000000000006";
+  const S11_SOURCE_EVIDENCE = {
+    event_id: "evidence_s11panel",
+    evidence_revision: 2,
+  };
+  const SUCCESSOR_CONTEXT = {
+    ...CONTEXT,
+    evidence_revision: 2,
+    current_context: "7".repeat(64),
+  };
+  const S11_ORG_CANDIDATES = [
+    {
+      claim_id: "s11_claim_org_picc",
+      entity_id: "org:picc_full",
+      entity_type: "insurer",
+      label: "中国人民财产保险股份有限公司",
+      confidence: 0.97,
+      provenance: {
+        matcher_id: "c-demo-entity-matcher/1",
+        matcher_version: "1",
+        knowledge_release_id: "c-demo-entity-knowledge/1",
+        method: "alias-longest-key",
+        source_pointer: "/documents/1/fields/insured_org",
+      },
+      knowledge: { same_as: ["org:picc"], conflict_with: [] },
+    },
+    {
+      claim_id: "s11_claim_org_pingan",
+      entity_id: "org:pingan_full",
+      entity_type: "insurer",
+      label: "中国平安财产保险股份有限公司",
+      confidence: 0.94,
+      provenance: {
+        matcher_id: "c-demo-entity-matcher/1",
+        matcher_version: "1",
+        knowledge_release_id: "c-demo-entity-knowledge/1",
+        method: "alias-fuzzy",
+        source_pointer: "/documents/1/fields/insured_org",
+      },
+      knowledge: { same_as: ["org:pingan"], conflict_with: [] },
+    },
+  ];
+  /** The org mention as the workspace selected finding: ambiguous with two
+   * coexisting insurer candidates, exact fixture provenance, and no active
+   * decision yet.  The Reviewer must pick one claim explicitly. */
+  const S11_ORG_ENTITY_LINK = {
+    mention_id: S11_MENTION_ORG,
+    mention: {
+      mention_id: S11_MENTION_ORG,
+      entity_type: "insurer",
+      document_id: "pol",
+      document_role: "交强险保单",
+      field: "insured_org",
+      raw: "人保财险",
+    },
+    state: "ambiguous",
+    candidates: S11_ORG_CANDIDATES,
+    active_decision_ids: [],
+    source_evidence: S11_SOURCE_EVIDENCE,
+    low_confidence: false,
+  };
+
+  function s11EntityLinkWorkspacePayload(
+    overrides: Record<string, unknown> = {},
+  ): WorkspaceResponse {
+    return workspacePayload({
+      claim_fence: 1,
+      claim_expires_at: LIVE_CLAIM_EXPIRES_AT,
+      evidence_revision: 2,
+      mandatory_blockers: [
+        {
+          finding_id: S11_FINDING_ORG,
+          run_id: "run_t02panel",
+          rule_id: "ENTITY_LINK_AMBIGUOUS",
+          verdict: "uncertain",
+          severity: "critical",
+          reason_code: "ENTITY_LINK_AMBIGUOUS",
+          mandatory: true,
+          evidence_links: [],
+          entity_link: S11_ORG_ENTITY_LINK,
+        },
+      ],
+      selected_finding: {
+        finding_id: S11_FINDING_ORG,
+        run_id: "run_t02panel",
+        rule_id: "ENTITY_LINK_AMBIGUOUS",
+        verdict: "uncertain",
+        severity: "critical",
+        reason_code: "ENTITY_LINK_AMBIGUOUS",
+        mandatory: true,
+        evidence_links: [],
+        entity_link: S11_ORG_ENTITY_LINK,
+      },
+      entity_link_ledger: [
+        {
+          mention_id: S11_MENTION_ORG,
+          mention: S11_ORG_ENTITY_LINK.mention,
+          state: "ambiguous",
+          finding_id: S11_FINDING_ORG,
+          active_decision_ids: [],
+          source_evidence: S11_SOURCE_EVIDENCE,
+          candidates: S11_ORG_CANDIDATES,
+          decisions: [],
+          low_confidence: false,
+        },
+      ],
+      ...overrides,
+    });
+  }
+
+  function s11EntityLinkRoutes(
+    overrides: Record<string, RouteHandler> = {},
+  ) {
+    return {
+      [`GET ${WORK_PATH}`]: () =>
+        jsonResponse(
+          claimedWorkPayload({
+            evidence_revision: 2,
+            command_context: SUCCESSOR_CONTEXT,
+          }),
+        ),
+      [`GET ${WORKSPACE_PATH}`]: () =>
+        jsonResponse(s11EntityLinkWorkspacePayload()),
+      [`GET ${ROUTE_PATH}`]: () =>
+        jsonResponse(routePayload({ evidence_revision: 2 })),
+      [`GET ${HISTORY_PATH}`]: () =>
+        jsonResponse(
+          historyPayload({
+            runs: [
+              {
+                ...historyPayload().runs[0],
+                evidence_revision: 2,
+              },
+            ],
+          }),
+        ),
+      ...overrides,
+    };
+  }
+
+  it("opens the entity-link comparison with an empty disabled candidate and submits one exact S11 command", async () => {
+    const router = fetchRouter({
+      ...s11EntityLinkRoutes({
+        [`POST ${ENTITY_LINK_PATH}`]: () =>
+          jsonResponse({
+            status: "accepted",
+            replayed: false,
+            application_id: APP_ID,
+            work_item_id: WORK_ID,
+            correction_id: "entity_link_s11panel",
+            entity_link_decision_id: "decision_s11panel_org",
+            candidate_claim_id: "s11_claim_org_pingan",
+            mention_id: S11_MENTION_ORG,
+            entity_id: "org:pingan_full",
+            entity_type: "insurer",
+            label: "中国平安财产保险股份有限公司",
+            relationship: "same_as",
+            cycle: 1,
+            invalidated_run_id: "run_t02panel",
+            job_id: "job_s11panel",
+            phase: "Assembly",
+            route: "pending_check",
+            lifecycle_revision: 7,
+            evidence_revision: 2,
+          }),
+      }),
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    // The ledger keeps every mention, candidate claim and provenance.
+    const ledger = screen.getByTestId("review-entity-link-ledger");
+    expect(ledger).toHaveTextContent("s11_claim_org_picc");
+    expect(ledger).toHaveTextContent("s11_claim_org_pingan");
+    expect(ledger).toHaveTextContent("中国人民财产保险股份有限公司");
+    expect(ledger).toHaveTextContent("c-demo-entity-matcher/1");
+    expect(ledger).toHaveTextContent("c-demo-entity-knowledge/1");
+    // The comparison pane renders the server ambiguous state without
+    // changing it.
+    expect(screen.getByTestId("review-entity-link")).toHaveTextContent(
+      "歧义（多候选并存）",
+    );
+    await userEvent.click(screen.getByTestId("review-entity-link-start"));
+    await screen.findByTestId("review-entity-link-form");
+    // An opened draft never preselects a candidate: the native select shows
+    // an explicit disabled placeholder, submit stays disabled, and no
+    // entity-link POST may leave before an explicit Reviewer choice.
+    const candidateSelect = screen.getByRole("combobox", { name: "候选实体" });
+    expect(candidateSelect).toHaveValue("");
+    expect(
+      within(candidateSelect).getByRole("option", {
+        name: "请选择候选实体",
+      }),
+    ).toBeDisabled();
+    expect(screen.getByTestId("review-entity-link-submit")).toBeDisabled();
+    expect(
+      router.calls.filter(
+        (call) => call.method === "POST" && call.url === ENTITY_LINK_PATH,
+      ),
+    ).toHaveLength(0);
+    // The Reviewer picks the second candidate by its opaque claim id and a
+    // registered reason; array order never selects a winner.
+    await userEvent.selectOptions(candidateSelect, "s11_claim_org_pingan");
+    await userEvent.selectOptions(
+      screen.getByRole("combobox", { name: "原因" }),
+      "ENTITY_LINK_AMBIGUITY_RESOLVED",
+    );
+    await userEvent.click(screen.getByTestId("review-entity-link-submit"));
+    await vi.waitFor(() =>
+      expect(
+        router.calls.some(
+          (call) =>
+            call.method === "POST" && call.url === ENTITY_LINK_PATH,
+        ),
+      ).toBe(true),
+    );
+    const calls = router.calls.filter(
+      (call) => call.method === "POST" && call.url === ENTITY_LINK_PATH,
+    );
+    expect(calls).toHaveLength(1);
+    // The serialized command carries only the generated S11 contract fields:
+    // the selected candidate identity, mention/finding/source evidence, the
+    // empty predecessor list, the live context/fence/application, and one
+    // idempotency key.
+    expect(calls[0].body).toEqual({
+      application_id: APP_ID,
+      expected_fence: 1,
+      expected_context: SUCCESSOR_CONTEXT,
+      idempotency_key: expect.any(String),
+      entity_link: {
+        schema_version: "entity-link-correction/1",
+        finding_id: S11_FINDING_ORG,
+        candidate_claim_id: "s11_claim_org_pingan",
+        mention_id: S11_MENTION_ORG,
+        source_evidence: S11_SOURCE_EVIDENCE,
+        expected_active_decision_ids: [],
+        decision: "accept",
+        entity_id: "org:pingan_full",
+        entity_type: "insurer",
+        label: "中国平安财产保险股份有限公司",
+        relationship: "same_as",
+        matcher_id: "c-demo-entity-matcher/1",
+        matcher_version: "1",
+        knowledge_release_id: "c-demo-entity-knowledge/1",
+        reason_code: "ENTITY_LINK_AMBIGUITY_RESOLVED",
+      },
+    });
+  });
+
+  it("renders unresolved, ambiguous and conflict mentions with low confidence as server states", async () => {
+    const CITY_ENTITY_LINK = {
+      mention_id: S11_MENTION_CITY,
+      mention: {
+        mention_id: S11_MENTION_CITY,
+        entity_type: "city",
+        document_id: "lease",
+        document_role: "融资租赁合同",
+        field: "city",
+        raw: "南京",
+      },
+      state: "unresolved",
+      candidates: [
+        {
+          claim_id: "s11_claim_city_nanjing",
+          entity_id: "addr:nanjing",
+          entity_type: "city",
+          label: "南京市",
+          confidence: 0.5,
+          provenance: {
+        matcher_id: "c-demo-entity-matcher/1",
+        matcher_version: "1",
+        knowledge_release_id: "c-demo-entity-knowledge/1",
+            method: "alias-longest-key",
+            source_pointer: "/documents/2/fields/city",
+      },
+          knowledge: { same_as: [], conflict_with: [] },
+      },
+      ],
+      active_decision_ids: [],
+        source_evidence: S11_SOURCE_EVIDENCE,
+      low_confidence: true,
+    };
+    const BRAND_ENTITY_LINK = {
+      mention_id: S11_MENTION_BRAND,
+      mention: {
+        mention_id: S11_MENTION_BRAND,
+        entity_type: "brand",
+        document_id: "inv",
+        document_role: "发票",
+        field: "brand_short",
+        raw: "一汽大众",
+      },
+      state: "conflict",
+      candidates: [
+        {
+          claim_id: "s11_claim_brand_faw",
+          entity_id: "brand:faw-vw",
+          entity_type: "brand",
+          label: "一汽-大众汽车有限公司",
+          confidence: 0.98,
+          provenance: {
+        matcher_id: "c-demo-entity-matcher/1",
+        matcher_version: "1",
+        knowledge_release_id: "c-demo-entity-knowledge/1",
+            method: "alias-longest-key",
+            source_pointer: "/documents/3/fields/brand_short",
+      },
+          knowledge: { same_as: [], conflict_with: ["brand:saic-vw"] },
+      },
+        {
+          claim_id: "s11_claim_brand_saic",
+          entity_id: "brand:saic-vw",
+          entity_type: "brand",
+          label: "上汽大众汽车有限公司",
+          confidence: 0.71,
+          provenance: {
+        matcher_id: "c-demo-entity-matcher/1",
+        matcher_version: "1",
+        knowledge_release_id: "c-demo-entity-knowledge/1",
+            method: "alias-fuzzy",
+            source_pointer: "/documents/3/fields/brand_short",
+      },
+          knowledge: { same_as: [], conflict_with: ["brand:faw-vw"] },
+      },
+      ],
+      active_decision_ids: [],
+        source_evidence: S11_SOURCE_EVIDENCE,
+      low_confidence: false,
+    };
+    const router = fetchRouter({
+      ...s11EntityLinkRoutes({
+        [`GET ${WORKSPACE_PATH}`]: () =>
+          jsonResponse(
+            s11EntityLinkWorkspacePayload({
+              mandatory_blockers: [
+                {
+                  finding_id: S11_FINDING_CITY,
+                  run_id: "run_t02panel",
+                  rule_id: "ENTITY_LINK_UNRESOLVED",
+                  verdict: "uncertain",
+                  severity: "critical",
+                  reason_code: "ENTITY_LINK_UNRESOLVED",
+                  mandatory: true,
+                  evidence_links: [],
+                  entity_link: CITY_ENTITY_LINK,
+      },
+                {
+                  finding_id: S11_FINDING_BRAND,
+                  run_id: "run_t02panel",
+                  rule_id: "ENTITY_LINK_CONFLICT",
+                  verdict: "uncertain",
+                  severity: "critical",
+                  reason_code: "ENTITY_LINK_CONFLICT",
+                  mandatory: true,
+                  evidence_links: [],
+                  entity_link: BRAND_ENTITY_LINK,
+      },
+              ],
+              selected_finding: {
+                finding_id: S11_FINDING_CITY,
+                run_id: "run_t02panel",
+                rule_id: "ENTITY_LINK_UNRESOLVED",
+                verdict: "uncertain",
+                severity: "critical",
+                reason_code: "ENTITY_LINK_UNRESOLVED",
+                mandatory: true,
+                evidence_links: [],
+                entity_link: CITY_ENTITY_LINK,
+      },
+              entity_link_ledger: [
+                {
+        mention_id: S11_MENTION_ORG,
+                  mention: S11_ORG_ENTITY_LINK.mention,
+                  state: "ambiguous",
+        finding_id: S11_FINDING_ORG,
+                  active_decision_ids: [],
+        source_evidence: S11_SOURCE_EVIDENCE,
+                  candidates: S11_ORG_CANDIDATES,
+                  decisions: [],
+                  low_confidence: false,
+      },
+                {
+                  mention_id: S11_MENTION_CITY,
+                  mention: CITY_ENTITY_LINK.mention,
+                  state: "unresolved",
+                  finding_id: S11_FINDING_CITY,
+                  active_decision_ids: [],
+        source_evidence: S11_SOURCE_EVIDENCE,
+                  candidates: CITY_ENTITY_LINK.candidates,
+                  decisions: [],
+                  low_confidence: true,
+      },
+                {
+                  mention_id: S11_MENTION_BRAND,
+                  mention: BRAND_ENTITY_LINK.mention,
+                  state: "conflict",
+                  finding_id: S11_FINDING_BRAND,
+                  active_decision_ids: [],
+        source_evidence: S11_SOURCE_EVIDENCE,
+                  candidates: BRAND_ENTITY_LINK.candidates,
+                  decisions: [],
+                  low_confidence: false,
+      },
+              ],
+            }),
+          ),
+      }),
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    const ledger = screen.getByTestId("review-entity-link-ledger");
+    expect(
+      ledger.querySelectorAll(
+        '[data-testid="review-entity-link-ledger-page"]',
+      ),
+    ).toHaveLength(3);
+    // The ambiguous org mention keeps its server state.
+    expect(ledger).toHaveTextContent("歧义（多候选并存）");
+    expect(ledger).toHaveTextContent("s11_claim_org_picc");
+    expect(ledger).toHaveTextContent("s11_claim_org_pingan");
+    // The unresolved low-confidence city mention keeps its server state and
+    // the explicit low-confidence marker; no client threshold invents it.
+    expect(ledger).toHaveTextContent("未解析");
+    expect(ledger).toHaveTextContent("低置信（服务端）");
+    expect(ledger).toHaveTextContent("addr:nanjing");
+    expect(ledger).toHaveTextContent("0.5");
+    // The conflicting brand mention keeps its conflict state and the frozen
+    // knowledge-release conflict targets.
+    expect(ledger).toHaveTextContent("冲突（别名互斥）");
+    expect(ledger).toHaveTextContent("brand:faw-vw");
+    expect(ledger).toHaveTextContent("brand:saic-vw");
+    expect(ledger).toHaveTextContent("conflict_with brand:saic-vw");
+    // The selected city finding renders the low-confidence marker in the
+    // comparison pane as a server fact.
+    expect(screen.getByTestId("review-entity-link")).toHaveTextContent(
+      "未解析",
+    );
+    expect(
+      screen.getByTestId("review-entity-link-low-confidence"),
+    ).toHaveTextContent("低置信候选（服务端）");
+    // No command may leave from render-only server states.
+    expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(
+      0,
+    );
+  });
+
+  it("renders the entity-link ledger, corrections and run pins from server history", async () => {
+    const S11_DECISION_ORG = "decision_s11panel_org";
+    const S11_DECISION_SUPERSEDING = "decision_s11panel_org_2";
+    const ledgerRecord = (overrides: Record<string, unknown>) => ({
+      mention: S11_ORG_ENTITY_LINK.mention,
+      candidate_entity: {
+        entity_id: "org:picc_full",
+        entity_type: "insurer",
+        label: "中国人民财产保险股份有限公司",
+      },
+      ...overrides,
+    });
+    fetchRouter({
+      ...s11EntityLinkRoutes({
+        [`GET ${HISTORY_PATH}`]: () =>
+          jsonResponse(
+            historyPayload({
+              runs: [
+                {
+                  ...historyPayload().runs[0],
+                  evidence_revision: 3,
+                  entity_link_decisions: [
+                    {
+                      decision_id: S11_DECISION_SUPERSEDING,
+                      candidate_claim_id: "s11_claim_org_picc",
+                      mention_id: S11_MENTION_ORG,
+                      entity_id: "org:picc_full",
+                      entity_type: "insurer",
+                      label: "中国人民财产保险股份有限公司",
+                      relationship: "same_as",
+                      evidence_revision: 3,
+                      matcher_id: "c-demo-entity-matcher/1",
+                      matcher_version: "1",
+                      knowledge_release_id: "c-demo-entity-knowledge/1",
+                      release_id: "auto_lease@1.9.0",
+                      release_digest: "4fdc8736",
+                    },
+                  ],
+                },
+              ],
+              entity_links: [
+                ledgerRecord({
+                  record_kind: "candidate",
+                  claim_id: "s11_claim_org_picc",
+                  confidence: 0.97,
+                  provenance: S11_ORG_CANDIDATES[0].provenance,
+                  knowledge: S11_ORG_CANDIDATES[0].knowledge,
+                }),
+                ledgerRecord({
+                  record_kind: "accepted",
+                  decision_id: S11_DECISION_ORG,
+                  link_id: "link_s11panel_org",
+                  relationship: "same_as",
+                  actor: "t02-reviewer",
+                  reason_code: "ENTITY_LINK_AMBIGUITY_RESOLVED",
+                  time: 200,
+                  cycle: 1,
+                  source_evidence: {
+                    ...S11_SOURCE_EVIDENCE,
+                    candidate_claim_id: "s11_claim_org_picc",
+                  },
+                  supersedes: [],
+                  status: "superseded",
+                  claim_id: "s11_claim_org_picc",
+                }),
+                ledgerRecord({
+                  record_kind: "accepted",
+                  decision_id: S11_DECISION_SUPERSEDING,
+                  link_id: "link_s11panel_org_2",
+                  relationship: "same_as",
+                  actor: "t02-reviewer",
+                  reason_code: "ENTITY_LINK_SOURCE_MISASSIGNED",
+                  time: 300,
+                  cycle: 2,
+                  source_evidence: {
+                    ...S11_SOURCE_EVIDENCE,
+                    evidence_revision: 3,
+                    candidate_claim_id: "s11_claim_org_picc",
+                  },
+                  supersedes: [S11_DECISION_ORG],
+                  status: "active",
+                  claim_id: "s11_claim_org_picc",
+                  matcher_id: "c-demo-entity-matcher/1",
+                  matcher_version: "1",
+                  knowledge_release_id: "c-demo-entity-knowledge/1",
+                  release_id: "auto_lease@1.9.0",
+                  release_digest: "4fdc8736",
+                }),
+              ],
+              entity_link_history: [
+                {
+                  evidence_revision: 3,
+                  event_id: "evidence_s11panel",
+                  correction_id: "entity_link_s11panel_2",
+                  decision_id: S11_DECISION_SUPERSEDING,
+                  candidate_claim_id: "s11_claim_org_picc",
+                  mention_id: S11_MENTION_ORG,
+                  mention: S11_ORG_ENTITY_LINK.mention,
+                  entity_id: "org:picc_full",
+                  entity_type: "insurer",
+                  label: "中国人民财产保险股份有限公司",
+                  relationship: "same_as",
+                  source_evidence: {
+                    ...S11_SOURCE_EVIDENCE,
+                    evidence_revision: 3,
+                  },
+                  decision: "accept",
+                  matcher_id: "c-demo-entity-matcher/1",
+                  matcher_version: "1",
+                  knowledge_release_id: "c-demo-entity-knowledge/1",
+                  reason_code: "ENTITY_LINK_SOURCE_MISASSIGNED",
+                  actor: "t02-reviewer",
+                  recorded_at: 300,
+                  cycle: 2,
+                  supersedes: [S11_DECISION_ORG],
+                },
+              ],
+            }),
+          ),
+      }),
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    // The preserved ledger shows candidate claims and both decisions with
+    // their explicit active/superseded server statuses; predecessor links
+    // stay navigable in the immutable history.
+    const ledger = screen.getByTestId("review-history-entity-links");
+    expect(ledger).toHaveTextContent("candidate");
+    expect(ledger).toHaveTextContent("s11_claim_org_picc");
+    expect(ledger).toHaveTextContent("中国人民财产保险股份有限公司");
+    expect(ledger).toHaveTextContent("superseded");
+    expect(ledger).toHaveTextContent("active");
+    expect(ledger).toHaveTextContent("supersedes decision_s11panel_org");
+    // Ordinary history output never re-exposes the raw mention value; the
+    // public references (mention id, candidate label, status, provenance)
+    // remain navigable.
+    expect(ledger.textContent ?? "").not.toContain("人保财险");
+    expect(ledger).toHaveTextContent("s11_mention_org_pol");
+    // The chronological correction history preserves the reason, cycle and
+    // superseded predecessor.
+    const corrections = screen.getByTestId(
+      "review-history-entity-link-corrections",
+    );
+    expect(corrections).toHaveTextContent("entity_link_s11panel_2");
+    expect(corrections).toHaveTextContent("ENTITY_LINK_SOURCE_MISASSIGNED");
+    expect(corrections).toHaveTextContent("周期 2");
+    expect(corrections).toHaveTextContent("supersedes decision_s11panel_org");
+    // The current run pin carries the full provenance binding.
+    const pin = screen.getByTestId("review-run-entity-link-decisions");
+    expect(pin).toHaveTextContent("decision_s11panel_org_2");
+    expect(pin).toHaveTextContent("matcher c-demo-entity-matcher/1@1");
+    expect(pin).toHaveTextContent("knowledge c-demo-entity-knowledge/1");
+    expect(pin).toHaveTextContent("release auto_lease@1.9.0@4fdc8736");
+  });
+
+  it.each([
+    ["stale context 409", 409, "S03_STALE", "STALE_REVIEW_CONTEXT"],
+    [
+      "release mismatch 422",
+      422,
+      "S03_REJECTED",
+      "ENTITY_LINK_RELEASE_MISMATCH",
+    ],
+  ])(
+    "%s locks entity link into reload-required without an unknown-outcome retry",
+    async (_label, status, error, reason) => {
+      const router = fetchRouter({
+        ...s11EntityLinkRoutes({
+          [`POST ${ENTITY_LINK_PATH}`]: () =>
+            jsonResponse({ detail: { error, reason_code: reason } }, status),
+        }),
+      });
+      renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+      await waitForReviewReady();
+      await userEvent.click(screen.getByTestId("review-entity-link-start"));
+      await screen.findByTestId("review-entity-link-form");
+      await userEvent.selectOptions(
+        screen.getByRole("combobox", { name: "候选实体" }),
+        "s11_claim_org_pingan",
+      );
+      await userEvent.click(screen.getByTestId("review-entity-link-submit"));
+      await waitFor(() =>
+        expect(screen.getByTestId("review-command-status")).toHaveTextContent(
+          `实体链接未接受（${reason}）：请重新加载权威上下文后再试`,
+        ),
+      );
+      // The definitive rejection closes the draft and blocks every command
+      // behind the reload fence; the outcome is never offered for retry.
+      expect(
+        screen.queryByTestId("review-entity-link-form"),
+      ).not.toBeInTheDocument();
+      expect(screen.queryByTestId("retry-button")).not.toBeInTheDocument();
+      for (const name of ["认领", "续期", "释放", "提交人工核验"]) {
+        expect(screen.getByRole("button", { name })).toBeDisabled();
+      }
+      expect(
+        router.calls.filter(
+          (call) => call.method === "POST" && call.url === ENTITY_LINK_PATH,
+        ),
+      ).toHaveLength(1);
+    },
+  );
+
+  it("keeps the exact entity-link body and idempotency key when the transport outcome is unknown", async () => {
+    let posts = 0;
+    const router = fetchRouter({
+      ...s11EntityLinkRoutes({
+        [`POST ${ENTITY_LINK_PATH}`]: () => {
+          posts += 1;
+          if (posts === 1) {
+            return Promise.reject(new TypeError("network unreachable"));
+          }
+          return jsonResponse({
+            status: "accepted",
+            replayed: false,
+            application_id: APP_ID,
+            work_item_id: WORK_ID,
+            correction_id: "entity_link_s11panel",
+            entity_link_decision_id: "decision_s11panel_org",
+            candidate_claim_id: "s11_claim_org_pingan",
+            mention_id: S11_MENTION_ORG,
+            entity_id: "org:pingan_full",
+            entity_type: "insurer",
+            label: "中国平安财产保险股份有限公司",
+            relationship: "same_as",
+            cycle: 1,
+            invalidated_run_id: "run_t02panel",
+            job_id: "job_s11panel",
+            phase: "Assembly",
+            route: "pending_check",
+            lifecycle_revision: 7,
+            evidence_revision: 2,
+          });
+        },
+      }),
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    await userEvent.click(screen.getByTestId("review-entity-link-start"));
+    await screen.findByTestId("review-entity-link-form");
+    await userEvent.selectOptions(
+      screen.getByRole("combobox", { name: "候选实体" }),
+      "s11_claim_org_pingan",
+    );
+    await userEvent.selectOptions(
+      screen.getByRole("combobox", { name: "原因" }),
+      "ENTITY_LINK_AMBIGUITY_RESOLVED",
+    );
+    await userEvent.click(screen.getByTestId("review-entity-link-submit"));
+    await waitFor(() =>
+      expect(screen.getByTestId("review-command-status")).toHaveTextContent(
+        "结果未知：网络未确认，重试将使用同一幂等键",
+      ),
+    );
+    await userEvent.click(screen.getByTestId("retry-button"));
+    await vi.waitFor(() =>
+      expect(
+        router.calls.filter(
+          (call) => call.method === "POST" && call.url === ENTITY_LINK_PATH,
+        ),
+      ).toHaveLength(2),
+    );
+    const bodies = router.calls
+      .filter(
+        (call) => call.method === "POST" && call.url === ENTITY_LINK_PATH,
+      )
+      .map((call) => call.body);
+    // The unknown outcome retains the byte-identical command and key; only
+    // the acceptance rotates the semantic key.
+    expect(bodies[1]).toEqual(bodies[0]);
+  });
+
+  it("hides unauthorized entity-link reads behind a sanitized 404 with no candidate identifiers", async () => {
+    fetchRouter({
+      ...s11EntityLinkRoutes({
+        [`GET ${WORKSPACE_PATH}`]: () =>
+          jsonResponse({ detail: { error: "S03_NOT_FOUND" } }, 404),
+      }),
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("review-error")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("review-error")).toHaveTextContent(
+      "未找到或无权访问",
+    );
+    const text = screen.getByTestId("review-panel").textContent ?? "";
+    expect(text).not.toContain("s11_claim_org_picc");
+    expect(text).not.toContain("org:picc_full");
+    expect(text).not.toContain(APP_ID);
+  });
+});

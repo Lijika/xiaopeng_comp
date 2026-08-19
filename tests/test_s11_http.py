@@ -34,6 +34,26 @@ ENTITY_LINK_RULE_IDS = {
 }
 
 
+def create_s11_react_test_app() -> Any:
+    """The S02 test app plus the explicit S01 worker test driver.
+
+    ``create_s02_test_app`` leaves ``S01_TEST_DRIVER`` unset, so the
+    ``/controlled/s01/api/_test/commands/process`` endpoint would 404.  The
+    production browser flow needs that boundary to advance each run
+    deterministically while the S01 background runtime stays disabled.
+    """
+    import task4_consistency.web.app as web
+    from task4_consistency.controlled.s01 import ControlledScenarioTestDriver
+    from task4_consistency.web.app import create_s02_test_app
+
+    app = create_s02_test_app()
+    if web.S01_SERVICE is None:
+        raise RuntimeError("S02 test app did not configure the S01 service")
+    web.S01_BACKGROUND_ENABLED = False
+    web.S01_TEST_DRIVER = ControlledScenarioTestDriver(web.S01_SERVICE)
+    return app
+
+
 def _s11_loopback(state_path: Path):
     return s01_test_loopback(
         {

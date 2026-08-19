@@ -612,6 +612,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/controlled/s01/api/commands/review-work-items/{work_item_id}/correct-entity-link": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Controlled S11 Demo Correct Entity Link */
+        post: operations["controlled_s11_demo_correct_entity_link_controlled_s01_api_commands_review_work_items__work_item_id__correct_entity_link_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/controlled/s01/api/commands/review-work-items/{work_item_id}/correct-field-observation": {
         parameters: {
             query?: never;
@@ -2294,6 +2311,10 @@ export interface components {
             corrections: components["schemas"]["S01HistoryCorrection"][];
             /** Current Run Id */
             current_run_id?: string | null;
+            /** Entity Link History */
+            entity_link_history?: components["schemas"]["S01HistoryEntityLinkCorrection"][];
+            /** Entity Links */
+            entity_links?: components["schemas"]["S01HistoryEntityLink"][];
             /** Membership History */
             membership_history?: components["schemas"]["S01HistoryMembershipCorrection"][];
             /** Memberships */
@@ -2528,6 +2549,114 @@ export interface components {
             /** Schema Version */
             schema_version: string;
         };
+        /** S01EntityLinkCandidateEntity */
+        S01EntityLinkCandidateEntity: {
+            /** Entity Id */
+            entity_id: string;
+            /** Entity Type */
+            entity_type: string;
+            /** Label */
+            label: string;
+        };
+        /**
+         * S01EntityLinkCorrectionResult
+         * @description Command acceptance of an entity-link correction.  Acceptance is not
+         *     proof the successor run is already current; the client must read
+         *     current-route/history for convergence.
+         */
+        S01EntityLinkCorrectionResult: {
+            /** Application Id */
+            application_id: string;
+            /** Candidate Claim Id */
+            candidate_claim_id: string;
+            /** Correction Id */
+            correction_id: string;
+            /** Cycle */
+            cycle: number;
+            /** Entity Id */
+            entity_id: string;
+            /** Entity Link Decision Id */
+            entity_link_decision_id: string;
+            /** Entity Type */
+            entity_type: string;
+            /** Evidence Revision */
+            evidence_revision: number;
+            /** Invalidated Run Id */
+            invalidated_run_id: string;
+            /** Job Id */
+            job_id: string;
+            /** Label */
+            label: string;
+            /** Lifecycle Revision */
+            lifecycle_revision: number;
+            /** Mention Id */
+            mention_id: string;
+            /** Phase */
+            phase: string;
+            /** Relationship */
+            relationship: string;
+            /** Replayed */
+            replayed: boolean;
+            /** Route */
+            route: string;
+            /** Status */
+            status: string;
+            /** Work Item Id */
+            work_item_id: string;
+        };
+        /**
+         * S01EntityLinkKnowledge
+         * @description The frozen knowledge-release facts carried by one candidate claim
+         *     (S11): same-as projection and explicit not-same-as conflict targets.
+         */
+        S01EntityLinkKnowledge: {
+            /** Conflict With */
+            conflict_with?: string[];
+            /** Same As */
+            same_as?: string[];
+        };
+        /**
+         * S01EntityLinkMention
+         * @description The application-local entity mention (S11): which document field the
+         *     mention was read from and the raw value that needs a link decision.
+         */
+        S01EntityLinkMention: {
+            /** Document Id */
+            document_id: string;
+            /** Document Role */
+            document_role: string;
+            /** Entity Type */
+            entity_type: string;
+            /** Field */
+            field: string;
+            /** Mention Id */
+            mention_id: string;
+            /** Raw */
+            raw: string;
+        };
+        /**
+         * S01EntityLinkProvenance
+         * @description The matcher and frozen knowledge-release provenance of one candidate
+         *     claim (S11).  The command must reproduce it exactly; an expired or wrong
+         *     release metadata pair is rejected with no successor, and the digests must
+         *     equal the fixed RunSpec entity-link release pin (SP-1).
+         */
+        S01EntityLinkProvenance: {
+            /** Knowledge Release Digest */
+            knowledge_release_digest?: string | null;
+            /** Knowledge Release Id */
+            knowledge_release_id: string;
+            /** Matcher Digest */
+            matcher_digest?: string | null;
+            /** Matcher Id */
+            matcher_id: string;
+            /** Matcher Version */
+            matcher_version: string;
+            /** Method */
+            method?: string | null;
+            /** Source Pointer */
+            source_pointer?: string | null;
+        };
         /** S01ErrorDetail */
         S01ErrorDetail: {
             /** Error */
@@ -2672,6 +2801,144 @@ export interface components {
             successor_observation_id: string;
             /** Superseded Observation Id */
             superseded_observation_id: string;
+        };
+        /**
+         * S01HistoryEntityLink
+         * @description One append-only ledger record of the preserved entity-link history
+         *     (S11): candidate claims and every accepted decision with its explicit
+         *     status.
+         */
+        S01HistoryEntityLink: {
+            /** Actor */
+            actor?: string | null;
+            candidate_entity?: components["schemas"]["S01EntityLinkCandidateEntity"] | null;
+            /** Claim Id */
+            claim_id?: string | null;
+            /** Confidence */
+            confidence?: number | null;
+            /** Cycle */
+            cycle?: number | null;
+            /** Decision Id */
+            decision_id?: string | null;
+            knowledge?: components["schemas"]["S01EntityLinkKnowledge"] | null;
+            /** Knowledge Release Digest */
+            knowledge_release_digest?: string | null;
+            /** Knowledge Release Id */
+            knowledge_release_id?: string | null;
+            /** Link Id */
+            link_id?: string | null;
+            /** Matcher Digest */
+            matcher_digest?: string | null;
+            /** Matcher Id */
+            matcher_id?: string | null;
+            /** Matcher Version */
+            matcher_version?: string | null;
+            mention: components["schemas"]["S01EntityLinkMention"];
+            provenance?: components["schemas"]["S01EntityLinkProvenance"] | null;
+            /** Reason Code */
+            reason_code?: string | null;
+            /** Record Kind */
+            record_kind: string;
+            /** Relationship */
+            relationship?: string | null;
+            /** Release Digest */
+            release_digest?: string | null;
+            /** Release Id */
+            release_id?: string | null;
+            source_evidence?: components["schemas"]["S01MembershipDecisionSourceEvidence"] | null;
+            /** Status */
+            status?: string | null;
+            /** Supersedes */
+            supersedes?: string[];
+            /** Time */
+            time?: number | null;
+        };
+        /**
+         * S01HistoryEntityLinkCorrection
+         * @description One chronologically committed entity-link correction (S11).
+         */
+        S01HistoryEntityLinkCorrection: {
+            /** Actor */
+            actor: string;
+            /** Candidate Claim Id */
+            candidate_claim_id: string;
+            /** Correction Id */
+            correction_id: string;
+            /** Cycle */
+            cycle: number;
+            /** Decision */
+            decision: string;
+            /** Decision Id */
+            decision_id: string;
+            /** Entity Id */
+            entity_id: string;
+            /** Entity Type */
+            entity_type: string;
+            /** Event Id */
+            event_id: string;
+            /** Evidence Revision */
+            evidence_revision: number;
+            /** Knowledge Release Digest */
+            knowledge_release_digest?: string | null;
+            /** Knowledge Release Id */
+            knowledge_release_id: string;
+            /** Label */
+            label: string;
+            /** Matcher Digest */
+            matcher_digest?: string | null;
+            /** Matcher Id */
+            matcher_id: string;
+            /** Matcher Version */
+            matcher_version: string;
+            mention: components["schemas"]["S01EntityLinkMention"];
+            /** Mention Id */
+            mention_id: string;
+            /** Reason Code */
+            reason_code: string;
+            /** Recorded At */
+            recorded_at: number;
+            /** Relationship */
+            relationship: string;
+            /** Release Digest */
+            release_digest?: string | null;
+            /** Release Id */
+            release_id?: string | null;
+            source_evidence: components["schemas"]["S01MembershipSourceEvidence"];
+            /** Supersedes */
+            supersedes?: string[];
+        };
+        /** S01HistoryEntityLinkDecisionPin */
+        S01HistoryEntityLinkDecisionPin: {
+            /** Candidate Claim Id */
+            candidate_claim_id: string;
+            /** Decision Id */
+            decision_id: string;
+            /** Entity Id */
+            entity_id: string;
+            /** Entity Type */
+            entity_type: string;
+            /** Evidence Revision */
+            evidence_revision: number;
+            /** Knowledge Release Digest */
+            knowledge_release_digest?: string | null;
+            /** Knowledge Release Id */
+            knowledge_release_id?: string | null;
+            /** Label */
+            label: string;
+            /** Matcher Digest */
+            matcher_digest?: string | null;
+            /** Matcher Id */
+            matcher_id?: string | null;
+            /** Matcher Version */
+            matcher_version?: string | null;
+            /** Mention Id */
+            mention_id: string;
+            /** Relationship */
+            relationship: string;
+            /** Release Digest */
+            release_digest?: string | null;
+            /** Release Id */
+            release_id?: string | null;
         };
         /**
          * S01HistoryMembership
@@ -2828,6 +3095,8 @@ export interface components {
             cycle: number;
             /** Decision Ids */
             decision_ids: string[];
+            /** Entity Link Decisions */
+            entity_link_decisions?: components["schemas"]["S01HistoryEntityLinkDecisionPin"][];
             /** Evidence Document Instance Ids */
             evidence_document_instance_ids?: string[];
             /** Evidence Revision */
@@ -3732,8 +4001,126 @@ export interface components {
             /** Run Id */
             run_id?: string | null;
         };
+        /**
+         * S01WorkspaceEntityLink
+         * @description The entity-link blocker projection (S11): the mention identity, its
+         *     current effective decision state and every coexisting candidate claim
+         *     with confidence, provenance and frozen knowledge facts.
+         */
+        S01WorkspaceEntityLink: {
+            /** Active Decision Ids */
+            active_decision_ids?: string[];
+            /** Candidates */
+            candidates: components["schemas"]["S01WorkspaceEntityLinkCandidate"][];
+            /**
+             * Low Confidence
+             * @default false
+             */
+            low_confidence: boolean;
+            mention: components["schemas"]["S01EntityLinkMention"];
+            /** Mention Id */
+            mention_id: string;
+            source_evidence: components["schemas"]["S01MembershipSourceEvidence"];
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "unresolved" | "ambiguous" | "conflict";
+        };
+        /**
+         * S01WorkspaceEntityLinkCandidate
+         * @description One immutable coexisting entity-link candidate claim (S11).  No
+         *     candidate is selected by the authority; the Reviewer decides explicitly.
+         */
+        S01WorkspaceEntityLinkCandidate: {
+            /** Claim Id */
+            claim_id: string;
+            /** Confidence */
+            confidence: number;
+            /** Entity Id */
+            entity_id: string;
+            /** Entity Type */
+            entity_type: string;
+            knowledge: components["schemas"]["S01EntityLinkKnowledge"];
+            /** Label */
+            label: string;
+            provenance: components["schemas"]["S01EntityLinkProvenance"];
+        };
+        /** S01WorkspaceEntityLinkDecision */
+        S01WorkspaceEntityLinkDecision: {
+            /** Actor */
+            actor: string;
+            candidate_entity: components["schemas"]["S01EntityLinkCandidateEntity"];
+            /** Cycle */
+            cycle: number;
+            /** Decision Id */
+            decision_id: string;
+            /** Finding Id */
+            finding_id?: string | null;
+            /** Knowledge Release Digest */
+            knowledge_release_digest?: string | null;
+            /** Knowledge Release Id */
+            knowledge_release_id?: string | null;
+            /** Link Id */
+            link_id?: string | null;
+            /** Matcher Digest */
+            matcher_digest?: string | null;
+            /** Matcher Id */
+            matcher_id?: string | null;
+            /** Matcher Version */
+            matcher_version?: string | null;
+            /** Reason Code */
+            reason_code: string;
+            /**
+             * Record Kind
+             * @constant
+             */
+            record_kind: "accepted";
+            /** Relationship */
+            relationship: string;
+            /** Release Digest */
+            release_digest?: string | null;
+            /** Release Id */
+            release_id?: string | null;
+            source_evidence: components["schemas"]["S01MembershipDecisionSourceEvidence"];
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "active" | "superseded";
+            /** Supersedes */
+            supersedes: string[];
+            /** Time */
+            time: number;
+        };
+        /** S01WorkspaceEntityLinkMentionPage */
+        S01WorkspaceEntityLinkMentionPage: {
+            /** Active Decision Ids */
+            active_decision_ids?: string[];
+            /** Candidates */
+            candidates: components["schemas"]["S01WorkspaceEntityLinkCandidate"][];
+            /** Decisions */
+            decisions: components["schemas"]["S01WorkspaceEntityLinkDecision"][];
+            /** Finding Id */
+            finding_id?: string | null;
+            /**
+             * Low Confidence
+             * @default false
+             */
+            low_confidence: boolean;
+            mention: components["schemas"]["S01EntityLinkMention"];
+            /** Mention Id */
+            mention_id: string;
+            source_evidence: components["schemas"]["S01MembershipSourceEvidence"];
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "unresolved" | "ambiguous" | "conflict" | "selected";
+        };
         /** S01WorkspaceFinding */
         S01WorkspaceFinding: {
+            entity_link?: components["schemas"]["S01WorkspaceEntityLink"] | null;
             /** Evidence Links */
             evidence_links: components["schemas"]["S01EvidenceLink"][];
             /** Finding Id */
@@ -3862,6 +4249,8 @@ export interface components {
             claim_fence: number;
             /** Current Run Id */
             current_run_id?: string | null;
+            /** Entity Link Ledger */
+            entity_link_ledger?: components["schemas"]["S01WorkspaceEntityLinkMentionPage"][];
             /** Evidence Ready */
             evidence_ready: boolean;
             /** Evidence Revision */
@@ -7580,6 +7969,153 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["S01ClaimResult"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01VerifyErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+        };
+    };
+    controlled_s11_demo_correct_entity_link_controlled_s01_api_commands_review_work_items__work_item_id__correct_entity_link_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                work_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** Application Id */
+                    application_id: string;
+                    /** Entity Link */
+                    entity_link: {
+                        /** Candidate Claim Id */
+                        candidate_claim_id: string;
+                        /**
+                         * Decision
+                         * @constant
+                         */
+                        decision: "accept";
+                        /** Entity Id */
+                        entity_id: string;
+                        /** Entity Type */
+                        entity_type: string;
+                        /** Expected Active Decision Ids */
+                        expected_active_decision_ids: string[];
+                        /** Finding Id */
+                        finding_id: string;
+                        /** Knowledge Release Id */
+                        knowledge_release_id: string;
+                        /** Label */
+                        label: string;
+                        /** Matcher Id */
+                        matcher_id: string;
+                        /** Matcher Version */
+                        matcher_version: string;
+                        /** Mention Id */
+                        mention_id: string;
+                        /**
+                         * Reason Code
+                         * @enum {string}
+                         */
+                        reason_code: "ENTITY_LINK_SOURCE_VERIFIED" | "ENTITY_LINK_SOURCE_MISASSIGNED" | "ENTITY_LINK_AMBIGUITY_RESOLVED";
+                        /**
+                         * Relationship
+                         * @constant
+                         */
+                        relationship: "same_as";
+                        /**
+                         * Schema Version
+                         * @constant
+                         */
+                        schema_version: "entity-link-correction/1";
+                        /** S01MembershipSourceEvidence */
+                        source_evidence: {
+                            /** Event Id */
+                            event_id: string;
+                            /** Evidence Revision */
+                            evidence_revision: number;
+                        };
+                    };
+                    /**
+                     * S01ReviewCommandContext
+                     * @description The closed review command context.  The domain compares it by exact
+                     *     equality (``_review_context_matches``), so a partial context is a semantic
+                     *     staleness; the schema here closes the shape so no arbitrary keys can hide
+                     *     a missing revision inside a migrated request or response.
+                     */
+                    expected_context: {
+                        /** Current Context */
+                        current_context: string;
+                        /** Evidence Revision */
+                        evidence_revision: number;
+                        /** Lifecycle Revision */
+                        lifecycle_revision: number;
+                        /** Projection Watermark */
+                        projection_watermark: number;
+                        /** Run Id */
+                        run_id: string;
+                    };
+                    /** Expected Fence */
+                    expected_fence: number;
+                    /** Idempotency Key */
+                    idempotency_key: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01EntityLinkCorrectionResult"];
                 };
             };
             /** @description Not Found */
