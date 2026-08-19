@@ -200,6 +200,74 @@ async function installManualWork(baseURL, reviewer) {
   throw new Error("S10 manual review work never appeared");
 }
 
+/** Press Tab until the focused element carries the given data-testid. */
+async function tabToTestId(page, testId, maxTabs = 80) {
+  for (let attempt = 0; attempt < maxTabs; attempt += 1) {
+    await page.keyboard.press("Tab");
+    const reached = await page.evaluate((id) => {
+      const active = document.activeElement;
+      return active !== null && active.dataset?.testid === id;
+    }, testId);
+    if (reached) return;
+  }
+  throw new Error(`keyboard focus never reached ${testId}`);
+}
+
+/** Press Tab until the focused element carries the given aria-label. */
+async function tabToName(page, name, maxTabs = 80) {
+  for (let attempt = 0; attempt < maxTabs; attempt += 1) {
+    await page.keyboard.press("Tab");
+    const reached = await page.evaluate((label) => {
+      const active = document.activeElement;
+      return active !== null && active.getAttribute("aria-label") === label;
+    }, name);
+    if (reached) return;
+  }
+  throw new Error(`keyboard focus never reached ${name}`);
+}
+
+/** Press Tab until the focused anchor links to the given work id. */
+async function tabToWorkLink(page, workId, maxTabs = 80) {
+  const fragment = encodeURIComponent(workId);
+  for (let attempt = 0; attempt < maxTabs; attempt += 1) {
+    await page.keyboard.press("Tab");
+    const reached = await page.evaluate((hrefFragment) => {
+      const active = document.activeElement;
+      return (
+        active !== null &&
+        active.tagName === "A" &&
+        active.href.includes(hrefFragment)
+      );
+    }, fragment);
+    if (reached) return;
+  }
+  throw new Error(`keyboard focus never reached ${workId}`);
+}
+
+/** Pick a native select option with the keyboard: focus is already on the
+ * select, ArrowDown moves the highlight one option at a time (the first
+ * option occupies index 0), and Tab commits the choice. */
+async function selectOptionByKeyboard(page, locator, value) {
+  const count = await locator.locator("option").count();
+  let index = -1;
+  for (let i = 0; i < count; i += 1) {
+    const optionValue = await locator
+      .locator("option")
+      .nth(i)
+      .getAttribute("value");
+    if (optionValue === value) {
+      index = i;
+      break;
+    }
+  }
+  expect(index).toBeGreaterThanOrEqual(0);
+  for (let step = 0; step < index; step += 1) {
+    await page.keyboard.press("ArrowDown");
+  }
+  await page.keyboard.press("Tab");
+  await expect(locator).toHaveValue(value);
+}
+
 async function openClaimedReviewPanel(reviewer, server) {
   const shellResponse = await reviewer.goto(`${server.baseURL}${REACT_URL}`, {
     waitUntil: "networkidle",
@@ -210,9 +278,11 @@ async function openClaimedReviewPanel(reviewer, server) {
   const workId = item.work_item_id;
   const applicationId = item.application_id;
   await reviewer.reload({ waitUntil: "networkidle" });
-  await reviewer.getByRole("link", { name: new RegExp(workId) }).click();
+  await tabToWorkLink(reviewer, workId);
+  await reviewer.keyboard.press("Enter");
   await expect(reviewer.getByTestId("review-panel")).toBeVisible();
-  await reviewer.getByRole("button", { name: "认领" }).click();
+  await tabToTestId(reviewer, "claim-button");
+  await reviewer.keyboard.press("Enter");
   await expect(reviewer.getByTestId("review-command-status")).toContainText(
     "认领已接受",
   );
@@ -247,9 +317,11 @@ async function openAndClaimWork(reviewer, server, item) {
     waitUntil: "networkidle",
   });
   await expect(reviewer.getByTestId("queue-panel")).toBeVisible();
-  await reviewer.getByRole("link", { name: new RegExp(item.work_item_id) }).click();
+  await tabToWorkLink(reviewer, item.work_item_id);
+  await reviewer.keyboard.press("Enter");
   await expect(reviewer.getByTestId("review-panel")).toBeVisible();
-  await reviewer.getByRole("button", { name: "认领" }).click();
+  await tabToTestId(reviewer, "claim-button");
+  await reviewer.keyboard.press("Enter");
   await expect(reviewer.getByTestId("review-command-status")).toContainText(
     "认领已接受",
   );
@@ -268,16 +340,39 @@ async function settleCleanup(cleanups) {
   if (failures.length > 0) throw failures[0];
 }
 
-test("S10 membership dual-pane correction reruns and changes only via a fresh current run", async ({
-  browser,
-}) => {
+/** Every pane, the form controls, and the history remain inside the active
+ * viewport with no horizontal document overflow. */
+async function expectContained(reviewer, testIds) {
+  const result = { document: false };
+  result.document = await reviewer.evaluate(
+    () => document.documentElement.scrollWidth <= window.innerWidth,
+  );
+  for (const id of testIds) {
+    result[id] = await reviewer.evaluate((testId) => {
+      const element = document.querySelector(`[data-testid="${testId}"]`);
+      if (element === null) return false;
+      const box = element.getBoundingClientRect();
+      return (
+        element.scrollWidth <= element.clientWidth &&
+        box.left >= 0 &&
+        box.right <= window.innerWidth
+      );
+    }, id);
+  }
+  expect(result).toEqual({
+    document: true,
+    ...Object.fromEntries(testIds.map((id) => [id, true])),
+  });
+}
+
+async function runS10Flow(browser, viewport) {
   const resources = {};
   let failure;
   try {
     resources.server = await startServer();
     const server = resources.server;
     resources.reviewerContext = await browser.newContext({
-      viewport: { width: 390, height: 844 },
+      viewport: { width: viewport.width, height: viewport.height },
       extraHTTPHeaders: { Authorization: `Bearer ${DEMO_CREDENTIAL}` },
     });
     const reviewer = await resources.reviewerContext.newPage();
@@ -304,17 +399,14 @@ test("S10 membership dual-pane correction reruns and changes only via a fresh cu
     await expect(reviewer.getByTestId("review-membership-candidate-provenance").first()).toContainText(
       "inferred=false",
     );
-    expect(reviewer.viewportSize()).toEqual({ width: 390, height: 844 });
-    expect(
-      await reviewer.evaluate(() => {
-        const fits = (element) => element.scrollWidth <= element.clientWidth;
-        return {
-          document: fits(document.documentElement),
-          ledger: fits(document.querySelector('[data-testid="review-membership-ledger"]')),
-          membership: fits(document.querySelector('[data-testid="review-membership"]')),
-        };
-      }),
-    ).toEqual({ document: true, ledger: true, membership: true });
+    expect(reviewer.viewportSize()).toEqual({
+      width: viewport.width,
+      height: viewport.height,
+    });
+    await expectContained(reviewer, [
+      "review-membership-ledger",
+      "review-membership",
+    ]);
 
     // Read the authoritative route before the correction.
     const routeBefore = await (
@@ -325,7 +417,8 @@ test("S10 membership dual-pane correction reruns and changes only via a fresh cu
 
     // Accept a claim whose public identifier contains the delimiter used by
     // the legacy UI.  The claim id remains byte-for-byte intact.
-    await reviewer.getByTestId("review-membership-start").click();
+    await tabToTestId(reviewer, "review-membership-start");
+    await reviewer.keyboard.press("Enter");
     await expect(reviewer.getByTestId("review-membership-form")).toBeVisible();
     expect(
       await reviewer.evaluate(() => {
@@ -346,16 +439,24 @@ test("S10 membership dual-pane correction reruns and changes only via a fresh cu
     ).toEqual({ form: true, controls: true });
     const candidateSelect = reviewer.getByRole("combobox", { name: "候选实例" });
     const reasonSelect = reviewer.getByRole("combobox", { name: "原因" });
+    // The opened draft never preselects a candidate: the native select shows
+    // an explicit disabled placeholder and submit stays disabled until the
+    // Reviewer picks a claim with the keyboard.
+    await expect(candidateSelect).toHaveValue("");
+    await expect(candidateSelect.locator('option[value=""]')).toBeDisabled();
+    await expect(reviewer.getByTestId("review-membership-submit")).toBeDisabled();
     await expect(reasonSelect.locator("option")).toHaveCount(3);
     await expect(
       reasonSelect.locator('option[value="MEMBERSHIP_PAGE_UNASSIGNED"]'),
     ).toHaveCount(0);
-    await candidateSelect.selectOption("s10::claim_page1_b");
-    await expect(candidateSelect).toHaveValue("s10::claim_page1_b");
-    await reasonSelect.selectOption(
+    await tabToTestId(reviewer, "review-membership-candidate-select");
+    await selectOptionByKeyboard(reviewer, candidateSelect, "s10::claim_page1_b");
+    await selectOptionByKeyboard(
+      reviewer,
+      reasonSelect,
       "MEMBERSHIP_SOURCE_VERIFIED",
     );
-    await reviewer.getByTestId("review-membership-submit").click();
+    await reviewer.keyboard.press("Enter");
     await expect(reviewer.getByTestId("review-command-status")).toContainText(
       "页归属已接受",
     );
@@ -409,20 +510,20 @@ test("S10 membership dual-pane correction reruns and changes only via a fresh cu
     const successorLedger = reviewer.getByTestId("review-membership-ledger");
     await expect(successorLedger).toContainText("selected");
     await expect(successorLedger).toContainText("active");
-    await reviewer
-      .getByRole("button", {
-        name: "选择附件 s10-attachment-1 第 1 页",
-      })
-      .click();
+    await tabToName(reviewer, "选择附件 s10-attachment-1 第 1 页");
+    await reviewer.keyboard.press("Enter");
     await expect(reviewer.getByTestId("review-membership")).toContainText("页 1");
     const successorCandidate = reviewer.getByRole("combobox", {
       name: "候选实例",
     });
-    await successorCandidate.selectOption("s10_claim_page1_a");
-    await reviewer
-      .getByRole("combobox", { name: "原因" })
-      .selectOption("MEMBERSHIP_SOURCE_MISASSIGNED");
-    await reviewer.getByTestId("review-membership-submit").click();
+    await tabToTestId(reviewer, "review-membership-candidate-select");
+    await selectOptionByKeyboard(reviewer, successorCandidate, "s10_claim_page1_a");
+    await selectOptionByKeyboard(
+      reviewer,
+      reviewer.getByRole("combobox", { name: "原因" }),
+      "MEMBERSHIP_SOURCE_MISASSIGNED",
+    );
+    await reviewer.keyboard.press("Enter");
     await expect(reviewer.getByTestId("review-command-status")).toContainText(
       "页归属已接受",
     );
@@ -469,20 +570,40 @@ test("S10 membership dual-pane correction reruns and changes only via a fresh cu
       successorWork.work_item_id,
     );
     await openAndClaimWork(reviewer, server, finalWork);
-    await reviewer
-      .getByRole("button", {
-        name: "选择附件 s10-attachment-2 第 2 页",
-      })
-      .click();
+    await tabToName(reviewer, "选择附件 s10-attachment-2 第 2 页");
+    await reviewer.keyboard.press("Enter");
     await expect(reviewer.getByTestId("review-membership")).toContainText("页 2");
-    await reviewer.getByTestId("review-membership-unassign-radio").click();
+    // Only the checked radio is tabbable; the Arrow key moves the selection
+    // to the unassign radio within the group.
+    await tabToTestId(reviewer, "review-membership-accept-radio");
+    await reviewer.keyboard.press("ArrowDown");
+    await expect(
+      reviewer.getByTestId("review-membership-unassign-radio"),
+    ).toBeChecked();
     const unassignReason = reviewer.getByRole("combobox", { name: "原因" });
     await expect(unassignReason.locator("option")).toHaveCount(3);
     await expect(
       unassignReason.locator('option[value="MEMBERSHIP_INSTANCE_WRONG"]'),
     ).toHaveCount(0);
-    await unassignReason.selectOption("MEMBERSHIP_PAGE_UNASSIGNED");
-    await reviewer.getByTestId("review-membership-submit").click();
+    // The unassign variant also binds an explicit source claim: the Reviewer
+    // picks the page-2 candidate with the keyboard before submit enables.
+    const page2CandidateValue = await candidateSelect
+      .locator('option:not([value=""])')
+      .first()
+      .getAttribute("value");
+    expect(page2CandidateValue).toBeTruthy();
+    await tabToTestId(reviewer, "review-membership-candidate-select");
+    await selectOptionByKeyboard(
+      reviewer,
+      candidateSelect,
+      page2CandidateValue,
+    );
+    await selectOptionByKeyboard(
+      reviewer,
+      unassignReason,
+      "MEMBERSHIP_PAGE_UNASSIGNED",
+    );
+    await reviewer.keyboard.press("Enter");
     await expect(reviewer.getByTestId("review-command-status")).toContainText(
       "页归属已接受",
     );
@@ -533,30 +654,14 @@ test("S10 membership dual-pane correction reruns and changes only via a fresh cu
     await expect(
       reviewer.getByTestId("review-history-membership-corrections"),
     ).toContainText("MEMBERSHIP_PAGE_UNASSIGNED");
-    expect(reviewer.viewportSize()).toEqual({ width: 390, height: 844 });
-    expect(
-      await reviewer.evaluate(() => {
-        const fits = (testId) => {
-          const element = document.querySelector(`[data-testid="${testId}"]`);
-          if (element === null) return false;
-          const box = element.getBoundingClientRect();
-          return (
-            element.scrollWidth <= element.clientWidth &&
-            box.left >= 0 &&
-            box.right <= window.innerWidth
-          );
-        };
-        return {
-          document: document.documentElement.scrollWidth <= window.innerWidth,
-          history: fits("review-history-memberships"),
-          corrections: fits("review-history-membership-corrections"),
-        };
-      }),
-    ).toEqual({
-      document: true,
-      history: true,
-      corrections: true,
+    expect(reviewer.viewportSize()).toEqual({
+      width: viewport.width,
+      height: viewport.height,
     });
+    await expectContained(reviewer, [
+      "review-history-memberships",
+      "review-history-membership-corrections",
+    ]);
   } catch (error) {
     failure = error;
     throw error;
@@ -572,6 +677,20 @@ test("S10 membership dual-pane correction reruns and changes only via a fresh cu
       if (failure === undefined) throw cleanupError;
     }
   }
-});
+}
+
+const VIEWPORTS = [
+  { width: 1280, height: 800, label: "desktop 1280x800" },
+  { width: 390, height: 844, label: "mobile 390x844" },
+];
+
+for (const viewport of VIEWPORTS) {
+  test(
+    `S10 membership dual-pane correction reruns via keyboard at ${viewport.label}`,
+    async ({ browser }) => {
+      await runS10Flow(browser, viewport);
+    },
+  );
+}
 
 module.exports.__startServerForDebug = startServer;

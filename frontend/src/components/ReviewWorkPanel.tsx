@@ -623,30 +623,30 @@ function WorkspaceSection({
                         />
                         显式未归集
                       </label>
-                      {membershipDraft.decision === "accept" ? (
-                        <select
-                          aria-label="候选实例"
-                          value={membershipDraft.claimId ?? ""}
-                          onChange={(event) =>
-                            onMembershipCandidate(event.target.value)
-                          }
-                          data-testid="review-membership-candidate-select"
-                        >
-                          {membership.candidates.map((candidate) => (
-                            <option
-                              key={candidate.claim_id}
-                              value={candidate.claim_id}
-                            >
-                              {candidate.document_role} ·{" "}
-                              {candidate.document_instance_id}
-                            </option>
-                          ))}
-                        </select>
-                      ) : (
-                        <p className="text-xs text-muted-foreground">
-                          该页不再属于任何单据实例，并从校验投影中排除。
-                        </p>
-                      )}
+                      {/* Both decision variants bind candidate_claim_id, so
+                       * the explicit claim selector stays visible and the
+                       * Reviewer must choose one server-authorized claim. */}
+                      <select
+                        aria-label="候选实例"
+                        value={membershipDraft.claimId ?? ""}
+                        onChange={(event) =>
+                          onMembershipCandidate(event.target.value)
+                        }
+                        data-testid="review-membership-candidate-select"
+                      >
+                        <option value="" disabled>
+                          请选择候选实例
+                        </option>
+                        {membership.candidates.map((candidate) => (
+                          <option
+                            key={candidate.claim_id}
+                            value={candidate.claim_id}
+                          >
+                            {candidate.document_role} ·{" "}
+                            {candidate.document_instance_id}
+                          </option>
+                        ))}
+                      </select>
                       <select
                         aria-label="原因"
                         value={membershipDraft.reason}
@@ -669,7 +669,11 @@ function WorkspaceSection({
                       <Button
                         size="sm"
                         data-testid="review-membership-submit"
-                        disabled={membershipPending}
+                        disabled={
+                          membershipPending ||
+                          membershipDraft.claimId === null ||
+                          membershipDraft.claimId === ""
+                        }
                         onClick={onSubmitMembership}
                       >
                         提交页归属修正
@@ -1565,7 +1569,10 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
   const [correctionRaw, setCorrectionRaw] = useState("");
   const [correctionReason, setCorrectionReason] =
     useState<CorrectionReason>("SOURCE_VALUE_MISREAD");
-  const [membershipKey, setMembershipKey] = useState(newIdempotencyKey);
+  // The membership key is minted only when a membership draft actually opens
+  // (handleStartMembership) and rotates on acceptance/rejection; the empty
+  // initial value is never submitted because submit requires an open draft.
+  const [membershipKey, setMembershipKey] = useState("");
   const [membershipDraft, setMembershipDraft] =
     useState<MembershipDraft | null>(null);
   // The exact restricted command (and the token it was issued under) retained
@@ -1596,6 +1603,10 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     setRevealed(null);
     setCorrectionTarget(null);
     setCorrectionRaw("");
+    // An open membership draft is server authority too: it must visibly close
+    // whenever the issuing claim authorization ends (expiry, owning-read
+    // loss, authoritative reload, or context change).
+    setMembershipDraft(null);
     reveal.reset();
     correct.reset();
   };
@@ -2098,7 +2109,9 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     setMembershipDraft({
       target,
       decision: "accept",
-      claimId: target.membership.candidates[0]?.claim_id ?? null,
+      // The browser never selects a candidate by array order, confidence,
+      // or any heuristic: the Reviewer must explicitly choose one claim.
+      claimId: null,
       reason: "MEMBERSHIP_SOURCE_VERIFIED",
     });
     setMembershipKey(newIdempotencyKey());
@@ -2132,6 +2145,16 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     if (work.data === undefined || anyPending || pendingCommand !== null) return;
     if (requiresReload || work.isError || !owningReadsCurrent) return;
     if (membershipDraft === null) return;
+    // Event-time authority check: the draft is only valid while the rendered
+    // work item is claimed and unexpired.  Expired or invalidated authority
+    // clears the draft and sends no POST.
+    if (
+      work.data.status !== "claimed" ||
+      Date.now() / 1000 >= work.data.claim_expires_at
+    ) {
+      setMembershipDraft(null);
+      return;
+    }
     const member = membershipDraft.target.membership;
     const candidate = member.candidates.find(
       (item) => item.claim_id === membershipDraft.claimId,

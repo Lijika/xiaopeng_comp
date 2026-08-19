@@ -11,6 +11,7 @@ import {
   renderWithQuery,
   restrictedDigest,
 } from "../test-utils";
+import type { RouteHandler } from "../test-utils";
 
 const WORK_ID = "work_t02panel1234567890abcdef";
 const APP_ID = "app_t02panel9876543210fedcba";
@@ -287,6 +288,107 @@ function claimedWorkspacePayload() {
   return workspacePayload({
     claim_fence: 1,
     claim_expires_at: LIVE_CLAIM_EXPIRES_AT,
+  });
+}
+
+/** One S10 ledger page with two server-authorized candidate claims.  The
+ * candidates are opaque to the browser: React renders them individually and
+ * the Reviewer must pick exactly one claim explicitly. */
+const S10_MEMBERSHIP_FINDING_ID = "finding_s10panel0000000000000002";
+const S10_PREDECESSOR_DECISION_ID = "decision_s10panel_prior";
+const S10_SOURCE_EVIDENCE = {
+  event_id: "evidence_s10panel",
+  evidence_revision: 2,
+};
+const S10_CANDIDATES = [
+  {
+    document_instance_id: "reg_cert_instance_a",
+    document_role: "机动车登记证书",
+    claim_id: "s10_claim_a",
+    provenance: {
+      adapter_id: "c-demo-s10-fixture",
+      adapter_version: "1",
+      source_pointer: "/pages/0",
+    },
+  },
+  {
+    document_instance_id: "reg::cert_instance_b",
+    document_role: "机动车登记证书",
+    claim_id: "s10::claim_b",
+    provenance: {
+      adapter_id: "c-demo-s10-fixture",
+      adapter_version: "1",
+      source_pointer: "/pages/0",
+    },
+  },
+];
+
+function s10MembershipWorkspacePayload(
+  overrides: Record<string, unknown> = {},
+) {
+  return workspacePayload({
+    claim_fence: 1,
+    claim_expires_at: LIVE_CLAIM_EXPIRES_AT,
+    evidence_revision: 2,
+    membership_ledger: [
+      {
+        attachment_id: "s10-attachment-1",
+        page_source_sha256: "10".repeat(32),
+        page_ordinal: 1,
+        state: "selected",
+        finding_id: S10_MEMBERSHIP_FINDING_ID,
+        active_decision_ids: [S10_PREDECESSOR_DECISION_ID],
+        source_evidence: S10_SOURCE_EVIDENCE,
+        candidates: S10_CANDIDATES,
+        decisions: [
+          {
+            record_kind: "accepted",
+            decision_id: S10_PREDECESSOR_DECISION_ID,
+            document_instance_id: "reg_cert_instance_a",
+            document_role: "机动车登记证书",
+            actor: "t02-reviewer",
+            reason_code: "MEMBERSHIP_SOURCE_VERIFIED",
+            time: 100,
+            cycle: 1,
+            source_evidence: {
+              ...S10_SOURCE_EVIDENCE,
+              candidate_claim_id: "s10_claim_a",
+            },
+            supersedes: [],
+            status: "active",
+          },
+        ],
+      },
+      {
+        attachment_id: "s10-attachment-2",
+        page_source_sha256: "20".repeat(32),
+        page_ordinal: 2,
+        state: "unassigned",
+        finding_id: "finding_s10panel0000000000000003",
+        active_decision_ids: ["decision_s10panel_unassigned"],
+        source_evidence: S10_SOURCE_EVIDENCE,
+        candidates: [S10_CANDIDATES[0]],
+        decisions: [
+          {
+            record_kind: "unassigned",
+            decision_id: "decision_s10panel_unassigned",
+            document_instance_id: null,
+            document_role: null,
+            actor: "t02-reviewer",
+            reason_code: "MEMBERSHIP_PAGE_UNASSIGNED",
+            time: 101,
+            cycle: 1,
+            source_evidence: {
+              ...S10_SOURCE_EVIDENCE,
+              candidate_claim_id: "s10_claim_a",
+            },
+            supersedes: [],
+            status: "active",
+          },
+        ],
+      },
+    ],
+    ...overrides,
   });
 }
 
@@ -668,6 +770,24 @@ describe("ReviewWorkPanel (T02)", () => {
     expect(screen.getByTestId("review-membership")).toHaveTextContent(
       "状态 已归属",
     );
+    // An opened draft never preselects a candidate: the native select shows
+    // an explicit disabled placeholder, submit stays disabled, and no
+    // membership POST may leave before an explicit Reviewer choice.
+    expect(
+      screen.getByRole("combobox", { name: "候选实例" }),
+    ).toHaveValue("");
+    expect(
+      within(screen.getByRole("combobox", { name: "候选实例" })).getByRole(
+        "option",
+        { name: "请选择候选实例" },
+      ),
+    ).toBeDisabled();
+    expect(screen.getByTestId("review-membership-submit")).toBeDisabled();
+    expect(
+      router.calls.filter(
+        (call) => call.method === "POST" && call.url === MEMBERSHIP_PATH,
+      ),
+    ).toHaveLength(0);
     await userEvent.click(
       screen.getByRole("button", {
         name: "选择附件 s10-attachment-2 第 2 页",
@@ -1437,6 +1557,333 @@ function correctionResultPayload(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
+
+describe("ReviewWorkPanel S10 page-membership explicit choice (T10)", () => {
+  const SUCCESSOR_CONTEXT = {
+    ...CONTEXT,
+    evidence_revision: 2,
+    current_context: "9".repeat(64),
+  };
+
+  function s10MembershipRoutes(overrides: Record<string, RouteHandler> = {}) {
+    return {
+      [`GET ${WORK_PATH}`]: () =>
+        jsonResponse(
+          claimedWorkPayload({
+            evidence_revision: 2,
+            command_context: SUCCESSOR_CONTEXT,
+          }),
+        ),
+      [`GET ${WORKSPACE_PATH}`]: () =>
+        jsonResponse(s10MembershipWorkspacePayload()),
+      [`GET ${ROUTE_PATH}`]: () =>
+        jsonResponse(routePayload({ evidence_revision: 2 })),
+      [`GET ${HISTORY_PATH}`]: () =>
+        jsonResponse(
+          historyPayload({
+            runs: [
+              {
+                ...historyPayload().runs[0],
+                evidence_revision: 2,
+              },
+            ],
+          }),
+        ),
+      ...overrides,
+    };
+  }
+
+  it("unassign keeps the candidate selector visible and binds the explicit claim", async () => {
+    const router = fetchRouter({
+      ...s10MembershipRoutes({
+        [`POST ${MEMBERSHIP_PATH}`]: () =>
+          jsonResponse({
+            status: "accepted",
+            replayed: false,
+            application_id: APP_ID,
+            work_item_id: WORK_ID,
+            correction_id: "membership_s10panel_unassign",
+            membership_decision_id: "decision_s10panel_unassign",
+            candidate_claim_id: "s10::claim_b",
+            attachment_id: "s10-attachment-1",
+            page_source_sha256: "10".repeat(32),
+            page_ordinal: 1,
+            decision: "unassign",
+            document_instance_id: null,
+            document_role: null,
+            cycle: 1,
+            invalidated_run_id: "run_t02panel",
+            job_id: "job_s10panel",
+            phase: "Assembly",
+            route: "pending_check",
+            lifecycle_revision: 7,
+            evidence_revision: 3,
+          }),
+      }),
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    await userEvent.click(
+      screen.getByRole("button", {
+        name: "选择附件 s10-attachment-1 第 1 页",
+      }),
+    );
+    await screen.findByTestId("review-membership-form");
+    await userEvent.click(screen.getByTestId("review-membership-unassign-radio"));
+    // The unassign variant also binds candidate_claim_id, so the candidate
+    // selector stays visible and starts on the empty disabled placeholder.
+    const candidateSelect = screen.getByRole("combobox", {
+      name: "候选实例",
+    });
+    expect(candidateSelect).toHaveValue("");
+    expect(screen.getByTestId("review-membership-submit")).toBeDisabled();
+    const reasonSelect = screen.getByRole("combobox", { name: "原因" });
+    expect(
+      within(reasonSelect).queryByRole("option", {
+        name: "MEMBERSHIP_INSTANCE_WRONG",
+      }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(reasonSelect).getByRole("option", {
+        name: "MEMBERSHIP_PAGE_UNASSIGNED",
+      }),
+    ).toBeInTheDocument();
+    await userEvent.selectOptions(candidateSelect, "s10::claim_b");
+    await userEvent.selectOptions(reasonSelect, "MEMBERSHIP_PAGE_UNASSIGNED");
+    await userEvent.click(screen.getByTestId("review-membership-submit"));
+    await vi.waitFor(() =>
+      expect(
+        router.calls.some(
+          (call) =>
+            call.method === "POST" && call.url === MEMBERSHIP_PATH,
+        ),
+      ).toBe(true),
+    );
+    const call = router.calls.find(
+      (candidate) =>
+        candidate.method === "POST" && candidate.url === MEMBERSHIP_PATH,
+    );
+    expect(call?.body).toEqual({
+      application_id: APP_ID,
+      expected_fence: 1,
+      expected_context: SUCCESSOR_CONTEXT,
+      idempotency_key: expect.any(String),
+      membership: {
+        schema_version: "page-membership-correction/2",
+        finding_id: S10_MEMBERSHIP_FINDING_ID,
+        candidate_claim_id: "s10::claim_b",
+        attachment_id: "s10-attachment-1",
+        page_source_sha256: "10".repeat(32),
+        page_ordinal: 1,
+        source_evidence: S10_SOURCE_EVIDENCE,
+        expected_active_decision_ids: [S10_PREDECESSOR_DECISION_ID],
+        decision: "unassign",
+        reason_code: "MEMBERSHIP_PAGE_UNASSIGNED",
+      },
+    });
+  });
+
+  it("expiry closes an open membership draft and a renewed claim never reopens it", async () => {
+    const nearExpiry = Math.floor(Date.now() / 1000) + 3;
+    const renewedExpiry = Math.floor(Date.now() / 1000) + 1800;
+    let workRequests = 0;
+    const router = fetchRouter({
+      ...s10MembershipRoutes({
+        [`GET ${WORK_PATH}`]: () => {
+          workRequests += 1;
+          return jsonResponse(
+            claimedWorkPayload({
+              evidence_revision: 2,
+              command_context: SUCCESSOR_CONTEXT,
+              claim_expires_at:
+                workRequests >= 2 ? renewedExpiry : nearExpiry,
+            }),
+          );
+        },
+        [`POST ${RENEW_PATH}`]: () =>
+          jsonResponse({
+            status: "renewed",
+            replayed: false,
+            application_id: APP_ID,
+            work_item_id: WORK_ID,
+            claim_subject: "t02-reviewer",
+            claim_fence: 1,
+            claim_expires_at: renewedExpiry,
+          }),
+      }),
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    await userEvent.click(
+      screen.getByRole("button", {
+        name: "选择附件 s10-attachment-1 第 1 页",
+      }),
+    );
+    await screen.findByTestId("review-membership-form");
+    // The one expiry clock fires without navigation: the open draft closes
+    // and no membership POST may leave under the expired authority.
+    await vi.waitFor(
+      () =>
+        expect(
+          screen.queryByTestId("review-membership-form"),
+        ).not.toBeInTheDocument(),
+      { timeout: 8_000 },
+    );
+    // The renew action stays available after expiry (canFenced excludes the
+    // expiry clock): authoritative renewal through the public flow must
+    // never resurrect the stale draft.
+    await userEvent.click(screen.getByTestId("renew-button"));
+    await vi.waitFor(() =>
+      expect(
+        screen.queryByTestId("review-membership-form"),
+      ).not.toBeInTheDocument(),
+    );
+    // Opening the draft again after renewal starts from scratch: no stale
+    // claim may reappear in the selector.
+    await userEvent.click(
+      screen.getByRole("button", {
+        name: "选择附件 s10-attachment-1 第 1 页",
+      }),
+    );
+    await screen.findByTestId("review-membership-form");
+    expect(
+      screen.getByRole("combobox", { name: "候选实例" }),
+    ).toHaveValue("");
+    expect(
+      router.calls.filter(
+        (call) =>
+          call.method === "POST" && call.url === MEMBERSHIP_PATH,
+      ),
+    ).toHaveLength(0);
+  });
+
+  it.each([
+    ["404 existence-hidden", 404, "S03_NOT_FOUND", "S03_NOT_FOUND"],
+    ["409 stale or conflicting", 409, "S03_STALE", "STALE_WORK_ITEM_CLAIM"],
+    ["503 structured unavailable", 503, "S03_UNAVAILABLE", "AUDIT_UNAVAILABLE"],
+  ])(
+    "%s locks membership into reload-required without an unknown-outcome retry",
+    async (_label, status, error, reason) => {
+      const router = fetchRouter({
+        ...s10MembershipRoutes({
+          [`POST ${MEMBERSHIP_PATH}`]: () =>
+            jsonResponse({ detail: { error, reason_code: reason } }, status),
+        }),
+      });
+      renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+      await waitForReviewReady();
+      await userEvent.click(
+        screen.getByRole("button", {
+          name: "选择附件 s10-attachment-1 第 1 页",
+        }),
+      );
+      await screen.findByTestId("review-membership-form");
+      await userEvent.selectOptions(
+        screen.getByRole("combobox", { name: "候选实例" }),
+        "s10::claim_b",
+      );
+      await userEvent.click(screen.getByTestId("review-membership-submit"));
+      await waitFor(() =>
+        expect(screen.getByTestId("review-command-status")).toHaveTextContent(
+          `页归属未接受（${reason}）：请重新加载权威上下文后再试`,
+        ),
+      );
+      expect(screen.getByTestId("review-reload-note")).toBeInTheDocument();
+      // A definitive outcome is proof the command was never accepted: no
+      // unknown-outcome retry, the rejected draft is scrubbed, and every
+      // write stays fenced until an authoritative reload.
+      expect(
+        screen.queryByRole("button", { name: "重试" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByTestId("review-membership-form"),
+      ).not.toBeInTheDocument();
+      for (const name of ["认领", "续期", "释放", "提交人工核验"]) {
+        expect(screen.getByRole("button", { name })).toBeDisabled();
+      }
+      await userEvent.click(screen.getByRole("button", { name: "重新加载" }));
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "续期" })).toBeEnabled(),
+      );
+      expect(
+        router.calls.filter(
+          (call) =>
+            call.method === "POST" && call.url === MEMBERSHIP_PATH,
+        ),
+      ).toHaveLength(1);
+    },
+  );
+
+  it("keeps the exact membership body and idempotency key when the transport outcome is unknown", async () => {
+    let posts = 0;
+    const router = fetchRouter({
+      ...s10MembershipRoutes({
+        [`POST ${MEMBERSHIP_PATH}`]: () => {
+          posts += 1;
+          if (posts === 1) {
+            return Promise.reject(new TypeError("network unreachable"));
+          }
+          return jsonResponse({
+            status: "accepted",
+            replayed: false,
+            application_id: APP_ID,
+            work_item_id: WORK_ID,
+            correction_id: "membership_s10panel",
+            membership_decision_id: "decision_s10panel",
+            candidate_claim_id: "s10::claim_b",
+            attachment_id: "s10-attachment-1",
+            page_source_sha256: "10".repeat(32),
+            page_ordinal: 1,
+            decision: "accept",
+            document_instance_id: "reg::cert_instance_b",
+            document_role: "机动车登记证书",
+            cycle: 1,
+            invalidated_run_id: "run_t02panel",
+            job_id: "job_s10panel",
+            phase: "Assembly",
+            route: "pending_check",
+            lifecycle_revision: 7,
+            evidence_revision: 3,
+          });
+        },
+      }),
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    await userEvent.click(
+      screen.getByRole("button", {
+        name: "选择附件 s10-attachment-1 第 1 页",
+      }),
+    );
+    await screen.findByTestId("review-membership-form");
+    await userEvent.selectOptions(
+      screen.getByRole("combobox", { name: "候选实例" }),
+      "s10::claim_b",
+    );
+    await userEvent.click(screen.getByTestId("review-membership-submit"));
+    await waitFor(() =>
+      expect(screen.getByTestId("review-command-status")).toHaveTextContent(
+        "结果未知：网络未确认，重试将使用同一幂等键",
+      ),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "重试" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("review-command-status")).toHaveTextContent(
+        "页归属已接受",
+      ),
+    );
+    const bodies = router.calls
+      .filter(
+        (call) =>
+          call.method === "POST" && call.url === MEMBERSHIP_PATH,
+      )
+      .map((call) => call.body);
+    expect(bodies).toHaveLength(2);
+    // The replay reuses the byte-identical serialized command, including the
+    // retained idempotency key.
+    expect(JSON.stringify(bodies[0])).toEqual(JSON.stringify(bodies[1]));
+  });
+});
 
 describe("ReviewWorkPanel controlled reveal (T03)", () => {
   it("reveals the restricted source for exactly the clicked observation and nowhere else", async () => {

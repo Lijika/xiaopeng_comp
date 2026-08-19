@@ -304,6 +304,9 @@ body {
   color: var(--muted-foreground);
   font-size: 0.8125rem;
   padding-inline-start: 1.25rem;
+  /* Server warnings carry uninterrupted absolute fixture paths; at mobile
+   * widths they must wrap anywhere instead of widening the document. */
+  overflow-wrap: anywhere;
 }
 
 /* S10 page-membership dual-pane: coexisting candidate claims (read-only) on
