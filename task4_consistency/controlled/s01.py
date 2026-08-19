@@ -461,6 +461,14 @@ class ControlledScenarioService:
             "ENTITY_LINK_AMBIGUITY_RESOLVED",
         }
     )
+    # S11: the governed matcher/knowledge release identities of the fixed
+    # C-DEMO release.  They are release-contract facts (the same fixed
+    # identity space as ``release_id``/``checker_build``); candidate input and
+    # the current mutable KB can never establish them.  The component digests
+    # they are bound to resolve from the immutable RunSpec release facts.
+    _ENTITY_MATCHER_ID = "c-demo-entity-matcher/1"
+    _ENTITY_MATCHER_VERSION = "1"
+    _ENTITY_KNOWLEDGE_RELEASE_ID = "c-demo-entity-knowledge/1"
     _EXCEPTION_REQUEST_REASON = "DOCUMENTED_BRAND_VARIANCE"
     _EXCEPTION_APPROVAL_REASONS = frozenset(
         {"DOCUMENTED_VARIANCE_ACCEPTED", "DOCUMENTED_VARIANCE_REJECTED"}
@@ -10363,6 +10371,67 @@ class ControlledScenarioService:
                         "work_item_id": work_item_id,
                         "reason_code": "ENTITY_LINK_RELEASE_MISMATCH",
                     }
+                # SP-1: candidate provenance must equal the fixed RunSpec
+                # release authority of the claimed work item's run.  The
+                # immutable ``entity_link_release`` pin was frozen with the
+                # run snapshot; candidate input, the command and the current
+                # mutable KB can never establish that authority.  Unknown,
+                # expired or wrong-release matcher/knowledge identity or
+                # component digest is rejected here with zero side effects.
+                work_item_run = next(
+                    (
+                        run
+                        for run in self._store.runs
+                        if run.get("run_id") == work_item["run_id"]
+                    ),
+                    None,
+                )
+                run_spec = (
+                    work_item_run.get("spec")
+                    if work_item_run is not None
+                    and isinstance(work_item_run.get("spec"), dict)
+                    else None
+                )
+                entity_link_release = (
+                    run_spec.get("evidence_snapshot", {}).get(
+                        "entity_link_release"
+                    )
+                    if run_spec is not None
+                    and isinstance(run_spec.get("evidence_snapshot"), dict)
+                    else None
+                )
+                pin_matcher = (
+                    entity_link_release.get("matcher")
+                    if isinstance(entity_link_release, dict)
+                    else None
+                )
+                pin_knowledge = (
+                    entity_link_release.get("knowledge")
+                    if isinstance(entity_link_release, dict)
+                    else None
+                )
+                if (
+                    not isinstance(pin_matcher, dict)
+                    or not isinstance(pin_knowledge, dict)
+                    or not isinstance(claim_provenance, dict)
+                    or claim_provenance.get("matcher_id")
+                    != pin_matcher.get("id")
+                    or claim_provenance.get("matcher_version")
+                    != pin_matcher.get("version")
+                    or claim_provenance.get("matcher_digest")
+                    != pin_matcher.get("digest")
+                    or claim_provenance.get("knowledge_release_id")
+                    != pin_knowledge.get("release_id")
+                    or claim_provenance.get("knowledge_release_digest")
+                    != pin_knowledge.get("digest")
+                ):
+                    return {
+                        "status": "rejected",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "work_item_id": work_item_id,
+                        "reason_code": "ENTITY_LINK_RELEASE_MISMATCH",
+                    }
                 current_source_evidence = self._current_evidence_reference(app)
                 if source_evidence != current_source_evidence:
                     return {
@@ -10466,6 +10535,12 @@ class ControlledScenarioService:
                     "matcher_id": normalized["matcher_id"],
                     "matcher_version": normalized["matcher_version"],
                     "knowledge_release_id": normalized["knowledge_release_id"],
+                    "matcher_digest": claim_provenance.get("matcher_digest"),
+                    "knowledge_release_digest": claim_provenance.get(
+                        "knowledge_release_digest"
+                    ),
+                    "release_id": entity_link_release["release_id"],
+                    "release_digest": entity_link_release["release_digest"],
                     "supersedes": superseded,
                     "status": "active",
                 }
@@ -10499,6 +10574,14 @@ class ControlledScenarioService:
                         "knowledge_release_id": normalized[
                             "knowledge_release_id"
                         ],
+                        "matcher_digest": claim_provenance.get(
+                            "matcher_digest"
+                        ),
+                        "knowledge_release_digest": claim_provenance.get(
+                            "knowledge_release_digest"
+                        ),
+                        "release_id": entity_link_release["release_id"],
+                        "release_digest": entity_link_release["release_digest"],
                         "source_evidence": copy.deepcopy(
                             current_source_evidence
                         ),
@@ -10655,6 +10738,16 @@ class ControlledScenarioService:
                             "matcher_version": normalized["matcher_version"],
                             "knowledge_release_id": normalized[
                                 "knowledge_release_id"
+                            ],
+                            "matcher_digest": claim_provenance.get(
+                                "matcher_digest"
+                            ),
+                            "knowledge_release_digest": claim_provenance.get(
+                                "knowledge_release_digest"
+                            ),
+                            "release_id": entity_link_release["release_id"],
+                            "release_digest": entity_link_release[
+                                "release_digest"
                             ],
                             "source_evidence_event_id": (
                                 current_source_evidence["event_id"]
@@ -15280,6 +15373,17 @@ class ControlledScenarioService:
                                 record.get("supersedes", [])
                             ),
                             "status": record["status"],
+                            "matcher_id": record.get("matcher_id"),
+                            "matcher_version": record.get("matcher_version"),
+                            "matcher_digest": record.get("matcher_digest"),
+                            "knowledge_release_id": record.get(
+                                "knowledge_release_id"
+                            ),
+                            "knowledge_release_digest": record.get(
+                                "knowledge_release_digest"
+                            ),
+                            "release_id": record.get("release_id"),
+                            "release_digest": record.get("release_digest"),
                         }
                         entity_links.append(item)
             entity_link_history = []
@@ -15321,6 +15425,10 @@ class ControlledScenarioService:
                                 "matcher_id",
                                 "matcher_version",
                                 "knowledge_release_id",
+                                "matcher_digest",
+                                "knowledge_release_digest",
+                                "release_id",
+                                "release_digest",
                                 "reason_code",
                                 "actor",
                                 "recorded_at",
@@ -15776,6 +15884,18 @@ class ControlledScenarioService:
                                 "matcher_id",
                                 "matcher_version",
                                 "knowledge_release_id",
+                            )
+                        )
+                        or any(
+                            not isinstance(provenance.get(key), str)
+                            or len(provenance[key]) != 64
+                            or any(
+                                character not in "0123456789abcdef"
+                                for character in provenance[key]
+                            )
+                            for key in (
+                                "matcher_digest",
+                                "knowledge_release_digest",
                             )
                         )
                         or not isinstance(knowledge, dict)
@@ -17533,6 +17653,47 @@ class ControlledScenarioService:
             for candidate in candidates
         )
 
+    def _entity_link_release_pin(
+        self, release: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Resolve the immutable entity-link release facts (SP-1) from one
+        fixed RunSpec release authority.
+
+        The matcher and knowledge component digests come from the release's
+        immutable content digest mapping (the fixed normalizer/alias build and
+        the compiled entity knowledge); the matcher/knowledge identities are
+        the fixed C-DEMO release-contract identities.  Candidate provenance,
+        Reviewer commands and the current mutable KB can never establish these
+        facts; an unresolvable release authority returns ``None`` and the
+        command fails closed with zero writes."""
+        release_id = release.get("release_id")
+        release_digest = release.get("digest")
+        matcher_digest = release.get("normalizer_digest")
+        knowledge_digest = release.get("knowledge_digest")
+        if not all(
+            isinstance(value, str) and value
+            for value in (
+                release_id,
+                release_digest,
+                matcher_digest,
+                knowledge_digest,
+            )
+        ):
+            return None
+        return {
+            "release_id": release_id,
+            "release_digest": release_digest,
+            "matcher": {
+                "id": self._ENTITY_MATCHER_ID,
+                "version": self._ENTITY_MATCHER_VERSION,
+                "digest": matcher_digest,
+            },
+            "knowledge": {
+                "release_id": self._ENTITY_KNOWLEDGE_RELEASE_ID,
+                "digest": knowledge_digest,
+            },
+        }
+
     def _entity_link_findings(
         self, app: dict[str, Any], run_spec: dict[str, Any]
     ) -> list[dict[str, Any]]:
@@ -17732,6 +17893,13 @@ class ControlledScenarioService:
                             "source_evidence",
                             "supersedes",
                             "status",
+                            "matcher_id",
+                            "matcher_version",
+                            "matcher_digest",
+                            "knowledge_release_id",
+                            "knowledge_release_digest",
+                            "release_id",
+                            "release_digest",
                         )
                     }
                 )
@@ -18449,6 +18617,33 @@ class ControlledScenarioService:
             self._transition_lifecycle(
                 app, "Checking", "CHECK_JOB_STARTED", store=owner
             )
+        # SP-1: resolve the release authority before the snapshot is frozen.
+        # The immutable entity-link release pin below is generated only from
+        # these fixed release facts; candidate input, the Reviewer command and
+        # the current mutable KB can never establish that authority.
+        policy_pin = None
+        if self._policy_governance is not None:
+            try:
+                policy_pin = self._policy_governance.resolve_run_pin(
+                    "C-DEMO/demo", int(self._clock()), store=owner
+                )
+            except Exception as error:
+                raise _PinnedReleaseUnavailable(self._PINNED_RELEASE_FAILURE) from error
+            if policy_pin is not None and self._holds_cover_application(
+                policy_pin.get("hold_union") or [],
+                str(app.get("application_id") or ""),
+            ):
+                # A Policy Safety Hold scoped to this application blocks
+                # new/current RunSpec publication: automatic routing and
+                # current completion fail closed until an explicit governed
+                # recovery releases every covering hold in the union.
+                raise _PinnedReleaseUnavailable(self._S09_HOLD_FAILURE)
+        if policy_pin is not None:
+            release = policy_pin["release"]
+        elif self._policy_governance is not None:
+            raise _PinnedReleaseUnavailable(self._POLICY_UNAVAILABLE_FAILURE)
+        else:
+            release = self._legacy_run_release()
         snapshot_payload = {
             "schema_version": "s01-evidence-snapshot/1",
             "evidence": self._assemble_evidence(
@@ -18524,6 +18719,15 @@ class ControlledScenarioService:
                     "label": candidate_entity.get("label"),
                     "relationship": record.get("relationship"),
                     "evidence_revision": app["evidence_revision"],
+                    "matcher_id": record.get("matcher_id"),
+                    "matcher_version": record.get("matcher_version"),
+                    "matcher_digest": record.get("matcher_digest"),
+                    "knowledge_release_id": record.get("knowledge_release_id"),
+                    "knowledge_release_digest": record.get(
+                        "knowledge_release_digest"
+                    ),
+                    "release_id": release["release_id"],
+                    "release_digest": release["digest"],
                 }
                 entity_link_decisions.append(pin)
             snapshot_payload["entity_link_decisions"] = sorted(
@@ -18533,6 +18737,14 @@ class ControlledScenarioService:
                     str(item.get("decision_id") or ""),
                 ),
             )
+            entity_link_release = self._entity_link_release_pin(release)
+            if entity_link_release is None:
+                # SP-1: an entity-link run whose release authority cannot
+                # resolve must fail closed like every other unloadable
+                # authority; a pinless run would route corrections into a
+                # misleading release-mismatch instead of unavailable.
+                raise _PinnedReleaseUnavailable(self._PINNED_RELEASE_FAILURE)
+            snapshot_payload["entity_link_release"] = entity_link_release
         snapshot_bytes = json.dumps(
             snapshot_payload,
             ensure_ascii=False,
@@ -18541,29 +18753,6 @@ class ControlledScenarioService:
         ).encode("utf-8")
         snapshot_digest = hashlib.sha256(snapshot_bytes).hexdigest()
         snapshot_id = f"snapshot_sha256_{snapshot_digest}"
-        policy_pin = None
-        if self._policy_governance is not None:
-            try:
-                policy_pin = self._policy_governance.resolve_run_pin(
-                    "C-DEMO/demo", int(self._clock()), store=owner
-                )
-            except Exception as error:
-                raise _PinnedReleaseUnavailable(self._PINNED_RELEASE_FAILURE) from error
-            if policy_pin is not None and self._holds_cover_application(
-                policy_pin.get("hold_union") or [],
-                str(app.get("application_id") or ""),
-            ):
-                # A Policy Safety Hold scoped to this application blocks
-                # new/current RunSpec publication: automatic routing and
-                # current completion fail closed until an explicit governed
-                # recovery releases every covering hold in the union.
-                raise _PinnedReleaseUnavailable(self._S09_HOLD_FAILURE)
-        if policy_pin is not None:
-            release = policy_pin["release"]
-        elif self._policy_governance is not None:
-            raise _PinnedReleaseUnavailable(self._POLICY_UNAVAILABLE_FAILURE)
-        else:
-            release = self._legacy_run_release()
         run_id_material = [
             job["job_id"],
             str(app["cycle"]),

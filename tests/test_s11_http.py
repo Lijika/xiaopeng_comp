@@ -10,6 +10,7 @@ fresh complete run wins current-run CAS.  No candidate auto-links.
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ from tests.test_s01_http import (
 )
 
 S11_SCENARIO = "app_s11_entity_ambiguity.json"
+ROOT = Path(__file__).resolve().parents[1]
 MENTION_ORG = "s11_mention_org_pol"
 MENTION_CITY = "s11_mention_city_lease"
 MENTION_BRAND = "s11_mention_brand_inv"
@@ -268,12 +270,56 @@ def test_entity_link_successor_requires_fresh_current_run(tmp_path) -> None:
         run_ids = [record["run_id"] for record in history["runs"]]
         assert old_run_id in run_ids  # old run retained immutable
         assert len(history["entity_link_history"]) == 1
+        # The successor run pin carries the full provenance binding and the
+        # correction history preserves the same tuple and digests.
+        new_run = next(
+            record for record in history["runs"] if record["current"] is True
+        )
+        assert new_run["evidence_revision"] == 2
+        assert new_run["entity_link_decisions"] == [
+            {
+                "decision_id": payload["entity_link_decision_id"],
+                "candidate_claim_id": "s11_claim_org_picc",
+                "mention_id": MENTION_ORG,
+                "entity_id": "org:picc_full",
+                "entity_type": "insurer",
+                "label": "中国人民财产保险股份有限公司",
+                "relationship": "same_as",
+                "evidence_revision": 2,
+                "matcher_id": "c-demo-entity-matcher/1",
+                "matcher_version": "1",
+                "matcher_digest": "f5ea06d53e1bcd9796d80f5565624908a1d634cdf4afe35ad7f8e1db8ca23b7f",
+                "knowledge_release_id": "c-demo-entity-knowledge/1",
+                "knowledge_release_digest": "431392b07cddceabf84362e92175b15a610539d661d465fb21202a41c37c3141",
+                "release_id": "auto_lease@1.9.0",
+                "release_digest": "4fdc8736240275e0da08b3e00cdd39b1a191473b911e67f81e657bd18cb2ae1e",
+            }
+        ]
+        correction = history["entity_link_history"][0]
+        assert correction["matcher_id"] == "c-demo-entity-matcher/1"
+        assert correction["matcher_version"] == "1"
+        assert (
+            correction["matcher_digest"]
+            == "f5ea06d53e1bcd9796d80f5565624908a1d634cdf4afe35ad7f8e1db8ca23b7f"
+        )
+        assert correction["knowledge_release_id"] == "c-demo-entity-knowledge/1"
+        assert (
+            correction["knowledge_release_digest"]
+            == "431392b07cddceabf84362e92175b15a610539d661d465fb21202a41c37c3141"
+        )
+        assert correction["release_id"] == "auto_lease@1.9.0"
+        assert (
+            correction["release_digest"]
+            == "4fdc8736240275e0da08b3e00cdd39b1a191473b911e67f81e657bd18cb2ae1e"
+        )
         decision = next(
             record
             for record in history["entity_links"]
             if record["record_kind"] == "accepted"
         )
         assert decision["cycle"] == 1
+        assert decision["matcher_digest"] == correction["matcher_digest"]
+        assert decision["release_id"] == correction["release_id"]
         assert history["entity_link_history"][0]["cycle"] == 1
         assert {record["record_kind"] for record in history["entity_links"]} == {
             "candidate",
@@ -486,6 +532,96 @@ def test_entity_link_http_unauthorized_is_sanitized_404(tmp_path) -> None:
         assert hidden.json()["detail"] == {"error": "S03_NOT_FOUND"}
 
 
+def test_entity_link_release_mismatch_is_422(tmp_path) -> None:
+    """SP-1 over HTTP: a candidate whose provenance is unknown/expired/
+    wrong-release is rejected at the fixed-RunSpec fence and the adapter maps
+    the stable reason to the existing 422 Unprocessable contract, exposing
+    only the registered error code and the stable reason -- never manifest
+    content, a filesystem path or an internal exception."""
+    fixture_root = tmp_path / "fixtures"
+    fixture_root.mkdir()
+    payload = json.loads(
+        (ROOT / "fixtures" / "applications" / S11_SCENARIO).read_text(
+            encoding="utf-8"
+        )
+    )
+    candidate = next(
+        record
+        for record in payload["graph"]["entity_links"]
+        if record["claim_id"] == "s11_claim_org_picc"
+    )
+    candidate["provenance"]["matcher_id"] = "c-demo-entity-matcher/unknown"
+    (fixture_root / S11_SCENARIO).write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+    state_path = tmp_path / "target.sqlite3"
+    with s01_test_loopback(
+        {
+            "TASK4_S01_STATE_PATH": str(state_path),
+            "TASK4_S01_TEST_STATE_PATH": str(state_path),
+            "TASK4_S01_TEST_SCENARIO_ID": S11_SCENARIO,
+            "TASK4_S01_TEST_FIXTURE_ROOT": str(fixture_root),
+        }
+    ) as server:
+        admission = _submit(server, key="s11-http-release-mismatch").json()
+        application_id = admission["application_id"]
+        item = wait_for_projected_queue_item(server, application_id)
+        work_item_id = item["work_item_id"]
+        work_item = server.request(
+            "GET",
+            f"/controlled/s01/api/queries/review-work-items/{work_item_id}",
+            headers=headers("reviewer"),
+        ).json()
+        claimed = server.request(
+            "POST",
+            f"/controlled/s01/api/commands/review-work-items/{work_item_id}/claim",
+            body={"expected_context": work_item["command_context"]},
+            headers=headers("reviewer"),
+        ).json()
+        workspace = server.request(
+            "GET",
+            f"/controlled/s01/api/queries/applications/{application_id}/workspace",
+            headers=headers("reviewer"),
+        ).json()
+        ambiguous = next(
+            candidate
+            for candidate in workspace["mandatory_blockers"]
+            if candidate["rule_id"] == "ENTITY_LINK_AMBIGUOUS"
+        )
+        rejected = server.request(
+            "POST",
+            f"/controlled/s01/api/commands/review-work-items/{work_item_id}/correct-entity-link",
+            body=_accept_command(
+                application_id,
+                work_item,
+                claimed,
+                ambiguous,
+                entity_id="org:picc_full",
+            ),
+            headers=headers("reviewer"),
+        )
+        assert rejected.status == 422
+        assert rejected.json()["detail"] == {
+            "error": "S03_REJECTED",
+            "reason_code": "ENTITY_LINK_RELEASE_MISMATCH",
+        }
+        assert "manifest" not in rejected.text
+        assert fixture_root.name not in rejected.text
+        # Zero side effects over HTTP: route unchanged, no correction history.
+        route = server.request(
+            "GET",
+            f"/controlled/s01/api/queries/applications/{application_id}/current-route",
+            headers=headers("reviewer"),
+        ).json()
+        assert route["route"] == "manual_review"
+        history = server.request(
+            "GET",
+            f"/controlled/s01/api/queries/applications/{application_id}/history",
+            headers=headers("reviewer"),
+        ).json()
+        assert history["entity_link_history"] == []
+
+
 def test_entity_link_http_openapi_contract_is_closed(tmp_path) -> None:
     """The S11 command is consumable through generated types: it declares a
     required, closed request body and a closed 200 schema."""
@@ -567,12 +703,32 @@ def test_entity_link_http_openapi_contract_is_closed(tmp_path) -> None:
         "matcher_id",
         "matcher_version",
         "knowledge_release_id",
+        "matcher_digest",
+        "knowledge_release_digest",
         "method",
         "source_pointer",
     }
     knowledge = components["S01EntityLinkKnowledge"]
     assert knowledge["additionalProperties"] is False
     assert set(knowledge["properties"]) == {"same_as", "conflict_with"}
+    # The R2 provenance-tuple response DTOs are closed too.
+    for schema_name in (
+        "S01WorkspaceEntityLinkDecision",
+        "S01HistoryEntityLinkDecisionPin",
+        "S01HistoryEntityLink",
+        "S01HistoryEntityLinkCorrection",
+    ):
+        assert components[schema_name]["additionalProperties"] is False
+    decision_pin = components["S01HistoryEntityLinkDecisionPin"]
+    assert {
+        "matcher_id",
+        "matcher_version",
+        "matcher_digest",
+        "knowledge_release_id",
+        "knowledge_release_digest",
+        "release_id",
+        "release_digest",
+    }.issubset(decision_pin["properties"])
     workspace_entity_link = components["S01WorkspaceEntityLink"]
     assert set(workspace_entity_link["properties"]) == {
         "mention_id",

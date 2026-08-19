@@ -273,6 +273,13 @@ def test_entity_link_successor_requires_fresh_current_run(
             "label": "中国人民财产保险股份有限公司",
             "relationship": "same_as",
             "evidence_revision": 2,
+            "matcher_id": "c-demo-entity-matcher/1",
+            "matcher_version": "1",
+            "matcher_digest": "f5ea06d53e1bcd9796d80f5565624908a1d634cdf4afe35ad7f8e1db8ca23b7f",
+            "knowledge_release_id": "c-demo-entity-knowledge/1",
+            "knowledge_release_digest": "431392b07cddceabf84362e92175b15a610539d661d465fb21202a41c37c3141",
+            "release_id": "auto_lease@1.9.0",
+            "release_digest": "4fdc8736240275e0da08b3e00cdd39b1a191473b911e67f81e657bd18cb2ae1e",
         }
     ]
     ledger = {
@@ -344,7 +351,9 @@ def test_integrator_entity_link_decisions_have_no_reviewer_authority(
     assert history["entity_link_history"] == []
 
 
-@pytest.mark.parametrize("invalid_kind", ["malformed", "duplicate"])
+@pytest.mark.parametrize(
+    "invalid_kind", ["malformed", "duplicate", "bad_digest"]
+)
 def test_invalid_candidate_claim_rejects_admission_without_application(
     tmp_path: Path,
     invalid_kind: str,
@@ -357,6 +366,10 @@ def test_invalid_candidate_claim_rejects_admission_without_application(
     candidates = payload["graph"]["entity_links"]
     if invalid_kind == "malformed":
         candidates[0]["mention"]["mention_id"] = ""
+    elif invalid_kind == "bad_digest":
+        # SP-1: a structurally invalid provenance digest is rejected at
+        # admission with no application, run or evidence.
+        candidates[0]["provenance"]["matcher_digest"] = "not-a-64-hex-digest"
     else:
         candidates.append(copy.deepcopy(candidates[0]))
     fixture_root = tmp_path / "fixtures"
@@ -675,6 +688,8 @@ def test_entity_link_cross_city_prohibition_is_conflict(
                     "matcher_id": "c-demo-entity-matcher/1",
                     "matcher_version": "1",
                     "knowledge_release_id": "c-demo-entity-knowledge/1",
+                    "matcher_digest": "f5ea06d53e1bcd9796d80f5565624908a1d634cdf4afe35ad7f8e1db8ca23b7f",
+                    "knowledge_release_digest": "431392b07cddceabf84362e92175b15a610539d661d465fb21202a41c37c3141",
                     "method": "alias-longest-key",
                     "source_pointer": "/documents/0/fields/plate_no",
                 },
@@ -705,6 +720,8 @@ def test_entity_link_cross_city_prohibition_is_conflict(
                     "matcher_id": "c-demo-entity-matcher/1",
                     "matcher_version": "1",
                     "knowledge_release_id": "c-demo-entity-knowledge/1",
+                    "matcher_digest": "f5ea06d53e1bcd9796d80f5565624908a1d634cdf4afe35ad7f8e1db8ca23b7f",
+                    "knowledge_release_digest": "431392b07cddceabf84362e92175b15a610539d661d465fb21202a41c37c3141",
                     "method": "alias-fuzzy",
                     "source_pointer": "/documents/0/fields/plate_no",
                 },
@@ -1085,6 +1102,177 @@ def test_entity_link_reason_and_release_are_closed(tmp_path: Path) -> None:
         application_id=application_id,
     )
     assert history["entity_link_history"] == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        # Unknown matcher identity.
+        ("matcher_id", "c-demo-entity-matcher/unknown"),
+        # Expired knowledge release identity.
+        ("knowledge_release_id", "c-demo-entity-knowledge/expired"),
+        # Wrong-release matcher component digest.
+        ("matcher_digest", "0" * 64),
+        # Wrong-release knowledge component digest.
+        ("knowledge_release_digest", "0" * 64),
+    ],
+)
+def test_entity_link_candidate_provenance_must_match_fixed_release(
+    tmp_path: Path,
+    field: str,
+    value: str,
+) -> None:
+    """SP-1: candidate provenance that is unknown, expired or wrong-release
+    must be rejected at the fixed-RunSpec provenance fence with zero Evidence,
+    Lifecycle, job, outbox, audit, history and route side effects.  The
+    candidate itself is mutated before admission, so the command built from
+    that candidate passes the command-to-candidate equality fence and only
+    the candidate-to-fixed-run-release fence can reject it."""
+    payload = json.loads(
+        (ROOT / "fixtures" / "applications" / SCENARIO).read_text(
+            encoding="utf-8"
+        )
+    )
+    candidate = payload["graph"]["entity_links"][0]
+    assert candidate["claim_id"] == "s11_claim_org_picc"
+    candidate["provenance"][field] = value
+    fixture_root = tmp_path / "fixtures"
+    fixture_root.mkdir()
+    (fixture_root / SCENARIO).write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+    service = ControlledScenarioService(
+        fixture_root=fixture_root,
+        rules_path=ROOT / "configs" / "rules_auto_lease.yaml",
+        state_path=tmp_path / "target.sqlite3",
+        scenario_id=SCENARIO,
+    )
+    admitted = service.submit_demo(
+        scenario_id=SCENARIO,
+        idempotency_key=f"s11-provenance-{field}-intake",
+        principal=INTEGRATOR,
+    )
+    assert admitted.disposition is AdmissionDisposition.ACCEPTED
+    assert service.process_next_job().status == "complete"
+    service.refresh_projection()
+    queue = service.queue_view(
+        role="reviewer",
+        scope=REVIEWER.scope,
+        subject=REVIEWER.subject,
+        now=100,
+    )
+    work_item_id = queue["items"][0]["work_item_id"]
+    work_item = service.review_work_item_view(
+        principal=REVIEWER,
+        work_item_id=work_item_id,
+        now=100,
+    )
+    claimed = service.claim_review_work_item(
+        principal=REVIEWER,
+        work_item_id=work_item_id,
+        expected_context=work_item["command_context"],
+        now=100,
+    )
+    workspace = service.workspace_view(
+        admitted.application_id,
+        role="reviewer",
+        scope=REVIEWER.scope,
+        subject=REVIEWER.subject,
+        now=100,
+    )
+    ambiguous = next(
+        item
+        for item in workspace["mandatory_blockers"]
+        if item["rule_id"] == "ENTITY_LINK_AMBIGUOUS"
+    )
+
+    def observe() -> dict[str, object]:
+        return {
+            "facts": service.fact_counts(),
+            "route": service.current_route_view(
+                principal=REVIEWER,
+                application_id=admitted.application_id,
+            ),
+            "work_item": service.review_work_item_view(
+                principal=REVIEWER,
+                work_item_id=work_item_id,
+                now=100,
+            ),
+            "workspace": service.workspace_view(
+                admitted.application_id,
+                role="reviewer",
+                scope=REVIEWER.scope,
+                subject=REVIEWER.subject,
+                now=100,
+            ),
+            "history": service.application_history_view(
+                principal=REVIEWER,
+                application_id=admitted.application_id,
+            ),
+            "audit": service.audit_timeline(
+                principal=AUDITOR,
+                application_id=admitted.application_id,
+            ),
+        }
+
+    before = observe()
+    result = service.correct_entity_link(
+        principal=REVIEWER,
+        application_id=admitted.application_id,
+        work_item_id=work_item_id,
+        expected_fence=claimed["claim_fence"],
+        expected_context=work_item["command_context"],
+        idempotency_key=f"s11-provenance-{field}",
+        entity_link=_accept_link_command(
+            ambiguous,
+            entity_id="org:picc_full",
+            entity_type="insurer",
+            label="中国人民财产保险股份有限公司",
+        ),
+        now=101,
+    )
+
+    assert result["status"] == "rejected"
+    assert result["reason_code"] == "ENTITY_LINK_RELEASE_MISMATCH"
+    assert observe() == before
+
+
+def test_entity_link_unresolvable_release_pin_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SP-1: when the fixed release authority cannot resolve an entity-link
+    pin, the run fails closed with the existing unavailable mapping and
+    publishes zero runs, attempts, findings or evidence successors."""
+    service = ControlledScenarioService(
+        fixture_root=ROOT / "fixtures" / "applications",
+        rules_path=ROOT / "configs" / "rules_auto_lease.yaml",
+        state_path=tmp_path / "target.sqlite3",
+        scenario_id=SCENARIO,
+    )
+    admitted = service.submit_demo(
+        scenario_id=SCENARIO,
+        idempotency_key="s11-unresolvable-intake",
+        principal=INTEGRATOR,
+    )
+    assert admitted.disposition is AdmissionDisposition.ACCEPTED
+
+    broken_release = dict(service._legacy_run_release())
+    broken_release.pop("knowledge_digest")
+    broken_release.pop("normalizer_digest")
+    monkeypatch.setattr(
+        service, "_legacy_run_release", lambda: broken_release
+    )
+
+    result = service.process_next_job()
+    assert result.status == "stopped"
+    assert result.reason_code == "PINNED_RELEASE_UNAVAILABLE"
+    counts = service.fact_counts()
+    assert counts["runs"] == 0
+    assert counts["attempts"] == 0
+    assert counts["findings"] == 0
+    assert counts["evidence_events"] == 1  # the admitted snapshot only
+    assert counts["jobs"] == 1  # the admission job, never completed
 
 
 def test_entity_link_successor_supersedes_active_predecessor(

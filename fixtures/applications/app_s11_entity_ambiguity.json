@@ -15,65 +15,170 @@
       "doc_id": "reg",
       "doc_type": "机动车登记证书",
       "fields": {
-        "vin": { "raw": "LSVAA4182N5000054", "confidence": 0.99 },
-        "engine_no": { "raw": "S2ENG54A", "confidence": 0.99 },
-        "owner_name": { "raw": "半真壬", "confidence": 0.99 },
-        "plate_no": { "raw": "苏A92054", "confidence": 0.99 },
-        "reg_cert_no": { "raw": "RC54", "confidence": 0.99 },
-        "reg_date": { "raw": "2024-12-12", "confidence": 0.99 },
-        "address": { "raw": "江苏省南京市建邺区半真实路54号", "confidence": 0.99 },
-        "brand": { "raw": "比亚迪汽车工业有限公司", "confidence": 0.99 },
-        "model": { "raw": "汉EV", "confidence": 0.99 }
+        "vin": {
+          "raw": "LSVAA4182N5000054",
+          "confidence": 0.99
+        },
+        "engine_no": {
+          "raw": "S2ENG54A",
+          "confidence": 0.99
+        },
+        "owner_name": {
+          "raw": "半真壬",
+          "confidence": 0.99
+        },
+        "plate_no": {
+          "raw": "苏A92054",
+          "confidence": 0.99
+        },
+        "reg_cert_no": {
+          "raw": "RC54",
+          "confidence": 0.99
+        },
+        "reg_date": {
+          "raw": "2024-12-12",
+          "confidence": 0.99
+        },
+        "address": {
+          "raw": "江苏省南京市建邺区半真实路54号",
+          "confidence": 0.99
+        },
+        "brand": {
+          "raw": "比亚迪汽车工业有限公司",
+          "confidence": 0.99
+        },
+        "model": {
+          "raw": "汉EV",
+          "confidence": 0.99
+        }
       }
     },
     {
       "doc_id": "pol",
       "doc_type": "交强险保单",
       "fields": {
-        "vin": { "raw": "LSVAA4182N5000054", "confidence": 0.99 },
-        "engine_no": { "raw": "S2ENG54A", "confidence": 0.99 },
-        "insured_name": { "raw": "半真壬", "confidence": 0.99 },
-        "plate_no": { "raw": "苏A92054", "confidence": 0.99 },
-        "plate_list": { "raw": "苏A92054", "confidence": 0.99 },
-        "brand": { "raw": "比亚迪汽车工业有限公司", "confidence": 0.99 },
-        "model": { "raw": "汉EV", "confidence": 0.99 },
-        "insured_org": { "raw": "人保财险", "confidence": 0.99 }
+        "vin": {
+          "raw": "LSVAA4182N5000054",
+          "confidence": 0.99
+        },
+        "engine_no": {
+          "raw": "S2ENG54A",
+          "confidence": 0.99
+        },
+        "insured_name": {
+          "raw": "半真壬",
+          "confidence": 0.99
+        },
+        "plate_no": {
+          "raw": "苏A92054",
+          "confidence": 0.99
+        },
+        "plate_list": {
+          "raw": "苏A92054",
+          "confidence": 0.99
+        },
+        "brand": {
+          "raw": "比亚迪汽车工业有限公司",
+          "confidence": 0.99
+        },
+        "model": {
+          "raw": "汉EV",
+          "confidence": 0.99
+        },
+        "insured_org": {
+          "raw": "人保财险",
+          "confidence": 0.99
+        }
       }
     },
     {
       "doc_id": "lease",
       "doc_type": "融资租赁合同",
       "fields": {
-        "vin": { "raw": "LSVAA4182N5000054", "confidence": 0.99 },
-        "lessee_name": { "raw": "半真壬", "confidence": 0.99 },
-        "id_number": { "raw": "320102199001012016", "confidence": 0.99 },
-        "financed_amount": { "raw": "182000", "confidence": 0.99 },
-        "reg_cert_no": { "raw": "RC54", "confidence": 0.99 },
-        "reg_date": { "raw": "2024-12-12", "confidence": 0.99 },
-        "brand": { "raw": "比亚迪汽车工业有限公司", "confidence": 0.99 },
-        "model": { "raw": "汉EV", "confidence": 0.99 },
-        "city": { "raw": "南京", "confidence": 0.6 }
+        "vin": {
+          "raw": "LSVAA4182N5000054",
+          "confidence": 0.99
+        },
+        "lessee_name": {
+          "raw": "半真壬",
+          "confidence": 0.99
+        },
+        "id_number": {
+          "raw": "320102199001012016",
+          "confidence": 0.99
+        },
+        "financed_amount": {
+          "raw": "182000",
+          "confidence": 0.99
+        },
+        "reg_cert_no": {
+          "raw": "RC54",
+          "confidence": 0.99
+        },
+        "reg_date": {
+          "raw": "2024-12-12",
+          "confidence": 0.99
+        },
+        "brand": {
+          "raw": "比亚迪汽车工业有限公司",
+          "confidence": 0.99
+        },
+        "model": {
+          "raw": "汉EV",
+          "confidence": 0.99
+        },
+        "city": {
+          "raw": "南京",
+          "confidence": 0.6
+        }
       }
     },
     {
       "doc_id": "inv",
       "doc_type": "发票",
       "fields": {
-        "vin": { "raw": "LSVAA4182N5000054", "confidence": 0.99 },
-        "engine_no": { "raw": "S2ENG54A", "confidence": 0.99 },
-        "invoice_amount": { "raw": "182000", "confidence": 0.99 },
-        "brand": { "raw": "比亚迪汽车工业有限公司", "confidence": 0.99 },
-        "model": { "raw": "汉EV", "confidence": 0.99 },
-        "brand_short": { "raw": "一汽大众", "confidence": 0.99 }
+        "vin": {
+          "raw": "LSVAA4182N5000054",
+          "confidence": 0.99
+        },
+        "engine_no": {
+          "raw": "S2ENG54A",
+          "confidence": 0.99
+        },
+        "invoice_amount": {
+          "raw": "182000",
+          "confidence": 0.99
+        },
+        "brand": {
+          "raw": "比亚迪汽车工业有限公司",
+          "confidence": 0.99
+        },
+        "model": {
+          "raw": "汉EV",
+          "confidence": 0.99
+        },
+        "brand_short": {
+          "raw": "一汽大众",
+          "confidence": 0.99
+        }
       }
     },
     {
       "doc_id": "id",
       "doc_type": "身份证",
       "fields": {
-        "id_number": { "raw": "320102199001012016", "confidence": 0.99 },
-        "owner_name": { "raw": "半真壬", "confidence": 0.99 },
-        "address": { "raw": "江苏省南京市建邺区半真实路54号", "confidence": 0.99 }
+        "id_number": {
+          "raw": "320102199001012016",
+          "confidence": 0.99
+        },
+        "owner_name": {
+          "raw": "半真壬",
+          "confidence": 0.99
+        },
+        "address": {
+          "raw": "江苏省南京市建邺区半真实路54号",
+          "confidence": 0.99
+        }
       }
     }
   ],
@@ -102,10 +207,14 @@
           "matcher_version": "1",
           "knowledge_release_id": "c-demo-entity-knowledge/1",
           "method": "alias-longest-key",
-          "source_pointer": "/documents/1/fields/insured_org"
+          "source_pointer": "/documents/1/fields/insured_org",
+          "matcher_digest": "f5ea06d53e1bcd9796d80f5565624908a1d634cdf4afe35ad7f8e1db8ca23b7f",
+          "knowledge_release_digest": "431392b07cddceabf84362e92175b15a610539d661d465fb21202a41c37c3141"
         },
         "knowledge": {
-          "same_as": ["org:picc"],
+          "same_as": [
+            "org:picc"
+          ],
           "conflict_with": []
         }
       },
@@ -132,10 +241,14 @@
           "matcher_version": "1",
           "knowledge_release_id": "c-demo-entity-knowledge/1",
           "method": "alias-fuzzy",
-          "source_pointer": "/documents/1/fields/insured_org"
+          "source_pointer": "/documents/1/fields/insured_org",
+          "matcher_digest": "f5ea06d53e1bcd9796d80f5565624908a1d634cdf4afe35ad7f8e1db8ca23b7f",
+          "knowledge_release_digest": "431392b07cddceabf84362e92175b15a610539d661d465fb21202a41c37c3141"
         },
         "knowledge": {
-          "same_as": ["org:pingan"],
+          "same_as": [
+            "org:pingan"
+          ],
           "conflict_with": []
         }
       },
@@ -162,7 +275,9 @@
           "matcher_version": "1",
           "knowledge_release_id": "c-demo-entity-knowledge/1",
           "method": "alias-longest-key",
-          "source_pointer": "/documents/2/fields/city"
+          "source_pointer": "/documents/2/fields/city",
+          "matcher_digest": "f5ea06d53e1bcd9796d80f5565624908a1d634cdf4afe35ad7f8e1db8ca23b7f",
+          "knowledge_release_digest": "431392b07cddceabf84362e92175b15a610539d661d465fb21202a41c37c3141"
         },
         "knowledge": {
           "same_as": [],
@@ -192,11 +307,15 @@
           "matcher_version": "1",
           "knowledge_release_id": "c-demo-entity-knowledge/1",
           "method": "alias-longest-key",
-          "source_pointer": "/documents/3/fields/brand_short"
+          "source_pointer": "/documents/3/fields/brand_short",
+          "matcher_digest": "f5ea06d53e1bcd9796d80f5565624908a1d634cdf4afe35ad7f8e1db8ca23b7f",
+          "knowledge_release_digest": "431392b07cddceabf84362e92175b15a610539d661d465fb21202a41c37c3141"
         },
         "knowledge": {
           "same_as": [],
-          "conflict_with": ["brand:saic-vw"]
+          "conflict_with": [
+            "brand:saic-vw"
+          ]
         }
       },
       {
@@ -222,11 +341,15 @@
           "matcher_version": "1",
           "knowledge_release_id": "c-demo-entity-knowledge/1",
           "method": "alias-fuzzy",
-          "source_pointer": "/documents/3/fields/brand_short"
+          "source_pointer": "/documents/3/fields/brand_short",
+          "matcher_digest": "f5ea06d53e1bcd9796d80f5565624908a1d634cdf4afe35ad7f8e1db8ca23b7f",
+          "knowledge_release_digest": "431392b07cddceabf84362e92175b15a610539d661d465fb21202a41c37c3141"
         },
         "knowledge": {
           "same_as": [],
-          "conflict_with": ["brand:faw-vw"]
+          "conflict_with": [
+            "brand:faw-vw"
+          ]
         }
       }
     ]

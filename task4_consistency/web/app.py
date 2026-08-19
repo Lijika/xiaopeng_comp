@@ -1251,13 +1251,16 @@ class S01EntityLinkCandidateEntity(BaseModel):
 class S01EntityLinkProvenance(BaseModel):
     """The matcher and frozen knowledge-release provenance of one candidate
     claim (S11).  The command must reproduce it exactly; an expired or wrong
-    release metadata pair is rejected with no successor."""
+    release metadata pair is rejected with no successor, and the digests must
+    equal the fixed RunSpec entity-link release pin (SP-1)."""
 
     model_config = ConfigDict(extra="forbid")
 
     matcher_id: str
     matcher_version: str
     knowledge_release_id: str
+    matcher_digest: str | None = None
+    knowledge_release_digest: str | None = None
     method: str | None = None
     source_pointer: str | None = None
 
@@ -1367,6 +1370,8 @@ class S01WorkspaceMembershipPage(BaseModel):
 
 
 class S01WorkspaceEntityLinkDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     record_kind: Literal["accepted"]
     decision_id: str
     link_id: str | None = None
@@ -1380,6 +1385,13 @@ class S01WorkspaceEntityLinkDecision(BaseModel):
     source_evidence: S01MembershipDecisionSourceEvidence
     supersedes: list[str]
     status: Literal["active", "superseded"]
+    matcher_id: str | None = None
+    matcher_version: str | None = None
+    matcher_digest: str | None = None
+    knowledge_release_id: str | None = None
+    knowledge_release_digest: str | None = None
+    release_id: str | None = None
+    release_digest: str | None = None
 
 
 class S01WorkspaceEntityLinkMentionPage(BaseModel):
@@ -1503,6 +1515,8 @@ class S01HistoryMembershipDecisionPin(BaseModel):
 
 
 class S01HistoryEntityLinkDecisionPin(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     decision_id: str
     candidate_claim_id: str
     mention_id: str
@@ -1511,6 +1525,13 @@ class S01HistoryEntityLinkDecisionPin(BaseModel):
     label: str
     relationship: str
     evidence_revision: int
+    matcher_id: str | None = None
+    matcher_version: str | None = None
+    matcher_digest: str | None = None
+    knowledge_release_id: str | None = None
+    knowledge_release_digest: str | None = None
+    release_id: str | None = None
+    release_digest: str | None = None
 
 
 class S01HistoryRun(BaseModel):
@@ -1631,6 +1652,8 @@ class S01HistoryEntityLink(BaseModel):
     (S11): candidate claims and every accepted decision with its explicit
     status."""
 
+    model_config = ConfigDict(extra="forbid")
+
     record_kind: str
     mention: S01EntityLinkMention
     decision_id: str | None = None
@@ -1648,10 +1671,19 @@ class S01HistoryEntityLink(BaseModel):
     confidence: float | None = None
     provenance: S01EntityLinkProvenance | None = None
     knowledge: S01EntityLinkKnowledge | None = None
+    matcher_id: str | None = None
+    matcher_version: str | None = None
+    matcher_digest: str | None = None
+    knowledge_release_id: str | None = None
+    knowledge_release_digest: str | None = None
+    release_id: str | None = None
+    release_digest: str | None = None
 
 
 class S01HistoryEntityLinkCorrection(BaseModel):
     """One chronologically committed entity-link correction (S11)."""
+
+    model_config = ConfigDict(extra="forbid")
 
     evidence_revision: int
     event_id: str
@@ -1669,6 +1701,10 @@ class S01HistoryEntityLinkCorrection(BaseModel):
     matcher_id: str
     matcher_version: str
     knowledge_release_id: str
+    matcher_digest: str | None = None
+    knowledge_release_digest: str | None = None
+    release_id: str | None = None
+    release_digest: str | None = None
     reason_code: str
     actor: str
     recorded_at: int
@@ -4537,6 +4573,21 @@ async def controlled_s11_demo_correct_entity_link(
         raise _s03_not_found(error) from error
     except ValueError as error:
         raise _s03_invalid_command(error) from error
+    if (
+        result.get("status") == "rejected"
+        and result.get("reason_code") == "ENTITY_LINK_RELEASE_MISMATCH"
+    ):
+        # SP-1: unknown/expired/wrong-release candidate provenance is a
+        # stable Unprocessable outcome under the existing 422 contract.  The
+        # registered S03_REJECTED code plus the stable reason_code are
+        # exposed; no manifest content, path or internal exception ever is.
+        raise HTTPException(
+            422,
+            detail={
+                "error": "S03_REJECTED",
+                "reason_code": "ENTITY_LINK_RELEASE_MISMATCH",
+            },
+        )
     return _s03_command_result(result)
 
 
