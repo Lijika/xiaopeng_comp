@@ -512,16 +512,3 @@ def test_membership_http_openapi_contract_is_closed(tmp_path) -> None:
     assert components["S01MembershipCandidateDocument"]["additionalProperties"] is False
     assert components["S01MembershipSourceEvidence"]["additionalProperties"] is False
     assert components["S01MembershipDecisionSourceEvidence"]["additionalProperties"] is False
-    import task4_consistency.web.app as web
-    from task4_consistency.controlled.s01 import ControlledScenarioTestDriver
-    from task4_consistency.web.app import create_s02_test_app
-
-    app = create_s02_test_app()
-    if web.S01_SERVICE is None:
-        raise RuntimeError("S02 test app did not configure the S01 service")
-    # The S02 factory wires the S01 background from its own env flag; the
-    # production browser flow needs the background disabled so every worker
-    # transition is driven explicitly through /_test/commands/process.
-    web.S01_BACKGROUND_ENABLED = False
-    web.S01_TEST_DRIVER = ControlledScenarioTestDriver(web.S01_SERVICE)
-    return app
