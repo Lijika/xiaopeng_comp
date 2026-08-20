@@ -5576,6 +5576,7 @@ class ControlledScenarioService:
                 else None
             )
             return {
+                "s01_authority_revision": self._store._store_revision,
                 "lifecycle_revision": lifecycle_revision,
                 "evidence_revision": evidence_revision,
                 "evidence_count": len(self._store.evidence_events),
@@ -5722,6 +5723,14 @@ class ControlledScenarioService:
                     ).encode("utf-8")
                 ).hexdigest(),
             }
+
+    def evaluation_publication_fence(self, expected_revision: int):
+        """Registered S12 publication guard over the S01 store revision."""
+        if not self.storage_available or not self.audit_available:
+            raise EvaluationAuthorityUnavailable(
+                "S01 evaluation business authority is unavailable"
+            )
+        return self._store.revision_fence(expected_revision)
 
     def issue_session(
         self,

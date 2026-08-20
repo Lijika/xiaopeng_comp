@@ -9,6 +9,7 @@ S01 and is not a legacy file or report authority.
 from __future__ import annotations
 
 import copy
+import contextlib
 import hashlib
 import hmac
 import json
@@ -268,6 +269,34 @@ class SQLiteTargetStore:
         connection = sqlite3.connect(self.state_path, timeout=5.0)
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
+
+    @contextlib.contextmanager
+    def revision_fence(self, expected_revision: int):
+        """Hold the store revision stable across an external publication."""
+        if isinstance(expected_revision, bool) or not isinstance(
+            expected_revision, int
+        ):
+            raise ValueError("authority revision must be an integer")
+        with contextlib.closing(self._connect()) as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT store_revision FROM s01_meta WHERE id = 1"
+                ).fetchone()
+            except sqlite3.Error as error:
+                raise RuntimeError("authority revision fence is unavailable") from error
+            current_revision = int(row[0]) if row else 0
+            if current_revision != expected_revision:
+                connection.execute("ROLLBACK")
+                raise StaleStoreRevision(
+                    "authority revision advanced before S12 publication: "
+                    f"expected {expected_revision}, found {current_revision}"
+                )
+            try:
+                yield
+            finally:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
 
     def _ensure_schema(self) -> None:
         with self._connect() as connection:

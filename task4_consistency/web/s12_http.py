@@ -294,7 +294,7 @@ class S12ClusterResponse(BaseModel):
     cluster_id: str
     stratum: str
     applications: list[str]
-    usage: str
+    usage: Literal["development", "calibration", "acceptance_holdout"]
     variants: list[str] | None = None
 
 
@@ -302,7 +302,7 @@ class S12OpportunityResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     opportunity_id: str
-    track: str
+    track: Literal["R", "C"]
     cluster: str
     application_id: str
     cycle: int
@@ -310,7 +310,7 @@ class S12OpportunityResponse(BaseModel):
     target_scope: Literal["C", "R-E2E", "R-T4-conditional"]
     evidence_snapshot_id: str
     variant_id: str | None = None
-    label: str
+    label: Literal["consistent", "inconsistent", "indeterminate", "not_applicable"]
     label_custody: str | None = None
     run_id: str
     difficulty: str | None = None
@@ -533,6 +533,33 @@ class S12EnvironmentResponse(BaseModel):
     schema_version: str
 
 
+class S12GovernedManifestComponent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: str
+    id: str
+    digest: str
+
+
+class S12GovernedManifestCompatibility(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    checker_build: str
+    input_contract_schema: str
+    evidence_readiness_policy: str
+
+
+class S12GovernedManifest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    manifest_id: str
+    digest: str
+    schema_version: str
+    scope: str
+    components: list[S12GovernedManifestComponent]
+    compatibility: S12GovernedManifestCompatibility
+
+
 class S12ReleaseResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -541,6 +568,7 @@ class S12ReleaseResponse(BaseModel):
     checker_build: str
     manifest_id: str
     manifest_digest: str
+    governed_manifest: S12GovernedManifest
     protected_baseline_digest: str
     limits: S12Limits
     applicable_check_ids: list[str]

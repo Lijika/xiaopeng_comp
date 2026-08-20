@@ -6612,8 +6612,11 @@ export interface components {
             cluster_id: string;
             /** Stratum */
             stratum: string;
-            /** Usage */
-            usage: string;
+            /**
+             * Usage
+             * @enum {string}
+             */
+            usage: "development" | "calibration" | "acceptance_holdout";
             /** Variants */
             variants?: string[] | null;
         };
@@ -6836,6 +6839,38 @@ export interface components {
             /** Scope */
             scope: string;
         };
+        /** S12GovernedManifest */
+        S12GovernedManifest: {
+            compatibility: components["schemas"]["S12GovernedManifestCompatibility"];
+            /** Components */
+            components: components["schemas"]["S12GovernedManifestComponent"][];
+            /** Digest */
+            digest: string;
+            /** Manifest Id */
+            manifest_id: string;
+            /** Schema Version */
+            schema_version: string;
+            /** Scope */
+            scope: string;
+        };
+        /** S12GovernedManifestCompatibility */
+        S12GovernedManifestCompatibility: {
+            /** Checker Build */
+            checker_build: string;
+            /** Evidence Readiness Policy */
+            evidence_readiness_policy: string;
+            /** Input Contract Schema */
+            input_contract_schema: string;
+        };
+        /** S12GovernedManifestComponent */
+        S12GovernedManifestComponent: {
+            /** Digest */
+            digest: string;
+            /** Id */
+            id: string;
+            /** Type */
+            type: string;
+        };
         /** S12JobResponse */
         S12JobResponse: {
             /** Attempt No */
@@ -7042,8 +7077,11 @@ export interface components {
             document_combination?: string | null;
             /** Evidence Snapshot Id */
             evidence_snapshot_id: string;
-            /** Label */
-            label: string;
+            /**
+             * Label
+             * @enum {string}
+             */
+            label: "consistent" | "inconsistent" | "indeterminate" | "not_applicable";
             /** Label Custody */
             label_custody?: string | null;
             /** Opportunity Id */
@@ -7057,8 +7095,11 @@ export interface components {
              * @enum {string}
              */
             target_scope: "C" | "R-E2E" | "R-T4-conditional";
-            /** Track */
-            track: string;
+            /**
+             * Track
+             * @enum {string}
+             */
+            track: "R" | "C";
             /** Variant Id */
             variant_id?: string | null;
         };
@@ -7296,6 +7337,7 @@ export interface components {
             applicable_check_ids: string[];
             /** Checker Build */
             checker_build: string;
+            governed_manifest: components["schemas"]["S12GovernedManifest"];
             limits: components["schemas"]["S12Limits"];
             /** Manifest Digest */
             manifest_digest: string;

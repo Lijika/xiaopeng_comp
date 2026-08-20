@@ -13108,6 +13108,11 @@
             "type": "string"
           },
           "usage": {
+            "enum": [
+              "development",
+              "calibration",
+              "acceptance_holdout"
+            ],
             "title": "Usage",
             "type": "string"
           },
@@ -13792,6 +13797,95 @@
         "title": "S12GovernanceEventVector",
         "type": "object"
       },
+      "S12GovernedManifest": {
+        "additionalProperties": false,
+        "properties": {
+          "compatibility": {
+            "$ref": "#/components/schemas/S12GovernedManifestCompatibility"
+          },
+          "components": {
+            "items": {
+              "$ref": "#/components/schemas/S12GovernedManifestComponent"
+            },
+            "title": "Components",
+            "type": "array"
+          },
+          "digest": {
+            "title": "Digest",
+            "type": "string"
+          },
+          "manifest_id": {
+            "title": "Manifest Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          }
+        },
+        "required": [
+          "manifest_id",
+          "digest",
+          "schema_version",
+          "scope",
+          "components",
+          "compatibility"
+        ],
+        "title": "S12GovernedManifest",
+        "type": "object"
+      },
+      "S12GovernedManifestCompatibility": {
+        "additionalProperties": false,
+        "properties": {
+          "checker_build": {
+            "title": "Checker Build",
+            "type": "string"
+          },
+          "evidence_readiness_policy": {
+            "title": "Evidence Readiness Policy",
+            "type": "string"
+          },
+          "input_contract_schema": {
+            "title": "Input Contract Schema",
+            "type": "string"
+          }
+        },
+        "required": [
+          "checker_build",
+          "input_contract_schema",
+          "evidence_readiness_policy"
+        ],
+        "title": "S12GovernedManifestCompatibility",
+        "type": "object"
+      },
+      "S12GovernedManifestComponent": {
+        "additionalProperties": false,
+        "properties": {
+          "digest": {
+            "title": "Digest",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "id",
+          "digest"
+        ],
+        "title": "S12GovernedManifestComponent",
+        "type": "object"
+      },
       "S12JobResponse": {
         "additionalProperties": false,
         "properties": {
@@ -14470,6 +14564,12 @@
             "type": "string"
           },
           "label": {
+            "enum": [
+              "consistent",
+              "inconsistent",
+              "indeterminate",
+              "not_applicable"
+            ],
             "title": "Label",
             "type": "string"
           },
@@ -14513,6 +14613,10 @@
             "type": "string"
           },
           "track": {
+            "enum": [
+              "R",
+              "C"
+            ],
             "title": "Track",
             "type": "string"
           },
@@ -15302,6 +15406,9 @@
             "title": "Checker Build",
             "type": "string"
           },
+          "governed_manifest": {
+            "$ref": "#/components/schemas/S12GovernedManifest"
+          },
           "limits": {
             "$ref": "#/components/schemas/S12Limits"
           },
@@ -15332,6 +15439,7 @@
           "checker_build",
           "manifest_id",
           "manifest_digest",
+          "governed_manifest",
           "protected_baseline_digest",
           "limits",
           "applicable_check_ids",

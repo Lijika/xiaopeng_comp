@@ -11,7 +11,7 @@ import sys
 import tempfile
 import threading
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import asdict, dataclass
 from email.message import Message
 from html.parser import HTMLParser
@@ -311,6 +311,8 @@ S01_DEMO_CREDENTIAL = os.environ.get("TASK4_S01_DEMO_CREDENTIAL", "").strip()
 S01_DEMO_SUBJECT = os.environ.get("TASK4_S01_DEMO_SUBJECT", "").strip()
 S01_OPERATOR_CREDENTIAL = os.environ.get("TASK4_S01_OPERATOR_CREDENTIAL", "").strip()
 S01_OPERATOR_SUBJECT = os.environ.get("TASK4_S01_OPERATOR_SUBJECT", "").strip()
+S02_CREDENTIAL = os.environ.get("TASK4_S02_CREDENTIAL", "").strip()
+S02_SUBJECT = os.environ.get("TASK4_S02_SUBJECT", "").strip()
 # S12 isolated evaluation plane: gated on a separately configured evaluation
 # SQLite state path plus a distinct operator identity.  Missing or invalid
 # configuration keeps S01-S11 startup and routes available while every S12
@@ -341,6 +343,7 @@ def _s12_evaluation_service() -> EvaluationService | None:
             "S01_DEMO_CREDENTIAL",
             "S01_OPERATOR_CREDENTIAL",
             "S01_AUDITOR_CREDENTIAL",
+            "S02_CREDENTIAL",
             "S05_EXCEPTION_APPROVER_CREDENTIAL",
             "S08_ADMIN_CREDENTIAL",
             "S08_APPROVER_CREDENTIAL",
@@ -355,6 +358,7 @@ def _s12_evaluation_service() -> EvaluationService | None:
             "S01_DEMO_SUBJECT",
             "S01_OPERATOR_SUBJECT",
             "S01_AUDITOR_SUBJECT",
+            "S02_SUBJECT",
             "S05_EXCEPTION_APPROVER_SUBJECT",
             "S08_ADMIN_SUBJECT",
             "S08_APPROVER_SUBJECT",
@@ -400,6 +404,16 @@ def _s12_evaluation_service() -> EvaluationService | None:
             facts.update(S08_SERVICE.evaluation_governance_measurement())
         return facts
 
+    @contextmanager
+    def business_publication_guard(revisions: dict[str, int]):
+        if S01_SERVICE is None or S08_SERVICE is None:
+            raise RuntimeError("S01/S08 authority is not configured")
+        s01_revision = revisions["s01_authority_revision"]
+        if s01_revision != revisions["s08_authority_revision"]:
+            raise RuntimeError("S01/S08 shared authority revisions disagree")
+        with S01_SERVICE.evaluation_publication_fence(s01_revision):
+            yield
+
     return EvaluationService(
         state_path=state_path,
         clock=lambda: int(time.time()),
@@ -407,6 +421,7 @@ def _s12_evaluation_service() -> EvaluationService | None:
         release_provider=release_provider,
         label_manifest_provider=LabelManifestStore(label_root_value).resolve,
         business_state_provider=business_state_provider,
+        business_publication_guard=business_publication_guard,
         worker_subject=S12_WORKER_SUBJECT,
     )
 
@@ -430,8 +445,6 @@ S01_SESSION_CLOCK: Callable[[], float] = time.time
 S02_SESSION_COOKIE = "s02_session"
 S02_SESSION_TTL_SECONDS = 15 * 60
 S02_MAX_COMMAND_BYTES = 256 * 1024
-S02_CREDENTIAL = os.environ.get("TASK4_S02_CREDENTIAL", "").strip()
-S02_SUBJECT = os.environ.get("TASK4_S02_SUBJECT", "").strip()
 S02_TENANT_ID = os.environ.get("TASK4_S02_TENANT_ID", "").strip()
 S02_SOURCE_SYSTEM_ID = os.environ.get("TASK4_S02_SOURCE_SYSTEM_ID", "").strip()
 S02_CONFIGURED = bool(

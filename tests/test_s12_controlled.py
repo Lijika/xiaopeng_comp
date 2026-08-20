@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import io
 import json
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +34,8 @@ from task4_consistency.controlled.s12 import (
     EvaluationService,
     LabelManifestNotFound,
     LabelManifestStore,
+    LabelManifestUnavailable,
+    S12Unavailable,
     _clopper_pearson_upper,
     _cluster_statistics,
     _opportunity_point_metrics,
@@ -40,6 +44,7 @@ from task4_consistency.controlled.s12 import (
     content_digest,
 )
 from task4_consistency.controlled.s12_runner import run_s12_runner
+from task4_consistency.controlled import s12_runner as s12_runner_module
 from task4_consistency.kb.store import get_kb
 from task4_consistency.rules.loader import load_rules
 
@@ -60,6 +65,29 @@ _ZERO_BUSINESS_DELTAS = {
     "policy_revision": 0,
     "governance_revision": 0,
 }
+
+
+def _business_authority_bindings(
+    business_services: list[ControlledScenarioService], governance_service: Any
+) -> tuple[Any, Any]:
+    def measure() -> dict[str, Any]:
+        facts: dict[str, Any] = {}
+        for service in business_services:
+            facts.update(service.evaluation_business_measurement())
+        facts.update(governance_service.evaluation_governance_measurement())
+        return facts
+
+    @contextmanager
+    def publication_guard(revisions: dict[str, int]):
+        with business_services[0].evaluation_publication_fence(
+            revisions["s01_authority_revision"]
+        ):
+            with governance_service.evaluation_publication_fence(
+                revisions["s08_authority_revision"]
+            ):
+                yield
+
+    return measure, publication_guard
 
 
 def _make_business_harness(
@@ -172,12 +200,9 @@ def _s12_authority_service(
     worker_subject: str = "s12-test-worker",
     clock: Any = None,
 ) -> EvaluationService:
-    def measure() -> dict[str, Any]:
-        facts: dict[str, Any] = {}
-        for service in business_services:
-            facts.update(service.evaluation_business_measurement())
-        facts.update(governance_service.evaluation_governance_measurement())
-        return facts
+    measure, publication_guard = _business_authority_bindings(
+        business_services, governance_service
+    )
 
     return EvaluationService(
         state_path=tmp_path / "evaluation.sqlite3",
@@ -192,6 +217,7 @@ def _s12_authority_service(
         ),
         label_manifest_provider=LabelManifestStore(label_root).resolve,
         business_state_provider=measure,
+        business_publication_guard=publication_guard,
         worker_subject=worker_subject,
     )
 
@@ -979,6 +1005,7 @@ def test_lease_takeover_fences_stale_worker_and_publishes_one_bundle(
         ),
         label_manifest_provider=LabelManifestStore(context["label_root"]).resolve,
         business_state_provider=context["measure"],
+        business_publication_guard=context["publication_guard"],
     )
     service_b = EvaluationService(
         state_path=eval_path,
@@ -996,6 +1023,7 @@ def test_lease_takeover_fences_stale_worker_and_publishes_one_bundle(
         ),
         label_manifest_provider=LabelManifestStore(context["label_root"]).resolve,
         business_state_provider=context["measure"],
+        business_publication_guard=context["publication_guard"],
     )
     plan = service_a.freeze_plan(command)
     runner_output = run_s12_runner(
@@ -1054,6 +1082,7 @@ def test_lease_takeover_fences_stale_worker_and_publishes_one_bundle(
         ),
         label_manifest_provider=LabelManifestStore(context["label_root"]).resolve,
         business_state_provider=context["measure"],
+        business_publication_guard=context["publication_guard"],
     )
     final_job = service_c.query_job(job["job_id"])
     assert final_job["status"] == "complete"
@@ -1092,12 +1121,9 @@ def _slice1_harness(
     label_root, manifest_id, manifest_digest = _write_label_manifest(
         tmp_path, labels
     )
-    def measure() -> dict[str, Any]:
-        facts: dict[str, Any] = {}
-        for business_service in business_services:
-            facts.update(business_service.evaluation_business_measurement())
-        facts.update(governance_service.evaluation_governance_measurement())
-        return facts
+    measure, publication_guard = _business_authority_bindings(
+        business_services, governance_service
+    )
 
     service = EvaluationService(
         state_path=tmp_path / "evaluation.sqlite3",
@@ -1112,6 +1138,7 @@ def _slice1_harness(
         ),
         label_manifest_provider=LabelManifestStore(label_root).resolve,
         business_state_provider=measure,
+        business_publication_guard=publication_guard,
     )
     command = _reference_plan_command(
         admitted=admitted,
@@ -1129,6 +1156,7 @@ def _slice1_harness(
         "label_root": label_root,
         "business_path": business_path,
         "measure": measure,
+        "publication_guard": publication_guard,
     }
 
 
@@ -1207,6 +1235,20 @@ def test_freeze_rejects_unregistered_label_manifest_and_caller_environment_claim
     fabricated["run_specs"] = {"app": {"run_id": "fake"}}
     with pytest.raises(ValueError):
         service.freeze_plan(fabricated)
+
+
+def test_label_storage_root_unavailable_and_healthy_unknown_reference(
+    tmp_path: Path,
+) -> None:
+    manifest_id = "manifest_sha256_" + "0" * 64
+    missing_root = LabelManifestStore(tmp_path / "missing-label-root")
+    with pytest.raises(LabelManifestUnavailable):
+        missing_root.resolve(manifest_id, "0" * 64)
+
+    healthy_root = tmp_path / "healthy-empty-label-root"
+    healthy_root.mkdir()
+    with pytest.raises(LabelManifestNotFound):
+        LabelManifestStore(healthy_root).resolve(manifest_id, "0" * 64)
 
 
 def test_business_authority_measurements_are_captured_and_unchanged(
@@ -1442,8 +1484,11 @@ def test_r_views_must_exactly_follow_the_registered_view_partition(tmp_path: Pat
         opportunity["opportunity_id"] for opportunity in command["opportunities"]
     ]
     incomplete = copy.deepcopy(command)
-    for opportunity in incomplete["opportunities"]:
+    for index, opportunity in enumerate(incomplete["opportunities"]):
         opportunity["track"] = "R"
+        opportunity["target_scope"] = (
+            "R-E2E" if index < 2 else "R-T4-conditional"
+        )
     incomplete["tracks"] = {"R": {"opportunities": opportunity_ids}, "C": {"opportunities": []}}
     incomplete["views"] = {
         "R-E2E": {"opportunities": opportunity_ids[:2]},
@@ -1485,6 +1530,8 @@ def test_application_and_all_variants_belong_to_one_base_cluster_and_split(tmp_p
     accepted = copy.deepcopy(command)
     accepted["clusters"][0]["variants"] = ["variant-a"]
     accepted["clusters"][1]["variants"] = ["variant-b"]
+    accepted["opportunities"][0]["variant_id"] = "variant-a"
+    accepted["opportunities"][1]["variant_id"] = "variant-b"
     plan = service.freeze_plan(accepted)
     assert plan["clusters"][0]["variants"] == ["variant-a"]
 
@@ -1652,14 +1699,9 @@ def _r2_reference_command(
 def _r2_service(
     tmp_path: Path, context: dict[str, Any], *, snapshot_provider: Any = None
 ) -> EvaluationService:
-    def measure() -> dict[str, Any]:
-        facts: dict[str, Any] = {}
-        for business_service in context["business_services"]:
-            facts.update(business_service.evaluation_business_measurement())
-        facts.update(
-            context["governance_service"].evaluation_governance_measurement()
-        )
-        return facts
+    measure, publication_guard = _business_authority_bindings(
+        context["business_services"], context["governance_service"]
+    )
 
     return EvaluationService(
         state_path=tmp_path / "evaluation.sqlite3",
@@ -1677,6 +1719,7 @@ def _r2_service(
         ),
         label_manifest_provider=LabelManifestStore(context["label_root"]).resolve,
         business_state_provider=measure,
+        business_publication_guard=publication_guard,
     )
 
 
@@ -1768,6 +1811,18 @@ def test_opportunity_application_and_variant_belong_to_base_cluster(tmp_path: Pa
     with_variant["opportunities"][0]["variant_id"] = "variant-1"
     with pytest.raises(ValueError, match="base cluster"):
         service.freeze_plan(with_variant)
+
+
+def test_declared_variants_must_exactly_match_opportunity_universe(
+    tmp_path: Path,
+) -> None:
+    context = _r2_baseline(tmp_path)
+    service = _r2_service(tmp_path, context)
+    command = _r2_reference_command(context)
+    command["clusters"][0]["variants"] = ["variant-uncovered"]
+
+    with pytest.raises(ValueError, match="variant universe"):
+        service.freeze_plan(command)
 
 
 def test_clustered_application_run_reference_and_opportunity_universes_match_exactly(
@@ -2362,6 +2417,7 @@ def _scientific_harness(
                 context["label_root"]
             ).resolve,
             business_state_provider=context["measure"],
+            business_publication_guard=context["publication_guard"],
         )
     return service, command, context
 
@@ -2388,6 +2444,7 @@ def test_result_digest_ignores_plan_id_freeze_time_job_attempt_worker_and_lineag
         ),
         label_manifest_provider=LabelManifestStore(context["label_root"]).resolve,
         business_state_provider=context["measure"],
+        business_publication_guard=context["publication_guard"],
     )
     plan_a = service_a.freeze_plan(command)
     later_command = copy.deepcopy(command)
@@ -2407,6 +2464,7 @@ def test_result_digest_ignores_plan_id_freeze_time_job_attempt_worker_and_lineag
         ),
         label_manifest_provider=LabelManifestStore(context["label_root"]).resolve,
         business_state_provider=context["measure"],
+        business_publication_guard=context["publication_guard"],
     )
     plan_b = service_b.freeze_plan(later_command)
     assert plan_a["plan_digest"] != plan_b["plan_digest"]
@@ -2630,6 +2688,7 @@ def test_rerun_never_resolves_current_authority_providers(tmp_path: Path) -> Non
         release_provider=counted_release,
         label_manifest_provider=counted_label,
         business_state_provider=counted_business,
+        business_publication_guard=context["publication_guard"],
     )
     plan = service.freeze_plan(command)
     runner_output = _runner_output_for_plan(plan)
@@ -2690,6 +2749,39 @@ def _runner_output_for_plan(plan: dict[str, Any]) -> dict[str, Any]:
     )
     assert output is not None
     return output
+
+
+def test_runner_tail_crossing_deadline_records_bounded_budget_stop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    service, command, _context = _slice1_harness(tmp_path)
+    plan = service.freeze_plan(command)
+    run_id, run_spec = next(iter(plan["run_specs"].items()))
+    payload = {
+        "schema_version": "s12-runner-request/1",
+        "checker_artifact": plan["checker_artifact"],
+        "run_specs": {run_id: run_spec},
+        "budget": {"max_runtime_ms": 5},
+        "stop_rule": "plan-exhausted",
+    }
+    stdin = io.TextIOWrapper(
+        io.BytesIO(json.dumps(payload).encode("utf-8")), encoding="utf-8"
+    )
+    stdout = io.StringIO()
+    clock = iter((100.0, 100.0, 100.006))
+    monkeypatch.setattr(s12_runner_module, "_apply_process_boundaries", lambda: None)
+    monkeypatch.setattr(s12_runner_module.sys, "stdin", stdin)
+    monkeypatch.setattr(s12_runner_module.sys, "stdout", stdout)
+    monkeypatch.setattr(s12_runner_module.time, "monotonic", lambda: next(clock))
+
+    assert s12_runner_module.main() == 0
+    result = json.loads(stdout.getvalue())
+
+    assert result["stop"] == {
+        "stop_reason": "budget-or-plan",
+        "elapsed_ms": 5,
+        "completed_run_ids": [run_id],
+    }
 
 
 def test_parent_rejects_tampered_runner_digest_checks_errors_and_identity(
@@ -2926,6 +3018,7 @@ def test_publication_cas_rejects_fence_advanced_after_ownership_read(
         ),
         label_manifest_provider=LabelManifestStore(context["label_root"]).resolve,
         business_state_provider=context["measure"],
+        business_publication_guard=context["publication_guard"],
     )
     service_b = EvaluationService(
         state_path=eval_path,
@@ -2943,6 +3036,7 @@ def test_publication_cas_rejects_fence_advanced_after_ownership_read(
         ),
         label_manifest_provider=LabelManifestStore(context["label_root"]).resolve,
         business_state_provider=context["measure"],
+        business_publication_guard=context["publication_guard"],
     )
     job = service_a.start_job(plan["plan_id"])
     worker_a_results: dict[str, Any] = {}
@@ -2977,6 +3071,7 @@ def test_publication_cas_rejects_fence_advanced_after_ownership_read(
         ),
         label_manifest_provider=LabelManifestStore(context["label_root"]).resolve,
         business_state_provider=context["measure"],
+        business_publication_guard=context["publication_guard"],
     )
     assert set(final._store.bundles) == {winner["bundle_id"]}
 
@@ -3005,7 +3100,8 @@ def test_cancel_claim_diagnostic_and_publish_are_row_scoped_transactions(
             release_id=release_id, release_digest=release_digest
         ),
         label_manifest_provider=LabelManifestStore(tmp_path / "labels").resolve,
-        business_state_provider=lambda: {},
+        business_state_provider=_context["measure"],
+        business_publication_guard=_context["publication_guard"],
     )
     assert fresh.query_job(job["job_id"])["status"] == "cancelled"
 
@@ -3031,6 +3127,7 @@ def test_concurrent_start_and_rerun_create_distinct_jobs(tmp_path: Path) -> None
         ),
         label_manifest_provider=LabelManifestStore(context["label_root"]).resolve,
         business_state_provider=context["measure"],
+        business_publication_guard=context["publication_guard"],
     )
     results: dict[str, Any] = {}
 
@@ -3073,6 +3170,7 @@ def test_stale_service_cache_cannot_overwrite_newer_job_state(
         ),
         label_manifest_provider=LabelManifestStore(context["label_root"]).resolve,
         business_state_provider=context["measure"],
+        business_publication_guard=context["publication_guard"],
     )
     job = service_a.start_job(plan["plan_id"])
     service_b.cancel_job(job["job_id"])
@@ -3229,6 +3327,7 @@ def test_replay_uses_bundle_frozen_inputs_without_current_authority_resolution(
         release_provider=broken_provider,
         label_manifest_provider=broken_provider,
         business_state_provider=context["measure"],
+        business_publication_guard=context["publication_guard"],
     )
     assert replay.query_bundle(bundle_id)["bundle_id"] == bundle_id
     rerun_job = replay.rerun_job(job["job_id"])
@@ -3449,6 +3548,39 @@ def test_process_uses_scope_local_holdout_and_mandatory_family_gates(
     ] == 1
 
 
+def test_opportunity_scope_must_match_track_and_view(tmp_path: Path) -> None:
+    context = _r2_baseline(tmp_path)
+    service = _r2_service(tmp_path, context)
+
+    c_mismatch = _r2_reference_command(context, plan_id="scope-c-mismatch")
+    c_mismatch["opportunities"][0]["target_scope"] = "R-E2E"
+    with pytest.raises(ValueError, match="target scope"):
+        service.freeze_plan(c_mismatch)
+
+    r_mismatch = _r2_reference_command(
+        context,
+        plan_id="scope-r-mismatch",
+        scope_declared="R-E2E",
+    )
+    opportunity_ids = [
+        opportunity["opportunity_id"]
+        for opportunity in r_mismatch["opportunities"]
+    ]
+    for opportunity in r_mismatch["opportunities"]:
+        opportunity["track"] = "R"
+        opportunity["target_scope"] = "R-T4-conditional"
+    r_mismatch["tracks"] = {
+        "R": {"opportunities": opportunity_ids},
+        "C": {"opportunities": []},
+    }
+    r_mismatch["views"] = {
+        "R-E2E": {"opportunities": opportunity_ids},
+        "R-T4-conditional": {"opportunities": []},
+    }
+    with pytest.raises(ValueError, match="target scope"):
+        service.freeze_plan(r_mismatch)
+
+
 def test_mandatory_family_coverage_is_server_owned_and_exact(
     tmp_path: Path,
 ) -> None:
@@ -3477,6 +3609,28 @@ def test_mandatory_family_coverage_is_server_owned_and_exact(
     )
     with pytest.raises(ValueError, match="server-owned registry"):
         service.freeze_plan(uncovered)
+
+
+def test_mandatory_checks_must_come_from_governed_release(
+    tmp_path: Path,
+) -> None:
+    context = _r2_baseline(tmp_path)
+    service = _r2_service(tmp_path, context)
+    command = _r2_reference_command(context, plan_id="unknown-governed-check")
+    replaced_check = command["opportunities"][0]["check_id"]
+    command["opportunities"][0]["check_id"] = "UNREGISTERED_CHECK"
+    for family in command["mandatory_check_families"]:
+        if replaced_check in family["check_ids"]:
+            family["check_ids"].remove(replaced_check)
+    command["mandatory_check_families"].append(
+        {
+            "family_id": "UNREGISTERED_CHECK",
+            "check_ids": ["UNREGISTERED_CHECK"],
+        }
+    )
+
+    with pytest.raises(ValueError, match="governed release"):
+        service.freeze_plan(command)
 
 
 def test_process_partial_budget_stop_is_insufficient(tmp_path: Path) -> None:
@@ -3540,6 +3694,52 @@ def test_result_digest_covers_complete_verified_runner_observation(
     assert second_bundle["result_digest"] != first_digest
 
 
+def test_runner_observation_requires_closed_check_schema(tmp_path: Path) -> None:
+    service, command, _context = _slice1_harness(tmp_path)
+    plan = service.freeze_plan(command)
+    baseline = _runner_output_for_plan(plan)
+
+    malformed_checks: list[dict[str, Any]] = []
+    missing_severity = copy.deepcopy(baseline)
+    del missing_severity["applications"][0]["checks"][0]["severity"]
+    malformed_checks.append(missing_severity)
+    wrong_severity = copy.deepcopy(baseline)
+    wrong_severity["applications"][0]["checks"][0]["severity"] = {}
+    malformed_checks.append(wrong_severity)
+    wrong_reasons = copy.deepcopy(baseline)
+    wrong_reasons["applications"][0]["checks"][0]["reason_codes"] = "bad"
+    malformed_checks.append(wrong_reasons)
+    extra_check_field = copy.deepcopy(baseline)
+    extra_check_field["applications"][0]["checks"][0]["invented"] = True
+    malformed_checks.append(extra_check_field)
+
+    for malformed in malformed_checks:
+        _invalidate_and_run(
+            service,
+            plan,
+            _recompute_digest(malformed),
+            "RUNNER_CHECK_INVALID",
+        )
+
+    mixed_outcome = copy.deepcopy(baseline)
+    mixed_outcome["applications"][0]["error"] = "CHECKER_EXECUTION_FAILED"
+    _invalidate_and_run(
+        service,
+        plan,
+        _recompute_digest(mixed_outcome),
+        "RUNNER_OUTPUT_MALFORMED",
+    )
+
+    extra_application_field = copy.deepcopy(baseline)
+    extra_application_field["applications"][0]["invented"] = True
+    _invalidate_and_run(
+        service,
+        plan,
+        _recompute_digest(extra_application_field),
+        "RUNNER_OUTPUT_MALFORMED",
+    )
+
+
 def _insert_readdressed_bundle(
     state_path: Path, bundle: dict[str, Any]
 ) -> str:
@@ -3553,6 +3753,7 @@ def _insert_readdressed_bundle(
         {key: value for key, value in plan.items() if key != "plan_digest"}
     )
     replay["plan"] = plan
+    bundle["plan_digest"] = plan["plan_digest"]
     bundle["replay_package_digest"] = content_digest(replay)
     bundle_id = "s12_bundle_sha256_" + content_digest(
         {key: value for key, value in bundle.items() if key != "bundle_id"}
@@ -3640,6 +3841,61 @@ def test_query_independently_verifies_every_nested_replay_address(
             service.query_bundle(tampered_id)
 
 
+def test_replay_verifies_governed_release_and_business_vector_digests(
+    tmp_path: Path,
+) -> None:
+    from task4_consistency.controlled.s12 import S12IntegrityError
+
+    service, command, _context = _slice1_harness(tmp_path)
+    plan = service.freeze_plan(command)
+    job = service.start_job(plan["plan_id"])
+    outcome = service.process_job(job["job_id"])
+    original = service.query_bundle(outcome["bundle_id"])
+    state_path = tmp_path / "evaluation.sqlite3"
+
+    release_tamper = copy.deepcopy(original)
+    release_replay = release_tamper["replay_package"]
+    for release in (
+        release_replay["plan"]["release"],
+        release_replay["result_material"]["release"],
+        release_tamper["release"],
+    ):
+        release["manifest_id"] = "manifest_sha256_" + "a" * 64
+        release["manifest_digest"] = "a" * 64
+        release["protected_baseline_digest"] = "a" * 64
+    release_tamper["result_digest"] = content_digest(
+        release_replay["result_material"]
+    )
+    release_tamper_id = _insert_readdressed_bundle(
+        state_path, release_tamper
+    )
+
+    vector_tamper = copy.deepcopy(original)
+    vector_replay = vector_tamper["replay_package"]
+    measurements = (
+        vector_replay["plan"]["business_before"],
+        vector_replay["business_before"],
+        vector_replay["business_after"],
+        vector_replay["result_material"]["business_before"],
+        vector_replay["result_material"]["business_after"],
+        vector_tamper["business_before"],
+        vector_tamper["business_after"],
+    )
+    for measurement in measurements:
+        measurement["applications_vector"][0][
+            "application_id"
+        ] = "self-readdressed"
+    vector_tamper["result_digest"] = content_digest(
+        vector_replay["result_material"]
+    )
+    vector_tamper_id = _insert_readdressed_bundle(state_path, vector_tamper)
+
+    with pytest.raises(S12IntegrityError):
+        service.query_bundle(release_tamper_id)
+    with pytest.raises(S12IntegrityError):
+        service.query_bundle(vector_tamper_id)
+
+
 def test_replay_top_level_material_must_match(tmp_path: Path) -> None:
     from task4_consistency.controlled.s12 import S12IntegrityError
 
@@ -3667,38 +3923,89 @@ def test_business_vector_keyset_must_match_exactly(tmp_path: Path) -> None:
 
     assert outcome["status"] == "INVALID"
     assert outcome["bundle_id"] is None
-    assert any(
-        reason.startswith("BUSINESS_AUTHORITY_CHANGED:")
-        for reason in outcome["reason_codes"]
-    )
+    assert outcome["reason_codes"] == ["BUSINESS_AUTHORITY_UNAVAILABLE"]
+
+
+def test_business_measurement_requires_complete_authority_schema(
+    tmp_path: Path,
+) -> None:
+    service, command, _context = _slice1_harness(tmp_path)
+    service._business_state_provider = lambda: {}
+
+    with pytest.raises(S12Unavailable, match="unavailable or corrupt"):
+        service.freeze_plan(command)
 
 
 def test_publication_rechecks_business_vector_inside_fenced_decision(
     tmp_path: Path,
 ) -> None:
     service, command, context = _slice1_harness(tmp_path)
-    changed = {"value": False}
-
-    def measured() -> dict[str, Any]:
-        facts = context["measure"]()
-        if changed["value"]:
-            facts["late_publication_change"] = "present"
-        return facts
-
-    service._business_state_provider = measured
     plan = service.freeze_plan(command)
     job = service.start_job(plan["plan_id"])
-    publish = service._store.publish_bundle_transaction
+    publication_guard = service._business_publication_guard
 
-    def mutate_then_publish(*args: Any, **kwargs: Any) -> bool:
-        changed["value"] = True
-        return publish(*args, **kwargs)
+    @contextmanager
+    def mutate_then_guard(revisions: dict[str, int]):
+        store = SQLiteTargetStore(context["business_path"])
+        application = next(iter(store.applications.values()))
+        application["route"] = "late-authority-change"
+        store.persist()
+        with publication_guard(revisions):
+            yield
 
-    service._store.publish_bundle_transaction = mutate_then_publish
+    service._business_publication_guard = mutate_then_guard
     outcome = service.process_job(job["job_id"])
 
     assert outcome["status"] == "INVALID"
     assert outcome["bundle_id"] is None
-    assert "BUSINESS_AUTHORITY_CHANGED:late_publication_change" in outcome[
-        "reason_codes"
+    assert outcome["reason_codes"] == [
+        "BUSINESS_AUTHORITY_CHANGED:authority_revision"
     ]
+
+
+def test_publication_holds_authority_revision_fence_through_commit(
+    tmp_path: Path,
+) -> None:
+    service, command, context = _slice1_harness(tmp_path)
+    plan = service.freeze_plan(command)
+    job = service.start_job(plan["plan_id"])
+    original_write = service._store._write_row
+    writer_started = threading.Event()
+    writer_finished = threading.Event()
+    writer_errors: list[BaseException] = []
+
+    def mutate_business_authority() -> None:
+        try:
+            writer_started.set()
+            store = SQLiteTargetStore(context["business_path"])
+            application = next(iter(store.applications.values()))
+            application["route"] = "late-authority-write"
+            store.persist()
+        except BaseException as error:  # surfaced on the test thread below
+            writer_errors.append(error)
+        finally:
+            writer_finished.set()
+
+    writer = threading.Thread(target=mutate_business_authority)
+
+    def observe_bundle_write(
+        connection: sqlite3.Connection,
+        table: str,
+        item_id: str,
+        value: dict[str, Any],
+    ) -> None:
+        if table == "s12_bundles":
+            writer.start()
+            assert writer_started.wait(timeout=5)
+            assert not writer_finished.wait(timeout=0.2)
+        original_write(connection, table, item_id, value)
+
+    service._store._write_row = observe_bundle_write
+    try:
+        outcome = service.process_job(job["job_id"])
+    finally:
+        writer.join(timeout=10)
+
+    assert not writer.is_alive()
+    assert writer_errors == []
+    assert outcome["bundle_id"] is not None

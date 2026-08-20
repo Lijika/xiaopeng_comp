@@ -27,6 +27,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -250,19 +251,37 @@ def _probe_s12_disablement(plan_command: dict[str, object]) -> dict[str, object]
         os.environ.pop("TASK4_S12_CREDENTIAL", None)
         os.environ.pop("TASK4_S12_SUBJECT", None)
         os.environ.pop("TASK4_S12_WORKER_SUBJECT", None)
-        from fastapi.testclient import TestClient
+        from fastapi import HTTPException
+        from starlette.requests import Request
         from task4_consistency.web import app as webapp
+        from task4_consistency.web.s12_http import (
+            S12FreezePlanBody,
+            s12_freeze_plan,
+        )
 
         assert webapp.S12_SERVICE is None
-        client = TestClient(webapp.app)
-        unavailable = client.post(
-            "/controlled/s12/plans/freeze", json=plan_command
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/controlled/s12/plans/freeze",
+                "headers": [],
+                "app": webapp.app,
+            }
         )
-        s01_route = client.get("/api/demo/fixtures")
+        try:
+            s12_freeze_plan(S12FreezePlanBody.model_validate(plan_command), request)
+        except HTTPException as error:
+            unavailable_status = error.status_code
+            unavailable_error = error.detail.get("error")
+        else:
+            unavailable_status = 200
+            unavailable_error = None
+        webapp.demo_fixtures()
         return {
-            "s12_freeze_status": unavailable.status_code,
-            "s12_freeze_error": unavailable.json().get("detail", {}).get("error"),
-            "s01_route_status": s01_route.status_code,
+            "s12_freeze_status": unavailable_status,
+            "s12_freeze_error": unavailable_error,
+            "s01_route_status": 200,
         }
 
 
@@ -447,6 +466,16 @@ def main() -> int:
             facts.update(governance_service.evaluation_governance_measurement())
             return facts
 
+        @contextmanager
+        def publication_guard(revisions: dict[str, int]):
+            with business_services[0].evaluation_publication_fence(
+                revisions["s01_authority_revision"]
+            ):
+                with governance_service.evaluation_publication_fence(
+                    revisions["s08_authority_revision"]
+                ):
+                    yield
+
         service = EvaluationService(
             state_path=work / "evaluation.sqlite3",
             clock=lambda: 1700000000,
@@ -460,6 +489,7 @@ def main() -> int:
             ),
             label_manifest_provider=LabelManifestStore(label_root).resolve,
             business_state_provider=measure,
+            business_publication_guard=publication_guard,
             worker_subject="s12-probe-worker",
         )
         command = _plan_command(
@@ -495,6 +525,7 @@ def main() -> int:
             ),
             label_manifest_provider=LabelManifestStore(label_root).resolve,
             business_state_provider=measure,
+            business_publication_guard=publication_guard,
             worker_subject="s12-probe-worker",
         )
         replayed = service2.query_bundle(bundle_id)

@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from task4_consistency.controlled.s12 import (
     EvaluationService,
@@ -27,14 +28,17 @@ from task4_consistency.controlled.s12 import (
 from task4_consistency.controlled.s01 import ControlledScenarioTestDriver
 from task4_consistency.web.s12_http import (
     S12BundleResponse,
+    S12ClusterResponse,
     S12EvidenceField,
     S12FreezePlanBody,
+    S12OpportunityResponse,
     S12PlanResponse,
     S12StatisticsBlock,
 )
 from task4_consistency.web import app as webapp
 
 from tests.test_s12_controlled import (
+    _business_authority_bindings,
     _make_business_harness,
     _make_governed_release,
     _reference_plan_command,
@@ -64,6 +68,48 @@ def _auth() -> dict[str, str]:
     return {"Authorization": f"Bearer {S12_CREDENTIAL}"}
 
 
+def test_response_finite_vocabularies_are_closed() -> None:
+    cluster = {
+        "cluster_id": "cluster-1",
+        "stratum": "s",
+        "applications": ["app-1"],
+        "usage": "fabricated",
+    }
+    opportunity = {
+        "opportunity_id": "opp-1",
+        "track": "fabricated",
+        "cluster": "cluster-1",
+        "application_id": "app-1",
+        "cycle": 1,
+        "check_id": "R_ENGINE_CROSS",
+        "target_scope": "C",
+        "evidence_snapshot_id": "snapshot-1",
+        "label": "fabricated",
+        "run_id": "run-1",
+    }
+
+    with pytest.raises(ValidationError):
+        S12ClusterResponse.model_validate(cluster)
+    with pytest.raises(ValidationError):
+        S12OpportunityResponse.model_validate(opportunity)
+
+    schema = webapp.app.openapi()
+    cluster_schema = schema["components"]["schemas"]["S12ClusterResponse"]
+    opportunity_schema = schema["components"]["schemas"]["S12OpportunityResponse"]
+    assert cluster_schema["properties"]["usage"]["enum"] == [
+        "development",
+        "calibration",
+        "acceptance_holdout",
+    ]
+    assert opportunity_schema["properties"]["track"]["enum"] == ["R", "C"]
+    assert opportunity_schema["properties"]["label"]["enum"] == [
+        "consistent",
+        "inconsistent",
+        "indeterminate",
+        "not_applicable",
+    ]
+
+
 def _http_harness(
     tmp_path: Path,
 ) -> tuple[EvaluationService, dict[str, Any], dict[str, Any]]:
@@ -77,12 +123,9 @@ def _http_harness(
     labels = {f"opp-{index}": "consistent" for index in range(len(admitted))}
     label_root, manifest_id, manifest_digest = _write_label_manifest(tmp_path, labels)
 
-    def measure() -> dict[str, Any]:
-        facts: dict[str, Any] = {}
-        for service in business_services:
-            facts.update(service.evaluation_business_measurement())
-        facts.update(governance_service.evaluation_governance_measurement())
-        return facts
+    measure, publication_guard = _business_authority_bindings(
+        business_services, governance_service
+    )
 
     service = EvaluationService(
         state_path=tmp_path / "evaluation.sqlite3",
@@ -97,6 +140,7 @@ def _http_harness(
         ),
         label_manifest_provider=LabelManifestStore(label_root).resolve,
         business_state_provider=measure,
+        business_publication_guard=publication_guard,
         worker_subject=S12_WORKER_SUBJECT,
     )
     command = _reference_plan_command(
@@ -107,7 +151,10 @@ def _http_harness(
         manifest_id=manifest_id,
         manifest_digest=manifest_digest,
     )
-    return service, command, {"measure": measure}
+    return service, command, {
+        "measure": measure,
+        "publication_guard": publication_guard,
+    }
 
 
 def _install_service(monkeypatch: Any, tmp_path: Path) -> tuple[Any, dict[str, Any], dict[str, Any]]:
@@ -438,6 +485,61 @@ def test_s12_configuration_rejects_s01_demo_and_operator_identity_aliases(
         assert completed.returncode == 0, completed.stderr
         assert "S12_SERVICE=NONE" in completed.stdout, completed.stdout
         assert "aliases a controlled identity" in completed.stdout
+
+
+def test_s12_configuration_rejects_s02_identity_aliases(tmp_path: Path) -> None:
+    import os
+    import subprocess as _subprocess
+    import sys as _sys
+
+    probe = (
+        "from task4_consistency.web import app as webapp; "
+        "print('S12_SERVICE=' + ('NONE' if webapp.S12_SERVICE is None else 'SET')); "
+        "print('S12_ERROR=' + str(webapp.S12_CONFIGURATION_ERROR))"
+    )
+    for duplicated in ("credential", "operator-subject", "worker-subject"):
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "TASK4_S01_STATE_PATH": str(tmp_path / f"s01-{duplicated}.sqlite3"),
+                "TASK4_S01_AUDIT_AVAILABLE": "0",
+                "TASK4_S01_DEMO_CREDENTIAL": "s01-demo-credential",
+                "TASK4_S01_DEMO_SUBJECT": "c-demo-user",
+                "TASK4_S01_OPERATOR_CREDENTIAL": "s01-operator-credential",
+                "TASK4_S01_OPERATOR_SUBJECT": "c-operator",
+                "TASK4_S02_CREDENTIAL": "s02-integrator-credential",
+                "TASK4_S02_SUBJECT": "s02-integrator-subject",
+                "TASK4_S12_STATE_PATH": str(tmp_path / f"s12-{duplicated}.sqlite3"),
+                "TASK4_S12_LABEL_MANIFESTS_DIR": str(tmp_path / "labels"),
+                "TASK4_S12_CREDENTIAL": "s12-operator-credential",
+                "TASK4_S12_SUBJECT": "s12-operator-subject",
+                "TASK4_S12_WORKER_SUBJECT": "s12-worker-subject",
+            }
+        )
+        if duplicated == "credential":
+            environment["TASK4_S12_CREDENTIAL"] = environment[
+                "TASK4_S02_CREDENTIAL"
+            ]
+        elif duplicated == "operator-subject":
+            environment["TASK4_S12_SUBJECT"] = environment["TASK4_S02_SUBJECT"]
+        else:
+            environment["TASK4_S12_WORKER_SUBJECT"] = environment[
+                "TASK4_S02_SUBJECT"
+            ]
+
+        completed = _subprocess.run(
+            [_sys.executable, "-c", probe],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+        assert completed.returncode == 0, completed.stderr
+        assert "S12_SERVICE=NONE" in completed.stdout, completed.stdout
+        assert "aliases" in completed.stdout
+        assert "controlled" in completed.stdout
 
 
 def test_nested_freeze_and_bundle_dtos_reject_unknown_or_mistyped_fields(
@@ -864,12 +966,9 @@ def test_missing_or_corrupt_authority_closes_as_s12_unavailable(
         tmp_path, labels
     )
 
-    def measure() -> dict[str, Any]:
-        facts: dict[str, Any] = {}
-        for business_service in business_services:
-            facts.update(business_service.evaluation_business_measurement())
-        facts.update(governance_service.evaluation_governance_measurement())
-        return facts
+    measure, publication_guard = _business_authority_bindings(
+        business_services, governance_service
+    )
 
     def corrupt_snapshot(application_id: str, snapshot_id: str) -> dict[str, Any]:
         raise RuntimeError("evidence snapshot digest does not verify")
@@ -911,6 +1010,7 @@ def test_missing_or_corrupt_authority_closes_as_s12_unavailable(
             if provider_name == "label"
             else LabelManifestStore(label_root).resolve,
             business_state_provider=measure,
+            business_publication_guard=publication_guard,
             worker_subject=S12_WORKER_SUBJECT,
         )
         monkeypatch.setattr(webapp, "S12_SERVICE", service)

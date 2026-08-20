@@ -41,6 +41,7 @@ from task4_consistency.controlled.s01 import (
     QueryNotFound,
 )
 from task4_consistency.controlled.s01_checker import TargetRelease
+from task4_consistency.controlled.s01_store import StaleStoreRevision
 from task4_consistency.controlled.s08 import (
     GovernedReleaseNotFound,
     PolicyUnavailable,
@@ -93,6 +94,91 @@ _ZERO_BUSINESS_DELTAS = {
     "policy_revision": 0,
     "governance_revision": 0,
 }
+
+_BUSINESS_SCALAR_INTS = frozenset(
+    {
+        "lifecycle_revision",
+        "evidence_revision",
+        "evidence_count",
+        "governance_revision",
+        "activation_count",
+    }
+)
+_BUSINESS_OPTIONAL_DIGESTS = frozenset(
+    {"evidence_digest", "current_run_reference", "activation_digest"}
+)
+_BUSINESS_VECTORS = (
+    "applications",
+    "evidence_events",
+    "lifecycle_events",
+    "audit_events",
+    "governance_events",
+    "manifests",
+    "artifacts",
+)
+_BUSINESS_VECTOR_IDENTITIES = {
+    "applications": "application_id",
+    "evidence_events": "event_id",
+    "lifecycle_events": "event_id",
+    "audit_events": "event_id",
+    "governance_events": "event_id",
+    "manifests": "manifest_id",
+    "artifacts": "artifact_id",
+}
+_BUSINESS_MEASUREMENT_FIELDS = frozenset(
+    {
+        *_BUSINESS_SCALAR_INTS,
+        *_BUSINESS_OPTIONAL_DIGESTS,
+        *(f"{name}_vector" for name in _BUSINESS_VECTORS),
+        *(f"{name}_id_list_digest" for name in _BUSINESS_VECTORS),
+    }
+)
+_BUSINESS_AUTHORITY_REVISIONS = (
+    "s01_authority_revision",
+    "s08_authority_revision",
+)
+
+
+def _validate_business_measurement(measurement: dict[str, Any]) -> None:
+    if set(measurement) != _BUSINESS_MEASUREMENT_FIELDS:
+        raise ValueError("business measurement schema is incomplete")
+    for field in _BUSINESS_SCALAR_INTS:
+        value = measurement[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"business measurement {field} is invalid")
+    for field in _BUSINESS_OPTIONAL_DIGESTS:
+        value = measurement[field]
+        if value is not None and (
+            not isinstance(value, str) or len(value) != 64
+        ):
+            raise ValueError(f"business measurement {field} is invalid")
+    for name in _BUSINESS_VECTORS:
+        vector = measurement[f"{name}_vector"]
+        digest = measurement[f"{name}_id_list_digest"]
+        if (
+            not isinstance(vector, list)
+            or any(not isinstance(item, dict) for item in vector)
+            or not isinstance(digest, str)
+            or len(digest) != 64
+        ):
+            raise ValueError(f"business measurement {name} vector is invalid")
+        identity_field = _BUSINESS_VECTOR_IDENTITIES[name]
+        identities = [item.get(identity_field) for item in vector]
+        expected_digest = hashlib.sha256(
+            json.dumps(
+                identities,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        if (
+            any(not isinstance(identity, str) for identity in identities)
+            or digest != expected_digest
+        ):
+            raise ValueError(
+                f"business measurement {name} identity digest is invalid"
+            )
 
 
 def _business_deltas(
@@ -235,10 +321,22 @@ class LabelManifestStore:
             raise LabelManifestUnavailable("label manifest id is required")
         if not isinstance(manifest_digest, str) or len(manifest_digest) != 64:
             raise LabelManifestUnavailable("label manifest digest is required")
+        try:
+            root_available = self._root.is_dir()
+        except OSError:
+            root_available = False
+        if not root_available:
+            raise LabelManifestUnavailable(
+                "label manifest storage root is unavailable"
+            )
         path = self._root / f"{manifest_id}.json"
         try:
             raw = path.read_bytes()
         except FileNotFoundError:
+            if not self._root.is_dir():
+                raise LabelManifestUnavailable(
+                    "label manifest storage root is unavailable"
+                ) from None
             raise LabelManifestNotFound(
                 f"label manifest is not registered: {manifest_id}"
             ) from None
@@ -590,7 +688,6 @@ class _EvalStore:
         bundle: dict[str, Any],
         predictions: dict[str, dict[str, Any]],
         attempt: dict[str, Any],
-        publication_precondition: Callable[[], bool] | None = None,
     ) -> bool:
         """Row-scoped atomic publication: one transaction conditionally owns
         the current leased job by job id, worker identity, fence, attempt and
@@ -601,12 +698,6 @@ class _EvalStore:
             connection.execute("BEGIN IMMEDIATE")
             current = self._owned_row(connection, job, now)
             if current is None:
-                connection.execute("ROLLBACK")
-                return False
-            if (
-                publication_precondition is not None
-                and not publication_precondition()
-            ):
                 connection.execute("ROLLBACK")
                 return False
             bundle_id = bundle["bundle_id"]
@@ -1236,6 +1327,10 @@ class EvaluationService:
         label_manifest_provider: Callable[[str, str], dict[str, Any]]
         | None = None,
         business_state_provider: Callable[[], dict[str, Any]] | None = None,
+        business_publication_guard: Callable[
+            [dict[str, int]], contextlib.AbstractContextManager[None]
+        ]
+        | None = None,
         worker_subject: str = "s12-evaluator-worker",
     ) -> None:
         if snapshot_provider is None:
@@ -1246,6 +1341,8 @@ class EvaluationService:
             raise ValueError("label_manifest_provider is required")
         if business_state_provider is None:
             raise ValueError("business_state_provider is required")
+        if business_publication_guard is None:
+            raise ValueError("business_publication_guard is required")
         self._store = _EvalStore(state_path)
         self._clock = clock or (lambda: int(time.time()))
         self._runner_override = runner_override
@@ -1253,6 +1350,7 @@ class EvaluationService:
         self._release_provider = release_provider
         self._label_manifest_provider = label_manifest_provider
         self._business_state_provider = business_state_provider
+        self._business_publication_guard = business_publication_guard
         self._worker_subject = str(worker_subject) or "s12-evaluator-worker"
         self._lock = threading.RLock()
 
@@ -1260,10 +1358,21 @@ class EvaluationService:
     def _stable_id(prefix: str, fingerprint: str) -> str:
         return f"{prefix}_{hashlib.sha256(fingerprint.encode()).hexdigest()[:24]}"
 
-    def _read_business_state(self) -> dict[str, Any]:
+    def _read_business_state(self) -> tuple[dict[str, Any], dict[str, int]]:
         try:
-            return dict(self._business_state_provider())
-        except (RuntimeError, TypeError, ValueError) as error:
+            measurement = dict(self._business_state_provider())
+            revisions = {
+                field: measurement.pop(field)
+                for field in _BUSINESS_AUTHORITY_REVISIONS
+            }
+            if any(
+                isinstance(value, bool) or not isinstance(value, int) or value < 0
+                for value in revisions.values()
+            ):
+                raise ValueError("business authority revision is invalid")
+            _validate_business_measurement(measurement)
+            return measurement, revisions
+        except (KeyError, RuntimeError, TypeError, ValueError) as error:
             raise S12Unavailable(
                 "the business-state authority is unavailable or corrupt"
             ) from error
@@ -1272,7 +1381,7 @@ class EvaluationService:
 
     def freeze_plan(self, command: dict[str, Any]) -> dict[str, Any]:
         resolved = self._resolve_freeze_material(command)
-        business_before = self._read_business_state()
+        business_before, _business_revisions = self._read_business_state()
         plan = {
             "schema_version": PLAN_SCHEMA,
             "plan_id": resolved["plan_id"],
@@ -1388,6 +1497,7 @@ class EvaluationService:
             raise S12Unavailable(
                 "the governed release authority is unavailable or corrupt"
             ) from error
+        governed_check_ids = set(resolved_release["applicable_check_ids"])
 
         # Evidence references -> S01 snapshot provider.  References are a
         # LIST of immutable run references (application, cycle, snapshot):
@@ -1543,6 +1653,10 @@ class EvaluationService:
             opportunity_ids.add(opportunity["opportunity_id"])
             if opportunity["track"] not in TRACKS:
                 raise ValueError("opportunity track must be R or C")
+            if opportunity["check_id"] not in governed_check_ids:
+                raise ValueError(
+                    "opportunity check is absent from the governed release"
+                )
             if opportunity["cluster"] not in cluster_ids:
                 raise ValueError("opportunity cluster is unknown")
             application_id = opportunity["application_id"]
@@ -1588,21 +1702,6 @@ class EvaluationService:
                     "opportunity cycle or evidence snapshot does not match "
                     "the frozen run spec"
                 )
-            run_id = self._run_reference_id(
-                application_id=application_id,
-                cycle=int(opportunity["cycle"]),
-                snapshot_id=opportunity["evidence_snapshot_id"],
-                check_id=str(opportunity["check_id"]),
-                target_scope=str(opportunity["target_scope"]),
-                variant_id=variant_id,
-            )
-            if run_id in opportunity_run_ids:
-                raise ValueError(
-                    "two opportunities freeze as the same run reference: "
-                    "the run identity is not unique"
-                )
-            opportunity_run_ids.add(run_id)
-            run_id_by_opportunity[opportunity["opportunity_id"]] = run_id
         if len(opportunities) > budget["max_opportunities"]:
             raise ValueError("opportunities exceed the frozen budget")
 
@@ -1663,6 +1762,37 @@ class EvaluationService:
                 "R-E2E and R-T4-conditional views must exactly account for "
                 "every registered R opportunity"
             )
+
+        view_by_opportunity = {
+            opportunity_id: view
+            for view, member_ids in view_members.items()
+            for opportunity_id in member_ids
+        }
+        for opportunity in opportunities:
+            expected_scope = (
+                "C"
+                if opportunity["track"] == "C"
+                else view_by_opportunity[opportunity["opportunity_id"]]
+            )
+            if opportunity["target_scope"] != expected_scope:
+                raise ValueError(
+                    "opportunity target scope must match its track and view"
+                )
+            run_id = self._run_reference_id(
+                application_id=opportunity["application_id"],
+                cycle=int(opportunity["cycle"]),
+                snapshot_id=opportunity["evidence_snapshot_id"],
+                check_id=str(opportunity["check_id"]),
+                target_scope=expected_scope,
+                variant_id=opportunity.get("variant_id"),
+            )
+            if run_id in opportunity_run_ids:
+                raise ValueError(
+                    "two opportunities freeze as the same run reference: "
+                    "the run identity is not unique"
+                )
+            opportunity_run_ids.add(run_id)
+            run_id_by_opportunity[opportunity["opportunity_id"]] = run_id
 
         mandatory_check_families = command.get("mandatory_check_families")
         if not isinstance(mandatory_check_families, list):
@@ -1781,6 +1911,17 @@ class EvaluationService:
                 "opportunity applications must exactly equal the clustered "
                 "applications minus cohort exclusions"
             )
+        opportunity_variants = {
+            opportunity["variant_id"]
+            for opportunity in opportunities
+            if opportunity.get("variant_id") is not None
+        }
+        expected_variants = set(owned_variants) - excluded_items
+        if opportunity_variants != expected_variants:
+            raise ValueError(
+                "opportunity variant universe must exactly equal the declared "
+                "cluster variants minus cohort exclusions"
+            )
 
         # Build one frozen RunSpec per logical run, keyed by the immutable
         # run-reference identity: two cycles or snapshots of one application
@@ -1828,6 +1969,9 @@ class EvaluationService:
                 "checker_build": resolved_release["checker_build"],
                 "manifest_id": resolved_release["manifest_id"],
                 "manifest_digest": resolved_release["manifest_digest"],
+                "governed_manifest": copy.deepcopy(
+                    resolved_release["governed_manifest"]
+                ),
                 "protected_baseline_digest": resolved_release[
                     "protected_baseline_digest"
                 ],
@@ -2047,10 +2191,36 @@ class EvaluationService:
             target_release = TargetRelease.from_artifact(plan["checker_artifact"])
             public_release = target_release.public_manifest()
             release = plan["release"]
+            governed_manifest = release["governed_manifest"]
+            manifest_material = {
+                key: value
+                for key, value in governed_manifest.items()
+                if key not in {"manifest_id", "digest"}
+            }
+            manifest_digest = content_digest(manifest_material)
+            checker_digest = content_digest(plan["checker_artifact"])
+            checker_components = [
+                component
+                for component in governed_manifest["components"]
+                if component.get("type") == "checker"
+            ]
             if (
                 release["release_id"] != target_release.release_id
                 or release["release_digest"] != target_release.release_digest
                 or release["checker_build"] != target_release.checker_build
+                or release["manifest_id"]
+                != governed_manifest.get("manifest_id")
+                or release["manifest_digest"]
+                != governed_manifest.get("digest")
+                or governed_manifest.get("digest") != manifest_digest
+                or governed_manifest.get("manifest_id")
+                != f"manifest_sha256_{manifest_digest}"
+                or len(checker_components) != 1
+                or checker_components[0].get("digest") != checker_digest
+                or checker_components[0].get("id")
+                != f"artifact_sha256_{checker_digest}"
+                or release["protected_baseline_digest"]
+                != target_release.release_digest
                 or release["limits"] != public_release["limits"]
                 or list(release["applicable_check_ids"])
                 != list(public_release["applicable_check_ids"])
@@ -2181,6 +2351,8 @@ class EvaluationService:
                 )
             business_before = replay["business_before"]
             business_after = replay["business_after"]
+            _validate_business_measurement(business_before)
+            _validate_business_measurement(business_after)
             business_deltas = _business_deltas(business_before, business_after)
             if replay["business_deltas"] != business_deltas:
                 raise S12IntegrityError(
@@ -2376,19 +2548,20 @@ class EvaluationService:
         if rerun_of_bundle_id:
             business_before = copy.deepcopy(replay["business_before"])
             business_after = copy.deepcopy(replay["business_after"])
+            business_authority_revisions: dict[str, int] | None = None
         else:
             business_before = plan.get("business_before") or {}
-            business_after = self._read_business_state()
-        changed_reasons = _business_vector_change_reasons(
-            business_before, business_after
-        )
-        if changed_reasons:
-            return self._settle_diagnostic(
-                snapshot,
-                job,
-                observed_now,
-                changed_reasons,
-            )
+            try:
+                business_after, business_authority_revisions = (
+                    self._read_business_state()
+                )
+            except S12Unavailable:
+                return self._settle_diagnostic(
+                    snapshot,
+                    job,
+                    observed_now,
+                    ["BUSINESS_AUTHORITY_UNAVAILABLE"],
+                )
         settled_at = int(self._clock())
         bundle_content = {
             "schema_version": BUNDLE_SCHEMA,
@@ -2543,33 +2716,42 @@ class EvaluationService:
         }
         publication_reasons: list[str] = []
 
-        def publication_precondition() -> bool:
-            try:
-                current_business = self._read_business_state()
-            except S12Unavailable:
-                publication_reasons.append("BUSINESS_AUTHORITY_UNAVAILABLE")
-                return False
-            publication_reasons.extend(
-                _business_vector_change_reasons(business_before, current_business)
+        if rerun_of_bundle_id:
+            published = self._store.publish_bundle_transaction(
+                job,
+                int(self._clock()),
+                bundle=bundle_content,
+                predictions=prediction_records,
+                attempt=attempt_record,
             )
-            if current_business != business_after:
-                publication_reasons.extend(
-                    _business_vector_change_reasons(
-                        business_after, current_business
+        else:
+            try:
+                assert business_authority_revisions is not None
+                with self._business_publication_guard(
+                    business_authority_revisions
+                ):
+                    publication_reasons.extend(
+                        _business_vector_change_reasons(
+                            business_before, business_after
+                        )
                     )
+                    published = not publication_reasons and (
+                        self._store.publish_bundle_transaction(
+                            job,
+                            int(self._clock()),
+                            bundle=bundle_content,
+                            predictions=prediction_records,
+                            attempt=attempt_record,
+                        )
+                    )
+            except StaleStoreRevision:
+                publication_reasons.append(
+                    "BUSINESS_AUTHORITY_CHANGED:authority_revision"
                 )
-            return not publication_reasons
-
-        published = self._store.publish_bundle_transaction(
-            job,
-            int(self._clock()),
-            bundle=bundle_content,
-            predictions=prediction_records,
-            attempt=attempt_record,
-            publication_precondition=(
-                None if rerun_of_bundle_id else publication_precondition
-            ),
-        )
+                published = False
+            except (RuntimeError, TypeError, ValueError, sqlite3.Error):
+                publication_reasons.append("BUSINESS_AUTHORITY_UNAVAILABLE")
+                published = False
         if not published:
             if publication_reasons:
                 return self._settle_diagnostic(
@@ -2717,9 +2899,18 @@ class EvaluationService:
             != declared_digest
         ):
             return ["RUNNER_DIGEST_MISMATCH"]
+        if set(runner_result) != {
+            "digest",
+            "schema_version",
+            "applications",
+            "stop",
+        }:
+            return ["RUNNER_OUTPUT_MALFORMED"]
         stop = runner_result.get("stop")
         if (
             not isinstance(stop, dict)
+            or set(stop)
+            != {"stop_reason", "elapsed_ms", "completed_run_ids"}
             or stop.get("stop_reason") not in {"plan-exhausted", "budget-or-plan"}
             or isinstance(stop.get("elapsed_ms"), bool)
             or not isinstance(stop.get("elapsed_ms"), int)
@@ -2749,9 +2940,15 @@ class EvaluationService:
             if run_spec["application_id"] != application_id:
                 return ["RUNNER_IDENTITY_MISMATCH"]
             if "error" in application:
-                if not isinstance(application["error"], str) or not application["error"]:
+                if (
+                    set(application) != {"application_id", "run_id", "error"}
+                    or not isinstance(application["error"], str)
+                    or not application["error"]
+                ):
                     return ["RUNNER_OUTPUT_MALFORMED"]
                 continue
+            if set(application) != {"application_id", "run_id", "checks"}:
+                return ["RUNNER_OUTPUT_MALFORMED"]
             checks = application.get("checks")
             if not isinstance(checks, list):
                 return ["RUNNER_OUTPUT_MALFORMED"]
@@ -2761,12 +2958,20 @@ class EvaluationService:
                     return ["RUNNER_OUTPUT_MALFORMED"]
                 rule_id = check.get("rule_id")
                 verdict = check.get("verdict")
+                severity = check.get("severity")
+                reason_codes = check.get("reason_codes")
                 if (
-                    not isinstance(rule_id, str)
+                    set(check)
+                    != {"rule_id", "verdict", "severity", "reason_codes"}
+                    or not isinstance(rule_id, str)
                     or not rule_id
                     or rule_id in rule_ids
                     or not isinstance(verdict, str)
                     or verdict not in {"consistent", "inconsistent", "uncertain", "skipped"}
+                    or not isinstance(severity, str)
+                    or not severity
+                    or not isinstance(reason_codes, list)
+                    or any(not isinstance(reason, str) for reason in reason_codes)
                 ):
                     return ["RUNNER_CHECK_INVALID"]
                 rule_ids.add(rule_id)

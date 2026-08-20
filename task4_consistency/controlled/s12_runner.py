@@ -176,12 +176,16 @@ def main() -> int:
             _application_checks(release, run_spec, remaining_ms)
         )
 
+    elapsed_ms = int((time.monotonic() - started_at) * 1000.0)
+    if elapsed_ms >= max_runtime_ms:
+        stop_reason = "budget-or-plan"
+        elapsed_ms = max_runtime_ms
     material = {
         "schema_version": RUNNER_RESULT_SCHEMA,
         "applications": applications,
         "stop": {
             "stop_reason": stop_reason,
-            "elapsed_ms": int((time.monotonic() - started_at) * 1000.0),
+            "elapsed_ms": elapsed_ms,
             "completed_run_ids": [
                 application["run_id"] for application in applications
             ],

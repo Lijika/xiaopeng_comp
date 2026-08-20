@@ -7653,6 +7653,7 @@ class PolicyGovernanceService:
                             "target_release": release,
                             "manifest_id": verified["manifest_id"],
                             "manifest_digest": verified["digest"],
+                            "governed_manifest": copy.deepcopy(verified),
                             "components": verified["components"],
                             "limits": public["limits"],
                             "applicable_check_ids": public["applicable_check_ids"],
@@ -7695,6 +7696,7 @@ class PolicyGovernanceService:
                 else None
             )
             return {
+                "s08_authority_revision": self._store._store_revision,
                 "governance_revision": len(self._store.policy_governance_events),
                 "activation_count": len(activated),
                 "activation_digest": activation_digest,
@@ -7806,6 +7808,12 @@ class PolicyGovernanceService:
                     ).encode("utf-8")
                 ).hexdigest(),
             }
+
+    def evaluation_publication_fence(self, expected_revision: int):
+        """Registered S12 publication guard over the S08 store revision."""
+        if not self.audit_available or not self.storage_available:
+            raise PolicyUnavailable("S08 evaluation authority is unavailable")
+        return self._store.revision_fence(expected_revision)
 
     # --------------------------------------------------------------- helpers
 
