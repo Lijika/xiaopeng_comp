@@ -149,6 +149,10 @@ class QueryNotFound(LookupError):
     """Existence-hiding query result for unauthorized/cross-scope reads."""
 
 
+class EvaluationAuthorityUnavailable(RuntimeError):
+    """S01 evaluation reads cannot prove the required authority state."""
+
+
 class _StoreWriteFailure(RuntimeError):
     """One staged in-memory store write failed before owner publication."""
 
@@ -5466,6 +5470,10 @@ class ControlledScenarioService:
         id before any value is returned; the read never writes business
         state."""
         with self._lock:
+            if not self.storage_available or not self.audit_available:
+                raise EvaluationAuthorityUnavailable(
+                    "S01 evaluation evidence authority is unavailable"
+                )
             self._reload_store()
             app = self._store.applications.get(application_id)
             if app is None:
@@ -5513,6 +5521,10 @@ class ControlledScenarioService:
         measure deltas across an evaluation freeze and its terminal
         publication.  Purely read-only; never writes business state."""
         with self._lock:
+            if not self.storage_available or not self.audit_available:
+                raise EvaluationAuthorityUnavailable(
+                    "S01 evaluation business authority is unavailable"
+                )
             self._reload_store()
             apps = list(self._store.applications.values())
             lifecycle_revision = max(

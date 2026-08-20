@@ -176,8 +176,9 @@ class S12Opportunity(BaseModel):
     application_id: str
     cycle: int = Field(ge=1)
     check_id: str
-    target_scope: str
+    target_scope: Literal["C", "R-E2E", "R-T4-conditional"]
     evidence_snapshot_id: str
+    variant_id: str | None = None
     difficulty: str | None = None
     data_source: str | None = None
     document_combination: str | None = None
@@ -188,6 +189,38 @@ class S12Membership(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     opportunities: list[str]
+
+
+class S12TrackMemberships(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    R: S12Membership
+    C: S12Membership
+
+
+class S12ViewMemberships(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    R_E2E: S12Membership = Field(alias="R-E2E")
+    R_T4_conditional: S12Membership = Field(alias="R-T4-conditional")
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+
+class S12TrackStatistics(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    R: "S12StatisticsBlock"
+    C: "S12StatisticsBlock"
+
+
+class S12ViewStatistics(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    R_E2E: "S12StatisticsBlock" = Field(alias="R-E2E")
+    R_T4_conditional: "S12StatisticsBlock" = Field(alias="R-T4-conditional")
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
 
 class S12ReleaseReference(BaseModel):
@@ -239,26 +272,20 @@ class S12FreezePlanBody(BaseModel):
 
     schema_version: Literal["s12-plan-command/1"]
     plan_id: str
-    scope_declared: str
+    scope_declared: Literal["C", "R-E2E", "R-T4-conditional"]
     seed: int = Field(ge=0)
     budget: S12Budget
     stop_rule: Literal["plan-exhausted", "budget-or-plan"]
     split: S12Split
     clusters: list[S12Cluster] = Field(min_length=1)
-    tracks: dict[str, S12Membership]
-    views: dict[str, S12Membership]
+    tracks: S12TrackMemberships
+    views: S12ViewMemberships
     opportunities: list[S12Opportunity] = Field(min_length=1)
     evidence_references: list[S12EvidenceReference] = Field(min_length=1)
     release_reference: S12ReleaseReference
     label_manifest: S12LabelManifestReference
     mandatory_check_families: list[S12MandatoryFamily] = Field(min_length=1)
     cohort: S12Cohort | None = None
-
-
-# Closed response models: every S12-typed nested object is an explicit
-# keyed model.  Opaque S01/S08-owned content (checker artifact, RunSpecs,
-# replay package) stays dict-shaped: the S12 surface never re-types
-# authority content (ADR-0008 role-minimized typed query interfaces).
 
 
 class S12ClusterResponse(BaseModel):
@@ -280,7 +307,7 @@ class S12OpportunityResponse(BaseModel):
     application_id: str
     cycle: int
     check_id: str
-    target_scope: str
+    target_scope: Literal["C", "R-E2E", "R-T4-conditional"]
     evidence_snapshot_id: str
     variant_id: str | None = None
     label: str
@@ -295,10 +322,206 @@ class S12OpportunityResponse(BaseModel):
 class S12LabelManifestResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    schema_version: Literal["s12-label-manifest/1"]
     manifest_id: str
     manifest_digest: str
     label_custody: str | None = None
-    labels: dict[str, str] = Field(default_factory=dict)
+    labels: dict[
+        str,
+        Literal["consistent", "inconsistent", "indeterminate", "not_applicable"],
+    ] = Field(default_factory=dict)
+
+
+class S12Limits(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_documents: int
+    max_findings: int
+    max_runtime_ms: int
+
+
+class S12PublicRelease(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    release_id: str
+    digest: str
+    checker_build: str
+    rules_digest: str
+    knowledge_digest: str
+    normalizer_digest: str
+    waiver_policy_id: str
+    waiver_policy_digest: str
+    limits: S12Limits
+    applicable_check_ids: list[str]
+    applicable_check_count: int
+
+
+class S12CheckerRule(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rule_id: str
+    rule_type: str
+    field: str | None = None
+    document_roles: list[str]
+    on_missing: str
+    severity: str
+    threshold: float
+    uncertain_band: float
+    abs_tol: float
+    rel_tol: float
+    list_field: str | None = None
+    item_field: str | None = None
+    if_field_present: str | None = None
+    required_field: str | None = None
+    min_confidence: float
+    require_all_docs: bool
+    transfer_name_policy: str | None = None
+    transfer_old_roles: list[str]
+    transfer_new_roles: list[str]
+    waivable: bool
+    waiver_policy_id: str | None = None
+    waiver_policy_digest: str | None = None
+    waiver_reasons: list[str]
+    waiver_scope: str | None = None
+    waiver_ttl_seconds: int
+
+
+class S12CheckerArtifact(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str
+    release_id: str
+    rules_digest: str
+    knowledge_digest: str
+    normalizer_digest: str
+    waiver_policy_id: str
+    waiver_policy_digest: str
+    checker_build: str
+    knowledge: list[tuple[str, list[tuple[str, str]]]]
+    aliases: list[tuple[str, list[str]]]
+    field_types: list[tuple[str, str]]
+    rules: list[S12CheckerRule]
+    low_confidence_threshold: float
+    critical_low_conf_compare: bool
+    date_order: str | None = None
+    vin_fix_ioq: bool
+    vin_strict_check_digit: bool
+    expand_id15_to_18: bool
+    limits: list[tuple[str, int]]
+
+
+class S12EvidenceField(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    raw: str | None
+    confidence: float
+    observation_id: str
+    source_object_ref: str | None = None
+    source_sha256: str | None = None
+    provenance_manifest_digest: str | None = None
+    source_page: int | None = None
+    source_region: str | None = None
+    evidence_eligible: bool
+    eligibility_reason: str
+    producer_id: str | None = None
+    producer_version: str | None = None
+
+
+class S12EvidenceDocument(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    document_id: str
+    document_role: str
+    fields: dict[str, S12EvidenceField]
+
+
+class S12ConfidenceSemantics(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    minimum: float
+    maximum: float
+    higher_is: str
+    meaning: str
+    granularity: str
+    calibration: str
+
+
+class S12CoordinateSystem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    origin: str
+    unit: str
+
+
+class S12RegisteredObservation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    attempt_status: Literal["observed", "not_detected"]
+    confidence: float | None
+    confidence_semantics: S12ConfidenceSemantics | None
+    coordinate_system: S12CoordinateSystem | None
+    eligibility_reason: str
+    evidence_eligible: bool
+    field: str
+    model_id: str | None
+    model_version: str | None
+    observation_id: str
+    producer_family: str
+    producer_id: str | None
+    producer_run_id: str | None
+    producer_task_id: str | None
+    producer_task_version: str | None
+    provenance_manifest_digest: str = Field(pattern=_DIGEST64)
+    raw: str | None
+    raw_lexeme: str
+    raw_type: Literal["null", "string"]
+    source_object_ref: str
+    source_page: int
+    source_pointer: str
+    source_receipt_id: str
+    source_region: str | None
+    source_result_object_ref: str
+    source_result_sha256: str = Field(pattern=_DIGEST64)
+    source_sha256: str = Field(pattern=_DIGEST64)
+    value_state: Literal["explicit_null", "empty", "present"]
+
+
+class S12RegisteredEvidenceDocument(S12EvidenceDocument):
+    document_type: str
+    observations: list[S12RegisteredObservation]
+
+
+class S12EvidenceSnapshot(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str
+    evidence: list[S12EvidenceDocument | S12RegisteredEvidenceDocument]
+
+
+class S12RunSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str
+    application_id: str
+    cycle: int
+    lifecycle_revision: int
+    evidence_snapshot_id: str
+    evidence_snapshot_digest: str
+    evidence_snapshot: S12EvidenceSnapshot
+    evidence_revision: int
+    check_id: str
+    target_scope: Literal["C", "R-E2E", "R-T4-conditional"]
+    variant_id: str | None = None
+    evidence_readiness_policy: str
+    baseline_release: S12PublicRelease
+    release_id: str
+    release_digest: str
+    checker_build: str
+    fence: int
+    limits: S12Limits
+    applicable_check_ids: list[str]
+    applicable_check_count: int
 
 
 class S12EnvironmentResponse(BaseModel):
@@ -319,7 +542,7 @@ class S12ReleaseResponse(BaseModel):
     manifest_id: str
     manifest_digest: str
     protected_baseline_digest: str
-    limits: dict[str, int]
+    limits: S12Limits
     applicable_check_ids: list[str]
     applicable_check_count: int
 
@@ -457,6 +680,7 @@ class S12Denominators(BaseModel):
 
     E: int
     E_all: int
+    applicable_opportunities: int
     n_consistent: int
     n_inconsistent: int
     n_consistent_decisive: int
@@ -483,17 +707,55 @@ class S12PointMetrics(BaseModel):
     conditional_fpr: float | None = None
 
 
+class S12PredictionCounts(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    consistent: int
+    inconsistent: int
+    uncertain: int
+    skipped: int
+    missing: int
+    error: int
+
+
+class S12MetricIntervals(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    coverage: list[float]
+    false_positive_rate: list[float]
+    false_negative_rate: list[float]
+    miss_rate: list[float]
+    labelability: list[float]
+    uncertain_on_inconsistent: list[float]
+    skipped_rate: list[float]
+    missing_rate: list[float]
+    error_rate: list[float]
+    conditional_fpr: list[float]
+
+    def values(self) -> list[list[float]]:
+        return list(self.model_dump().values())
+
+
+class S12MetricBounds(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    coverage_lower: float | None = None
+    false_positive_rate_upper: float | None = None
+    false_negative_rate_upper: float | None = None
+    miss_rate_upper: float | None = None
+
+
 class S12StatisticsBlock(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     membership: str
     opportunity_count: int
     denominators: S12Denominators
-    prediction_counts: dict[str, int]
+    prediction_counts: "S12PredictionCounts"
     point: S12PointMetrics
     # Two-sided 95% bootstrap intervals are per-metric [low, high] pairs.
-    interval_95_two_sided: dict[str, list[float]] | None = None
-    bounds_95_one_sided: dict[str, float | None] | None = None
+    interval_95_two_sided: S12MetricIntervals | None = None
+    bounds_95_one_sided: S12MetricBounds | None = None
     estimable: bool
     not_estimable_reasons: list[str]
     conclusion: str
@@ -529,20 +791,20 @@ class S12PlanResponse(BaseModel):
 
     schema_version: Literal["s12-evaluation-plan/1"]
     plan_id: str
-    scope: str
+    scope: Literal["C", "R-E2E", "R-T4-conditional"]
     seed: int
     budget: S12Budget
-    stop_rule: str
+    stop_rule: Literal["plan-exhausted", "budget-or-plan"]
     split: S12Split
     clusters: list[S12ClusterResponse]
-    tracks: dict[str, S12Membership]
-    views: dict[str, S12Membership]
+    tracks: S12TrackMemberships
+    views: S12ViewMemberships
     opportunities: list[S12OpportunityResponse]
     label_manifest: S12LabelManifestResponse
     environment: S12EnvironmentResponse
     release: S12ReleaseResponse
-    checker_artifact: dict[str, Any]
-    run_specs: dict[str, Any]
+    checker_artifact: S12CheckerArtifact
+    run_specs: dict[str, S12RunSpec]
     evidence_references: list[S12EvidenceReferenceResponse]
     mandatory_check_families: list[S12MandatoryFamilyResponse]
     cohort: S12CohortResponse | None = None
@@ -594,6 +856,121 @@ class S12ProcessResponse(BaseModel):
     reason_codes: list[str] | None = None
 
 
+class S12StrataStatistics(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    difficulty: dict[str, S12StatisticsBlock]
+    data_source: dict[str, S12StatisticsBlock]
+    document_combination: dict[str, S12StatisticsBlock]
+    perturbation_family: dict[str, S12StatisticsBlock]
+
+
+class S12RunnerCheck(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rule_id: str
+    verdict: Literal["consistent", "inconsistent", "uncertain", "skipped"]
+    severity: str
+    reason_codes: list[str]
+
+
+class S12RunnerApplication(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    application_id: str
+    run_id: str
+    checks: list[S12RunnerCheck] | None = None
+    error: str | None = None
+
+
+class S12StopObservation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    stop_reason: Literal["plan-exhausted", "budget-or-plan"]
+    elapsed_ms: int
+    completed_run_ids: list[str]
+
+
+class S12ResultMaterial(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    scope: Literal["C", "R-E2E", "R-T4-conditional"]
+    seed: int
+    budget: S12Budget
+    stop_rule: Literal["plan-exhausted", "budget-or-plan"]
+    split: S12Split
+    release: S12ReleaseResponse
+    environment: S12EnvironmentResponse
+    evidence_references: list[S12EvidenceReferenceResponse]
+    label_manifest: S12LabelManifestResponse
+    mandatory_check_families: list[S12MandatoryFamilyResponse]
+    cohort: S12CohortResponse | None = None
+    clusters: list[S12ClusterResponse]
+    opportunities: list[S12OpportunityResponse]
+    tracks: S12TrackMemberships
+    views: S12ViewMemberships
+    predictions: dict[
+        str,
+        Literal[
+            "consistent",
+            "inconsistent",
+            "uncertain",
+            "skipped",
+            "missing",
+            "error",
+        ],
+    ]
+    errors: list[S12PredictionError]
+    missing_opportunities: list[str]
+    tracks_statistics: S12TrackStatistics
+    views_statistics: S12ViewStatistics
+    mandatory_family_statistics: dict[str, S12StatisticsBlock]
+    strata: S12StrataStatistics
+    scope_eligibility: S12ScopeEligibility
+    status: str
+    status_reasons: list[str]
+    runner_result_digest: str
+    stop_reason: Literal["plan-exhausted", "budget-or-plan"]
+    completed_run_ids: list[str]
+    business_before: S12BusinessMeasurement
+    business_after: S12BusinessMeasurement
+    business_deltas: S12BusinessDeltas
+
+
+class S12ReplayPackage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["s12-replay-package/1"]
+    plan: S12PlanResponse
+    predictions: dict[
+        str,
+        Literal[
+            "consistent",
+            "inconsistent",
+            "uncertain",
+            "skipped",
+            "missing",
+            "error",
+        ],
+    ]
+    errors: list[S12PredictionError]
+    missing_opportunities: list[str]
+    applications: list[S12RunnerApplication]
+    stop: S12StopObservation
+    runner_result_digest: str
+    status: str
+    status_reasons: list[str]
+    scope_eligibility: S12ScopeEligibility
+    tracks_statistics: S12TrackStatistics
+    views_statistics: S12ViewStatistics
+    mandatory_family_statistics: dict[str, S12StatisticsBlock]
+    strata: S12StrataStatistics
+    business_before: S12BusinessMeasurement
+    business_after: S12BusinessMeasurement
+    business_deltas: S12BusinessDeltas
+    result_material: S12ResultMaterial
+
+
 class S12BundleResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -609,32 +986,54 @@ class S12BundleResponse(BaseModel):
     run_started_at: int
     run_settled_at: int
     status: str
-    scope: str
+    scope: Literal["C", "R-E2E", "R-T4-conditional"]
     status_reasons: list[str]
-    tracks: dict[str, S12StatisticsBlock]
-    views: dict[str, S12StatisticsBlock]
+    tracks: S12TrackStatistics
+    views: S12ViewStatistics
     mandatory_check_families: dict[str, S12StatisticsBlock]
-    strata: dict[str, dict[str, S12StatisticsBlock]]
+    strata: S12StrataStatistics
     scope_eligibility: S12ScopeEligibility
     clusters: list[S12ClusterResponse]
     opportunities: list[S12OpportunityResponse]
-    tracks_declared: dict[str, S12Membership]
-    views_declared: dict[str, S12Membership]
+    tracks_declared: S12TrackMemberships
+    views_declared: S12ViewMemberships
     evidence_references: list[S12EvidenceReferenceResponse]
     label_manifest: S12LabelManifestResponse
     cohort: S12CohortResponse | None
-    predictions: dict[str, str]
-    prediction_alphabet: list[str]
-    gold_alphabet: list[str]
+    predictions: dict[
+        str,
+        Literal[
+            "consistent",
+            "inconsistent",
+            "uncertain",
+            "skipped",
+            "missing",
+            "error",
+        ],
+    ]
+    prediction_alphabet: list[
+        Literal[
+            "consistent",
+            "inconsistent",
+            "uncertain",
+            "skipped",
+            "missing",
+            "error",
+        ]
+    ]
+    gold_alphabet: list[
+        Literal["consistent", "inconsistent", "indeterminate", "not_applicable"]
+    ]
     errors: list[S12PredictionError]
     missing_opportunities: list[str]
     release: S12ReleaseResponse
     environment: S12EnvironmentResponse
-    stop_rule: str
-    stop_reason: str
+    stop_rule: Literal["plan-exhausted", "budget-or-plan"]
+    stop_reason: Literal["plan-exhausted", "budget-or-plan"]
     stop_elapsed_ms: int
     completed_run_ids: list[str]
     stop_rule_satisfied: bool
+    runner_result_digest: str
     evidence_snapshot_ids: list[str]
     seed: int
     budget: S12Budget
@@ -643,7 +1042,7 @@ class S12BundleResponse(BaseModel):
     business_after: S12BusinessMeasurement
     business_deltas: S12BusinessDeltas
     result_digest: str
-    replay_package: dict[str, Any]
+    replay_package: S12ReplayPackage
     replay_package_digest: str
     command: str
 
@@ -661,7 +1060,7 @@ def s12_freeze_plan(body: S12FreezePlanBody, request: Request) -> dict[str, Any]
     business state."""
     _s12_require_operator(request)
     try:
-        return _s12_service(request).freeze_plan(body.model_dump())
+        return _s12_service(request).freeze_plan(body.model_dump(by_alias=True))
     except ValueError:
         raise _s12_invalid_command()
     except (S12IntegrityError, S12Unavailable):

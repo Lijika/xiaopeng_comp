@@ -30,11 +30,13 @@ from task4_consistency.controlled.s01_checker import TargetRelease
 from task4_consistency.controlled.s01_store import SQLiteTargetStore
 from task4_consistency.controlled.s12 import (
     EvaluationService,
+    LabelManifestNotFound,
     LabelManifestStore,
     _clopper_pearson_upper,
     _cluster_statistics,
     _opportunity_point_metrics,
     _select_status,
+    _server_mandatory_families,
     content_digest,
 )
 from task4_consistency.controlled.s12_runner import run_s12_runner
@@ -1195,11 +1197,7 @@ def test_freeze_rejects_unregistered_label_manifest_and_caller_environment_claim
     service, command, _context = _slice1_harness(tmp_path)
     unknown_manifest = copy.deepcopy(command)
     unknown_manifest["label_manifest"]["manifest_id"] = "manifest_sha256_" + "0" * 64
-    # An unregistered label manifest is an evaluation-owned authority
-    # condition (S12_UNAVAILABLE), never a caller syntax error (SP-09).
-    from task4_consistency.controlled.s12 import S12Unavailable
-
-    with pytest.raises(S12Unavailable):
+    with pytest.raises(LabelManifestNotFound):
         service.freeze_plan(unknown_manifest)
     fabricated = copy.deepcopy(command)
     fabricated["environment"] = {"python": "9.9.9", "evaluator_build": "fake"}
@@ -1458,6 +1456,13 @@ def test_r_views_must_exactly_follow_the_registered_view_partition(tmp_path: Pat
         "R-E2E": {"opportunities": opportunity_ids[:2]},
         "R-T4-conditional": {"opportunities": opportunity_ids[2:]},
     }
+    complete["scope_declared"] = "R-E2E"
+    complete["mandatory_check_families"] = _server_mandatory_families(
+        {
+            opportunity["check_id"]
+            for opportunity in complete["opportunities"][:2]
+        }
+    )
     plan = service.freeze_plan(complete)
     assert plan["plan_id"] == "plan-c-1"
 
@@ -1711,15 +1716,15 @@ def test_formal_status_uses_only_the_selected_scope_and_required_views() -> None
         opportunities, clusters, predictions, seed=17, membership="R"
     )
     status, _reasons = _select_status(
-        {"R": passing_r, "C": passing_c},
-        {"R-E2E": _empty_stats("R-E2E"), "R-T4-conditional": _empty_stats("R-T4-conditional")},
+        {"R": failing_r, "C": passing_c},
+        {"R-E2E": passing_r, "R-T4-conditional": failing_r},
         scope="R-E2E",
     )
     assert status == "PASS(scope=R-E2E)"
 
     status, _reasons = _select_status(
-        {"R": passing_r, "C": passing_c},
-        {"R-E2E": _empty_stats("R-E2E"), "R-T4-conditional": _empty_stats("R-T4-conditional")},
+        {"R": failing_r, "C": passing_c},
+        {"R-E2E": failing_r, "R-T4-conditional": passing_r},
         scope="R-T4-conditional",
     )
     assert status == "PASS(scope=R-T4-conditional)"
@@ -1778,12 +1783,12 @@ def test_clustered_application_run_reference_and_opportunity_universes_match_exa
     extra_reference = copy.deepcopy(command)
     dropped = extra_reference["opportunities"].pop(0)
     extra_reference["tracks"]["C"]["opportunities"].remove(dropped["opportunity_id"])
-    extra_reference["mandatory_check_families"] = [
+    extra_reference["mandatory_check_families"] = _server_mandatory_families(
         {
-            "family_id": "brand-model",
-            "check_ids": ["R_BRAND_CROSS", "R_MODEL_CROSS"],
+            opportunity["check_id"]
+            for opportunity in extra_reference["opportunities"]
         }
-    ]
+    )
     remaining_labels = {
         opportunity["opportunity_id"]: "consistent"
         for opportunity in extra_reference["opportunities"]
@@ -1911,7 +1916,7 @@ def test_same_application_two_cycles_and_snapshots_freeze_as_distinct_runs(
             "manifest_digest": manifest_digest,
         },
         "mandatory_check_families": [
-            {"family_id": "engine", "check_ids": ["R_ENGINE_CROSS"]}
+            {"family_id": "cross-document", "check_ids": ["R_ENGINE_CROSS"]}
         ],
     }
     plan = service.freeze_plan(command)
@@ -1967,11 +1972,11 @@ def _auxiliary_metric_fixture() -> tuple[
         for index, gold in enumerate(golds)
     ]
     expected = {
-        "labelability": 0.8,  # 8 C/I-gold among 10 applicable (ADR-0007 §4)
+        "labelability": 8 / 9,  # not_applicable is outside the denominator
         "uncertain_on_inconsistent": 0.25,  # 1 uncertain among 4 gold-inconsistent
-        "skipped_rate": 0.1,  # 1/10
-        "missing_rate": 0.1,  # 1/10
-        "error_rate": 0.1,  # 1/10
+        "skipped_rate": 1 / 9,
+        "missing_rate": 1 / 9,
+        "error_rate": 0.0,
         "conditional_fpr": 1 / 3,  # 1 fp among 3 decisive gold-consistent
     }
     return opportunities, predictions, expected
@@ -2002,8 +2007,8 @@ def test_auxiliary_metric_denominators_follow_fixed_applicability_rules() -> Non
     opportunities, predictions, _expected = _auxiliary_metric_fixture()
     metrics = _opportunity_point_metrics(opportunities, predictions)
     denominators = metrics["denominators"]
-    # E_all counts every frozen opportunity, not only eligible gold.
-    assert denominators["E_all"] == 10
+    assert denominators["E_all"] == 9
+    assert denominators["applicable_opportunities"] == 9
     assert denominators["n_consistent"] == 4
     assert denominators["n_inconsistent"] == 4
     assert denominators["n_consistent_decisive"] == 3
@@ -2017,11 +2022,11 @@ def test_auxiliary_metric_denominators_follow_fixed_applicability_rules() -> Non
         "conditional_fpr",
     ):
         assert name in metrics["denominators"], name
-    assert metrics["denominators"]["labelability"] == 10
+    assert metrics["denominators"]["labelability"] == 9
     assert metrics["denominators"]["uncertain_on_inconsistent"] == 4
-    assert metrics["denominators"]["skipped_rate"] == 10
-    assert metrics["denominators"]["missing_rate"] == 10
-    assert metrics["denominators"]["error_rate"] == 10
+    assert metrics["denominators"]["skipped_rate"] == 9
+    assert metrics["denominators"]["missing_rate"] == 9
+    assert metrics["denominators"]["error_rate"] == 9
     assert metrics["denominators"]["conditional_fpr"] == 3
     # A degenerate class denominator yields the contract-defined 0.0 rate
     # without silently shrinking the denominator.
@@ -2032,6 +2037,23 @@ def test_auxiliary_metric_denominators_follow_fixed_applicability_rules() -> Non
     assert degenerate["point"]["uncertain_on_inconsistent"] == 0.0
     assert degenerate["point"]["conditional_fpr"] == 0.0
     assert degenerate["denominators"]["uncertain_on_inconsistent"] == 0
+
+
+def test_not_applicable_is_excluded_from_auxiliary_denominators() -> None:
+    opportunities = [
+        {"opportunity_id": "applicable", "label": "consistent"},
+        {"opportunity_id": "outside", "label": "not_applicable"},
+    ]
+    metrics = _opportunity_point_metrics(
+        opportunities,
+        {"applicable": "consistent", "outside": "error"},
+    )
+
+    assert metrics["denominators"]["applicable_opportunities"] == 1
+    assert metrics["denominators"]["labelability"] == 1
+    assert metrics["denominators"]["error_rate"] == 1
+    assert metrics["point"]["labelability"] == 1.0
+    assert metrics["point"]["error_rate"] == 0.0
 
 
 def test_required_auxiliary_metrics_are_global_and_in_every_required_stratum(
@@ -2388,12 +2410,15 @@ def test_result_digest_ignores_plan_id_freeze_time_job_attempt_worker_and_lineag
     )
     plan_b = service_b.freeze_plan(later_command)
     assert plan_a["plan_digest"] != plan_b["plan_digest"]
-    runner_a = _runner_output_for_plan(plan_a)
-    runner_b = _runner_output_for_plan(plan_b)
+    runner_observation = _runner_output_for_plan(plan_a)
     job_a = service_a.start_job(plan_a["plan_id"])
-    outcome_a = service_a.process_job(job_a["job_id"], runner_result=runner_a)
+    outcome_a = service_a.process_job(
+        job_a["job_id"], runner_result=copy.deepcopy(runner_observation)
+    )
     job_b = service_b.start_job(plan_b["plan_id"])
-    outcome_b = service_b.process_job(job_b["job_id"], runner_result=runner_b)
+    outcome_b = service_b.process_job(
+        job_b["job_id"], runner_result=copy.deepcopy(runner_observation)
+    )
     bundle_a = service_a.query_bundle(outcome_a["bundle_id"])
     bundle_b = service_b.query_bundle(outcome_b["bundle_id"])
     assert bundle_a["result_digest"] == bundle_b["result_digest"]
@@ -2475,7 +2500,17 @@ def test_bundle_embeds_complete_content_addressed_replay_package(
         opportunity["opportunity_id"]: opportunity["label"]
         for opportunity in plan["opportunities"]
     }
-    assert replay["applications"] == bundle["predictions"] or replay["predictions"]
+    assert replay["predictions"] == bundle["predictions"]
+    assert {application["run_id"] for application in replay["applications"]} == set(
+        embedded_plan["run_specs"]
+    )
+    assert replay["runner_result_digest"] == content_digest(
+        {
+            "schema_version": "s12-runner-result/1",
+            "applications": replay["applications"],
+            "stop": replay["stop"],
+        }
+    )
     assert bundle["replay_package_digest"] == content_digest(replay)
     assert replay["plan"]["release"]["release_id"]
     assert replay["plan"]["budget"] == round_trip_plan["budget"]
@@ -2607,12 +2642,10 @@ def test_rerun_never_resolves_current_authority_providers(tmp_path: Path) -> Non
         rerun_job["job_id"], runner_result=runner_output
     )
     assert rerun_outcome["bundle_id"]
-    # Snapshot/release/label authority providers are never resolved on
-    # rerun; the business measurement gate at publication remains required
-    # by the frozen zero-delta contract.
     assert counters["snapshot"] == freeze_calls["snapshot"]
     assert counters["release"] == freeze_calls["release"]
     assert counters["label"] == freeze_calls["label"]
+    assert counters["business"] == freeze_calls["business"]
 
 
 # ---------------------------------------------------------------------------
@@ -3145,11 +3178,16 @@ def test_result_digest_is_stable_across_identical_rerun_lineage(
     stable across an identical rerun, independent of job/attempt/lineage."""
     service, command, _context = _slice1_harness(tmp_path)
     plan = service.freeze_plan(command)
+    runner_observation = _runner_output_for_plan(plan)
     job = service.start_job(plan["plan_id"])
-    outcome = service.process_job(job["job_id"])
+    outcome = service.process_job(
+        job["job_id"], runner_result=copy.deepcopy(runner_observation)
+    )
     bundle = service.query_bundle(outcome["bundle_id"])
     rerun_job = service.rerun_job(job["job_id"])
-    rerun_outcome = service.process_job(rerun_job["job_id"])
+    rerun_outcome = service.process_job(
+        rerun_job["job_id"], runner_result=copy.deepcopy(runner_observation)
+    )
     rerun_bundle = service.query_bundle(rerun_outcome["bundle_id"])
     assert rerun_bundle["result_digest"] == bundle["result_digest"]
 
@@ -3344,3 +3382,323 @@ def test_rollback_probe_rejects_prior_source_root_mismatch(tmp_path: Path) -> No
     assert report["probe"] == "FAIL"
     assert report["prior_artifact"]["tree_digest_matches"] is False
     assert report["prior_artifact"]["prior_code_serves_business_state"] is False
+
+
+# ---------------------------------------------------------------------------
+# Ticket #28 R3 Codex repair
+# ---------------------------------------------------------------------------
+
+
+def test_formal_r_view_ignores_aggregate_sibling_and_out_of_scope_gates() -> None:
+    """A formal R view owns its conclusion; aggregate R and the sibling view
+    remain report-only for that scope."""
+
+    def statistics(membership: str, conclusion: str) -> dict[str, Any]:
+        return {
+            "membership": membership,
+            "opportunity_count": 1,
+            "denominators": {"E": 1},
+            "estimable": True,
+            "not_estimable_reasons": [],
+            "conclusion": conclusion,
+        }
+
+    status, reasons = _select_status(
+        {
+            "R": statistics("R", "fail"),
+            "C": statistics("C", "fail"),
+        },
+        {
+            "R-E2E": statistics("R-E2E", "pass"),
+            "R-T4-conditional": statistics("R-T4-conditional", "fail"),
+        },
+        scope="R-E2E",
+    )
+
+    assert status == "PASS(scope=R-E2E)", reasons
+
+
+def test_process_uses_scope_local_holdout_and_mandatory_family_gates(
+    tmp_path: Path,
+) -> None:
+    """A C formal run reports and gates only C opportunities even when the
+    frozen plan also carries a development-only R view."""
+    context = _r2_baseline(tmp_path)
+    service = _r2_service(tmp_path, context)
+    command = _r2_reference_command(context, scope_declared="C")
+    out_of_scope = command["opportunities"][0]
+    out_of_scope["track"] = "R"
+    out_of_scope["target_scope"] = "R-E2E"
+    out_of_scope_id = out_of_scope["opportunity_id"]
+    command["tracks"]["R"]["opportunities"] = [out_of_scope_id]
+    command["tracks"]["C"]["opportunities"].remove(out_of_scope_id)
+    command["views"]["R-E2E"]["opportunities"] = [out_of_scope_id]
+    command["mandatory_check_families"][0]["check_ids"].remove(
+        out_of_scope["check_id"]
+    )
+
+    plan = service.freeze_plan(command)
+    job = service.start_job(plan["plan_id"])
+    outcome = service.process_job(job["job_id"])
+    bundle = service.query_bundle(outcome["bundle_id"])
+
+    reasons = bundle["scope_eligibility"]["reasons"]
+    assert all(out_of_scope_id not in reason for reason in reasons), reasons
+    assert bundle["mandatory_check_families"]["cross-document"][
+        "opportunity_count"
+    ] == 1
+
+
+def test_mandatory_family_coverage_is_server_owned_and_exact(
+    tmp_path: Path,
+) -> None:
+    service, command, _context = _slice1_harness(tmp_path)
+
+    omitted = copy.deepcopy(command)
+    omitted["mandatory_check_families"].pop()
+    with pytest.raises(ValueError, match="server-owned registry"):
+        service.freeze_plan(omitted)
+
+    invented = copy.deepcopy(command)
+    invented["mandatory_check_families"][0]["family_id"] = "caller-family"
+    with pytest.raises(ValueError, match="server-owned registry"):
+        service.freeze_plan(invented)
+
+    overlapping = copy.deepcopy(command)
+    overlapping["mandatory_check_families"][1]["check_ids"].append(
+        "R_ENGINE_CROSS"
+    )
+    with pytest.raises(ValueError, match="server-owned registry"):
+        service.freeze_plan(overlapping)
+
+    uncovered = copy.deepcopy(command)
+    uncovered["mandatory_check_families"][0]["check_ids"].remove(
+        "R_ENGINE_CROSS"
+    )
+    with pytest.raises(ValueError, match="server-owned registry"):
+        service.freeze_plan(uncovered)
+
+
+def test_process_partial_budget_stop_is_insufficient(tmp_path: Path) -> None:
+    service, command, _context = _slice1_harness(tmp_path)
+    command["stop_rule"] = "budget-or-plan"
+    plan = service.freeze_plan(command)
+    complete = _runner_output_for_plan(plan)
+    completed_ids = complete["stop"]["completed_run_ids"][:1]
+    partial = _stopped_runner_result(complete, completed_ids=completed_ids)
+
+    job = service.start_job(plan["plan_id"])
+    outcome = service.process_job(job["job_id"], runner_result=partial)
+    bundle = service.query_bundle(outcome["bundle_id"])
+
+    assert outcome["status"] == "INSUFFICIENT"
+    assert bundle["stop_rule_satisfied"] is False
+    assert any("stop" in reason for reason in bundle["status_reasons"])
+
+
+def test_runner_elapsed_must_obey_exact_frozen_deadline(tmp_path: Path) -> None:
+    service, command, _context = _slice1_harness(tmp_path)
+    plan = service.freeze_plan(command)
+    over_deadline = _runner_output_for_plan(plan)
+    over_deadline["stop"]["stop_reason"] = "budget-or-plan"
+    over_deadline["stop"]["elapsed_ms"] = (
+        plan["budget"]["max_runtime_ms"] + 1
+    )
+
+    _invalidate_and_run(
+        service,
+        plan,
+        _recompute_digest(over_deadline),
+        "RUNNER_STOP_OBSERVATION_INVALID",
+    )
+
+
+def test_result_digest_covers_complete_verified_runner_observation(
+    tmp_path: Path,
+) -> None:
+    service, command, _context = _slice1_harness(tmp_path)
+    plan = service.freeze_plan(command)
+    first_result = _runner_output_for_plan(plan)
+    first_job = service.start_job(plan["plan_id"])
+    first_outcome = service.process_job(
+        first_job["job_id"], runner_result=first_result
+    )
+    first_digest = service.query_bundle(first_outcome["bundle_id"])[
+        "result_digest"
+    ]
+
+    changed_observation = copy.deepcopy(first_result)
+    changed_observation["stop"]["elapsed_ms"] += 1
+    _recompute_digest(changed_observation)
+    second_job = service.start_job(plan["plan_id"])
+    second_outcome = service.process_job(
+        second_job["job_id"], runner_result=changed_observation
+    )
+    second_bundle = service.query_bundle(second_outcome["bundle_id"])
+
+    assert second_bundle["runner_result_digest"] == changed_observation["digest"]
+    assert second_bundle["result_digest"] != first_digest
+
+
+def _insert_readdressed_bundle(
+    state_path: Path, bundle: dict[str, Any]
+) -> str:
+    import sqlite3 as _sqlite3
+
+    from task4_consistency.controlled.s12 import _integrity_digest
+
+    replay = bundle["replay_package"]
+    plan = replay["plan"]
+    plan["plan_digest"] = content_digest(
+        {key: value for key, value in plan.items() if key != "plan_digest"}
+    )
+    replay["plan"] = plan
+    bundle["replay_package_digest"] = content_digest(replay)
+    bundle_id = "s12_bundle_sha256_" + content_digest(
+        {key: value for key, value in bundle.items() if key != "bundle_id"}
+    )
+    bundle["bundle_id"] = bundle_id
+    payload = json.dumps(
+        bundle, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    connection = _sqlite3.connect(state_path)
+    try:
+        connection.execute(
+            "INSERT INTO s12_bundles(item_id, payload, integrity_sha256) "
+            "VALUES (?, ?, ?)",
+            (
+                bundle_id,
+                payload,
+                _integrity_digest("s12_bundles", bundle_id, payload),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    return bundle_id
+
+
+def test_query_independently_verifies_every_nested_replay_address(
+    tmp_path: Path,
+) -> None:
+    from task4_consistency.controlled.s12 import S12IntegrityError
+
+    service, command, _context = _slice1_harness(tmp_path)
+    plan = service.freeze_plan(command)
+    job = service.start_job(plan["plan_id"])
+    outcome = service.process_job(job["job_id"])
+    original = service.query_bundle(outcome["bundle_id"])
+    state_path = tmp_path / "evaluation.sqlite3"
+
+    def mutate_label(bundle: dict[str, Any]) -> None:
+        bundle["replay_package"]["plan"]["label_manifest"]["labels"][
+            "opp-0"
+        ] = "inconsistent"
+
+    def mutate_evidence(bundle: dict[str, Any]) -> None:
+        run_spec = next(
+            iter(bundle["replay_package"]["plan"]["run_specs"].values())
+        )
+        run_spec["evidence_snapshot"]["forged"] = True
+
+    def mutate_run_spec(bundle: dict[str, Any]) -> None:
+        run_spec = next(
+            iter(bundle["replay_package"]["plan"]["run_specs"].values())
+        )
+        run_spec["application_id"] = "forged-application"
+
+    def mutate_checker(bundle: dict[str, Any]) -> None:
+        bundle["replay_package"]["plan"]["checker_artifact"][
+            "checker_build"
+        ] = "forged-checker"
+
+    def mutate_result(bundle: dict[str, Any]) -> None:
+        bundle["replay_package"]["result_material"]["status"] = "PASS(scope=C)"
+
+    def mutate_derived_statistics(bundle: dict[str, Any]) -> None:
+        replay = bundle["replay_package"]
+        for statistics in (
+            bundle["tracks"]["C"],
+            replay["tracks_statistics"]["C"],
+            replay["result_material"]["tracks_statistics"]["C"],
+        ):
+            statistics["point"]["coverage"] = 0.123456
+        bundle["result_digest"] = content_digest(replay["result_material"])
+
+    for mutator in (
+        mutate_label,
+        mutate_evidence,
+        mutate_run_spec,
+        mutate_checker,
+        mutate_result,
+        mutate_derived_statistics,
+    ):
+        tampered = copy.deepcopy(original)
+        mutator(tampered)
+        tampered_id = _insert_readdressed_bundle(state_path, tampered)
+        with pytest.raises(S12IntegrityError):
+            service.query_bundle(tampered_id)
+
+
+def test_replay_top_level_material_must_match(tmp_path: Path) -> None:
+    from task4_consistency.controlled.s12 import S12IntegrityError
+
+    service, command, _context = _slice1_harness(tmp_path)
+    plan = service.freeze_plan(command)
+    job = service.start_job(plan["plan_id"])
+    outcome = service.process_job(job["job_id"])
+    tampered = copy.deepcopy(service.query_bundle(outcome["bundle_id"]))
+    tampered["replay_package"]["predictions"]["opp-0"] = "uncertain"
+    tampered_id = _insert_readdressed_bundle(
+        tmp_path / "evaluation.sqlite3", tampered
+    )
+
+    with pytest.raises(S12IntegrityError):
+        service.query_bundle(tampered_id)
+
+
+def test_business_vector_keyset_must_match_exactly(tmp_path: Path) -> None:
+    service, command, _context = _slice1_harness(tmp_path)
+    plan = service.freeze_plan(command)
+    service._business_state_provider = lambda: {}
+    job = service.start_job(plan["plan_id"])
+
+    outcome = service.process_job(job["job_id"])
+
+    assert outcome["status"] == "INVALID"
+    assert outcome["bundle_id"] is None
+    assert any(
+        reason.startswith("BUSINESS_AUTHORITY_CHANGED:")
+        for reason in outcome["reason_codes"]
+    )
+
+
+def test_publication_rechecks_business_vector_inside_fenced_decision(
+    tmp_path: Path,
+) -> None:
+    service, command, context = _slice1_harness(tmp_path)
+    changed = {"value": False}
+
+    def measured() -> dict[str, Any]:
+        facts = context["measure"]()
+        if changed["value"]:
+            facts["late_publication_change"] = "present"
+        return facts
+
+    service._business_state_provider = measured
+    plan = service.freeze_plan(command)
+    job = service.start_job(plan["plan_id"])
+    publish = service._store.publish_bundle_transaction
+
+    def mutate_then_publish(*args: Any, **kwargs: Any) -> bool:
+        changed["value"] = True
+        return publish(*args, **kwargs)
+
+    service._store.publish_bundle_transaction = mutate_then_publish
+    outcome = service.process_job(job["job_id"])
+
+    assert outcome["status"] == "INVALID"
+    assert outcome["bundle_id"] is None
+    assert "BUSINESS_AUTHORITY_CHANGED:late_publication_change" in outcome[
+        "reason_codes"
+    ]

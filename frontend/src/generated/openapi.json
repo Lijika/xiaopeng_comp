@@ -12212,6 +12212,12 @@
           },
           "gold_alphabet": {
             "items": {
+              "enum": [
+                "consistent",
+                "inconsistent",
+                "indeterminate",
+                "not_applicable"
+              ],
               "type": "string"
             },
             "title": "Gold Alphabet",
@@ -12255,6 +12261,14 @@
           },
           "prediction_alphabet": {
             "items": {
+              "enum": [
+                "consistent",
+                "inconsistent",
+                "uncertain",
+                "skipped",
+                "missing",
+                "error"
+              ],
               "type": "string"
             },
             "title": "Prediction Alphabet",
@@ -12262,6 +12276,14 @@
           },
           "predictions": {
             "additionalProperties": {
+              "enum": [
+                "consistent",
+                "inconsistent",
+                "uncertain",
+                "skipped",
+                "missing",
+                "error"
+              ],
               "type": "string"
             },
             "title": "Predictions",
@@ -12271,9 +12293,7 @@
             "$ref": "#/components/schemas/S12ReleaseResponse"
           },
           "replay_package": {
-            "additionalProperties": true,
-            "title": "Replay Package",
-            "type": "object"
+            "$ref": "#/components/schemas/S12ReplayPackage"
           },
           "replay_package_digest": {
             "title": "Replay Package Digest",
@@ -12302,12 +12322,21 @@
             "title": "Run Started At",
             "type": "integer"
           },
+          "runner_result_digest": {
+            "title": "Runner Result Digest",
+            "type": "string"
+          },
           "schema_version": {
             "const": "s12-evaluation-bundle/1",
             "title": "Schema Version",
             "type": "string"
           },
           "scope": {
+            "enum": [
+              "C",
+              "R-E2E",
+              "R-T4-conditional"
+            ],
             "title": "Scope",
             "type": "string"
           },
@@ -12337,10 +12366,18 @@
             "type": "integer"
           },
           "stop_reason": {
+            "enum": [
+              "plan-exhausted",
+              "budget-or-plan"
+            ],
             "title": "Stop Reason",
             "type": "string"
           },
           "stop_rule": {
+            "enum": [
+              "plan-exhausted",
+              "budget-or-plan"
+            ],
             "title": "Stop Rule",
             "type": "string"
           },
@@ -12349,42 +12386,19 @@
             "type": "boolean"
           },
           "strata": {
-            "additionalProperties": {
-              "additionalProperties": {
-                "$ref": "#/components/schemas/S12StatisticsBlock"
-              },
-              "type": "object"
-            },
-            "title": "Strata",
-            "type": "object"
+            "$ref": "#/components/schemas/S12StrataStatistics"
           },
           "tracks": {
-            "additionalProperties": {
-              "$ref": "#/components/schemas/S12StatisticsBlock"
-            },
-            "title": "Tracks",
-            "type": "object"
+            "$ref": "#/components/schemas/S12TrackStatistics"
           },
           "tracks_declared": {
-            "additionalProperties": {
-              "$ref": "#/components/schemas/S12Membership"
-            },
-            "title": "Tracks Declared",
-            "type": "object"
+            "$ref": "#/components/schemas/S12TrackMemberships"
           },
           "views": {
-            "additionalProperties": {
-              "$ref": "#/components/schemas/S12StatisticsBlock"
-            },
-            "title": "Views",
-            "type": "object"
+            "$ref": "#/components/schemas/S12ViewStatistics"
           },
           "views_declared": {
-            "additionalProperties": {
-              "$ref": "#/components/schemas/S12Membership"
-            },
-            "title": "Views Declared",
-            "type": "object"
+            "$ref": "#/components/schemas/S12ViewMemberships"
           },
           "worker_id": {
             "title": "Worker Id",
@@ -12430,6 +12444,7 @@
           "stop_elapsed_ms",
           "completed_run_ids",
           "stop_rule_satisfied",
+          "runner_result_digest",
           "evidence_snapshot_ids",
           "seed",
           "budget",
@@ -12641,6 +12656,387 @@
         "title": "S12BusinessMeasurement",
         "type": "object"
       },
+      "S12CheckerArtifact": {
+        "additionalProperties": false,
+        "properties": {
+          "aliases": {
+            "items": {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "type": "string"
+                },
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              ],
+              "type": "array"
+            },
+            "title": "Aliases",
+            "type": "array"
+          },
+          "checker_build": {
+            "title": "Checker Build",
+            "type": "string"
+          },
+          "critical_low_conf_compare": {
+            "title": "Critical Low Conf Compare",
+            "type": "boolean"
+          },
+          "date_order": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date Order"
+          },
+          "expand_id15_to_18": {
+            "title": "Expand Id15 To 18",
+            "type": "boolean"
+          },
+          "field_types": {
+            "items": {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "string"
+                }
+              ],
+              "type": "array"
+            },
+            "title": "Field Types",
+            "type": "array"
+          },
+          "knowledge": {
+            "items": {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "type": "string"
+                },
+                {
+                  "items": {
+                    "maxItems": 2,
+                    "minItems": 2,
+                    "prefixItems": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "string"
+                      }
+                    ],
+                    "type": "array"
+                  },
+                  "type": "array"
+                }
+              ],
+              "type": "array"
+            },
+            "title": "Knowledge",
+            "type": "array"
+          },
+          "knowledge_digest": {
+            "title": "Knowledge Digest",
+            "type": "string"
+          },
+          "limits": {
+            "items": {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ],
+              "type": "array"
+            },
+            "title": "Limits",
+            "type": "array"
+          },
+          "low_confidence_threshold": {
+            "title": "Low Confidence Threshold",
+            "type": "number"
+          },
+          "normalizer_digest": {
+            "title": "Normalizer Digest",
+            "type": "string"
+          },
+          "release_id": {
+            "title": "Release Id",
+            "type": "string"
+          },
+          "rules": {
+            "items": {
+              "$ref": "#/components/schemas/S12CheckerRule"
+            },
+            "title": "Rules",
+            "type": "array"
+          },
+          "rules_digest": {
+            "title": "Rules Digest",
+            "type": "string"
+          },
+          "schema_version": {
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "vin_fix_ioq": {
+            "title": "Vin Fix Ioq",
+            "type": "boolean"
+          },
+          "vin_strict_check_digit": {
+            "title": "Vin Strict Check Digit",
+            "type": "boolean"
+          },
+          "waiver_policy_digest": {
+            "title": "Waiver Policy Digest",
+            "type": "string"
+          },
+          "waiver_policy_id": {
+            "title": "Waiver Policy Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "release_id",
+          "rules_digest",
+          "knowledge_digest",
+          "normalizer_digest",
+          "waiver_policy_id",
+          "waiver_policy_digest",
+          "checker_build",
+          "knowledge",
+          "aliases",
+          "field_types",
+          "rules",
+          "low_confidence_threshold",
+          "critical_low_conf_compare",
+          "vin_fix_ioq",
+          "vin_strict_check_digit",
+          "expand_id15_to_18",
+          "limits"
+        ],
+        "title": "S12CheckerArtifact",
+        "type": "object"
+      },
+      "S12CheckerRule": {
+        "additionalProperties": false,
+        "properties": {
+          "abs_tol": {
+            "title": "Abs Tol",
+            "type": "number"
+          },
+          "document_roles": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Document Roles",
+            "type": "array"
+          },
+          "field": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Field"
+          },
+          "if_field_present": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "If Field Present"
+          },
+          "item_field": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Item Field"
+          },
+          "list_field": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "List Field"
+          },
+          "min_confidence": {
+            "title": "Min Confidence",
+            "type": "number"
+          },
+          "on_missing": {
+            "title": "On Missing",
+            "type": "string"
+          },
+          "rel_tol": {
+            "title": "Rel Tol",
+            "type": "number"
+          },
+          "require_all_docs": {
+            "title": "Require All Docs",
+            "type": "boolean"
+          },
+          "required_field": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Required Field"
+          },
+          "rule_id": {
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "rule_type": {
+            "title": "Rule Type",
+            "type": "string"
+          },
+          "severity": {
+            "title": "Severity",
+            "type": "string"
+          },
+          "threshold": {
+            "title": "Threshold",
+            "type": "number"
+          },
+          "transfer_name_policy": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transfer Name Policy"
+          },
+          "transfer_new_roles": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Transfer New Roles",
+            "type": "array"
+          },
+          "transfer_old_roles": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Transfer Old Roles",
+            "type": "array"
+          },
+          "uncertain_band": {
+            "title": "Uncertain Band",
+            "type": "number"
+          },
+          "waivable": {
+            "title": "Waivable",
+            "type": "boolean"
+          },
+          "waiver_policy_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Waiver Policy Digest"
+          },
+          "waiver_policy_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Waiver Policy Id"
+          },
+          "waiver_reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Waiver Reasons",
+            "type": "array"
+          },
+          "waiver_scope": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Waiver Scope"
+          },
+          "waiver_ttl_seconds": {
+            "title": "Waiver Ttl Seconds",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "rule_id",
+          "rule_type",
+          "document_roles",
+          "on_missing",
+          "severity",
+          "threshold",
+          "uncertain_band",
+          "abs_tol",
+          "rel_tol",
+          "min_confidence",
+          "require_all_docs",
+          "transfer_old_roles",
+          "transfer_new_roles",
+          "waivable",
+          "waiver_reasons",
+          "waiver_ttl_seconds"
+        ],
+        "title": "S12CheckerRule",
+        "type": "object"
+      },
       "S12Cluster": {
         "additionalProperties": false,
         "properties": {
@@ -12773,6 +13169,69 @@
         "title": "S12CohortResponse",
         "type": "object"
       },
+      "S12ConfidenceSemantics": {
+        "additionalProperties": false,
+        "properties": {
+          "calibration": {
+            "title": "Calibration",
+            "type": "string"
+          },
+          "granularity": {
+            "title": "Granularity",
+            "type": "string"
+          },
+          "higher_is": {
+            "title": "Higher Is",
+            "type": "string"
+          },
+          "maximum": {
+            "title": "Maximum",
+            "type": "number"
+          },
+          "meaning": {
+            "title": "Meaning",
+            "type": "string"
+          },
+          "minimum": {
+            "title": "Minimum",
+            "type": "number"
+          }
+        },
+        "required": [
+          "minimum",
+          "maximum",
+          "higher_is",
+          "meaning",
+          "granularity",
+          "calibration"
+        ],
+        "title": "S12ConfidenceSemantics",
+        "type": "object"
+      },
+      "S12CoordinateSystem": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "origin": {
+            "title": "Origin",
+            "type": "string"
+          },
+          "unit": {
+            "title": "Unit",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "origin",
+          "unit"
+        ],
+        "title": "S12CoordinateSystem",
+        "type": "object"
+      },
       "S12Denominators": {
         "additionalProperties": false,
         "properties": {
@@ -12782,6 +13241,10 @@
           },
           "E_all": {
             "title": "E All",
+            "type": "integer"
+          },
+          "applicable_opportunities": {
+            "title": "Applicable Opportunities",
             "type": "integer"
           },
           "conditional_fpr": {
@@ -12824,6 +13287,7 @@
         "required": [
           "E",
           "E_all",
+          "applicable_opportunities",
           "n_consistent",
           "n_inconsistent",
           "n_consistent_decisive",
@@ -12864,6 +13328,33 @@
           "schema_version"
         ],
         "title": "S12EnvironmentResponse",
+        "type": "object"
+      },
+      "S12EvidenceDocument": {
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "title": "Document Id",
+            "type": "string"
+          },
+          "document_role": {
+            "title": "Document Role",
+            "type": "string"
+          },
+          "fields": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/S12EvidenceField"
+            },
+            "title": "Fields",
+            "type": "object"
+          }
+        },
+        "required": [
+          "document_id",
+          "document_role",
+          "fields"
+        ],
+        "title": "S12EvidenceDocument",
         "type": "object"
       },
       "S12EvidenceEventVector": {
@@ -12913,6 +13404,124 @@
           "payload_digest"
         ],
         "title": "S12EvidenceEventVector",
+        "type": "object"
+      },
+      "S12EvidenceField": {
+        "additionalProperties": false,
+        "properties": {
+          "confidence": {
+            "title": "Confidence",
+            "type": "number"
+          },
+          "eligibility_reason": {
+            "title": "Eligibility Reason",
+            "type": "string"
+          },
+          "evidence_eligible": {
+            "title": "Evidence Eligible",
+            "type": "boolean"
+          },
+          "observation_id": {
+            "title": "Observation Id",
+            "type": "string"
+          },
+          "producer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Producer Id"
+          },
+          "producer_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Producer Version"
+          },
+          "provenance_manifest_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provenance Manifest Digest"
+          },
+          "raw": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw"
+          },
+          "source_object_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Object Ref"
+          },
+          "source_page": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Page"
+          },
+          "source_region": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Region"
+          },
+          "source_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Sha256"
+          }
+        },
+        "required": [
+          "raw",
+          "confidence",
+          "observation_id",
+          "evidence_eligible",
+          "eligibility_reason"
+        ],
+        "title": "S12EvidenceField",
         "type": "object"
       },
       "S12EvidenceReference": {
@@ -12973,6 +13582,35 @@
           "snapshot_digest"
         ],
         "title": "S12EvidenceReferenceResponse",
+        "type": "object"
+      },
+      "S12EvidenceSnapshot": {
+        "additionalProperties": false,
+        "properties": {
+          "evidence": {
+            "items": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/S12EvidenceDocument"
+                },
+                {
+                  "$ref": "#/components/schemas/S12RegisteredEvidenceDocument"
+                }
+              ]
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "schema_version": {
+            "title": "Schema Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "evidence"
+        ],
+        "title": "S12EvidenceSnapshot",
         "type": "object"
       },
       "S12Exclusion": {
@@ -13064,6 +13702,11 @@
             "type": "string"
           },
           "scope_declared": {
+            "enum": [
+              "C",
+              "R-E2E",
+              "R-T4-conditional"
+            ],
             "title": "Scope Declared",
             "type": "string"
           },
@@ -13084,18 +13727,10 @@
             "type": "string"
           },
           "tracks": {
-            "additionalProperties": {
-              "$ref": "#/components/schemas/S12Membership"
-            },
-            "title": "Tracks",
-            "type": "object"
+            "$ref": "#/components/schemas/S12TrackMemberships"
           },
           "views": {
-            "additionalProperties": {
-              "$ref": "#/components/schemas/S12Membership"
-            },
-            "title": "Views",
-            "type": "object"
+            "$ref": "#/components/schemas/S12ViewMemberships"
           }
         },
         "required": [
@@ -13337,6 +13972,12 @@
           },
           "labels": {
             "additionalProperties": {
+              "enum": [
+                "consistent",
+                "inconsistent",
+                "indeterminate",
+                "not_applicable"
+              ],
               "type": "string"
             },
             "title": "Labels",
@@ -13349,9 +13990,15 @@
           "manifest_id": {
             "title": "Manifest Id",
             "type": "string"
+          },
+          "schema_version": {
+            "const": "s12-label-manifest/1",
+            "title": "Schema Version",
+            "type": "string"
           }
         },
         "required": [
+          "schema_version",
           "manifest_id",
           "manifest_digest"
         ],
@@ -13395,6 +14042,30 @@
           "phase"
         ],
         "title": "S12LifecycleEventVector",
+        "type": "object"
+      },
+      "S12Limits": {
+        "additionalProperties": false,
+        "properties": {
+          "max_documents": {
+            "title": "Max Documents",
+            "type": "integer"
+          },
+          "max_findings": {
+            "title": "Max Findings",
+            "type": "integer"
+          },
+          "max_runtime_ms": {
+            "title": "Max Runtime Ms",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "max_documents",
+          "max_findings",
+          "max_runtime_ms"
+        ],
+        "title": "S12Limits",
         "type": "object"
       },
       "S12MandatoryFamily": {
@@ -13488,6 +14159,146 @@
         "title": "S12Membership",
         "type": "object"
       },
+      "S12MetricBounds": {
+        "additionalProperties": false,
+        "properties": {
+          "coverage_lower": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Coverage Lower"
+          },
+          "false_negative_rate_upper": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "False Negative Rate Upper"
+          },
+          "false_positive_rate_upper": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "False Positive Rate Upper"
+          },
+          "miss_rate_upper": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Miss Rate Upper"
+          }
+        },
+        "title": "S12MetricBounds",
+        "type": "object"
+      },
+      "S12MetricIntervals": {
+        "additionalProperties": false,
+        "properties": {
+          "conditional_fpr": {
+            "items": {
+              "type": "number"
+            },
+            "title": "Conditional Fpr",
+            "type": "array"
+          },
+          "coverage": {
+            "items": {
+              "type": "number"
+            },
+            "title": "Coverage",
+            "type": "array"
+          },
+          "error_rate": {
+            "items": {
+              "type": "number"
+            },
+            "title": "Error Rate",
+            "type": "array"
+          },
+          "false_negative_rate": {
+            "items": {
+              "type": "number"
+            },
+            "title": "False Negative Rate",
+            "type": "array"
+          },
+          "false_positive_rate": {
+            "items": {
+              "type": "number"
+            },
+            "title": "False Positive Rate",
+            "type": "array"
+          },
+          "labelability": {
+            "items": {
+              "type": "number"
+            },
+            "title": "Labelability",
+            "type": "array"
+          },
+          "miss_rate": {
+            "items": {
+              "type": "number"
+            },
+            "title": "Miss Rate",
+            "type": "array"
+          },
+          "missing_rate": {
+            "items": {
+              "type": "number"
+            },
+            "title": "Missing Rate",
+            "type": "array"
+          },
+          "skipped_rate": {
+            "items": {
+              "type": "number"
+            },
+            "title": "Skipped Rate",
+            "type": "array"
+          },
+          "uncertain_on_inconsistent": {
+            "items": {
+              "type": "number"
+            },
+            "title": "Uncertain On Inconsistent",
+            "type": "array"
+          }
+        },
+        "required": [
+          "coverage",
+          "false_positive_rate",
+          "false_negative_rate",
+          "miss_rate",
+          "labelability",
+          "uncertain_on_inconsistent",
+          "skipped_rate",
+          "missing_rate",
+          "error_rate",
+          "conditional_fpr"
+        ],
+        "title": "S12MetricIntervals",
+        "type": "object"
+      },
       "S12Opportunity": {
         "additionalProperties": false,
         "properties": {
@@ -13561,6 +14372,11 @@
             "title": "Perturbation Family"
           },
           "target_scope": {
+            "enum": [
+              "C",
+              "R-E2E",
+              "R-T4-conditional"
+            ],
             "title": "Target Scope",
             "type": "string"
           },
@@ -13571,6 +14387,17 @@
             ],
             "title": "Track",
             "type": "string"
+          },
+          "variant_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Variant Id"
           }
         },
         "required": [
@@ -13677,6 +14504,11 @@
             "type": "string"
           },
           "target_scope": {
+            "enum": [
+              "C",
+              "R-E2E",
+              "R-T4-conditional"
+            ],
             "title": "Target Scope",
             "type": "string"
           },
@@ -13721,9 +14553,7 @@
             "$ref": "#/components/schemas/S12BusinessMeasurement"
           },
           "checker_artifact": {
-            "additionalProperties": true,
-            "title": "Checker Artifact",
-            "type": "object"
+            "$ref": "#/components/schemas/S12CheckerArtifact"
           },
           "clusters": {
             "items": {
@@ -13785,7 +14615,9 @@
             "$ref": "#/components/schemas/S12ReleaseResponse"
           },
           "run_specs": {
-            "additionalProperties": true,
+            "additionalProperties": {
+              "$ref": "#/components/schemas/S12RunSpec"
+            },
             "title": "Run Specs",
             "type": "object"
           },
@@ -13795,6 +14627,11 @@
             "type": "string"
           },
           "scope": {
+            "enum": [
+              "C",
+              "R-E2E",
+              "R-T4-conditional"
+            ],
             "title": "Scope",
             "type": "string"
           },
@@ -13806,22 +14643,18 @@
             "$ref": "#/components/schemas/S12Split"
           },
           "stop_rule": {
+            "enum": [
+              "plan-exhausted",
+              "budget-or-plan"
+            ],
             "title": "Stop Rule",
             "type": "string"
           },
           "tracks": {
-            "additionalProperties": {
-              "$ref": "#/components/schemas/S12Membership"
-            },
-            "title": "Tracks",
-            "type": "object"
+            "$ref": "#/components/schemas/S12TrackMemberships"
           },
           "views": {
-            "additionalProperties": {
-              "$ref": "#/components/schemas/S12Membership"
-            },
-            "title": "Views",
-            "type": "object"
+            "$ref": "#/components/schemas/S12ViewMemberships"
           }
         },
         "required": [
@@ -13967,6 +14800,45 @@
         "title": "S12PointMetrics",
         "type": "object"
       },
+      "S12PredictionCounts": {
+        "additionalProperties": false,
+        "properties": {
+          "consistent": {
+            "title": "Consistent",
+            "type": "integer"
+          },
+          "error": {
+            "title": "Error",
+            "type": "integer"
+          },
+          "inconsistent": {
+            "title": "Inconsistent",
+            "type": "integer"
+          },
+          "missing": {
+            "title": "Missing",
+            "type": "integer"
+          },
+          "skipped": {
+            "title": "Skipped",
+            "type": "integer"
+          },
+          "uncertain": {
+            "title": "Uncertain",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "consistent",
+          "inconsistent",
+          "uncertain",
+          "skipped",
+          "missing",
+          "error"
+        ],
+        "title": "S12PredictionCounts",
+        "type": "object"
+      },
       "S12PredictionError": {
         "additionalProperties": false,
         "properties": {
@@ -14046,6 +14918,352 @@
         "title": "S12ProcessResponse",
         "type": "object"
       },
+      "S12PublicRelease": {
+        "additionalProperties": false,
+        "properties": {
+          "applicable_check_count": {
+            "title": "Applicable Check Count",
+            "type": "integer"
+          },
+          "applicable_check_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Applicable Check Ids",
+            "type": "array"
+          },
+          "checker_build": {
+            "title": "Checker Build",
+            "type": "string"
+          },
+          "digest": {
+            "title": "Digest",
+            "type": "string"
+          },
+          "knowledge_digest": {
+            "title": "Knowledge Digest",
+            "type": "string"
+          },
+          "limits": {
+            "$ref": "#/components/schemas/S12Limits"
+          },
+          "normalizer_digest": {
+            "title": "Normalizer Digest",
+            "type": "string"
+          },
+          "release_id": {
+            "title": "Release Id",
+            "type": "string"
+          },
+          "rules_digest": {
+            "title": "Rules Digest",
+            "type": "string"
+          },
+          "waiver_policy_digest": {
+            "title": "Waiver Policy Digest",
+            "type": "string"
+          },
+          "waiver_policy_id": {
+            "title": "Waiver Policy Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "release_id",
+          "digest",
+          "checker_build",
+          "rules_digest",
+          "knowledge_digest",
+          "normalizer_digest",
+          "waiver_policy_id",
+          "waiver_policy_digest",
+          "limits",
+          "applicable_check_ids",
+          "applicable_check_count"
+        ],
+        "title": "S12PublicRelease",
+        "type": "object"
+      },
+      "S12RegisteredEvidenceDocument": {
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "title": "Document Id",
+            "type": "string"
+          },
+          "document_role": {
+            "title": "Document Role",
+            "type": "string"
+          },
+          "document_type": {
+            "title": "Document Type",
+            "type": "string"
+          },
+          "fields": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/S12EvidenceField"
+            },
+            "title": "Fields",
+            "type": "object"
+          },
+          "observations": {
+            "items": {
+              "$ref": "#/components/schemas/S12RegisteredObservation"
+            },
+            "title": "Observations",
+            "type": "array"
+          }
+        },
+        "required": [
+          "document_id",
+          "document_role",
+          "fields",
+          "document_type",
+          "observations"
+        ],
+        "title": "S12RegisteredEvidenceDocument",
+        "type": "object"
+      },
+      "S12RegisteredObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt_status": {
+            "enum": [
+              "observed",
+              "not_detected"
+            ],
+            "title": "Attempt Status",
+            "type": "string"
+          },
+          "confidence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence"
+          },
+          "confidence_semantics": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/S12ConfidenceSemantics"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "coordinate_system": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/S12CoordinateSystem"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "eligibility_reason": {
+            "title": "Eligibility Reason",
+            "type": "string"
+          },
+          "evidence_eligible": {
+            "title": "Evidence Eligible",
+            "type": "boolean"
+          },
+          "field": {
+            "title": "Field",
+            "type": "string"
+          },
+          "model_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Id"
+          },
+          "model_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Version"
+          },
+          "observation_id": {
+            "title": "Observation Id",
+            "type": "string"
+          },
+          "producer_family": {
+            "title": "Producer Family",
+            "type": "string"
+          },
+          "producer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Producer Id"
+          },
+          "producer_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Producer Run Id"
+          },
+          "producer_task_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Producer Task Id"
+          },
+          "producer_task_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Producer Task Version"
+          },
+          "provenance_manifest_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Provenance Manifest Digest",
+            "type": "string"
+          },
+          "raw": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw"
+          },
+          "raw_lexeme": {
+            "title": "Raw Lexeme",
+            "type": "string"
+          },
+          "raw_type": {
+            "enum": [
+              "null",
+              "string"
+            ],
+            "title": "Raw Type",
+            "type": "string"
+          },
+          "source_object_ref": {
+            "title": "Source Object Ref",
+            "type": "string"
+          },
+          "source_page": {
+            "title": "Source Page",
+            "type": "integer"
+          },
+          "source_pointer": {
+            "title": "Source Pointer",
+            "type": "string"
+          },
+          "source_receipt_id": {
+            "title": "Source Receipt Id",
+            "type": "string"
+          },
+          "source_region": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Region"
+          },
+          "source_result_object_ref": {
+            "title": "Source Result Object Ref",
+            "type": "string"
+          },
+          "source_result_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Source Result Sha256",
+            "type": "string"
+          },
+          "source_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Source Sha256",
+            "type": "string"
+          },
+          "value_state": {
+            "enum": [
+              "explicit_null",
+              "empty",
+              "present"
+            ],
+            "title": "Value State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "attempt_status",
+          "confidence",
+          "confidence_semantics",
+          "coordinate_system",
+          "eligibility_reason",
+          "evidence_eligible",
+          "field",
+          "model_id",
+          "model_version",
+          "observation_id",
+          "producer_family",
+          "producer_id",
+          "producer_run_id",
+          "producer_task_id",
+          "producer_task_version",
+          "provenance_manifest_digest",
+          "raw",
+          "raw_lexeme",
+          "raw_type",
+          "source_object_ref",
+          "source_page",
+          "source_pointer",
+          "source_receipt_id",
+          "source_region",
+          "source_result_object_ref",
+          "source_result_sha256",
+          "source_sha256",
+          "value_state"
+        ],
+        "title": "S12RegisteredObservation",
+        "type": "object"
+      },
       "S12ReleaseReference": {
         "additionalProperties": false,
         "properties": {
@@ -14085,11 +15303,7 @@
             "type": "string"
           },
           "limits": {
-            "additionalProperties": {
-              "type": "integer"
-            },
-            "title": "Limits",
-            "type": "object"
+            "$ref": "#/components/schemas/S12Limits"
           },
           "manifest_digest": {
             "title": "Manifest Digest",
@@ -14124,6 +15338,535 @@
           "applicable_check_count"
         ],
         "title": "S12ReleaseResponse",
+        "type": "object"
+      },
+      "S12ReplayPackage": {
+        "additionalProperties": false,
+        "properties": {
+          "applications": {
+            "items": {
+              "$ref": "#/components/schemas/S12RunnerApplication"
+            },
+            "title": "Applications",
+            "type": "array"
+          },
+          "business_after": {
+            "$ref": "#/components/schemas/S12BusinessMeasurement"
+          },
+          "business_before": {
+            "$ref": "#/components/schemas/S12BusinessMeasurement"
+          },
+          "business_deltas": {
+            "$ref": "#/components/schemas/S12BusinessDeltas"
+          },
+          "errors": {
+            "items": {
+              "$ref": "#/components/schemas/S12PredictionError"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "mandatory_family_statistics": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/S12StatisticsBlock"
+            },
+            "title": "Mandatory Family Statistics",
+            "type": "object"
+          },
+          "missing_opportunities": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Opportunities",
+            "type": "array"
+          },
+          "plan": {
+            "$ref": "#/components/schemas/S12PlanResponse"
+          },
+          "predictions": {
+            "additionalProperties": {
+              "enum": [
+                "consistent",
+                "inconsistent",
+                "uncertain",
+                "skipped",
+                "missing",
+                "error"
+              ],
+              "type": "string"
+            },
+            "title": "Predictions",
+            "type": "object"
+          },
+          "result_material": {
+            "$ref": "#/components/schemas/S12ResultMaterial"
+          },
+          "runner_result_digest": {
+            "title": "Runner Result Digest",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": "s12-replay-package/1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "scope_eligibility": {
+            "$ref": "#/components/schemas/S12ScopeEligibility"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "status_reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Status Reasons",
+            "type": "array"
+          },
+          "stop": {
+            "$ref": "#/components/schemas/S12StopObservation"
+          },
+          "strata": {
+            "$ref": "#/components/schemas/S12StrataStatistics"
+          },
+          "tracks_statistics": {
+            "$ref": "#/components/schemas/S12TrackStatistics"
+          },
+          "views_statistics": {
+            "$ref": "#/components/schemas/S12ViewStatistics"
+          }
+        },
+        "required": [
+          "schema_version",
+          "plan",
+          "predictions",
+          "errors",
+          "missing_opportunities",
+          "applications",
+          "stop",
+          "runner_result_digest",
+          "status",
+          "status_reasons",
+          "scope_eligibility",
+          "tracks_statistics",
+          "views_statistics",
+          "mandatory_family_statistics",
+          "strata",
+          "business_before",
+          "business_after",
+          "business_deltas",
+          "result_material"
+        ],
+        "title": "S12ReplayPackage",
+        "type": "object"
+      },
+      "S12ResultMaterial": {
+        "additionalProperties": false,
+        "properties": {
+          "budget": {
+            "$ref": "#/components/schemas/S12Budget"
+          },
+          "business_after": {
+            "$ref": "#/components/schemas/S12BusinessMeasurement"
+          },
+          "business_before": {
+            "$ref": "#/components/schemas/S12BusinessMeasurement"
+          },
+          "business_deltas": {
+            "$ref": "#/components/schemas/S12BusinessDeltas"
+          },
+          "clusters": {
+            "items": {
+              "$ref": "#/components/schemas/S12ClusterResponse"
+            },
+            "title": "Clusters",
+            "type": "array"
+          },
+          "cohort": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/S12CohortResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "completed_run_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Completed Run Ids",
+            "type": "array"
+          },
+          "environment": {
+            "$ref": "#/components/schemas/S12EnvironmentResponse"
+          },
+          "errors": {
+            "items": {
+              "$ref": "#/components/schemas/S12PredictionError"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "evidence_references": {
+            "items": {
+              "$ref": "#/components/schemas/S12EvidenceReferenceResponse"
+            },
+            "title": "Evidence References",
+            "type": "array"
+          },
+          "label_manifest": {
+            "$ref": "#/components/schemas/S12LabelManifestResponse"
+          },
+          "mandatory_check_families": {
+            "items": {
+              "$ref": "#/components/schemas/S12MandatoryFamilyResponse"
+            },
+            "title": "Mandatory Check Families",
+            "type": "array"
+          },
+          "mandatory_family_statistics": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/S12StatisticsBlock"
+            },
+            "title": "Mandatory Family Statistics",
+            "type": "object"
+          },
+          "missing_opportunities": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Opportunities",
+            "type": "array"
+          },
+          "opportunities": {
+            "items": {
+              "$ref": "#/components/schemas/S12OpportunityResponse"
+            },
+            "title": "Opportunities",
+            "type": "array"
+          },
+          "predictions": {
+            "additionalProperties": {
+              "enum": [
+                "consistent",
+                "inconsistent",
+                "uncertain",
+                "skipped",
+                "missing",
+                "error"
+              ],
+              "type": "string"
+            },
+            "title": "Predictions",
+            "type": "object"
+          },
+          "release": {
+            "$ref": "#/components/schemas/S12ReleaseResponse"
+          },
+          "runner_result_digest": {
+            "title": "Runner Result Digest",
+            "type": "string"
+          },
+          "scope": {
+            "enum": [
+              "C",
+              "R-E2E",
+              "R-T4-conditional"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "scope_eligibility": {
+            "$ref": "#/components/schemas/S12ScopeEligibility"
+          },
+          "seed": {
+            "title": "Seed",
+            "type": "integer"
+          },
+          "split": {
+            "$ref": "#/components/schemas/S12Split"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "status_reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Status Reasons",
+            "type": "array"
+          },
+          "stop_reason": {
+            "enum": [
+              "plan-exhausted",
+              "budget-or-plan"
+            ],
+            "title": "Stop Reason",
+            "type": "string"
+          },
+          "stop_rule": {
+            "enum": [
+              "plan-exhausted",
+              "budget-or-plan"
+            ],
+            "title": "Stop Rule",
+            "type": "string"
+          },
+          "strata": {
+            "$ref": "#/components/schemas/S12StrataStatistics"
+          },
+          "tracks": {
+            "$ref": "#/components/schemas/S12TrackMemberships"
+          },
+          "tracks_statistics": {
+            "$ref": "#/components/schemas/S12TrackStatistics"
+          },
+          "views": {
+            "$ref": "#/components/schemas/S12ViewMemberships"
+          },
+          "views_statistics": {
+            "$ref": "#/components/schemas/S12ViewStatistics"
+          }
+        },
+        "required": [
+          "scope",
+          "seed",
+          "budget",
+          "stop_rule",
+          "split",
+          "release",
+          "environment",
+          "evidence_references",
+          "label_manifest",
+          "mandatory_check_families",
+          "clusters",
+          "opportunities",
+          "tracks",
+          "views",
+          "predictions",
+          "errors",
+          "missing_opportunities",
+          "tracks_statistics",
+          "views_statistics",
+          "mandatory_family_statistics",
+          "strata",
+          "scope_eligibility",
+          "status",
+          "status_reasons",
+          "runner_result_digest",
+          "stop_reason",
+          "completed_run_ids",
+          "business_before",
+          "business_after",
+          "business_deltas"
+        ],
+        "title": "S12ResultMaterial",
+        "type": "object"
+      },
+      "S12RunSpec": {
+        "additionalProperties": false,
+        "properties": {
+          "applicable_check_count": {
+            "title": "Applicable Check Count",
+            "type": "integer"
+          },
+          "applicable_check_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Applicable Check Ids",
+            "type": "array"
+          },
+          "application_id": {
+            "title": "Application Id",
+            "type": "string"
+          },
+          "baseline_release": {
+            "$ref": "#/components/schemas/S12PublicRelease"
+          },
+          "check_id": {
+            "title": "Check Id",
+            "type": "string"
+          },
+          "checker_build": {
+            "title": "Checker Build",
+            "type": "string"
+          },
+          "cycle": {
+            "title": "Cycle",
+            "type": "integer"
+          },
+          "evidence_readiness_policy": {
+            "title": "Evidence Readiness Policy",
+            "type": "string"
+          },
+          "evidence_revision": {
+            "title": "Evidence Revision",
+            "type": "integer"
+          },
+          "evidence_snapshot": {
+            "$ref": "#/components/schemas/S12EvidenceSnapshot"
+          },
+          "evidence_snapshot_digest": {
+            "title": "Evidence Snapshot Digest",
+            "type": "string"
+          },
+          "evidence_snapshot_id": {
+            "title": "Evidence Snapshot Id",
+            "type": "string"
+          },
+          "fence": {
+            "title": "Fence",
+            "type": "integer"
+          },
+          "lifecycle_revision": {
+            "title": "Lifecycle Revision",
+            "type": "integer"
+          },
+          "limits": {
+            "$ref": "#/components/schemas/S12Limits"
+          },
+          "release_digest": {
+            "title": "Release Digest",
+            "type": "string"
+          },
+          "release_id": {
+            "title": "Release Id",
+            "type": "string"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "target_scope": {
+            "enum": [
+              "C",
+              "R-E2E",
+              "R-T4-conditional"
+            ],
+            "title": "Target Scope",
+            "type": "string"
+          },
+          "variant_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Variant Id"
+          }
+        },
+        "required": [
+          "run_id",
+          "application_id",
+          "cycle",
+          "lifecycle_revision",
+          "evidence_snapshot_id",
+          "evidence_snapshot_digest",
+          "evidence_snapshot",
+          "evidence_revision",
+          "check_id",
+          "target_scope",
+          "evidence_readiness_policy",
+          "baseline_release",
+          "release_id",
+          "release_digest",
+          "checker_build",
+          "fence",
+          "limits",
+          "applicable_check_ids",
+          "applicable_check_count"
+        ],
+        "title": "S12RunSpec",
+        "type": "object"
+      },
+      "S12RunnerApplication": {
+        "additionalProperties": false,
+        "properties": {
+          "application_id": {
+            "title": "Application Id",
+            "type": "string"
+          },
+          "checks": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/S12RunnerCheck"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checks"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "application_id",
+          "run_id"
+        ],
+        "title": "S12RunnerApplication",
+        "type": "object"
+      },
+      "S12RunnerCheck": {
+        "additionalProperties": false,
+        "properties": {
+          "reason_codes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reason Codes",
+            "type": "array"
+          },
+          "rule_id": {
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "severity": {
+            "title": "Severity",
+            "type": "string"
+          },
+          "verdict": {
+            "enum": [
+              "consistent",
+              "inconsistent",
+              "uncertain",
+              "skipped"
+            ],
+            "title": "Verdict",
+            "type": "string"
+          }
+        },
+        "required": [
+          "rule_id",
+          "verdict",
+          "severity",
+          "reason_codes"
+        ],
+        "title": "S12RunnerCheck",
         "type": "object"
       },
       "S12ScopeEligibility": {
@@ -14195,23 +15938,12 @@
           "bounds_95_one_sided": {
             "anyOf": [
               {
-                "additionalProperties": {
-                  "anyOf": [
-                    {
-                      "type": "number"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "type": "object"
+                "$ref": "#/components/schemas/S12MetricBounds"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Bounds 95 One Sided"
+            ]
           },
           "conclusion": {
             "title": "Conclusion",
@@ -14227,19 +15959,12 @@
           "interval_95_two_sided": {
             "anyOf": [
               {
-                "additionalProperties": {
-                  "items": {
-                    "type": "number"
-                  },
-                  "type": "array"
-                },
-                "type": "object"
+                "$ref": "#/components/schemas/S12MetricIntervals"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Interval 95 Two Sided"
+            ]
           },
           "membership": {
             "title": "Membership",
@@ -14260,11 +15985,7 @@
             "$ref": "#/components/schemas/S12PointMetrics"
           },
           "prediction_counts": {
-            "additionalProperties": {
-              "type": "integer"
-            },
-            "title": "Prediction Counts",
-            "type": "object"
+            "$ref": "#/components/schemas/S12PredictionCounts"
           }
         },
         "required": [
@@ -14278,6 +15999,146 @@
           "conclusion"
         ],
         "title": "S12StatisticsBlock",
+        "type": "object"
+      },
+      "S12StopObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "completed_run_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Completed Run Ids",
+            "type": "array"
+          },
+          "elapsed_ms": {
+            "title": "Elapsed Ms",
+            "type": "integer"
+          },
+          "stop_reason": {
+            "enum": [
+              "plan-exhausted",
+              "budget-or-plan"
+            ],
+            "title": "Stop Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "stop_reason",
+          "elapsed_ms",
+          "completed_run_ids"
+        ],
+        "title": "S12StopObservation",
+        "type": "object"
+      },
+      "S12StrataStatistics": {
+        "additionalProperties": false,
+        "properties": {
+          "data_source": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/S12StatisticsBlock"
+            },
+            "title": "Data Source",
+            "type": "object"
+          },
+          "difficulty": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/S12StatisticsBlock"
+            },
+            "title": "Difficulty",
+            "type": "object"
+          },
+          "document_combination": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/S12StatisticsBlock"
+            },
+            "title": "Document Combination",
+            "type": "object"
+          },
+          "perturbation_family": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/S12StatisticsBlock"
+            },
+            "title": "Perturbation Family",
+            "type": "object"
+          }
+        },
+        "required": [
+          "difficulty",
+          "data_source",
+          "document_combination",
+          "perturbation_family"
+        ],
+        "title": "S12StrataStatistics",
+        "type": "object"
+      },
+      "S12TrackMemberships": {
+        "additionalProperties": false,
+        "properties": {
+          "C": {
+            "$ref": "#/components/schemas/S12Membership"
+          },
+          "R": {
+            "$ref": "#/components/schemas/S12Membership"
+          }
+        },
+        "required": [
+          "R",
+          "C"
+        ],
+        "title": "S12TrackMemberships",
+        "type": "object"
+      },
+      "S12TrackStatistics": {
+        "additionalProperties": false,
+        "properties": {
+          "C": {
+            "$ref": "#/components/schemas/S12StatisticsBlock"
+          },
+          "R": {
+            "$ref": "#/components/schemas/S12StatisticsBlock"
+          }
+        },
+        "required": [
+          "R",
+          "C"
+        ],
+        "title": "S12TrackStatistics",
+        "type": "object"
+      },
+      "S12ViewMemberships": {
+        "additionalProperties": false,
+        "properties": {
+          "R-E2E": {
+            "$ref": "#/components/schemas/S12Membership"
+          },
+          "R-T4-conditional": {
+            "$ref": "#/components/schemas/S12Membership"
+          }
+        },
+        "required": [
+          "R-E2E",
+          "R-T4-conditional"
+        ],
+        "title": "S12ViewMemberships",
+        "type": "object"
+      },
+      "S12ViewStatistics": {
+        "additionalProperties": false,
+        "properties": {
+          "R-E2E": {
+            "$ref": "#/components/schemas/S12StatisticsBlock"
+          },
+          "R-T4-conditional": {
+            "$ref": "#/components/schemas/S12StatisticsBlock"
+          }
+        },
+        "required": [
+          "R-E2E",
+          "R-T4-conditional"
+        ],
+        "title": "S12ViewStatistics",
         "type": "object"
       },
       "T05BusinessExceptionOperationsResult": {

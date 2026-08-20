@@ -36,7 +36,11 @@ from task4_consistency.controlled.s12_runner import (
     RUNNER_RESULT_SCHEMA,
     run_s12_runner,
 )
-from task4_consistency.controlled.s01 import QueryNotFound
+from task4_consistency.controlled.s01 import (
+    EvaluationAuthorityUnavailable,
+    QueryNotFound,
+)
+from task4_consistency.controlled.s01_checker import TargetRelease
 from task4_consistency.controlled.s08 import (
     GovernedReleaseNotFound,
     PolicyUnavailable,
@@ -76,6 +80,11 @@ _MIN_INCONSISTENT_CLUSTERS = 99
 
 _USAGE_PARTITIONS = ("development", "calibration", "acceptance_holdout")
 
+_MANDATORY_FAMILY_REGISTRY = (
+    ("cross-document", frozenset({"R_ENGINE_CROSS", "R_VIN_CROSS"})),
+    ("brand-model", frozenset({"R_BRAND_CROSS", "R_MODEL_CROSS"})),
+)
+
 _ZERO_BUSINESS_DELTAS = {
     "lifecycle_revision": 0,
     "evidence_rows": 0,
@@ -112,6 +121,31 @@ def _business_deltas(
         "governance_revision": int(after.get("governance_revision") or 0)
         - int(before.get("governance_revision") or 0),
     }
+
+
+def _business_vector_change_reasons(
+    before: dict[str, Any], after: dict[str, Any]
+) -> list[str]:
+    return [
+        f"BUSINESS_AUTHORITY_CHANGED:{key}"
+        for key in sorted(set(before) | set(after))
+        if key not in before or key not in after or before[key] != after[key]
+    ]
+
+
+def _server_mandatory_families(check_ids: set[str]) -> list[dict[str, Any]]:
+    remaining = set(check_ids)
+    families: list[dict[str, Any]] = []
+    for family_id, registered_checks in _MANDATORY_FAMILY_REGISTRY:
+        selected = sorted(remaining & registered_checks)
+        if selected:
+            families.append({"family_id": family_id, "check_ids": selected})
+            remaining.difference_update(selected)
+    families.extend(
+        {"family_id": check_id, "check_ids": [check_id]}
+        for check_id in sorted(remaining)
+    )
+    return families
 
 
 # S12 immutable evaluation rows are keyed (table, item_id) with a payload
@@ -180,6 +214,10 @@ class LabelManifestUnavailable(S12Unavailable):
     claims can never impersonate the label authority."""
 
 
+class LabelManifestNotFound(ValueError):
+    """A healthy label authority has no registered manifest reference."""
+
+
 class LabelManifestStore:
     """Evaluation-owned configured label storage.  Manifests are registered
     files named ``<manifest_id>.json`` under one configured root; every
@@ -200,9 +238,13 @@ class LabelManifestStore:
         path = self._root / f"{manifest_id}.json"
         try:
             raw = path.read_bytes()
+        except FileNotFoundError:
+            raise LabelManifestNotFound(
+                f"label manifest is not registered: {manifest_id}"
+            ) from None
         except OSError:
             raise LabelManifestUnavailable(
-                f"label manifest is not registered: {manifest_id}"
+                f"label manifest storage is unavailable: {manifest_id}"
             ) from None
         try:
             manifest = json.loads(raw.decode("utf-8"))
@@ -548,6 +590,7 @@ class _EvalStore:
         bundle: dict[str, Any],
         predictions: dict[str, dict[str, Any]],
         attempt: dict[str, Any],
+        publication_precondition: Callable[[], bool] | None = None,
     ) -> bool:
         """Row-scoped atomic publication: one transaction conditionally owns
         the current leased job by job id, worker identity, fence, attempt and
@@ -558,6 +601,12 @@ class _EvalStore:
             connection.execute("BEGIN IMMEDIATE")
             current = self._owned_row(connection, job, now)
             if current is None:
+                connection.execute("ROLLBACK")
+                return False
+            if (
+                publication_precondition is not None
+                and not publication_precondition()
+            ):
                 connection.execute("ROLLBACK")
                 return False
             bundle_id = bundle["bundle_id"]
@@ -698,8 +747,14 @@ def _opportunity_point_metrics(
     inconsistent (n_inconsistent), skipped/missing/error (E_all), and
     conditional FPR (n_consistent_decisive).  Denominators never shrink when
     a prediction is uncertain/skipped/missing/error."""
-    e_all = len(opportunities)
+    e_all = sum(
+        opportunity["label"] != "not_applicable"
+        for opportunity in opportunities
+    )
     prediction_counts = {token: 0 for token in PREDICTION_ALPHABET}
+    applicable_prediction_counts = {
+        token: 0 for token in PREDICTION_ALPHABET
+    }
     fp = fn = miss = decisive = 0
     labeled = 0
     n_consistent = 0
@@ -710,6 +765,9 @@ def _opportunity_point_metrics(
         prediction = predictions.get(opportunity["opportunity_id"], "missing")
         prediction_counts[prediction] += 1
         gold = opportunity["label"]
+        if gold == "not_applicable":
+            continue
+        applicable_prediction_counts[prediction] += 1
         # ADR-0007 §4: labelability = count(gold in {consistent,
         # inconsistent}) / count(applicable opportunities).
         if gold in {"consistent", "inconsistent"}:
@@ -742,13 +800,13 @@ def _opportunity_point_metrics(
             else 0.0
         ),
         "skipped_rate": (
-            prediction_counts["skipped"] / e_all if e_all else 0.0
+            applicable_prediction_counts["skipped"] / e_all if e_all else 0.0
         ),
         "missing_rate": (
-            prediction_counts["missing"] / e_all if e_all else 0.0
+            applicable_prediction_counts["missing"] / e_all if e_all else 0.0
         ),
         "error_rate": (
-            prediction_counts["error"] / e_all if e_all else 0.0
+            applicable_prediction_counts["error"] / e_all if e_all else 0.0
         ),
         "conditional_fpr": (
             fp / n_consistent_decisive if n_consistent_decisive else 0.0
@@ -758,6 +816,7 @@ def _opportunity_point_metrics(
         "denominators": {
             "E": e,
             "E_all": e_all,
+            "applicable_opportunities": e_all,
             "n_consistent": n_consistent,
             "n_inconsistent": n_inconsistent,
             "n_consistent_decisive": n_consistent_decisive,
@@ -822,6 +881,7 @@ def _cluster_statistics(
             "denominators": {
                 "E": 0,
                 "E_all": 0,
+                "applicable_opportunities": 0,
                 "n_consistent": 0,
                 "n_inconsistent": 0,
                 "n_consistent_decisive": 0,
@@ -1068,8 +1128,8 @@ def _select_status(
     """Exact status vocabulary: INVALID / INSUFFICIENT / FAIL / PASS(scope=...)
     / SMOKE_ONLY.  Formal unscoped PASS is prohibited; PASS always carries the
     frozen plan scope.  The conclusion evaluates ONLY the selected formal
-    scope: C uses the C track; an R scope uses the R track plus exactly its
-    required view.  Aggregate R remains reported separately and can never
+    scope: C uses the C track and an R scope uses exactly its selected view.
+    Aggregate R remains reported separately and can never
     change another scope's conclusion.  A formal PASS additionally requires
     verified holdout eligibility and every declared mandatory check family
     estimable and passing; development/calibration evidence stays non-formal
@@ -1082,9 +1142,9 @@ def _select_status(
     if scope == "C":
         selected = [track_statistics["C"]]
     elif scope == "R-E2E":
-        selected = [track_statistics["R"], view_statistics["R-E2E"]]
+        selected = [view_statistics["R-E2E"]]
     else:  # R-T4-conditional
-        selected = [track_statistics["R"], view_statistics["R-T4-conditional"]]
+        selected = [view_statistics["R-T4-conditional"]]
     active = [item for item in selected if item["opportunity_count"] > 0]
     if not active:
         return "SMOKE_ONLY", ["no eligible C/I gold opportunities"]
@@ -1126,7 +1186,7 @@ def _holdout_eligibility(
     opportunities: list[dict[str, Any]],
     clusters: list[dict[str, Any]],
 ) -> tuple[bool, list[str]]:
-    """Formal eligibility: every frozen opportunity must belong to an
+    """Formal eligibility: every selected frozen opportunity must belong to an
     ``acceptance_holdout`` cluster and carry independent label custody.
     Development and calibration evidence can never support a formal result."""
     usage_by_cluster = {
@@ -1200,11 +1260,19 @@ class EvaluationService:
     def _stable_id(prefix: str, fingerprint: str) -> str:
         return f"{prefix}_{hashlib.sha256(fingerprint.encode()).hexdigest()[:24]}"
 
+    def _read_business_state(self) -> dict[str, Any]:
+        try:
+            return dict(self._business_state_provider())
+        except (RuntimeError, TypeError, ValueError) as error:
+            raise S12Unavailable(
+                "the business-state authority is unavailable or corrupt"
+            ) from error
+
     # -- plan freeze -------------------------------------------------------
 
     def freeze_plan(self, command: dict[str, Any]) -> dict[str, Any]:
         resolved = self._resolve_freeze_material(command)
-        business_before = dict(self._business_state_provider())
+        business_before = self._read_business_state()
         plan = {
             "schema_version": PLAN_SCHEMA,
             "plan_id": resolved["plan_id"],
@@ -1367,7 +1435,7 @@ class EvaluationService:
                 ) from error
             except S12Unavailable as error:
                 raise
-            except RuntimeError as error:
+            except (RuntimeError, EvaluationAuthorityUnavailable) as error:
                 raise S12Unavailable(
                     "the S01 evidence authority is unavailable or corrupt"
                 ) from error
@@ -1599,9 +1667,17 @@ class EvaluationService:
         mandatory_check_families = command.get("mandatory_check_families")
         if not isinstance(mandatory_check_families, list):
             raise ValueError("mandatory_check_families are required")
-        opportunity_check_ids = {
-            str(opportunity["check_id"]) for opportunity in opportunities
+        scope_opportunity_ids = (
+            track_members["C"] if scope == "C" else view_members[scope]
+        )
+        selected_check_ids = {
+            str(opportunity["check_id"])
+            for opportunity in opportunities
+            if opportunity["opportunity_id"] in scope_opportunity_ids
         }
+        expected_families = _server_mandatory_families(selected_check_ids)
+        declared_families: dict[str, tuple[str, ...]] = {}
+        declared_checks: set[str] = set()
         for family in mandatory_check_families:
             if (
                 not isinstance(family, dict)
@@ -1609,14 +1685,33 @@ class EvaluationService:
                 or not family["family_id"]
                 or not isinstance(family.get("check_ids"), list)
                 or not family["check_ids"]
+                or any(
+                    not isinstance(check_id, str) or not check_id
+                    for check_id in family["check_ids"]
+                )
             ):
                 raise ValueError("mandatory check family is invalid")
-            unknown_checks = set(family["check_ids"]) - opportunity_check_ids
-            if unknown_checks:
+            family_id = family["family_id"]
+            family_checks = set(family["check_ids"])
+            if (
+                family_id in declared_families
+                or len(family_checks) != len(family["check_ids"])
+                or declared_checks & family_checks
+            ):
                 raise ValueError(
-                    f"mandatory check family {family['family_id']} has no "
-                    "frozen opportunities"
+                    "mandatory check families must match the server-owned registry"
                 )
+            declared_families[family_id] = tuple(sorted(family_checks))
+            declared_checks.update(family_checks)
+        expected_by_id = {
+            family["family_id"]: tuple(family["check_ids"])
+            for family in expected_families
+        }
+        if declared_families != expected_by_id:
+            raise ValueError(
+                "mandatory check families must match the server-owned registry"
+            )
+        mandatory_check_families = expected_families
         cohort = command.get("cohort")
         if cohort is not None:
             if not isinstance(cohort, dict) or not isinstance(
@@ -1723,10 +1818,8 @@ class EvaluationService:
             "views": views,
             "opportunities": resolved_opportunities,
             "label_manifest": {
-                "manifest_id": label_manifest["manifest_id"],
+                **copy.deepcopy(label_manifest),
                 "manifest_digest": label_reference["manifest_digest"],
-                "label_custody": label_manifest.get("label_custody"),
-                "labels": copy.deepcopy(labels),
             },
             "environment": environment,
             "release": {
@@ -1871,21 +1964,9 @@ class EvaluationService:
             source_bundle_row = self._store.bundles.get(source_bundle)
             if source_bundle_row is None:
                 raise ValueError("job has no published bundle to rerun")
-            replay = source_bundle_row.get("replay_package")
-            if (
-                not isinstance(replay, dict)
-                or content_digest(replay)
-                != source_bundle_row.get("replay_package_digest")
-            ):
-                raise ValueError("source bundle replay package is invalid")
-            embedded_plan = replay.get("plan")
-            plan_digest = (
-                embedded_plan.get("plan_digest")
-                if isinstance(embedded_plan, dict)
-                else None
-            )
-            if not isinstance(plan_digest, str) or len(plan_digest) != 64:
-                raise ValueError("source bundle replay plan is invalid")
+            self._verify_replay_bundle(source_bundle, source_bundle_row)
+            replay = source_bundle_row["replay_package"]
+            plan_digest = replay["plan"]["plan_digest"]
             rerun_job_id = self._stable_id(
                 "s12job",
                 f"{source['plan_id']}:{worker_id}:{int(self._clock())}:"
@@ -1920,37 +2001,287 @@ class EvaluationService:
                 raise ValueError(f"job {job_id} does not exist")
             return job
 
+    @classmethod
+    def _verify_replay_bundle(
+        cls, bundle_id: str, bundle: dict[str, Any]
+    ) -> None:
+        try:
+            _verify_bundle_content_address(bundle_id, bundle)
+            replay = bundle["replay_package"]
+            if (
+                not isinstance(replay, dict)
+                or content_digest(replay) != bundle["replay_package_digest"]
+            ):
+                raise S12IntegrityError(
+                    "bundle replay package digest does not verify"
+                )
+            plan = replay["plan"]
+            if (
+                not isinstance(plan, dict)
+                or content_digest(
+                    {key: value for key, value in plan.items() if key != "plan_digest"}
+                )
+                != plan["plan_digest"]
+            ):
+                raise S12IntegrityError(
+                    "bundle replay plan digest does not verify"
+                )
+
+            label_manifest = plan["label_manifest"]
+            label_body = {
+                key: value
+                for key, value in label_manifest.items()
+                if key not in {"manifest_id", "manifest_digest"}
+            }
+            label_digest = content_digest(label_body)
+            if (
+                label_manifest.get("schema_version") != LABEL_MANIFEST_SCHEMA
+                or label_manifest.get("manifest_digest") != label_digest
+                or label_manifest.get("manifest_id")
+                != f"manifest_sha256_{label_digest}"
+            ):
+                raise S12IntegrityError(
+                    "bundle label manifest address does not verify"
+                )
+
+            target_release = TargetRelease.from_artifact(plan["checker_artifact"])
+            public_release = target_release.public_manifest()
+            release = plan["release"]
+            if (
+                release["release_id"] != target_release.release_id
+                or release["release_digest"] != target_release.release_digest
+                or release["checker_build"] != target_release.checker_build
+                or release["limits"] != public_release["limits"]
+                or list(release["applicable_check_ids"])
+                != list(public_release["applicable_check_ids"])
+                or release["applicable_check_count"]
+                != public_release["applicable_check_count"]
+            ):
+                raise S12IntegrityError(
+                    "bundle checker artifact and release identity disagree"
+                )
+
+            references = {
+                (
+                    reference["application_id"],
+                    int(reference["cycle"]),
+                    reference["snapshot_id"],
+                ): reference["snapshot_digest"]
+                for reference in plan["evidence_references"]
+            }
+            if len(references) != len(plan["evidence_references"]):
+                raise S12IntegrityError(
+                    "bundle evidence references are duplicated"
+                )
+            run_specs = plan["run_specs"]
+            used_runs: set[str] = set()
+            labels = label_manifest["labels"]
+            for opportunity in plan["opportunities"]:
+                opportunity_id = opportunity["opportunity_id"]
+                if (
+                    labels.get(opportunity_id) != opportunity["label"]
+                    or label_manifest.get("label_custody")
+                    != opportunity.get("label_custody")
+                ):
+                    raise S12IntegrityError(
+                        "bundle opportunity gold disagrees with label manifest"
+                    )
+                run_id = cls._run_reference_id(
+                    application_id=opportunity["application_id"],
+                    cycle=int(opportunity["cycle"]),
+                    snapshot_id=opportunity["evidence_snapshot_id"],
+                    check_id=opportunity["check_id"],
+                    target_scope=opportunity["target_scope"],
+                    variant_id=opportunity.get("variant_id"),
+                )
+                if opportunity["run_id"] != run_id or run_id not in run_specs:
+                    raise S12IntegrityError(
+                        "bundle opportunity and RunSpec identity disagree"
+                    )
+                used_runs.add(run_id)
+                run_spec = run_specs[run_id]
+                if any(
+                    run_spec.get(key) != opportunity.get(key)
+                    for key in (
+                        "application_id",
+                        "cycle",
+                        "check_id",
+                        "target_scope",
+                        "variant_id",
+                    )
+                ) or run_spec.get("run_id") != run_id:
+                    raise S12IntegrityError(
+                        "bundle RunSpec material disagrees with its opportunity"
+                    )
+                snapshot_digest = content_digest(run_spec["evidence_snapshot"])
+                reference_key = (
+                    run_spec["application_id"],
+                    int(run_spec["cycle"]),
+                    run_spec["evidence_snapshot_id"],
+                )
+                if (
+                    run_spec["evidence_snapshot_digest"] != snapshot_digest
+                    or references.get(reference_key) != snapshot_digest
+                    or run_spec["release_id"] != target_release.release_id
+                    or run_spec["release_digest"] != target_release.release_digest
+                    or run_spec["checker_build"] != target_release.checker_build
+                    or content_digest(run_spec["baseline_release"])
+                    != content_digest(public_release)
+                ):
+                    raise S12IntegrityError(
+                        "bundle RunSpec nested authority does not verify"
+                    )
+            if set(run_specs) != used_runs or set(labels) != {
+                opportunity["opportunity_id"]
+                for opportunity in plan["opportunities"]
+            }:
+                raise S12IntegrityError(
+                    "bundle replay universes do not match the frozen plan"
+                )
+
+            runner_material = {
+                "schema_version": RUNNER_RESULT_SCHEMA,
+                "applications": replay["applications"],
+                "stop": replay["stop"],
+            }
+            runner_digest = content_digest(runner_material)
+            runner_result = {"digest": runner_digest, **runner_material}
+            if (
+                replay["runner_result_digest"] != runner_digest
+                or bundle["runner_result_digest"] != runner_digest
+                or cls._validate_runner_result(runner_result, plan) is not None
+            ):
+                raise S12IntegrityError(
+                    "bundle runner observation does not verify"
+                )
+            predictions, errors, missing = cls._materialize_predictions(
+                plan, runner_result
+            )
+            completed_all_runs = set(replay["stop"]["completed_run_ids"]) == set(
+                plan["run_specs"]
+            )
+            stop_rule_satisfied = completed_all_runs and (
+                replay["stop"]["stop_reason"] == "plan-exhausted"
+                or plan["stop_rule"] == "budget-or-plan"
+            )
+            derived = cls._derive_evaluation(
+                plan,
+                predictions,
+                stop_rule_satisfied=stop_rule_satisfied,
+            )
+            expected_replay = {
+                "predictions": predictions,
+                "errors": errors,
+                "missing_opportunities": missing,
+                **derived,
+            }
+            if any(replay.get(key) != value for key, value in expected_replay.items()):
+                raise S12IntegrityError(
+                    "bundle replay derived material does not verify"
+                )
+            business_before = replay["business_before"]
+            business_after = replay["business_after"]
+            business_deltas = _business_deltas(business_before, business_after)
+            if replay["business_deltas"] != business_deltas:
+                raise S12IntegrityError(
+                    "bundle replay business vector does not verify"
+                )
+            expected_result_material = {
+                "scope": plan["scope"],
+                "seed": plan["seed"],
+                "budget": copy.deepcopy(plan["budget"]),
+                "stop_rule": plan["stop_rule"],
+                "split": copy.deepcopy(plan["split"]),
+                "release": copy.deepcopy(plan["release"]),
+                "environment": copy.deepcopy(plan["environment"]),
+                "evidence_references": copy.deepcopy(plan["evidence_references"]),
+                "label_manifest": copy.deepcopy(plan["label_manifest"]),
+                "mandatory_check_families": copy.deepcopy(
+                    plan["mandatory_check_families"]
+                ),
+                "cohort": copy.deepcopy(plan.get("cohort")),
+                "clusters": copy.deepcopy(plan["clusters"]),
+                "opportunities": copy.deepcopy(plan["opportunities"]),
+                "tracks": copy.deepcopy(plan["tracks"]),
+                "views": copy.deepcopy(plan["views"]),
+                **expected_replay,
+                "runner_result_digest": runner_digest,
+                "stop_reason": replay["stop"]["stop_reason"],
+                "completed_run_ids": replay["stop"]["completed_run_ids"],
+                "business_before": copy.deepcopy(business_before),
+                "business_after": copy.deepcopy(business_after),
+                "business_deltas": business_deltas,
+            }
+            result_material = replay["result_material"]
+            if (
+                result_material != expected_result_material
+                or content_digest(result_material) != bundle["result_digest"]
+            ):
+                raise S12IntegrityError(
+                    "bundle scientific result material does not verify"
+                )
+            top_level_expected = {
+                "plan_id": plan["plan_id"],
+                "plan_digest": plan["plan_digest"],
+                "status": result_material["status"],
+                "scope": plan["scope"],
+                "status_reasons": result_material["status_reasons"],
+                "tracks": replay["tracks_statistics"],
+                "views": replay["views_statistics"],
+                "mandatory_check_families": replay["mandatory_family_statistics"],
+                "strata": replay["strata"],
+                "scope_eligibility": replay["scope_eligibility"],
+                "clusters": plan["clusters"],
+                "opportunities": plan["opportunities"],
+                "tracks_declared": plan["tracks"],
+                "views_declared": plan["views"],
+                "evidence_references": plan["evidence_references"],
+                "label_manifest": plan["label_manifest"],
+                "cohort": plan.get("cohort"),
+                "predictions": predictions,
+                "errors": errors,
+                "missing_opportunities": missing,
+                "release": plan["release"],
+                "environment": plan["environment"],
+                "stop_rule": plan["stop_rule"],
+                "stop_reason": replay["stop"]["stop_reason"],
+                "stop_elapsed_ms": replay["stop"]["elapsed_ms"],
+                "completed_run_ids": replay["stop"]["completed_run_ids"],
+                "stop_rule_satisfied": stop_rule_satisfied,
+                "evidence_snapshot_ids": sorted(
+                    {
+                        opportunity["evidence_snapshot_id"]
+                        for opportunity in plan["opportunities"]
+                    }
+                ),
+                "seed": plan["seed"],
+                "budget": plan["budget"],
+                "split": plan["split"],
+                "business_before": business_before,
+                "business_after": business_after,
+                "business_deltas": business_deltas,
+            }
+            if any(
+                bundle.get(key) != value
+                for key, value in top_level_expected.items()
+            ):
+                raise S12IntegrityError(
+                    "bundle top-level and replay material disagree"
+                )
+        except S12IntegrityError:
+            raise
+        except (KeyError, TypeError, ValueError, OverflowError) as error:
+            raise S12IntegrityError(
+                "bundle nested replay material is invalid"
+            ) from error
+
     def query_bundle(self, bundle_id: str) -> dict[str, Any]:
         with self._lock:
             self._store.reload()
             bundle = self._store.bundles.get(bundle_id)
             if bundle is None:
                 raise ValueError(f"bundle {bundle_id} does not exist")
-            _verify_bundle_content_address(bundle_id, bundle)
-            replay = bundle.get("replay_package")
-            if (
-                not isinstance(replay, dict)
-                or content_digest(replay)
-                != bundle.get("replay_package_digest")
-            ):
-                raise S12IntegrityError(
-                    "bundle replay package digest does not verify"
-                )
-            embedded_plan = replay.get("plan")
-            if (
-                not isinstance(embedded_plan, dict)
-                or content_digest(
-                    {
-                        key: value
-                        for key, value in embedded_plan.items()
-                        if key != "plan_digest"
-                    }
-                )
-                != embedded_plan.get("plan_digest")
-            ):
-                raise S12IntegrityError(
-                    "bundle replay plan digest does not verify"
-                )
+            self._verify_replay_bundle(bundle_id, bundle)
             return bundle
 
     # -- durable worker -----------------------------------------------------
@@ -1977,27 +2308,11 @@ class EvaluationService:
                     snapshot, job, observed_now, ["SOURCE_BUNDLE_MISSING"]
                 )
             try:
-                _verify_bundle_content_address(rerun_of_bundle_id, source_bundle)
-                replay = source_bundle.get("replay_package")
-                if (
-                    not isinstance(replay, dict)
-                    or content_digest(replay)
-                    != source_bundle.get("replay_package_digest")
-                ):
-                    raise S12IntegrityError(
-                        "source bundle replay package digest does not verify"
-                    )
-                plan = replay.get("plan")
-                if (
-                    not isinstance(plan, dict)
-                    or content_digest(
-                        {k: v for k, v in plan.items() if k != "plan_digest"}
-                    )
-                    != plan.get("plan_digest")
-                ):
-                    raise S12IntegrityError(
-                        "source bundle replay plan digest does not verify"
-                    )
+                self._verify_replay_bundle(
+                    rerun_of_bundle_id, source_bundle
+                )
+                replay = source_bundle["replay_package"]
+                plan = replay["plan"]
             except S12IntegrityError:
                 return self._settle_diagnostic(
                     snapshot, job, observed_now, ["SOURCE_BUNDLE_INVALID"]
@@ -2033,114 +2348,46 @@ class EvaluationService:
         )
         stop_observation = runner_result["stop"]
         stop_reason = stop_observation["stop_reason"]
-        stop_rule_satisfied = plan["stop_rule"] == "budget-or-plan" or (
-            plan["stop_rule"] == "plan-exhausted"
-            and stop_reason == "plan-exhausted"
+        completed_all_runs = set(stop_observation["completed_run_ids"]) == set(
+            plan["run_specs"]
+        )
+        stop_rule_satisfied = completed_all_runs and (
+            stop_reason == "plan-exhausted"
+            or plan["stop_rule"] == "budget-or-plan"
         )
         opportunities = plan["opportunities"]
-        by_id = {opportunity["opportunity_id"]: opportunity for opportunity in opportunities}
-        track_statistics = {
-            track: _cluster_statistics(
-                [by_id[oid] for oid in membership["opportunities"]],
-                plan["clusters"],
-                predictions,
-                plan["seed"],
-                membership=track,
-            )
-            for track, membership in plan["tracks"].items()
-        }
-        view_statistics = {
-            view: _cluster_statistics(
-                [by_id[oid] for oid in membership["opportunities"]],
-                plan["clusters"],
-                predictions,
-                plan["seed"],
-                membership=view,
-            )
-            for view, membership in plan["views"].items()
-        }
-        # Formal eligibility and mandatory check families: derived from the
-        # frozen manifest, never from caller claims.
-        holdout_eligible, holdout_reasons = _holdout_eligibility(
-            opportunities, plan["clusters"]
-        )
-        mandatory_family_statistics: dict[str, dict[str, Any]] = {}
-        mandatory_families_ok = True
-        family_failures: list[str] = []
-        for family in plan["mandatory_check_families"]:
-            family_check_ids = set(family["check_ids"])
-            family_opportunities = [
-                opportunity
-                for opportunity in opportunities
-                if opportunity["check_id"] in family_check_ids
-            ]
-            family_statistics = _cluster_statistics(
-                family_opportunities,
-                plan["clusters"],
-                predictions,
-                plan["seed"],
-                membership=family["family_id"],
-            )
-            mandatory_family_statistics[family["family_id"]] = family_statistics
-            if not family_statistics["estimable"]:
-                mandatory_families_ok = False
-                family_failures.append(
-                    f"{family['family_id']}: "
-                    + ",".join(family_statistics["not_estimable_reasons"])
-                )
-            elif family_statistics["conclusion"] != "pass":
-                mandatory_families_ok = False
-                family_failures.append(
-                    f"{family['family_id']}: mandatory family gates not passing"
-                )
-        strata: dict[str, dict[str, dict[str, Any]]] = {}
-        for group_by in (
-            "difficulty",
-            "data_source",
-            "document_combination",
-            "perturbation_family",
-        ):
-            grouped: dict[str, list[dict[str, Any]]] = {}
-            for opportunity in opportunities:
-                value = opportunity.get(group_by)
-                if isinstance(value, str) and value:
-                    grouped.setdefault(value, []).append(opportunity)
-            strata[group_by] = {
-                value: _cluster_statistics(
-                    members,
-                    plan["clusters"],
-                    predictions,
-                    plan["seed"],
-                    membership=f"{group_by}:{value}",
-                )
-                for value, members in sorted(grouped.items())
-            }
-        status, status_reasons = _select_status(
-            track_statistics,
-            view_statistics,
-            plan["scope"],
-            holdout_eligible=holdout_eligible,
-            mandatory_families_ok=mandatory_families_ok,
+        derived = self._derive_evaluation(
+            plan,
+            predictions,
             stop_rule_satisfied=stop_rule_satisfied,
         )
-        scope_reasons = list(holdout_reasons)
-        scope_reasons.extend(family_failures)
+        track_statistics = derived["tracks_statistics"]
+        view_statistics = derived["views_statistics"]
+        mandatory_family_statistics = derived["mandatory_family_statistics"]
+        strata = derived["strata"]
+        scope_eligibility = derived["scope_eligibility"]
+        holdout_eligible = scope_eligibility["holdout_eligible"]
+        scope_reasons = scope_eligibility["reasons"]
+        status = derived["status"]
+        status_reasons = derived["status_reasons"]
         # Measured business state: capture again immediately before terminal
         # publication.  Any required fact that changed since freeze prevents
         # a formal result and records the exact changed fact.
-        business_before = plan.get("business_before") or {}
-        business_after = dict(self._business_state_provider())
-        changed_facts = sorted(
-            key
-            for key in business_before
-            if key in business_after and business_before[key] != business_after[key]
+        if rerun_of_bundle_id:
+            business_before = copy.deepcopy(replay["business_before"])
+            business_after = copy.deepcopy(replay["business_after"])
+        else:
+            business_before = plan.get("business_before") or {}
+            business_after = self._read_business_state()
+        changed_reasons = _business_vector_change_reasons(
+            business_before, business_after
         )
-        if changed_facts:
+        if changed_reasons:
             return self._settle_diagnostic(
                 snapshot,
                 job,
                 observed_now,
-                [f"BUSINESS_AUTHORITY_CHANGED:{key}" for key in changed_facts],
+                changed_reasons,
             )
         settled_at = int(self._clock())
         bundle_content = {
@@ -2181,6 +2428,7 @@ class EvaluationService:
             "release": copy.deepcopy(plan["release"]),
             "environment": copy.deepcopy(plan["environment"]),
             "stop_rule": plan["stop_rule"],
+            "runner_result_digest": runner_result["digest"],
             "stop_reason": stop_reason,
             "stop_elapsed_ms": stop_observation["elapsed_ms"],
             "completed_run_ids": copy.deepcopy(
@@ -2229,6 +2477,7 @@ class EvaluationService:
             },
             "status": status,
             "status_reasons": status_reasons,
+            "runner_result_digest": runner_result["digest"],
             "stop_reason": stop_reason,
             "completed_run_ids": stop_observation[
                 "completed_run_ids"
@@ -2246,6 +2495,7 @@ class EvaluationService:
             "missing_opportunities": missing,
             "applications": runner_result["applications"],
             "stop": stop_observation,
+            "runner_result_digest": runner_result["digest"],
             "status": status,
             "status_reasons": status_reasons,
             "scope_eligibility": {
@@ -2259,6 +2509,7 @@ class EvaluationService:
             "business_before": copy.deepcopy(business_before),
             "business_after": copy.deepcopy(business_after),
             "business_deltas": _business_deltas(business_before, business_after),
+            "result_material": copy.deepcopy(result_material),
         }
         bundle_content["replay_package"] = replay_package
         bundle_content["replay_package_digest"] = content_digest(replay_package)
@@ -2290,14 +2541,40 @@ class EvaluationService:
             }
             for opportunity_id, prediction in predictions.items()
         }
+        publication_reasons: list[str] = []
+
+        def publication_precondition() -> bool:
+            try:
+                current_business = self._read_business_state()
+            except S12Unavailable:
+                publication_reasons.append("BUSINESS_AUTHORITY_UNAVAILABLE")
+                return False
+            publication_reasons.extend(
+                _business_vector_change_reasons(business_before, current_business)
+            )
+            if current_business != business_after:
+                publication_reasons.extend(
+                    _business_vector_change_reasons(
+                        business_after, current_business
+                    )
+                )
+            return not publication_reasons
+
         published = self._store.publish_bundle_transaction(
             job,
             int(self._clock()),
             bundle=bundle_content,
             predictions=prediction_records,
             attempt=attempt_record,
+            publication_precondition=(
+                None if rerun_of_bundle_id else publication_precondition
+            ),
         )
         if not published:
+            if publication_reasons:
+                return self._settle_diagnostic(
+                    snapshot, job, observed_now, sorted(set(publication_reasons))
+                )
             return self._settle_stale_attempt(job, observed_now)
         self._store.reload()
         return {
@@ -2502,12 +2779,7 @@ class EvaluationService:
             return ["RUNNER_STOP_OBSERVATION_INVALID"]
         known_runs = set(plan["run_specs"])
         max_runtime_ms = int(plan["budget"]["max_runtime_ms"])
-        # The frozen global runtime window bounds every observed stop: at
-        # most one in-flight run may exceed the window, plus a fixed 1s
-        # boundary for sub-millisecond budgets.  Anything beyond that is a
-        # forged or unauthenticated stop observation.
-        elapsed_bound = max(2 * max_runtime_ms, max_runtime_ms + 1000)
-        if stop["elapsed_ms"] > elapsed_bound:
+        if stop["elapsed_ms"] > max_runtime_ms:
             return ["RUNNER_STOP_OBSERVATION_INVALID"]
         if stop["stop_reason"] == "plan-exhausted":
             if set(completed_ids) != known_runs:
@@ -2558,3 +2830,115 @@ class EvaluationService:
                 continue
             predictions[opportunity_id] = verdict
         return predictions, errors, missing
+
+    @staticmethod
+    def _derive_evaluation(
+        plan: dict[str, Any],
+        predictions: dict[str, str],
+        *,
+        stop_rule_satisfied: bool,
+    ) -> dict[str, Any]:
+        opportunities = plan["opportunities"]
+        by_id = {
+            opportunity["opportunity_id"]: opportunity
+            for opportunity in opportunities
+        }
+        scope_opportunity_ids = (
+            plan["tracks"]["C"]["opportunities"]
+            if plan["scope"] == "C"
+            else plan["views"][plan["scope"]]["opportunities"]
+        )
+        scope_opportunities = [by_id[oid] for oid in scope_opportunity_ids]
+        track_statistics = {
+            track: _cluster_statistics(
+                [by_id[oid] for oid in membership["opportunities"]],
+                plan["clusters"],
+                predictions,
+                plan["seed"],
+                membership=track,
+            )
+            for track, membership in plan["tracks"].items()
+        }
+        view_statistics = {
+            view: _cluster_statistics(
+                [by_id[oid] for oid in membership["opportunities"]],
+                plan["clusters"],
+                predictions,
+                plan["seed"],
+                membership=view,
+            )
+            for view, membership in plan["views"].items()
+        }
+        holdout_eligible, holdout_reasons = _holdout_eligibility(
+            scope_opportunities, plan["clusters"]
+        )
+        mandatory_family_statistics: dict[str, dict[str, Any]] = {}
+        mandatory_families_ok = True
+        family_failures: list[str] = []
+        for family in plan["mandatory_check_families"]:
+            family_check_ids = set(family["check_ids"])
+            family_statistics = _cluster_statistics(
+                [
+                    opportunity
+                    for opportunity in scope_opportunities
+                    if opportunity["check_id"] in family_check_ids
+                ],
+                plan["clusters"],
+                predictions,
+                plan["seed"],
+                membership=family["family_id"],
+            )
+            mandatory_family_statistics[family["family_id"]] = family_statistics
+            if not family_statistics["estimable"]:
+                mandatory_families_ok = False
+                family_failures.append(
+                    f"{family['family_id']}: "
+                    + ",".join(family_statistics["not_estimable_reasons"])
+                )
+            elif family_statistics["conclusion"] != "pass":
+                mandatory_families_ok = False
+                family_failures.append(
+                    f"{family['family_id']}: mandatory family gates not passing"
+                )
+        strata: dict[str, dict[str, dict[str, Any]]] = {}
+        for group_by in (
+            "difficulty",
+            "data_source",
+            "document_combination",
+            "perturbation_family",
+        ):
+            grouped: dict[str, list[dict[str, Any]]] = {}
+            for opportunity in opportunities:
+                value = opportunity.get(group_by)
+                if isinstance(value, str) and value:
+                    grouped.setdefault(value, []).append(opportunity)
+            strata[group_by] = {
+                value: _cluster_statistics(
+                    members,
+                    plan["clusters"],
+                    predictions,
+                    plan["seed"],
+                    membership=f"{group_by}:{value}",
+                )
+                for value, members in sorted(grouped.items())
+            }
+        status, status_reasons = _select_status(
+            track_statistics,
+            view_statistics,
+            plan["scope"],
+            holdout_eligible=holdout_eligible,
+            mandatory_families_ok=mandatory_families_ok,
+            stop_rule_satisfied=stop_rule_satisfied,
+        )
+        return {
+            "tracks_statistics": track_statistics,
+            "views_statistics": view_statistics,
+            "mandatory_family_statistics": mandatory_family_statistics,
+            "strata": strata,
+            "scope_eligibility": {
+                "holdout_eligible": holdout_eligible,
+                "reasons": sorted(set([*holdout_reasons, *family_failures])),
+            },
+            "status": status,
+            "status_reasons": status_reasons,
+        }

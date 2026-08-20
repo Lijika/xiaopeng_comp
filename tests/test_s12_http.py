@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -23,15 +24,25 @@ from task4_consistency.controlled.s12 import (
     EvaluationService,
     LabelManifestStore,
 )
-from task4_consistency.web.s12_http import S12BundleResponse
+from task4_consistency.controlled.s01 import ControlledScenarioTestDriver
+from task4_consistency.web.s12_http import (
+    S12BundleResponse,
+    S12EvidenceField,
+    S12FreezePlanBody,
+    S12PlanResponse,
+    S12StatisticsBlock,
+)
 from task4_consistency.web import app as webapp
 
 from tests.test_s12_controlled import (
     _make_business_harness,
     _make_governed_release,
     _reference_plan_command,
+    _s12_authority_service,
     _write_label_manifest,
 )
+from tests.test_s02_controlled import INTEGRATOR as S02_INTEGRATOR
+from tests.test_s02_controlled import _registered_service
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -214,6 +225,97 @@ def test_typed_freeze_start_process_query_bundle_and_rerun(
     )
 
 
+def test_s02_registered_snapshot_is_lossless_through_s12_http(
+    tmp_path: Path,
+) -> None:
+    business, submission = _registered_service(tmp_path / "s02")
+    admitted = business.submit_registered(
+        submission=submission,
+        idempotency_key="s12-s02-registered",
+        principal=S02_INTEGRATOR,
+    )
+    completed = ControlledScenarioTestDriver(business).process_next_job(now=0)
+    assert admitted.application_id is not None
+    assert completed.status == "complete"
+    assert completed.evidence_snapshot_id is not None
+    assert completed.evidence_snapshot_digest is not None
+    source_snapshot = business.evaluation_evidence_snapshot(
+        application_id=admitted.application_id,
+        snapshot_id=completed.evidence_snapshot_id,
+    )["evidence_snapshot"]
+
+    governance, release_id, release_digest, _manifest = _make_governed_release(
+        tmp_path
+    )
+    labels = {f"opp-{index}": "consistent" for index in range(4)}
+    label_root, manifest_id, manifest_digest = _write_label_manifest(tmp_path, labels)
+    service = _s12_authority_service(
+        tmp_path,
+        business_services=[business],
+        governance_service=governance,
+        label_root=label_root,
+        worker_subject=S12_WORKER_SUBJECT,
+    )
+    scenarios = (
+        "app_r53_bad_engine.json",
+        "app_s04_bad_vin.json",
+        "app_bad_brand.json",
+        "app_bad_model.json",
+    )
+    command = _reference_plan_command(
+        admitted=[(scenario, admitted.application_id) for scenario in scenarios],
+        snapshot_by_application={
+            admitted.application_id: (
+                completed.evidence_snapshot_id,
+                completed.evidence_snapshot_digest,
+            )
+        },
+        release_id=release_id,
+        release_digest=release_digest,
+        manifest_id=manifest_id,
+        manifest_digest=manifest_digest,
+        labels=labels,
+        plan_id="plan-s02-http",
+    )
+    command["clusters"] = [
+        {
+            "cluster_id": "cl-0",
+            "stratum": "registered",
+            "applications": [admitted.application_id],
+            "usage": "development",
+        }
+    ]
+    for opportunity in command["opportunities"]:
+        opportunity["cluster"] = "cl-0"
+        opportunity["data_source"] = "registered"
+    command["evidence_references"] = command["evidence_references"][:1]
+
+    frozen = S12PlanResponse.model_validate(service.freeze_plan(command)).model_dump(
+        mode="json", by_alias=True
+    )
+    run_spec = next(iter(frozen["run_specs"].values()))
+    assert run_spec["evidence_snapshot"] == source_snapshot
+    assert hashlib.sha256(
+        json.dumps(
+            run_spec["evidence_snapshot"],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest() == completed.evidence_snapshot_digest
+
+    started = service.start_job(command["plan_id"])
+    processed = service.process_job(started["job_id"])
+    assert processed["bundle_id"] is not None
+    queried = S12BundleResponse.model_validate(
+        service.query_bundle(processed["bundle_id"])
+    ).model_dump(mode="json", by_alias=True)
+    replay_run_spec = next(
+        iter(queried["replay_package"]["plan"]["run_specs"].values())
+    )
+    assert replay_run_spec["evidence_snapshot"] == source_snapshot
+
+
 def test_s12_http_unknown_and_invalid_commands_are_closed(
     monkeypatch: Any, tmp_path: Path
 ) -> None:
@@ -305,13 +407,16 @@ def test_s12_configuration_rejects_s01_demo_and_operator_identity_aliases(
     probe = (
         "import os; "
         "from task4_consistency.web import app as webapp; "
-        "print('S12_SERVICE=' + ('NONE' if webapp.S12_SERVICE is None else 'SET'))"
+        "print('S12_SERVICE=' + ('NONE' if webapp.S12_SERVICE is None else 'SET')); "
+        "print('S12_ERROR=' + str(webapp.S12_CONFIGURATION_ERROR))"
     )
     for duplicated in ("TASK4_S12_CREDENTIAL", "TASK4_S12_SUBJECT"):
         environment = os.environ.copy()
         environment["TASK4_S01_STATE_PATH"] = str(tmp_path / f"s01-{duplicated}.sqlite3")
         environment["TASK4_S01_AUDIT_AVAILABLE"] = "0"
         environment["TASK4_S12_STATE_PATH"] = str(tmp_path / f"s12-{duplicated}.sqlite3")
+        environment["TASK4_S12_LABEL_MANIFESTS_DIR"] = str(tmp_path / "labels")
+        environment["TASK4_S12_WORKER_SUBJECT"] = "c-demo-evaluation-worker"
         environment["TASK4_S01_DEMO_CREDENTIAL"] = "s01-demo-credential"
         environment["TASK4_S01_DEMO_SUBJECT"] = "c-demo-demo-user"
         environment["TASK4_S01_OPERATOR_CREDENTIAL"] = "s01-operator-credential"
@@ -332,6 +437,7 @@ def test_s12_configuration_rejects_s01_demo_and_operator_identity_aliases(
         )
         assert completed.returncode == 0, completed.stderr
         assert "S12_SERVICE=NONE" in completed.stdout, completed.stdout
+        assert "aliases a controlled identity" in completed.stdout
 
 
 def test_nested_freeze_and_bundle_dtos_reject_unknown_or_mistyped_fields(
@@ -359,6 +465,67 @@ def test_nested_freeze_and_bundle_dtos_reject_unknown_or_mistyped_fields(
         "/controlled/s12/plans/freeze", json=mistyped_opportunity, headers=_auth()
     )
     assert response.status_code == 422, response.text
+
+
+def test_request_preserves_variant_and_finite_scope(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    _service, plan_command, _context = _install_service(monkeypatch, tmp_path)
+    plan_command["scope_declared"] = "R-E2E"
+    plan_command["opportunities"][0]["variant_id"] = "variant-0"
+    plan_command["clusters"][0]["variants"] = ["variant-0"]
+    validated = S12FreezePlanBody.model_validate(plan_command)
+    assert validated.opportunities[0].variant_id == "variant-0"
+    assert validated.scope_declared == "R-E2E"
+
+    invalid_scope = copy.deepcopy(plan_command)
+    invalid_scope["scope_declared"] = "fabricated-scope"
+    with pytest.raises(Exception):
+        S12FreezePlanBody.model_validate(invalid_scope)
+
+
+def test_evidence_field_preserves_missing_raw_value() -> None:
+    field = S12EvidenceField.model_validate(
+        {
+            "raw": None,
+            "confidence": 0.0,
+            "observation_id": "observation-missing",
+            "evidence_eligible": False,
+            "eligibility_reason": "PROVENANCE_INELIGIBLE",
+        }
+    )
+
+    assert field.raw is None
+
+
+def test_finite_response_maps_reject_unknown_keys() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        S12StatisticsBlock.model_validate(
+            {
+                "membership": "C",
+                "opportunity_count": 1,
+                "denominators": {
+                    "E": 1,
+                    "E_all": 1,
+                    "n_consistent": 1,
+                    "n_inconsistent": 0,
+                    "n_consistent_decisive": 1,
+                    "labelability": 1,
+                    "uncertain_on_inconsistent": 0,
+                    "skipped_rate": 1,
+                    "missing_rate": 1,
+                    "error_rate": 1,
+                    "conditional_fpr": 1,
+                },
+                "prediction_counts": {"fabricated": 1},
+                "point": {"coverage": 1.0},
+                "estimable": False,
+                "not_estimable_reasons": [],
+                "conclusion": "insufficient",
+            }
+        )
 
 
 def test_generated_s12_schemas_are_recursively_closed(
@@ -402,22 +569,22 @@ def test_generated_s12_schemas_are_recursively_closed(
 
     def assert_closed(node: dict[str, Any], path: str) -> None:
         node = resolve(node)
-        # Opaque S01/S08-owned content fields stay dict-shaped by design:
-        # the S12 surface never re-types authority content (checker
-        # artifact, frozen RunSpecs, the replay package).
-        if path.rsplit(".", 1)[-1] in {
-            "checker_artifact",
+        identifier_map_fields = {
+            "fields",
+            "labels",
             "run_specs",
-            "replay_package",
-        }:
-            return
-        assert node.get("additionalProperties") is not True, (
-            f"open nested object at {path}: additionalProperties=true"
-        )
+            "predictions",
+            "mandatory_check_families",
+            "mandatory_family_statistics",
+            "difficulty",
+            "data_source",
+            "document_combination",
+            "perturbation_family",
+        }
+        additional = node.get("additionalProperties")
         if "properties" in node:
-            additional = node.get("additionalProperties", False)
-            assert additional is not True, (
-                f"open nested object at {path}: additionalProperties=true"
+            assert additional is False, (
+                f"finite object at {path} must set additionalProperties=false"
             )
             for name, child in node["properties"].items():
                 assert_closed(child, f"{path}.{name}")
@@ -425,10 +592,11 @@ def test_generated_s12_schemas_are_recursively_closed(
             assert_closed(node["items"], f"{path}[]")
         for variant in node.get("anyOf", []) or node.get("oneOf", []):
             assert_closed(variant, f"{path}|{variant.get('$ref') or 'variant'}")
-        if "additionalProperties" in node and isinstance(
-            node["additionalProperties"], dict
-        ):
-            assert_closed(node["additionalProperties"], f"{path}<value>")
+        if isinstance(additional, dict):
+            assert path.rsplit(".", 1)[-1] in identifier_map_fields, (
+                f"finite object at {path} is a typed open map"
+            )
+            assert_closed(additional, f"{path}<value>")
 
     critical = (
         "S12PlanResponse",
@@ -451,8 +619,34 @@ def test_generated_s12_schemas_are_recursively_closed(
         "S12EnvironmentResponse",
         "S12LabelManifestResponse",
         "S12EvidenceReferenceResponse",
+        "S12PredictionCounts",
+        "S12TrackStatistics",
+        "S12ViewStatistics",
+        "S12RunSpec",
+        "S12ReplayPackage",
     ):
         assert schema_name in schemas, schema_name
+
+    expected_properties = {
+        "S12PredictionCounts": {
+            "consistent",
+            "inconsistent",
+            "uncertain",
+            "skipped",
+            "missing",
+            "error",
+        },
+        "S12TrackStatistics": {"R", "C"},
+        "S12ViewStatistics": {"R-E2E", "R-T4-conditional"},
+        "S12StrataStatistics": {
+            "difficulty",
+            "data_source",
+            "document_combination",
+            "perturbation_family",
+        },
+    }
+    for schema_name, properties in expected_properties.items():
+        assert set(schemas[schema_name]["properties"]) == properties
 
 
 def test_generated_contract_test_fails_when_a_nested_schema_is_open(
@@ -470,28 +664,28 @@ def test_generated_contract_test_fails_when_a_nested_schema_is_open(
 
     def assert_closed(node: dict[str, Any], path: str) -> None:
         node = resolve(node)
-        assert node.get("additionalProperties") is not True, (
-            f"open nested object at {path}: additionalProperties=true"
-        )
+        additional = node.get("additionalProperties")
+        if additional is True:
+            raise AssertionError(f"object at {path} is open")
         if "properties" in node:
-            additional = node.get("additionalProperties", False)
-            assert additional is not True, (
-                f"open nested object at {path}: additionalProperties=true"
-            )
+            assert additional is False, f"finite object at {path} must be closed"
             for name, child in node["properties"].items():
                 assert_closed(child, f"{path}.{name}")
         if "items" in node:
             assert_closed(node["items"], f"{path}[]")
+        if isinstance(additional, dict):
+            raise AssertionError(f"finite object at {path} is a typed open map")
 
-    open_node = {"type": "object", "additionalProperties": True}
-    try:
-        assert_closed(open_node, "open")
-    except AssertionError:
-        pass
-    else:
-        raise AssertionError(
-            "the recursive checker accepted an open nested map"
-        )
+    for open_node in (
+        {"type": "object", "additionalProperties": True},
+        {
+            "type": "object",
+            "properties": {"known": {"type": "integer"}},
+            "additionalProperties": {"type": "integer"},
+        },
+    ):
+        with pytest.raises(AssertionError):
+            assert_closed(open_node, "finite")
 
 
 def test_s12_startup_requires_a_distinct_worker_subject(
@@ -565,6 +759,14 @@ def test_s12_response_models_reject_unknown_nested_fields(
     bundle["tracks"]["C"]["point"]["bogus_metric"] = 0.5
     with pytest.raises(ValidationError):
         S12BundleResponse.model_validate(bundle)
+    replay_unknown = fetched.json()
+    replay_unknown["replay_package"]["fabricated"] = True
+    with pytest.raises(ValidationError):
+        S12BundleResponse.model_validate(replay_unknown)
+    track_unknown = fetched.json()
+    track_unknown["tracks"]["fabricated"] = track_unknown["tracks"]["C"]
+    with pytest.raises(ValidationError):
+        S12BundleResponse.model_validate(track_unknown)
 
 
 def test_service_derives_worker_identity_and_has_no_caller_override(
@@ -726,6 +928,62 @@ def test_missing_or_corrupt_authority_closes_as_s12_unavailable(
         assert (
             response.json()["detail"]["error"] == "S12_UNAVAILABLE"
         ), provider_name
+
+
+def test_healthy_unknown_label_reference_is_an_invalid_command(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    _service, command, _context = _install_service(monkeypatch, tmp_path)
+    unknown = copy.deepcopy(command)
+    unknown["label_manifest"] = {
+        "manifest_id": "manifest_sha256_" + "0" * 64,
+        "manifest_digest": "0" * 64,
+    }
+
+    response = TestClient(webapp.app).post(
+        "/controlled/s12/plans/freeze", json=unknown, headers=_auth()
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["error"] == "S12_INVALID_COMMAND"
+
+
+def test_s01_evaluation_authority_unavailable_maps_to_503(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    service, command, _context = _install_service(monkeypatch, tmp_path)
+
+    def unavailable_snapshot(*_args: Any, **_kwargs: Any) -> Any:
+        from task4_consistency.controlled.s01 import EvaluationAuthorityUnavailable
+
+        raise EvaluationAuthorityUnavailable("S01 evaluation authority unavailable")
+
+    service._snapshot_provider = unavailable_snapshot
+    response = TestClient(webapp.app).post(
+        "/controlled/s12/plans/freeze", json=command, headers=_auth()
+    )
+
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"]["error"] == "S12_UNAVAILABLE"
+
+
+def test_s01_business_authority_unavailable_maps_to_503(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    service, command, _context = _install_service(monkeypatch, tmp_path)
+
+    def unavailable_business() -> dict[str, Any]:
+        from task4_consistency.controlled.s01 import EvaluationAuthorityUnavailable
+
+        raise EvaluationAuthorityUnavailable("S01 evaluation authority unavailable")
+
+    service._business_state_provider = unavailable_business
+    response = TestClient(webapp.app, raise_server_exceptions=False).post(
+        "/controlled/s12/plans/freeze", json=command, headers=_auth()
+    )
+
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"]["error"] == "S12_UNAVAILABLE"
 
 
 def test_diagnostic_job_query_serializes_reason_codes(

@@ -6314,7 +6314,7 @@ export interface components {
             /** Fence */
             fence: number;
             /** Gold Alphabet */
-            gold_alphabet: string[];
+            gold_alphabet: ("consistent" | "inconsistent" | "indeterminate" | "not_applicable")[];
             /** Job Id */
             job_id: string;
             label_manifest: components["schemas"]["S12LabelManifestResponse"];
@@ -6331,16 +6331,13 @@ export interface components {
             /** Plan Id */
             plan_id: string;
             /** Prediction Alphabet */
-            prediction_alphabet: string[];
+            prediction_alphabet: ("consistent" | "inconsistent" | "uncertain" | "skipped" | "missing" | "error")[];
             /** Predictions */
             predictions: {
-                [key: string]: string;
+                [key: string]: "consistent" | "inconsistent" | "uncertain" | "skipped" | "missing" | "error";
             };
             release: components["schemas"]["S12ReleaseResponse"];
-            /** Replay Package */
-            replay_package: {
-                [key: string]: unknown;
-            };
+            replay_package: components["schemas"]["S12ReplayPackage"];
             /** Replay Package Digest */
             replay_package_digest: string;
             /** Rerun Of Bundle Id */
@@ -6351,13 +6348,18 @@ export interface components {
             run_settled_at: number;
             /** Run Started At */
             run_started_at: number;
+            /** Runner Result Digest */
+            runner_result_digest: string;
             /**
              * Schema Version
              * @constant
              */
             schema_version: "s12-evaluation-bundle/1";
-            /** Scope */
-            scope: string;
+            /**
+             * Scope
+             * @enum {string}
+             */
+            scope: "C" | "R-E2E" | "R-T4-conditional";
             scope_eligibility: components["schemas"]["S12ScopeEligibility"];
             /** Seed */
             seed: number;
@@ -6368,34 +6370,23 @@ export interface components {
             status_reasons: string[];
             /** Stop Elapsed Ms */
             stop_elapsed_ms: number;
-            /** Stop Reason */
-            stop_reason: string;
-            /** Stop Rule */
-            stop_rule: string;
+            /**
+             * Stop Reason
+             * @enum {string}
+             */
+            stop_reason: "plan-exhausted" | "budget-or-plan";
+            /**
+             * Stop Rule
+             * @enum {string}
+             */
+            stop_rule: "plan-exhausted" | "budget-or-plan";
             /** Stop Rule Satisfied */
             stop_rule_satisfied: boolean;
-            /** Strata */
-            strata: {
-                [key: string]: {
-                    [key: string]: components["schemas"]["S12StatisticsBlock"];
-                };
-            };
-            /** Tracks */
-            tracks: {
-                [key: string]: components["schemas"]["S12StatisticsBlock"];
-            };
-            /** Tracks Declared */
-            tracks_declared: {
-                [key: string]: components["schemas"]["S12Membership"];
-            };
-            /** Views */
-            views: {
-                [key: string]: components["schemas"]["S12StatisticsBlock"];
-            };
-            /** Views Declared */
-            views_declared: {
-                [key: string]: components["schemas"]["S12Membership"];
-            };
+            strata: components["schemas"]["S12StrataStatistics"];
+            tracks: components["schemas"]["S12TrackStatistics"];
+            tracks_declared: components["schemas"]["S12TrackMemberships"];
+            views: components["schemas"]["S12ViewStatistics"];
+            views_declared: components["schemas"]["S12ViewMemberships"];
             /** Worker Id */
             worker_id: string;
         };
@@ -6488,6 +6479,115 @@ export interface components {
             /** Manifests Vector */
             manifests_vector?: components["schemas"]["S12ManifestVector"][];
         };
+        /** S12CheckerArtifact */
+        S12CheckerArtifact: {
+            /** Aliases */
+            aliases: [
+                string,
+                string[]
+            ][];
+            /** Checker Build */
+            checker_build: string;
+            /** Critical Low Conf Compare */
+            critical_low_conf_compare: boolean;
+            /** Date Order */
+            date_order?: string | null;
+            /** Expand Id15 To 18 */
+            expand_id15_to_18: boolean;
+            /** Field Types */
+            field_types: [
+                string,
+                string
+            ][];
+            /** Knowledge */
+            knowledge: [
+                string,
+                [
+                    string,
+                    string
+                ][]
+            ][];
+            /** Knowledge Digest */
+            knowledge_digest: string;
+            /** Limits */
+            limits: [
+                string,
+                number
+            ][];
+            /** Low Confidence Threshold */
+            low_confidence_threshold: number;
+            /** Normalizer Digest */
+            normalizer_digest: string;
+            /** Release Id */
+            release_id: string;
+            /** Rules */
+            rules: components["schemas"]["S12CheckerRule"][];
+            /** Rules Digest */
+            rules_digest: string;
+            /** Schema Version */
+            schema_version: string;
+            /** Vin Fix Ioq */
+            vin_fix_ioq: boolean;
+            /** Vin Strict Check Digit */
+            vin_strict_check_digit: boolean;
+            /** Waiver Policy Digest */
+            waiver_policy_digest: string;
+            /** Waiver Policy Id */
+            waiver_policy_id: string;
+        };
+        /** S12CheckerRule */
+        S12CheckerRule: {
+            /** Abs Tol */
+            abs_tol: number;
+            /** Document Roles */
+            document_roles: string[];
+            /** Field */
+            field?: string | null;
+            /** If Field Present */
+            if_field_present?: string | null;
+            /** Item Field */
+            item_field?: string | null;
+            /** List Field */
+            list_field?: string | null;
+            /** Min Confidence */
+            min_confidence: number;
+            /** On Missing */
+            on_missing: string;
+            /** Rel Tol */
+            rel_tol: number;
+            /** Require All Docs */
+            require_all_docs: boolean;
+            /** Required Field */
+            required_field?: string | null;
+            /** Rule Id */
+            rule_id: string;
+            /** Rule Type */
+            rule_type: string;
+            /** Severity */
+            severity: string;
+            /** Threshold */
+            threshold: number;
+            /** Transfer Name Policy */
+            transfer_name_policy?: string | null;
+            /** Transfer New Roles */
+            transfer_new_roles: string[];
+            /** Transfer Old Roles */
+            transfer_old_roles: string[];
+            /** Uncertain Band */
+            uncertain_band: number;
+            /** Waivable */
+            waivable: boolean;
+            /** Waiver Policy Digest */
+            waiver_policy_digest?: string | null;
+            /** Waiver Policy Id */
+            waiver_policy_id?: string | null;
+            /** Waiver Reasons */
+            waiver_reasons: string[];
+            /** Waiver Scope */
+            waiver_scope?: string | null;
+            /** Waiver Ttl Seconds */
+            waiver_ttl_seconds: number;
+        };
         /** S12Cluster */
         S12Cluster: {
             /** Applications */
@@ -6527,12 +6627,38 @@ export interface components {
             /** Exclusions */
             exclusions: components["schemas"]["S12Exclusion"][];
         };
+        /** S12ConfidenceSemantics */
+        S12ConfidenceSemantics: {
+            /** Calibration */
+            calibration: string;
+            /** Granularity */
+            granularity: string;
+            /** Higher Is */
+            higher_is: string;
+            /** Maximum */
+            maximum: number;
+            /** Meaning */
+            meaning: string;
+            /** Minimum */
+            minimum: number;
+        };
+        /** S12CoordinateSystem */
+        S12CoordinateSystem: {
+            /** Name */
+            name: string;
+            /** Origin */
+            origin: string;
+            /** Unit */
+            unit: string;
+        };
         /** S12Denominators */
         S12Denominators: {
             /** E */
             E: number;
             /** E All */
             E_all: number;
+            /** Applicable Opportunities */
+            applicable_opportunities: number;
             /** Conditional Fpr */
             conditional_fpr: number;
             /** Error Rate */
@@ -6563,6 +6689,17 @@ export interface components {
             /** Schema Version */
             schema_version: string;
         };
+        /** S12EvidenceDocument */
+        S12EvidenceDocument: {
+            /** Document Id */
+            document_id: string;
+            /** Document Role */
+            document_role: string;
+            /** Fields */
+            fields: {
+                [key: string]: components["schemas"]["S12EvidenceField"];
+            };
+        };
         /** S12EvidenceEventVector */
         S12EvidenceEventVector: {
             /** Application Id */
@@ -6581,6 +6718,33 @@ export interface components {
             revision: number;
             /** Snapshot Id */
             snapshot_id: string;
+        };
+        /** S12EvidenceField */
+        S12EvidenceField: {
+            /** Confidence */
+            confidence: number;
+            /** Eligibility Reason */
+            eligibility_reason: string;
+            /** Evidence Eligible */
+            evidence_eligible: boolean;
+            /** Observation Id */
+            observation_id: string;
+            /** Producer Id */
+            producer_id?: string | null;
+            /** Producer Version */
+            producer_version?: string | null;
+            /** Provenance Manifest Digest */
+            provenance_manifest_digest?: string | null;
+            /** Raw */
+            raw: string | null;
+            /** Source Object Ref */
+            source_object_ref?: string | null;
+            /** Source Page */
+            source_page?: number | null;
+            /** Source Region */
+            source_region?: string | null;
+            /** Source Sha256 */
+            source_sha256?: string | null;
         };
         /** S12EvidenceReference */
         S12EvidenceReference: {
@@ -6603,6 +6767,13 @@ export interface components {
             snapshot_digest: string;
             /** Snapshot Id */
             snapshot_id: string;
+        };
+        /** S12EvidenceSnapshot */
+        S12EvidenceSnapshot: {
+            /** Evidence */
+            evidence: (components["schemas"]["S12EvidenceDocument"] | components["schemas"]["S12RegisteredEvidenceDocument"])[];
+            /** Schema Version */
+            schema_version: string;
         };
         /** S12Exclusion */
         S12Exclusion: {
@@ -6634,8 +6805,11 @@ export interface components {
              * @constant
              */
             schema_version: "s12-plan-command/1";
-            /** Scope Declared */
-            scope_declared: string;
+            /**
+             * Scope Declared
+             * @enum {string}
+             */
+            scope_declared: "C" | "R-E2E" | "R-T4-conditional";
             /** Seed */
             seed: number;
             split: components["schemas"]["S12Split"];
@@ -6644,14 +6818,8 @@ export interface components {
              * @enum {string}
              */
             stop_rule: "plan-exhausted" | "budget-or-plan";
-            /** Tracks */
-            tracks: {
-                [key: string]: components["schemas"]["S12Membership"];
-            };
-            /** Views */
-            views: {
-                [key: string]: components["schemas"]["S12Membership"];
-            };
+            tracks: components["schemas"]["S12TrackMemberships"];
+            views: components["schemas"]["S12ViewMemberships"];
         };
         /** S12GovernanceEventVector */
         S12GovernanceEventVector: {
@@ -6721,12 +6889,17 @@ export interface components {
             label_custody?: string | null;
             /** Labels */
             labels?: {
-                [key: string]: string;
+                [key: string]: "consistent" | "inconsistent" | "indeterminate" | "not_applicable";
             };
             /** Manifest Digest */
             manifest_digest: string;
             /** Manifest Id */
             manifest_id: string;
+            /**
+             * Schema Version
+             * @constant
+             */
+            schema_version: "s12-label-manifest/1";
         };
         /** S12LifecycleEventVector */
         S12LifecycleEventVector: {
@@ -6742,6 +6915,15 @@ export interface components {
             reason_code: string;
             /** Revision */
             revision: number;
+        };
+        /** S12Limits */
+        S12Limits: {
+            /** Max Documents */
+            max_documents: number;
+            /** Max Findings */
+            max_findings: number;
+            /** Max Runtime Ms */
+            max_runtime_ms: number;
         };
         /** S12MandatoryFamily */
         S12MandatoryFamily: {
@@ -6773,6 +6955,40 @@ export interface components {
             /** Opportunities */
             opportunities: string[];
         };
+        /** S12MetricBounds */
+        S12MetricBounds: {
+            /** Coverage Lower */
+            coverage_lower?: number | null;
+            /** False Negative Rate Upper */
+            false_negative_rate_upper?: number | null;
+            /** False Positive Rate Upper */
+            false_positive_rate_upper?: number | null;
+            /** Miss Rate Upper */
+            miss_rate_upper?: number | null;
+        };
+        /** S12MetricIntervals */
+        S12MetricIntervals: {
+            /** Conditional Fpr */
+            conditional_fpr: number[];
+            /** Coverage */
+            coverage: number[];
+            /** Error Rate */
+            error_rate: number[];
+            /** False Negative Rate */
+            false_negative_rate: number[];
+            /** False Positive Rate */
+            false_positive_rate: number[];
+            /** Labelability */
+            labelability: number[];
+            /** Miss Rate */
+            miss_rate: number[];
+            /** Missing Rate */
+            missing_rate: number[];
+            /** Skipped Rate */
+            skipped_rate: number[];
+            /** Uncertain On Inconsistent */
+            uncertain_on_inconsistent: number[];
+        };
         /** S12Opportunity */
         S12Opportunity: {
             /** Application Id */
@@ -6795,13 +7011,18 @@ export interface components {
             opportunity_id: string;
             /** Perturbation Family */
             perturbation_family?: string | null;
-            /** Target Scope */
-            target_scope: string;
+            /**
+             * Target Scope
+             * @enum {string}
+             */
+            target_scope: "C" | "R-E2E" | "R-T4-conditional";
             /**
              * Track
              * @enum {string}
              */
             track: "R" | "C";
+            /** Variant Id */
+            variant_id?: string | null;
         };
         /** S12OpportunityResponse */
         S12OpportunityResponse: {
@@ -6831,8 +7052,11 @@ export interface components {
             perturbation_family?: string | null;
             /** Run Id */
             run_id: string;
-            /** Target Scope */
-            target_scope: string;
+            /**
+             * Target Scope
+             * @enum {string}
+             */
+            target_scope: "C" | "R-E2E" | "R-T4-conditional";
             /** Track */
             track: string;
             /** Variant Id */
@@ -6842,10 +7066,7 @@ export interface components {
         S12PlanResponse: {
             budget: components["schemas"]["S12Budget"];
             business_before: components["schemas"]["S12BusinessMeasurement"];
-            /** Checker Artifact */
-            checker_artifact: {
-                [key: string]: unknown;
-            };
+            checker_artifact: components["schemas"]["S12CheckerArtifact"];
             /** Clusters */
             clusters: components["schemas"]["S12ClusterResponse"][];
             cohort?: components["schemas"]["S12CohortResponse"] | null;
@@ -6866,28 +7087,28 @@ export interface components {
             release: components["schemas"]["S12ReleaseResponse"];
             /** Run Specs */
             run_specs: {
-                [key: string]: unknown;
+                [key: string]: components["schemas"]["S12RunSpec"];
             };
             /**
              * Schema Version
              * @constant
              */
             schema_version: "s12-evaluation-plan/1";
-            /** Scope */
-            scope: string;
+            /**
+             * Scope
+             * @enum {string}
+             */
+            scope: "C" | "R-E2E" | "R-T4-conditional";
             /** Seed */
             seed: number;
             split: components["schemas"]["S12Split"];
-            /** Stop Rule */
-            stop_rule: string;
-            /** Tracks */
-            tracks: {
-                [key: string]: components["schemas"]["S12Membership"];
-            };
-            /** Views */
-            views: {
-                [key: string]: components["schemas"]["S12Membership"];
-            };
+            /**
+             * Stop Rule
+             * @enum {string}
+             */
+            stop_rule: "plan-exhausted" | "budget-or-plan";
+            tracks: components["schemas"]["S12TrackMemberships"];
+            views: components["schemas"]["S12ViewMemberships"];
         };
         /** S12PointMetrics */
         S12PointMetrics: {
@@ -6911,6 +7132,21 @@ export interface components {
             skipped_rate?: number | null;
             /** Uncertain On Inconsistent */
             uncertain_on_inconsistent?: number | null;
+        };
+        /** S12PredictionCounts */
+        S12PredictionCounts: {
+            /** Consistent */
+            consistent: number;
+            /** Error */
+            error: number;
+            /** Inconsistent */
+            inconsistent: number;
+            /** Missing */
+            missing: number;
+            /** Skipped */
+            skipped: number;
+            /** Uncertain */
+            uncertain: number;
         };
         /** S12PredictionError */
         S12PredictionError: {
@@ -6940,6 +7176,111 @@ export interface components {
             /** Status */
             status: string;
         };
+        /** S12PublicRelease */
+        S12PublicRelease: {
+            /** Applicable Check Count */
+            applicable_check_count: number;
+            /** Applicable Check Ids */
+            applicable_check_ids: string[];
+            /** Checker Build */
+            checker_build: string;
+            /** Digest */
+            digest: string;
+            /** Knowledge Digest */
+            knowledge_digest: string;
+            limits: components["schemas"]["S12Limits"];
+            /** Normalizer Digest */
+            normalizer_digest: string;
+            /** Release Id */
+            release_id: string;
+            /** Rules Digest */
+            rules_digest: string;
+            /** Waiver Policy Digest */
+            waiver_policy_digest: string;
+            /** Waiver Policy Id */
+            waiver_policy_id: string;
+        };
+        /** S12RegisteredEvidenceDocument */
+        S12RegisteredEvidenceDocument: {
+            /** Document Id */
+            document_id: string;
+            /** Document Role */
+            document_role: string;
+            /** Document Type */
+            document_type: string;
+            /** Fields */
+            fields: {
+                [key: string]: components["schemas"]["S12EvidenceField"];
+            };
+            /** Observations */
+            observations: components["schemas"]["S12RegisteredObservation"][];
+        };
+        /** S12RegisteredObservation */
+        S12RegisteredObservation: {
+            /**
+             * Attempt Status
+             * @enum {string}
+             */
+            attempt_status: "observed" | "not_detected";
+            /** Confidence */
+            confidence: number | null;
+            confidence_semantics: components["schemas"]["S12ConfidenceSemantics"] | null;
+            coordinate_system: components["schemas"]["S12CoordinateSystem"] | null;
+            /** Eligibility Reason */
+            eligibility_reason: string;
+            /** Evidence Eligible */
+            evidence_eligible: boolean;
+            /** Field */
+            field: string;
+            /** Model Id */
+            model_id: string | null;
+            /** Model Version */
+            model_version: string | null;
+            /** Observation Id */
+            observation_id: string;
+            /** Producer Family */
+            producer_family: string;
+            /** Producer Id */
+            producer_id: string | null;
+            /** Producer Run Id */
+            producer_run_id: string | null;
+            /** Producer Task Id */
+            producer_task_id: string | null;
+            /** Producer Task Version */
+            producer_task_version: string | null;
+            /** Provenance Manifest Digest */
+            provenance_manifest_digest: string;
+            /** Raw */
+            raw: string | null;
+            /** Raw Lexeme */
+            raw_lexeme: string;
+            /**
+             * Raw Type
+             * @enum {string}
+             */
+            raw_type: "null" | "string";
+            /** Source Object Ref */
+            source_object_ref: string;
+            /** Source Page */
+            source_page: number;
+            /** Source Pointer */
+            source_pointer: string;
+            /** Source Receipt Id */
+            source_receipt_id: string;
+            /** Source Region */
+            source_region: string | null;
+            /** Source Result Object Ref */
+            source_result_object_ref: string;
+            /** Source Result Sha256 */
+            source_result_sha256: string;
+            /** Source Sha256 */
+            source_sha256: string;
+            /**
+             * Value State
+             * @enum {string}
+             */
+            value_state: "explicit_null" | "empty" | "present";
+        };
         /** S12ReleaseReference */
         S12ReleaseReference: {
             /** Release Digest */
@@ -6955,10 +7296,7 @@ export interface components {
             applicable_check_ids: string[];
             /** Checker Build */
             checker_build: string;
-            /** Limits */
-            limits: {
-                [key: string]: number;
-            };
+            limits: components["schemas"]["S12Limits"];
             /** Manifest Digest */
             manifest_digest: string;
             /** Manifest Id */
@@ -6969,6 +7307,175 @@ export interface components {
             release_digest: string;
             /** Release Id */
             release_id: string;
+        };
+        /** S12ReplayPackage */
+        S12ReplayPackage: {
+            /** Applications */
+            applications: components["schemas"]["S12RunnerApplication"][];
+            business_after: components["schemas"]["S12BusinessMeasurement"];
+            business_before: components["schemas"]["S12BusinessMeasurement"];
+            business_deltas: components["schemas"]["S12BusinessDeltas"];
+            /** Errors */
+            errors: components["schemas"]["S12PredictionError"][];
+            /** Mandatory Family Statistics */
+            mandatory_family_statistics: {
+                [key: string]: components["schemas"]["S12StatisticsBlock"];
+            };
+            /** Missing Opportunities */
+            missing_opportunities: string[];
+            plan: components["schemas"]["S12PlanResponse"];
+            /** Predictions */
+            predictions: {
+                [key: string]: "consistent" | "inconsistent" | "uncertain" | "skipped" | "missing" | "error";
+            };
+            result_material: components["schemas"]["S12ResultMaterial"];
+            /** Runner Result Digest */
+            runner_result_digest: string;
+            /**
+             * Schema Version
+             * @constant
+             */
+            schema_version: "s12-replay-package/1";
+            scope_eligibility: components["schemas"]["S12ScopeEligibility"];
+            /** Status */
+            status: string;
+            /** Status Reasons */
+            status_reasons: string[];
+            stop: components["schemas"]["S12StopObservation"];
+            strata: components["schemas"]["S12StrataStatistics"];
+            tracks_statistics: components["schemas"]["S12TrackStatistics"];
+            views_statistics: components["schemas"]["S12ViewStatistics"];
+        };
+        /** S12ResultMaterial */
+        S12ResultMaterial: {
+            budget: components["schemas"]["S12Budget"];
+            business_after: components["schemas"]["S12BusinessMeasurement"];
+            business_before: components["schemas"]["S12BusinessMeasurement"];
+            business_deltas: components["schemas"]["S12BusinessDeltas"];
+            /** Clusters */
+            clusters: components["schemas"]["S12ClusterResponse"][];
+            cohort?: components["schemas"]["S12CohortResponse"] | null;
+            /** Completed Run Ids */
+            completed_run_ids: string[];
+            environment: components["schemas"]["S12EnvironmentResponse"];
+            /** Errors */
+            errors: components["schemas"]["S12PredictionError"][];
+            /** Evidence References */
+            evidence_references: components["schemas"]["S12EvidenceReferenceResponse"][];
+            label_manifest: components["schemas"]["S12LabelManifestResponse"];
+            /** Mandatory Check Families */
+            mandatory_check_families: components["schemas"]["S12MandatoryFamilyResponse"][];
+            /** Mandatory Family Statistics */
+            mandatory_family_statistics: {
+                [key: string]: components["schemas"]["S12StatisticsBlock"];
+            };
+            /** Missing Opportunities */
+            missing_opportunities: string[];
+            /** Opportunities */
+            opportunities: components["schemas"]["S12OpportunityResponse"][];
+            /** Predictions */
+            predictions: {
+                [key: string]: "consistent" | "inconsistent" | "uncertain" | "skipped" | "missing" | "error";
+            };
+            release: components["schemas"]["S12ReleaseResponse"];
+            /** Runner Result Digest */
+            runner_result_digest: string;
+            /**
+             * Scope
+             * @enum {string}
+             */
+            scope: "C" | "R-E2E" | "R-T4-conditional";
+            scope_eligibility: components["schemas"]["S12ScopeEligibility"];
+            /** Seed */
+            seed: number;
+            split: components["schemas"]["S12Split"];
+            /** Status */
+            status: string;
+            /** Status Reasons */
+            status_reasons: string[];
+            /**
+             * Stop Reason
+             * @enum {string}
+             */
+            stop_reason: "plan-exhausted" | "budget-or-plan";
+            /**
+             * Stop Rule
+             * @enum {string}
+             */
+            stop_rule: "plan-exhausted" | "budget-or-plan";
+            strata: components["schemas"]["S12StrataStatistics"];
+            tracks: components["schemas"]["S12TrackMemberships"];
+            tracks_statistics: components["schemas"]["S12TrackStatistics"];
+            views: components["schemas"]["S12ViewMemberships"];
+            views_statistics: components["schemas"]["S12ViewStatistics"];
+        };
+        /** S12RunSpec */
+        S12RunSpec: {
+            /** Applicable Check Count */
+            applicable_check_count: number;
+            /** Applicable Check Ids */
+            applicable_check_ids: string[];
+            /** Application Id */
+            application_id: string;
+            baseline_release: components["schemas"]["S12PublicRelease"];
+            /** Check Id */
+            check_id: string;
+            /** Checker Build */
+            checker_build: string;
+            /** Cycle */
+            cycle: number;
+            /** Evidence Readiness Policy */
+            evidence_readiness_policy: string;
+            /** Evidence Revision */
+            evidence_revision: number;
+            evidence_snapshot: components["schemas"]["S12EvidenceSnapshot"];
+            /** Evidence Snapshot Digest */
+            evidence_snapshot_digest: string;
+            /** Evidence Snapshot Id */
+            evidence_snapshot_id: string;
+            /** Fence */
+            fence: number;
+            /** Lifecycle Revision */
+            lifecycle_revision: number;
+            limits: components["schemas"]["S12Limits"];
+            /** Release Digest */
+            release_digest: string;
+            /** Release Id */
+            release_id: string;
+            /** Run Id */
+            run_id: string;
+            /**
+             * Target Scope
+             * @enum {string}
+             */
+            target_scope: "C" | "R-E2E" | "R-T4-conditional";
+            /** Variant Id */
+            variant_id?: string | null;
+        };
+        /** S12RunnerApplication */
+        S12RunnerApplication: {
+            /** Application Id */
+            application_id: string;
+            /** Checks */
+            checks?: components["schemas"]["S12RunnerCheck"][] | null;
+            /** Error */
+            error?: string | null;
+            /** Run Id */
+            run_id: string;
+        };
+        /** S12RunnerCheck */
+        S12RunnerCheck: {
+            /** Reason Codes */
+            reason_codes: string[];
+            /** Rule Id */
+            rule_id: string;
+            /** Severity */
+            severity: string;
+            /**
+             * Verdict
+             * @enum {string}
+             */
+            verdict: "consistent" | "inconsistent" | "uncertain" | "skipped";
         };
         /** S12ScopeEligibility */
         S12ScopeEligibility: {
@@ -6991,19 +7498,13 @@ export interface components {
         };
         /** S12StatisticsBlock */
         S12StatisticsBlock: {
-            /** Bounds 95 One Sided */
-            bounds_95_one_sided?: {
-                [key: string]: number | null;
-            } | null;
+            bounds_95_one_sided?: components["schemas"]["S12MetricBounds"] | null;
             /** Conclusion */
             conclusion: string;
             denominators: components["schemas"]["S12Denominators"];
             /** Estimable */
             estimable: boolean;
-            /** Interval 95 Two Sided */
-            interval_95_two_sided?: {
-                [key: string]: number[];
-            } | null;
+            interval_95_two_sided?: components["schemas"]["S12MetricIntervals"] | null;
             /** Membership */
             membership: string;
             /** Not Estimable Reasons */
@@ -7011,10 +7512,58 @@ export interface components {
             /** Opportunity Count */
             opportunity_count: number;
             point: components["schemas"]["S12PointMetrics"];
-            /** Prediction Counts */
-            prediction_counts: {
-                [key: string]: number;
+            prediction_counts: components["schemas"]["S12PredictionCounts"];
+        };
+        /** S12StopObservation */
+        S12StopObservation: {
+            /** Completed Run Ids */
+            completed_run_ids: string[];
+            /** Elapsed Ms */
+            elapsed_ms: number;
+            /**
+             * Stop Reason
+             * @enum {string}
+             */
+            stop_reason: "plan-exhausted" | "budget-or-plan";
+        };
+        /** S12StrataStatistics */
+        S12StrataStatistics: {
+            /** Data Source */
+            data_source: {
+                [key: string]: components["schemas"]["S12StatisticsBlock"];
             };
+            /** Difficulty */
+            difficulty: {
+                [key: string]: components["schemas"]["S12StatisticsBlock"];
+            };
+            /** Document Combination */
+            document_combination: {
+                [key: string]: components["schemas"]["S12StatisticsBlock"];
+            };
+            /** Perturbation Family */
+            perturbation_family: {
+                [key: string]: components["schemas"]["S12StatisticsBlock"];
+            };
+        };
+        /** S12TrackMemberships */
+        S12TrackMemberships: {
+            C: components["schemas"]["S12Membership"];
+            R: components["schemas"]["S12Membership"];
+        };
+        /** S12TrackStatistics */
+        S12TrackStatistics: {
+            C: components["schemas"]["S12StatisticsBlock"];
+            R: components["schemas"]["S12StatisticsBlock"];
+        };
+        /** S12ViewMemberships */
+        S12ViewMemberships: {
+            "R-E2E": components["schemas"]["S12Membership"];
+            "R-T4-conditional": components["schemas"]["S12Membership"];
+        };
+        /** S12ViewStatistics */
+        S12ViewStatistics: {
+            "R-E2E": components["schemas"]["S12StatisticsBlock"];
+            "R-T4-conditional": components["schemas"]["S12StatisticsBlock"];
         };
         /** T05BusinessExceptionOperationsResult */
         T05BusinessExceptionOperationsResult: {

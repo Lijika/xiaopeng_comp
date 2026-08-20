@@ -307,6 +307,10 @@ try:
 except Exception as error:
     S01_SERVICE = None
     S01_CONFIGURATION_ERROR = str(error)
+S01_DEMO_CREDENTIAL = os.environ.get("TASK4_S01_DEMO_CREDENTIAL", "").strip()
+S01_DEMO_SUBJECT = os.environ.get("TASK4_S01_DEMO_SUBJECT", "").strip()
+S01_OPERATOR_CREDENTIAL = os.environ.get("TASK4_S01_OPERATOR_CREDENTIAL", "").strip()
+S01_OPERATOR_SUBJECT = os.environ.get("TASK4_S01_OPERATOR_SUBJECT", "").strip()
 # S12 isolated evaluation plane: gated on a separately configured evaluation
 # SQLite state path plus a distinct operator identity.  Missing or invalid
 # configuration keeps S01-S11 startup and routes available while every S12
@@ -331,8 +335,6 @@ def _s12_evaluation_service() -> EvaluationService | None:
         raise ValueError("TASK4_S12_STATE_PATH must be absolute")
     # P-5-style identity isolation: the S12 operator identity must not alias
     # any other controlled identity, or the evaluation plane stays closed.
-    # Resolved lazily because sibling credentials are defined later in this
-    # module.
     controlled_credentials = {
         globals().get(name, "")
         for name in (
@@ -422,10 +424,6 @@ S01_REQUIRE_CONFIGURED_STARTUP = True
 S01_SESSION_COOKIE = "s01_session"
 S01_SESSION_TTL_SECONDS = 15 * 60
 S01_SESSION_CLOCK: Callable[[], float] = time.time
-S01_DEMO_CREDENTIAL = os.environ.get("TASK4_S01_DEMO_CREDENTIAL", "").strip()
-S01_DEMO_SUBJECT = os.environ.get("TASK4_S01_DEMO_SUBJECT", "").strip()
-S01_OPERATOR_CREDENTIAL = os.environ.get("TASK4_S01_OPERATOR_CREDENTIAL", "").strip()
-S01_OPERATOR_SUBJECT = os.environ.get("TASK4_S01_OPERATOR_SUBJECT", "").strip()
 # ``S01_AUDITOR_CREDENTIAL`` / ``S01_AUDITOR_SUBJECT`` are loaded beside the
 # governance identities above (P-5) so the T09 scope gate can verify the
 # Auditor against every other controlled identity at configuration time.

@@ -6359,6 +6359,21 @@ def test_evaluation_business_measurement_changes_for_any_application_revision(
     assert after != before
 
 
+@pytest.mark.parametrize("flag", ["audit_available", "storage_available"])
+def test_evaluation_reads_require_storage_and_audit_authority(
+    tmp_path: Path, flag: str
+) -> None:
+    service, _state_path = _s12_two_application_business(tmp_path)
+    setattr(service, flag, False)
+
+    with pytest.raises(RuntimeError, match="S01 evaluation"):
+        service.evaluation_business_measurement()
+    with pytest.raises(RuntimeError, match="S01 evaluation"):
+        service.evaluation_evidence_snapshot(
+            application_id="app-0", snapshot_id="snapshot_sha256_" + "0" * 64
+        )
+
+
 def test_evaluation_evidence_measurement_changes_for_payload_with_same_snapshot_id(
     tmp_path: Path,
 ) -> None:
