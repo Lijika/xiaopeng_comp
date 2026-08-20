@@ -42,6 +42,7 @@ from task4_consistency.controlled.s01 import (
     _ApplicationStateAuthorityUnavailable,
 )
 from task4_consistency.controlled.s08 import PolicyGovernanceService
+from task4_consistency.controlled.s12 import EvaluationService
 from task4_consistency.controlled.s02 import (
     ControlledObject,
     RegisteredSource,
@@ -306,6 +307,65 @@ try:
 except Exception as error:
     S01_SERVICE = None
     S01_CONFIGURATION_ERROR = str(error)
+# S12 isolated evaluation plane: gated on a separately configured evaluation
+# SQLite state path plus a distinct operator identity.  Missing or invalid
+# configuration keeps S01-S11 startup and routes available while every S12
+# route reports scoped unavailability.
+S12_CONFIGURATION_ERROR: str | None = None
+S12_CREDENTIAL = os.environ.get("TASK4_S12_CREDENTIAL", "").strip()
+S12_SUBJECT = os.environ.get("TASK4_S12_SUBJECT", "").strip()
+S12_SERVICE: EvaluationService | None = None
+
+
+def _s12_evaluation_service() -> EvaluationService | None:
+    state_value = os.environ.get("TASK4_S12_STATE_PATH", "").strip()
+    if not state_value or not S12_CREDENTIAL or not S12_SUBJECT:
+        return None
+    state_path = Path(state_value)
+    if not state_path.is_absolute():
+        raise ValueError("TASK4_S12_STATE_PATH must be absolute")
+    # P-5-style identity isolation: the S12 operator identity must not alias
+    # any other controlled identity, or the evaluation plane stays closed.
+    # Resolved lazily because sibling credentials are defined later in this
+    # module.
+    controlled_credentials = {
+        globals().get(name, "")
+        for name in (
+            "S01_DEMO_CREDENTIAL",
+            "S01_OPERATOR_CREDENTIAL",
+            "S01_AUDITOR_CREDENTIAL",
+            "S05_EXCEPTION_APPROVER_CREDENTIAL",
+            "S08_ADMIN_CREDENTIAL",
+            "S08_APPROVER_CREDENTIAL",
+            "S08_OPERATOR_CREDENTIAL",
+            "S09_REPLAY_CREDENTIAL",
+            "S09_SIMULATION_CREDENTIAL",
+        )
+    }
+    controlled_subjects = {
+        globals().get(name, "")
+        for name in (
+            "S01_DEMO_SUBJECT",
+            "S01_OPERATOR_SUBJECT",
+            "S01_AUDITOR_SUBJECT",
+            "S05_EXCEPTION_APPROVER_SUBJECT",
+            "S08_ADMIN_SUBJECT",
+            "S08_APPROVER_SUBJECT",
+            "S08_OPERATOR_SUBJECT",
+            "S09_REPLAY_SUBJECT",
+            "S09_SIMULATION_SUBJECT",
+        )
+    }
+    if S12_CREDENTIAL in controlled_credentials or S12_SUBJECT in controlled_subjects:
+        raise ValueError("TASK4_S12 identity aliases a controlled identity")
+    return EvaluationService(state_path=state_path, clock=lambda: int(time.time()))
+
+
+try:
+    S12_SERVICE = _s12_evaluation_service()
+except Exception as error:
+    S12_SERVICE = None
+    S12_CONFIGURATION_ERROR = str(error)
 S01_TEST_DRIVER: ControlledScenarioTestDriver | None = None
 S01_BACKGROUND_ENABLED = _s01_demo_flag(
     "TASK4_S01_BACKGROUND_ENABLED", default=True
@@ -5554,6 +5614,17 @@ def kb_get() -> dict[str, Any]:
 from task4_consistency.web.s08_http import register_router
 
 register_router(app, sys.modules[__name__])
+
+# --- S12 isolated evaluation HTTP adapter --------------------------------
+# The typed S12 operator surface (freeze/start/cancel/process/query/rerun)
+# lives in web/s12_http.py on its own APIRouter and registers after S08 so
+# route registration order stays stable.  S12_SERVICE is None unless
+# TASK4_S12_STATE_PATH plus distinct TASK4_S12_CREDENTIAL/SUBJECT are
+# configured; every S12 route then reports scoped S12_UNAVAILABLE without
+# affecting any S01-S11 route.
+from task4_consistency.web.s12_http import register_router as register_s12_router
+
+register_s12_router(app, sys.modules[__name__])
 
 
 def create_s01_test_app() -> FastAPI:

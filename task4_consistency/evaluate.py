@@ -72,6 +72,11 @@ class Metrics:
     n_check_fail: int = 0
     verdict_counts: dict[str, int] = field(default_factory=dict)
     uncertain_rate: float = 0.0
+    # Ticket #28 / ADR-0007: the legacy fixture evaluator is classified
+    # C-DEV-REG (development regression) and never produces formal
+    # acceptance; formal acceptance reads S12 bundles only.
+    claim: str = "C-DEV-REG"
+    formal_acceptance: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -91,16 +96,20 @@ SUITE_DIRS: dict[str, list[Path]] = {
 HONESTY_MAIN = (
     "Official delivery metrics from suite=main only. "
     "field_source=synthetic/step2-bound fixtures are not external OCR. "
-    "Do not claim real-OCR evaluation unless field_source=external_ocr."
+    "Do not claim real-OCR evaluation unless field_source=external_ocr. "
+    "C-DEV-REG development regression only; never formal acceptance "
+    "(formal evaluation reads S12 sealed bundles)."
 )
 HONESTY_SEMI_SMOKE = (
     "suite=semi smoke mode: no reliable labels → FP/FN/coverage gates NOT claimed. "
     "Only load/run stability + verdict distribution. "
-    "Never use semi smoke to assert miss_rate/FNR thresholds."
+    "Never use semi smoke to assert miss_rate/FNR thresholds. "
+    "C-DEV-REG development regression only."
 )
 HONESTY_SEMI_LABELED = (
     "suite=semi labeled: FP/FN computed separately from main; "
-    "must NOT be merged into main denominator for delivery claims."
+    "must NOT be merged into main denominator for delivery claims. "
+    "C-DEV-REG development regression only."
 )
 
 
@@ -554,7 +563,8 @@ def metrics_to_html(metrics: Metrics) -> str:
 
     thr_rows = "".join(
         f"<tr><td>{html_mod.escape(k)}</td>"
-        f"<td style='color:{'green' if v else 'red'}'><b>{'PASS' if v else 'FAIL'}</b></td></tr>"
+        f"<td style='color:{'green' if v else 'red'}'>"
+        f"<b>{'C-DEV-REG PASS' if v else 'C-DEV-REG FAIL'}</b></td></tr>"
         for k, v in (metrics.pass_thresholds or {}).items()
     )
     kpi = f"""
@@ -611,8 +621,9 @@ table{{border-collapse:collapse;margin:16px 0}}
 td,th{{border:1px solid #ccc;padding:6px 10px}}
 .ok{{color:green}}.muted{{color:#888}}
 details{{margin:8px 0;padding:8px;background:#fafafa;border:1px solid #eee}}
-</style></head><body>
-<h1>Batch Evaluate Summary</h1>
+</style></head>
+<body>
+<h1>Batch Evaluate Summary — C-DEV-REG development regression (no formal acceptance)</h1>
 {kpi}
 <h2>Thresholds</h2>
 <table><tr><th>gate</th><th>result</th></tr>{thr_rows}</table>

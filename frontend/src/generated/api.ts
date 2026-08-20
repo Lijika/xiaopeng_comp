@@ -1874,6 +1874,150 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/controlled/s12/bundles/{bundle_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * S12 Query Bundle
+         * @description Query one immutable content-addressed evaluation bundle.
+         */
+        get: operations["s12_query_bundle_controlled_s12_bundles__bundle_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s12/jobs/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * S12 Start Job
+         * @description Start one durable evaluation job for a frozen plan.
+         */
+        post: operations["s12_start_job_controlled_s12_jobs_start_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s12/jobs/{job_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * S12 Query Job
+         * @description Query one durable job and its lease/fence/attempt state.
+         */
+        get: operations["s12_query_job_controlled_s12_jobs__job_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s12/jobs/{job_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * S12 Cancel Job
+         * @description Cancel a queued or leased job with zero business delta.
+         */
+        post: operations["s12_cancel_job_controlled_s12_jobs__job_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s12/jobs/{job_id}/process": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * S12 Process Job
+         * @description Execute one claimed durable job: restricted runner, parent
+         *     materialization, statistics, status selection, bundle publication.
+         */
+        post: operations["s12_process_job_controlled_s12_jobs__job_id__process_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s12/jobs/{job_id}/rerun": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * S12 Rerun Job
+         * @description Start a linked rerun job: its bundle will reference the source
+         *     bundle via ``rerun_of_bundle_id`` and never overwrite it.
+         */
+        post: operations["s12_rerun_job_controlled_s12_jobs__job_id__rerun_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s12/plans/freeze": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * S12 Freeze Plan
+         * @description Freeze one evaluation plan: cohorts, clusters, splits, opportunities,
+         *     independent gold labels, evidence snapshots, release/checker/build
+         *     identities, seed, budget and stop rule become one immutable plan.
+         */
+        post: operations["s12_freeze_plan_controlled_s12_plans_freeze_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/demo/react": {
         parameters: {
             query?: never;
@@ -6093,6 +6237,316 @@ export interface components {
             revision: number;
             /** Trusted Time */
             trusted_time: number;
+        };
+        /** S12BundleResponse */
+        S12BundleResponse: {
+            /** Attempt No */
+            attempt_no: number;
+            /** Budget */
+            budget: {
+                [key: string]: number;
+            };
+            /** Bundle Id */
+            bundle_id: string;
+            /** Business Deltas */
+            business_deltas: {
+                [key: string]: unknown;
+            };
+            /** Command */
+            command: string;
+            /** Environment */
+            environment: {
+                [key: string]: unknown;
+            };
+            /** Errors */
+            errors: {
+                [key: string]: string;
+            }[];
+            /** Evidence Snapshot Ids */
+            evidence_snapshot_ids: string[];
+            /** Fence */
+            fence: number;
+            /** Gold Alphabet */
+            gold_alphabet: string[];
+            /** Job Id */
+            job_id: string;
+            /** Missing Opportunities */
+            missing_opportunities: string[];
+            /** Plan Digest */
+            plan_digest: string;
+            /** Plan Id */
+            plan_id: string;
+            /** Prediction Alphabet */
+            prediction_alphabet: string[];
+            /** Predictions */
+            predictions: {
+                [key: string]: string;
+            };
+            /** Release */
+            release: {
+                [key: string]: unknown;
+            };
+            /** Rerun Of Bundle Id */
+            rerun_of_bundle_id: string | null;
+            /** Run Settled At */
+            run_settled_at: number;
+            /** Run Started At */
+            run_started_at: number;
+            /**
+             * Schema Version
+             * @constant
+             */
+            schema_version: "s12-evaluation-bundle/1";
+            /** Scope */
+            scope: string;
+            /** Seed */
+            seed: number;
+            /** Split */
+            split: {
+                [key: string]: unknown;
+            };
+            /** Status */
+            status: string;
+            /** Status Reasons */
+            status_reasons: string[];
+            /** Stop Rule */
+            stop_rule: string;
+            /** Stop Rule Satisfied */
+            stop_rule_satisfied: boolean;
+            /** Tracks */
+            tracks: {
+                [key: string]: unknown;
+            };
+            /** Views */
+            views: {
+                [key: string]: unknown;
+            };
+            /** Worker Id */
+            worker_id: string;
+        };
+        /** S12Cluster */
+        S12Cluster: {
+            /** Applications */
+            applications: string[];
+            /** Cluster Id */
+            cluster_id: string;
+            /** Stratum */
+            stratum: string;
+            /**
+             * Usage
+             * @enum {string}
+             */
+            usage: "development" | "calibration" | "acceptance_holdout";
+        };
+        /** S12FreezePlanBody */
+        S12FreezePlanBody: {
+            /** Budget */
+            budget: {
+                [key: string]: number;
+            };
+            /** Checker Artifact */
+            checker_artifact: {
+                [key: string]: unknown;
+            };
+            /** Clusters */
+            clusters: components["schemas"]["S12Cluster"][];
+            /** Environment */
+            environment: {
+                [key: string]: unknown;
+            };
+            /** Opportunities */
+            opportunities: components["schemas"]["S12Opportunity"][];
+            /** Plan Id */
+            plan_id: string;
+            /** Release */
+            release: {
+                [key: string]: unknown;
+            };
+            /** Run Specs */
+            run_specs: {
+                [key: string]: unknown;
+            };
+            /**
+             * Schema Version
+             * @constant
+             */
+            schema_version: "s12-plan-command/1";
+            /** Scope */
+            scope: string;
+            /** Seed */
+            seed: number;
+            /** Split */
+            split: {
+                [key: string]: unknown;
+            };
+            /** Stop Rule */
+            stop_rule: string;
+            /** Tracks */
+            tracks: {
+                [key: string]: components["schemas"]["S12Membership"];
+            };
+            /** Views */
+            views: {
+                [key: string]: components["schemas"]["S12Membership"];
+            };
+        };
+        /** S12JobResponse */
+        S12JobResponse: {
+            /** Attempt No */
+            attempt_no: number;
+            /** Created At */
+            created_at: number;
+            /** Fence */
+            fence: number;
+            /** Job Id */
+            job_id: string;
+            /** Lease Until */
+            lease_until?: number | null;
+            /** Plan Digest */
+            plan_digest: string;
+            /** Plan Id */
+            plan_id: string;
+            /** Reason Codes */
+            reason_codes?: string[] | null;
+            /** Rerun Of Bundle Id */
+            rerun_of_bundle_id: string | null;
+            /** Result */
+            result?: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Schema Version
+             * @constant
+             */
+            schema_version: "s12-job/1";
+            /** Status */
+            status: string;
+            /** Worker Id */
+            worker_id: string;
+        };
+        /** S12Membership */
+        S12Membership: {
+            /** Opportunities */
+            opportunities: string[];
+        };
+        /** S12Opportunity */
+        S12Opportunity: {
+            /** Application Id */
+            application_id: string;
+            /** Check Id */
+            check_id: string;
+            /** Cluster */
+            cluster: string;
+            /** Cycle */
+            cycle: number;
+            /** Evidence Snapshot Id */
+            evidence_snapshot_id: string;
+            /**
+             * Label
+             * @enum {string}
+             */
+            label: "consistent" | "inconsistent" | "indeterminate" | "not_applicable";
+            /** Opportunity Id */
+            opportunity_id: string;
+            /** Target Scope */
+            target_scope: string;
+            /**
+             * Track
+             * @enum {string}
+             */
+            track: "R" | "C";
+        };
+        /** S12PlanResponse */
+        S12PlanResponse: {
+            /** Budget */
+            budget: {
+                [key: string]: number;
+            };
+            /** Checker Artifact */
+            checker_artifact: {
+                [key: string]: unknown;
+            };
+            /** Clusters */
+            clusters: {
+                [key: string]: unknown;
+            }[];
+            /** Environment */
+            environment: {
+                [key: string]: unknown;
+            };
+            /** Frozen At */
+            frozen_at: number;
+            /** Opportunities */
+            opportunities: {
+                [key: string]: unknown;
+            }[];
+            /** Plan Digest */
+            plan_digest: string;
+            /** Plan Id */
+            plan_id: string;
+            /** Release */
+            release: {
+                [key: string]: unknown;
+            };
+            /** Run Specs */
+            run_specs: {
+                [key: string]: unknown;
+            };
+            /**
+             * Schema Version
+             * @constant
+             */
+            schema_version: "s12-evaluation-plan/1";
+            /** Scope */
+            scope: string;
+            /** Seed */
+            seed: number;
+            /** Split */
+            split: {
+                [key: string]: unknown;
+            };
+            /** Stop Rule */
+            stop_rule: string;
+            /** Tracks */
+            tracks: {
+                [key: string]: {
+                    [key: string]: unknown;
+                };
+            };
+            /** Views */
+            views: {
+                [key: string]: {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        /** S12ProcessResponse */
+        S12ProcessResponse: {
+            /**
+             * Attempt No
+             * @default 0
+             */
+            attempt_no: number;
+            /** Bundle Id */
+            bundle_id?: string | null;
+            /**
+             * Job Id
+             * @default
+             */
+            job_id: string;
+            /** Reason Code */
+            reason_code?: string | null;
+            /** Reason Codes */
+            reason_codes?: string[] | null;
+            /** Status */
+            status: string;
+        };
+        /** S12StartJobBody */
+        S12StartJobBody: {
+            /** Plan Id */
+            plan_id: string;
+            /** Worker Id */
+            worker_id: string;
         };
         /** T05BusinessExceptionOperationsResult */
         T05BusinessExceptionOperationsResult: {
@@ -11776,6 +12230,227 @@ export interface operations {
                 };
                 content: {
                     "text/html": string;
+                };
+            };
+        };
+    };
+    s12_query_bundle_controlled_s12_bundles__bundle_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bundle_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S12BundleResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    s12_start_job_controlled_s12_jobs_start_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["S12StartJobBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S12JobResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    s12_query_job_controlled_s12_jobs__job_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S12JobResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    s12_cancel_job_controlled_s12_jobs__job_id__cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S12JobResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    s12_process_job_controlled_s12_jobs__job_id__process_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S12ProcessResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    s12_rerun_job_controlled_s12_jobs__job_id__rerun_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S12JobResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    s12_freeze_plan_controlled_s12_plans_freeze_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["S12FreezePlanBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S12PlanResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

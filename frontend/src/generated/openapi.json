@@ -12013,6 +12013,736 @@
         "title": "S09WorkspaceEventRef",
         "type": "object"
       },
+      "S12BundleResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt_no": {
+            "title": "Attempt No",
+            "type": "integer"
+          },
+          "budget": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Budget",
+            "type": "object"
+          },
+          "bundle_id": {
+            "title": "Bundle Id",
+            "type": "string"
+          },
+          "business_deltas": {
+            "additionalProperties": true,
+            "title": "Business Deltas",
+            "type": "object"
+          },
+          "command": {
+            "title": "Command",
+            "type": "string"
+          },
+          "environment": {
+            "additionalProperties": true,
+            "title": "Environment",
+            "type": "object"
+          },
+          "errors": {
+            "items": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "evidence_snapshot_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Evidence Snapshot Ids",
+            "type": "array"
+          },
+          "fence": {
+            "title": "Fence",
+            "type": "integer"
+          },
+          "gold_alphabet": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Gold Alphabet",
+            "type": "array"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "missing_opportunities": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Opportunities",
+            "type": "array"
+          },
+          "plan_digest": {
+            "title": "Plan Digest",
+            "type": "string"
+          },
+          "plan_id": {
+            "title": "Plan Id",
+            "type": "string"
+          },
+          "prediction_alphabet": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Prediction Alphabet",
+            "type": "array"
+          },
+          "predictions": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Predictions",
+            "type": "object"
+          },
+          "release": {
+            "additionalProperties": true,
+            "title": "Release",
+            "type": "object"
+          },
+          "rerun_of_bundle_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rerun Of Bundle Id"
+          },
+          "run_settled_at": {
+            "title": "Run Settled At",
+            "type": "integer"
+          },
+          "run_started_at": {
+            "title": "Run Started At",
+            "type": "integer"
+          },
+          "schema_version": {
+            "const": "s12-evaluation-bundle/1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          },
+          "seed": {
+            "title": "Seed",
+            "type": "integer"
+          },
+          "split": {
+            "additionalProperties": true,
+            "title": "Split",
+            "type": "object"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "status_reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Status Reasons",
+            "type": "array"
+          },
+          "stop_rule": {
+            "title": "Stop Rule",
+            "type": "string"
+          },
+          "stop_rule_satisfied": {
+            "title": "Stop Rule Satisfied",
+            "type": "boolean"
+          },
+          "tracks": {
+            "additionalProperties": true,
+            "title": "Tracks",
+            "type": "object"
+          },
+          "views": {
+            "additionalProperties": true,
+            "title": "Views",
+            "type": "object"
+          },
+          "worker_id": {
+            "title": "Worker Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "bundle_id",
+          "plan_id",
+          "plan_digest",
+          "job_id",
+          "fence",
+          "attempt_no",
+          "worker_id",
+          "rerun_of_bundle_id",
+          "run_started_at",
+          "run_settled_at",
+          "status",
+          "scope",
+          "status_reasons",
+          "tracks",
+          "views",
+          "predictions",
+          "prediction_alphabet",
+          "gold_alphabet",
+          "errors",
+          "missing_opportunities",
+          "release",
+          "environment",
+          "stop_rule_satisfied",
+          "split",
+          "evidence_snapshot_ids",
+          "seed",
+          "budget",
+          "stop_rule",
+          "business_deltas",
+          "command"
+        ],
+        "title": "S12BundleResponse",
+        "type": "object"
+      },
+      "S12Cluster": {
+        "additionalProperties": false,
+        "properties": {
+          "applications": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Applications",
+            "type": "array"
+          },
+          "cluster_id": {
+            "title": "Cluster Id",
+            "type": "string"
+          },
+          "stratum": {
+            "title": "Stratum",
+            "type": "string"
+          },
+          "usage": {
+            "enum": [
+              "development",
+              "calibration",
+              "acceptance_holdout"
+            ],
+            "title": "Usage",
+            "type": "string"
+          }
+        },
+        "required": [
+          "cluster_id",
+          "stratum",
+          "applications",
+          "usage"
+        ],
+        "title": "S12Cluster",
+        "type": "object"
+      },
+      "S12FreezePlanBody": {
+        "additionalProperties": false,
+        "properties": {
+          "budget": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Budget",
+            "type": "object"
+          },
+          "checker_artifact": {
+            "additionalProperties": true,
+            "title": "Checker Artifact",
+            "type": "object"
+          },
+          "clusters": {
+            "items": {
+              "$ref": "#/components/schemas/S12Cluster"
+            },
+            "title": "Clusters",
+            "type": "array"
+          },
+          "environment": {
+            "additionalProperties": true,
+            "title": "Environment",
+            "type": "object"
+          },
+          "opportunities": {
+            "items": {
+              "$ref": "#/components/schemas/S12Opportunity"
+            },
+            "title": "Opportunities",
+            "type": "array"
+          },
+          "plan_id": {
+            "title": "Plan Id",
+            "type": "string"
+          },
+          "release": {
+            "additionalProperties": true,
+            "title": "Release",
+            "type": "object"
+          },
+          "run_specs": {
+            "additionalProperties": true,
+            "title": "Run Specs",
+            "type": "object"
+          },
+          "schema_version": {
+            "const": "s12-plan-command/1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          },
+          "seed": {
+            "title": "Seed",
+            "type": "integer"
+          },
+          "split": {
+            "additionalProperties": true,
+            "title": "Split",
+            "type": "object"
+          },
+          "stop_rule": {
+            "title": "Stop Rule",
+            "type": "string"
+          },
+          "tracks": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/S12Membership"
+            },
+            "title": "Tracks",
+            "type": "object"
+          },
+          "views": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/S12Membership"
+            },
+            "title": "Views",
+            "type": "object"
+          }
+        },
+        "required": [
+          "schema_version",
+          "plan_id",
+          "scope",
+          "seed",
+          "budget",
+          "stop_rule",
+          "split",
+          "environment",
+          "release",
+          "checker_artifact",
+          "run_specs",
+          "clusters",
+          "tracks",
+          "views",
+          "opportunities"
+        ],
+        "title": "S12FreezePlanBody",
+        "type": "object"
+      },
+      "S12JobResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt_no": {
+            "title": "Attempt No",
+            "type": "integer"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "integer"
+          },
+          "fence": {
+            "title": "Fence",
+            "type": "integer"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "lease_until": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lease Until"
+          },
+          "plan_digest": {
+            "title": "Plan Digest",
+            "type": "string"
+          },
+          "plan_id": {
+            "title": "Plan Id",
+            "type": "string"
+          },
+          "reason_codes": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Codes"
+          },
+          "rerun_of_bundle_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rerun Of Bundle Id"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
+          "schema_version": {
+            "const": "s12-job/1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "worker_id": {
+            "title": "Worker Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "job_id",
+          "plan_id",
+          "plan_digest",
+          "worker_id",
+          "status",
+          "fence",
+          "attempt_no",
+          "rerun_of_bundle_id",
+          "created_at"
+        ],
+        "title": "S12JobResponse",
+        "type": "object"
+      },
+      "S12Membership": {
+        "additionalProperties": false,
+        "properties": {
+          "opportunities": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Opportunities",
+            "type": "array"
+          }
+        },
+        "required": [
+          "opportunities"
+        ],
+        "title": "S12Membership",
+        "type": "object"
+      },
+      "S12Opportunity": {
+        "additionalProperties": false,
+        "properties": {
+          "application_id": {
+            "title": "Application Id",
+            "type": "string"
+          },
+          "check_id": {
+            "title": "Check Id",
+            "type": "string"
+          },
+          "cluster": {
+            "title": "Cluster",
+            "type": "string"
+          },
+          "cycle": {
+            "title": "Cycle",
+            "type": "integer"
+          },
+          "evidence_snapshot_id": {
+            "title": "Evidence Snapshot Id",
+            "type": "string"
+          },
+          "label": {
+            "enum": [
+              "consistent",
+              "inconsistent",
+              "indeterminate",
+              "not_applicable"
+            ],
+            "title": "Label",
+            "type": "string"
+          },
+          "opportunity_id": {
+            "title": "Opportunity Id",
+            "type": "string"
+          },
+          "target_scope": {
+            "title": "Target Scope",
+            "type": "string"
+          },
+          "track": {
+            "enum": [
+              "R",
+              "C"
+            ],
+            "title": "Track",
+            "type": "string"
+          }
+        },
+        "required": [
+          "opportunity_id",
+          "track",
+          "cluster",
+          "application_id",
+          "cycle",
+          "check_id",
+          "target_scope",
+          "evidence_snapshot_id",
+          "label"
+        ],
+        "title": "S12Opportunity",
+        "type": "object"
+      },
+      "S12PlanResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "budget": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Budget",
+            "type": "object"
+          },
+          "checker_artifact": {
+            "additionalProperties": true,
+            "title": "Checker Artifact",
+            "type": "object"
+          },
+          "clusters": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Clusters",
+            "type": "array"
+          },
+          "environment": {
+            "additionalProperties": true,
+            "title": "Environment",
+            "type": "object"
+          },
+          "frozen_at": {
+            "title": "Frozen At",
+            "type": "integer"
+          },
+          "opportunities": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Opportunities",
+            "type": "array"
+          },
+          "plan_digest": {
+            "title": "Plan Digest",
+            "type": "string"
+          },
+          "plan_id": {
+            "title": "Plan Id",
+            "type": "string"
+          },
+          "release": {
+            "additionalProperties": true,
+            "title": "Release",
+            "type": "object"
+          },
+          "run_specs": {
+            "additionalProperties": true,
+            "title": "Run Specs",
+            "type": "object"
+          },
+          "schema_version": {
+            "const": "s12-evaluation-plan/1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          },
+          "seed": {
+            "title": "Seed",
+            "type": "integer"
+          },
+          "split": {
+            "additionalProperties": true,
+            "title": "Split",
+            "type": "object"
+          },
+          "stop_rule": {
+            "title": "Stop Rule",
+            "type": "string"
+          },
+          "tracks": {
+            "additionalProperties": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Tracks",
+            "type": "object"
+          },
+          "views": {
+            "additionalProperties": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Views",
+            "type": "object"
+          }
+        },
+        "required": [
+          "schema_version",
+          "plan_id",
+          "scope",
+          "seed",
+          "budget",
+          "stop_rule",
+          "split",
+          "environment",
+          "release",
+          "checker_artifact",
+          "run_specs",
+          "clusters",
+          "tracks",
+          "views",
+          "opportunities",
+          "frozen_at",
+          "plan_digest"
+        ],
+        "title": "S12PlanResponse",
+        "type": "object"
+      },
+      "S12ProcessResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt_no": {
+            "default": 0,
+            "title": "Attempt No",
+            "type": "integer"
+          },
+          "bundle_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bundle Id"
+          },
+          "job_id": {
+            "default": "",
+            "title": "Job Id",
+            "type": "string"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Code"
+          },
+          "reason_codes": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Codes"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "S12ProcessResponse",
+        "type": "object"
+      },
+      "S12StartJobBody": {
+        "additionalProperties": false,
+        "properties": {
+          "plan_id": {
+            "title": "Plan Id",
+            "type": "string"
+          },
+          "worker_id": {
+            "title": "Worker Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "plan_id",
+          "worker_id"
+        ],
+        "title": "S12StartJobBody",
+        "type": "object"
+      },
       "T05BusinessExceptionOperationsResult": {
         "additionalProperties": false,
         "properties": {
@@ -19945,6 +20675,284 @@
           }
         },
         "summary": "Controlled S09 React Page"
+      }
+    },
+    "/controlled/s12/bundles/{bundle_id}": {
+      "get": {
+        "description": "Query one immutable content-addressed evaluation bundle.",
+        "operationId": "s12_query_bundle_controlled_s12_bundles__bundle_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bundle_id",
+            "required": true,
+            "schema": {
+              "title": "Bundle Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S12BundleResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "S12 Query Bundle"
+      }
+    },
+    "/controlled/s12/jobs/start": {
+      "post": {
+        "description": "Start one durable evaluation job for a frozen plan.",
+        "operationId": "s12_start_job_controlled_s12_jobs_start_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S12StartJobBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S12JobResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "S12 Start Job"
+      }
+    },
+    "/controlled/s12/jobs/{job_id}": {
+      "get": {
+        "description": "Query one durable job and its lease/fence/attempt state.",
+        "operationId": "s12_query_job_controlled_s12_jobs__job_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S12JobResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "S12 Query Job"
+      }
+    },
+    "/controlled/s12/jobs/{job_id}/cancel": {
+      "post": {
+        "description": "Cancel a queued or leased job with zero business delta.",
+        "operationId": "s12_cancel_job_controlled_s12_jobs__job_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S12JobResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "S12 Cancel Job"
+      }
+    },
+    "/controlled/s12/jobs/{job_id}/process": {
+      "post": {
+        "description": "Execute one claimed durable job: restricted runner, parent\nmaterialization, statistics, status selection, bundle publication.",
+        "operationId": "s12_process_job_controlled_s12_jobs__job_id__process_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S12ProcessResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "S12 Process Job"
+      }
+    },
+    "/controlled/s12/jobs/{job_id}/rerun": {
+      "post": {
+        "description": "Start a linked rerun job: its bundle will reference the source\nbundle via ``rerun_of_bundle_id`` and never overwrite it.",
+        "operationId": "s12_rerun_job_controlled_s12_jobs__job_id__rerun_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S12JobResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "S12 Rerun Job"
+      }
+    },
+    "/controlled/s12/plans/freeze": {
+      "post": {
+        "description": "Freeze one evaluation plan: cohorts, clusters, splits, opportunities,\nindependent gold labels, evidence snapshots, release/checker/build\nidentities, seed, budget and stop rule become one immutable plan.",
+        "operationId": "s12_freeze_plan_controlled_s12_plans_freeze_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S12FreezePlanBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S12PlanResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "S12 Freeze Plan"
       }
     },
     "/demo/react": {

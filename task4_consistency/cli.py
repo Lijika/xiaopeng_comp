@@ -156,7 +156,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
     ok = all(metrics.pass_thresholds.values()) if metrics.pass_thresholds else True
     if metrics.mode == "smoke":
         print(
-            f"SMOKE {'PASS' if ok else 'FAIL'} suite={metrics.suite} "
+            f"SMOKE (C-DEV-REG) {'PASS' if ok else 'FAIL'} suite={metrics.suite} "
             f"n_ok={metrics.n_check_ok} n_fail={metrics.n_check_fail}",
             file=sys.stderr,
         )
@@ -167,9 +167,15 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
 
     if not ok:
         failed = [k for k, v in metrics.pass_thresholds.items() if not v]
-        print(f"THRESHOLD FAIL: {failed}", file=sys.stderr)
+        print(
+            f"C-DEV-REG FAIL (development regression; no formal acceptance): {failed}",
+            file=sys.stderr,
+        )
         return EXIT_THRESHOLD
-    print("THRESHOLD PASS", file=sys.stderr)
+    print(
+        "C-DEV-REG PASS (development regression; no formal acceptance)",
+        file=sys.stderr,
+    )
     if metrics.warnings:
         for w in metrics.warnings:
             print(f"WARNING: {w}", file=sys.stderr)
