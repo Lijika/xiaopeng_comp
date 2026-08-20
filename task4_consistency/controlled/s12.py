@@ -36,6 +36,11 @@ from task4_consistency.controlled.s12_runner import (
     RUNNER_RESULT_SCHEMA,
     run_s12_runner,
 )
+from task4_consistency.controlled.s01 import QueryNotFound
+from task4_consistency.controlled.s08 import (
+    GovernedReleaseNotFound,
+    PolicyUnavailable,
+)
 
 PLAN_COMMAND_SCHEMA = "s12-plan-command/1"
 PLAN_SCHEMA = "s12-evaluation-plan/1"
@@ -56,6 +61,10 @@ PREDICTION_ALPHABET = (
 GOLD_ALPHABET = ("consistent", "inconsistent", "indeterminate", "not_applicable")
 TRACKS = ("R", "C")
 VIEWS = ("R-E2E", "R-T4-conditional")
+# The finite formal scopes: each formal conclusion evaluates exactly one
+# verified track and its required views.  Aggregate R stays a reported
+# aggregate and can never carry a merged formal PASS.
+FORMAL_SCOPES = ("C", "R-E2E", "R-T4-conditional")
 
 _BOOTSTRAP_REPLICATES = 10_000
 _COVERAGE_GATE = 0.80
@@ -164,10 +173,11 @@ class S12Unavailable(RuntimeError):
     """The evaluation authority cannot be proven and fails closed."""
 
 
-class LabelManifestUnavailable(ValueError):
+class LabelManifestUnavailable(S12Unavailable):
     """The evaluation-owned label manifest is missing, unregistered, or
-    digest-mismatched: caller-supplied label claims cannot impersonate the
-    label authority."""
+    digest-mismatched.  This is an evaluation-owned authority condition
+    (S12_UNAVAILABLE), not a caller syntax error: caller-supplied label
+    claims can never impersonate the label authority."""
 
 
 class LabelManifestStore:
@@ -682,32 +692,81 @@ def _clopper_pearson_upper(k: int, n: int) -> float:
 def _opportunity_point_metrics(
     opportunities: list[dict[str, Any]], predictions: dict[str, str]
 ) -> dict[str, Any]:
-    """Point estimates over all eligible C/I gold opportunities; denominators
-    are fixed and never shrink when a prediction is uncertain/skipped/missing/
-    error."""
-    eligible = [o for o in opportunities if o["label"] in {"consistent", "inconsistent"}]
-    n_consistent = sum(1 for o in eligible if o["label"] == "consistent")
-    n_inconsistent = sum(1 for o in eligible if o["label"] == "inconsistent")
-    e = len(eligible)
+    """Point estimates over all eligible C/I gold opportunities plus every
+    required auxiliary rate with its fixed applicable-opportunity
+    denominator (ADR-0007 §4): labelability (E_all), uncertain-on-
+    inconsistent (n_inconsistent), skipped/missing/error (E_all), and
+    conditional FPR (n_consistent_decisive).  Denominators never shrink when
+    a prediction is uncertain/skipped/missing/error."""
+    e_all = len(opportunities)
     prediction_counts = {token: 0 for token in PREDICTION_ALPHABET}
     fp = fn = miss = decisive = 0
-    for opportunity in eligible:
+    labeled = 0
+    n_consistent = 0
+    n_inconsistent = 0
+    n_consistent_decisive = 0
+    uncertain_on_inconsistent = 0
+    for opportunity in opportunities:
         prediction = predictions.get(opportunity["opportunity_id"], "missing")
         prediction_counts[prediction] += 1
         gold = opportunity["label"]
-        if prediction in {"consistent", "inconsistent"}:
-            decisive += 1
-        if gold == "consistent" and prediction == "inconsistent":
-            fp += 1
-        if gold == "inconsistent" and prediction == "consistent":
-            fn += 1
-        if gold == "inconsistent" and prediction != "inconsistent":
-            miss += 1
+        # ADR-0007 §4: labelability = count(gold in {consistent,
+        # inconsistent}) / count(applicable opportunities).
+        if gold in {"consistent", "inconsistent"}:
+            labeled += 1
+        if gold not in {"consistent", "inconsistent"}:
+            continue
+        if gold == "consistent":
+            n_consistent += 1
+            if prediction in {"consistent", "inconsistent"}:
+                n_consistent_decisive += 1
+                decisive += 1
+            if prediction == "inconsistent":
+                fp += 1
+        if gold == "inconsistent":
+            n_inconsistent += 1
+            if prediction == "uncertain":
+                uncertain_on_inconsistent += 1
+            if prediction in {"consistent", "inconsistent"}:
+                decisive += 1
+            if prediction == "consistent":
+                fn += 1
+            if prediction != "inconsistent":
+                miss += 1
+    e = n_consistent + n_inconsistent
+    auxiliary = {
+        "labelability": (labeled / e_all) if e_all else 0.0,
+        "uncertain_on_inconsistent": (
+            uncertain_on_inconsistent / n_inconsistent
+            if n_inconsistent
+            else 0.0
+        ),
+        "skipped_rate": (
+            prediction_counts["skipped"] / e_all if e_all else 0.0
+        ),
+        "missing_rate": (
+            prediction_counts["missing"] / e_all if e_all else 0.0
+        ),
+        "error_rate": (
+            prediction_counts["error"] / e_all if e_all else 0.0
+        ),
+        "conditional_fpr": (
+            fp / n_consistent_decisive if n_consistent_decisive else 0.0
+        ),
+    }
     return {
         "denominators": {
             "E": e,
+            "E_all": e_all,
             "n_consistent": n_consistent,
             "n_inconsistent": n_inconsistent,
+            "n_consistent_decisive": n_consistent_decisive,
+            "labelability": e_all,
+            "uncertain_on_inconsistent": n_inconsistent,
+            "skipped_rate": e_all,
+            "missing_rate": e_all,
+            "error_rate": e_all,
+            "conditional_fpr": n_consistent_decisive,
         },
         "prediction_counts": prediction_counts,
         "point": {
@@ -715,6 +774,7 @@ def _opportunity_point_metrics(
             "false_positive_rate": (fp / n_consistent) if n_consistent else 0.0,
             "false_negative_rate": (fn / n_inconsistent) if n_inconsistent else 0.0,
             "miss_rate": (miss / n_inconsistent) if n_inconsistent else 0.0,
+            **auxiliary,
         },
         "_counts": {"fp": fp, "fn": fn, "miss": miss},
     }
@@ -759,13 +819,31 @@ def _cluster_statistics(
         return {
             "membership": membership,
             "opportunity_count": 0,
-            "denominators": {"E": 0, "n_consistent": 0, "n_inconsistent": 0},
+            "denominators": {
+                "E": 0,
+                "E_all": 0,
+                "n_consistent": 0,
+                "n_inconsistent": 0,
+                "n_consistent_decisive": 0,
+                "labelability": 0,
+                "uncertain_on_inconsistent": 0,
+                "skipped_rate": 0,
+                "missing_rate": 0,
+                "error_rate": 0,
+                "conditional_fpr": 0,
+            },
             "prediction_counts": {token: 0 for token in PREDICTION_ALPHABET},
             "point": {
                 "coverage": None,
                 "false_positive_rate": None,
                 "false_negative_rate": None,
                 "miss_rate": None,
+                "labelability": None,
+                "uncertain_on_inconsistent": None,
+                "skipped_rate": None,
+                "missing_rate": None,
+                "error_rate": None,
+                "conditional_fpr": None,
             },
             "interval_95_two_sided": None,
             "bounds_95_one_sided": None,
@@ -804,6 +882,12 @@ def _cluster_statistics(
         "false_positive_rate": [],
         "false_negative_rate": [],
         "miss_rate": [],
+        "labelability": [],
+        "uncertain_on_inconsistent": [],
+        "skipped_rate": [],
+        "missing_rate": [],
+        "error_rate": [],
+        "conditional_fpr": [],
     }
     valid = 0
     for _ in range(_BOOTSTRAP_REPLICATES):
@@ -913,6 +997,14 @@ def _cluster_statistics(
             "false_positive_rate": _two_sided("false_positive_rate"),
             "false_negative_rate": _two_sided("false_negative_rate"),
             "miss_rate": _two_sided("miss_rate"),
+            "labelability": _two_sided("labelability"),
+            "uncertain_on_inconsistent": _two_sided(
+                "uncertain_on_inconsistent"
+            ),
+            "skipped_rate": _two_sided("skipped_rate"),
+            "missing_rate": _two_sided("missing_rate"),
+            "error_rate": _two_sided("error_rate"),
+            "conditional_fpr": _two_sided("conditional_fpr"),
         }
         bounds["coverage_lower"] = _one_sided_lower("coverage")
     else:
@@ -971,23 +1063,39 @@ def _select_status(
     *,
     holdout_eligible: bool = True,
     mandatory_families_ok: bool = True,
+    stop_rule_satisfied: bool = True,
 ) -> tuple[str, list[str]]:
     """Exact status vocabulary: INVALID / INSUFFICIENT / FAIL / PASS(scope=...)
     / SMOKE_ONLY.  Formal unscoped PASS is prohibited; PASS always carries the
-    frozen plan scope.  A formal PASS additionally requires verified holdout
-    eligibility and every declared mandatory check family estimable and
-    passing; development/calibration evidence stays non-formal (INSUFFICIENT
-    with the exact reason), never a formal PASS or FAIL."""
-    active = [
-        item
-        for item in (*track_statistics.values(), *view_statistics.values())
-        if item["opportunity_count"] > 0
-    ]
+    frozen plan scope.  The conclusion evaluates ONLY the selected formal
+    scope: C uses the C track; an R scope uses the R track plus exactly its
+    required view.  Aggregate R remains reported separately and can never
+    change another scope's conclusion.  A formal PASS additionally requires
+    verified holdout eligibility and every declared mandatory check family
+    estimable and passing; development/calibration evidence stays non-formal
+    (INSUFFICIENT with the exact reason), never a formal PASS or FAIL."""
+    if scope not in FORMAL_SCOPES:
+        raise ValueError(
+            f"unknown formal scope {scope!r}: formal scopes are "
+            + ", ".join(FORMAL_SCOPES)
+        )
+    if scope == "C":
+        selected = [track_statistics["C"]]
+    elif scope == "R-E2E":
+        selected = [track_statistics["R"], view_statistics["R-E2E"]]
+    else:  # R-T4-conditional
+        selected = [track_statistics["R"], view_statistics["R-T4-conditional"]]
+    active = [item for item in selected if item["opportunity_count"] > 0]
     if not active:
         return "SMOKE_ONLY", ["no eligible C/I gold opportunities"]
     if sum(item["denominators"]["E"] for item in active) == 0:
         return "SMOKE_ONLY", ["no eligible C/I gold opportunities"]
     non_formal: list[str] = []
+    if not stop_rule_satisfied:
+        non_formal.append(
+            "non-formal stop: the verified stop observation does not "
+            "satisfy the frozen stop rule"
+        )
     if not holdout_eligible:
         non_formal.append("non-formal scope: not all opportunities are "
                           "acceptance_holdout with independent label custody")
@@ -1154,8 +1262,11 @@ class EvaluationService:
         scope = command.get("scope_declared")
         if not isinstance(plan_id, str) or not plan_id:
             raise ValueError("plan_id is required")
-        if not isinstance(scope, str) or not scope:
-            raise ValueError("scope_declared is required")
+        if scope not in FORMAL_SCOPES:
+            raise ValueError(
+                f"scope_declared must be one of the formal scopes "
+                + ", ".join(FORMAL_SCOPES)
+            )
         seed = command.get("seed")
         if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
             raise ValueError("seed must be a non-negative integer")
@@ -1201,42 +1312,73 @@ class EvaluationService:
                 release_reference["release_id"],
                 release_reference["release_digest"],
             )
-        except Exception as error:
+        except GovernedReleaseNotFound as error:
             raise ValueError(
                 "release reference does not resolve against the governed authority"
             ) from error
+        except (S12Unavailable, PolicyUnavailable, RuntimeError) as error:
+            raise S12Unavailable(
+                "the governed release authority is unavailable or corrupt"
+            ) from error
 
-        # Evidence references -> S01 snapshot provider.
+        # Evidence references -> S01 snapshot provider.  References are a
+        # LIST of immutable run references (application, cycle, snapshot):
+        # two cycles or snapshots of one application are distinct runs and
+        # the dict-by-application collapse is prohibited.
         evidence_references = command.get("evidence_references")
-        if not isinstance(evidence_references, dict) or not evidence_references:
+        if (
+            not isinstance(evidence_references, list)
+            or not evidence_references
+        ):
             raise ValueError("evidence_references are required")
-        resolved_snapshots: dict[str, dict[str, Any]] = {}
-        for application_id, reference in evidence_references.items():
+        resolved_snapshots: dict[tuple[str, int, str], dict[str, Any]] = {}
+        run_reference_identity: dict[tuple[str, int, str], str] = {}
+        for reference in evidence_references:
             if (
-                not isinstance(application_id, str)
-                or not application_id
-                or not isinstance(reference, dict)
+                not isinstance(reference, dict)
+                or not isinstance(reference.get("application_id"), str)
+                or not reference["application_id"]
+                or isinstance(reference.get("cycle"), bool)
+                or not isinstance(reference.get("cycle"), int)
+                or reference["cycle"] < 1
                 or not isinstance(reference.get("snapshot_id"), str)
                 or not reference["snapshot_id"]
                 or not isinstance(reference.get("snapshot_digest"), str)
                 or len(reference["snapshot_digest"]) != 64
             ):
                 raise ValueError("evidence reference is invalid")
+            reference_key = (
+                reference["application_id"],
+                reference["cycle"],
+                reference["snapshot_id"],
+            )
+            if reference_key in resolved_snapshots:
+                raise ValueError(
+                    "evidence references must be unique per "
+                    "(application, cycle, snapshot)"
+                )
             try:
                 snapshot = self._snapshot_provider(
-                    application_id, reference["snapshot_id"]
+                    reference["application_id"], reference["snapshot_id"]
                 )
-            except Exception as error:
+            except QueryNotFound as error:
                 raise ValueError(
                     "evidence reference does not resolve against the S01 authority"
                 ) from error
+            except S12Unavailable as error:
+                raise
+            except RuntimeError as error:
+                raise S12Unavailable(
+                    "the S01 evidence authority is unavailable or corrupt"
+                ) from error
             if (
-                snapshot.get("evidence_snapshot_id") != reference["snapshot_id"]
+                snapshot.get("evidence_snapshot_id")
+                != reference["snapshot_id"]
                 or snapshot.get("evidence_snapshot_digest")
                 != reference["snapshot_digest"]
             ):
                 raise ValueError("evidence reference digest does not verify")
-            resolved_snapshots[application_id] = snapshot
+            resolved_snapshots[reference_key] = snapshot
 
         # Label manifest reference -> evaluation-owned label store.
         label_reference = command.get("label_manifest")
@@ -1258,6 +1400,9 @@ class EvaluationService:
         cluster_ids: set[str] = set()
         owned_applications: dict[str, str] = {}
         owned_variants: dict[str, str] = {}
+        run_reference_applications = {
+            key[0] for key in resolved_snapshots
+        }
         for cluster in clusters:
             if (
                 not isinstance(cluster, dict)
@@ -1282,11 +1427,6 @@ class EvaluationService:
                         f"application {application_id} belongs to more than "
                         "one base cluster"
                     )
-                if application_id not in evidence_references:
-                    raise ValueError(
-                        f"cluster application {application_id} has no "
-                        "evidence reference"
-                    )
                 owned_applications[application_id] = cluster["cluster_id"]
             variants = cluster.get("variants")
             if variants is not None:
@@ -1302,11 +1442,19 @@ class EvaluationService:
                             "cluster variant identity is invalid or duplicated"
                         )
                     owned_variants[variant_id] = cluster["cluster_id"]
+        unowned_references = run_reference_applications - set(owned_applications)
+        if unowned_references:
+            raise ValueError(
+                "evidence references must belong to a base cluster: "
+                + ", ".join(sorted(unowned_references))
+            )
 
         opportunities = command.get("opportunities")
         if not isinstance(opportunities, list) or not opportunities:
             raise ValueError("opportunities are required")
         opportunity_ids: set[str] = set()
+        opportunity_run_ids: set[str] = set()
+        run_id_by_opportunity: dict[str, str] = {}
         for opportunity in opportunities:
             if not isinstance(opportunity, dict):
                 raise ValueError("opportunity must be an object")
@@ -1330,9 +1478,39 @@ class EvaluationService:
             if opportunity["cluster"] not in cluster_ids:
                 raise ValueError("opportunity cluster is unknown")
             application_id = opportunity["application_id"]
-            if application_id not in resolved_snapshots:
-                raise ValueError("opportunity application has no evidence reference")
-            snapshot = resolved_snapshots[application_id]
+            if (
+                owned_applications.get(application_id)
+                != opportunity["cluster"]
+            ):
+                raise ValueError(
+                    f"opportunity application {application_id} must belong "
+                    "to its named base cluster "
+                    f"{opportunity['cluster']}"
+                )
+            variant_id = opportunity.get("variant_id")
+            if variant_id is not None:
+                if (
+                    not isinstance(variant_id, str)
+                    or not variant_id
+                    or owned_variants.get(variant_id)
+                    != opportunity["cluster"]
+                ):
+                    raise ValueError(
+                        f"opportunity variant {variant_id!r} must belong to "
+                        "its named base cluster "
+                        f"{opportunity['cluster']}"
+                    )
+            reference_key = (
+                application_id,
+                int(opportunity["cycle"]),
+                opportunity["evidence_snapshot_id"],
+            )
+            snapshot = resolved_snapshots.get(reference_key)
+            if snapshot is None:
+                raise ValueError(
+                    "opportunity cycle or evidence snapshot does not match "
+                    "any declared frozen run reference"
+                )
             if (
                 int(opportunity["cycle"]) != int(snapshot.get("cycle") or 0)
                 or opportunity["evidence_snapshot_id"]
@@ -1342,6 +1520,21 @@ class EvaluationService:
                     "opportunity cycle or evidence snapshot does not match "
                     "the frozen run spec"
                 )
+            run_id = self._run_reference_id(
+                application_id=application_id,
+                cycle=int(opportunity["cycle"]),
+                snapshot_id=opportunity["evidence_snapshot_id"],
+                check_id=str(opportunity["check_id"]),
+                target_scope=str(opportunity["target_scope"]),
+                variant_id=variant_id,
+            )
+            if run_id in opportunity_run_ids:
+                raise ValueError(
+                    "two opportunities freeze as the same run reference: "
+                    "the run identity is not unique"
+                )
+            opportunity_run_ids.add(run_id)
+            run_id_by_opportunity[opportunity["opportunity_id"]] = run_id
         if len(opportunities) > budget["max_opportunities"]:
             raise ValueError("opportunities exceed the frozen budget")
 
@@ -1356,6 +1549,12 @@ class EvaluationService:
             entries = collection.get("opportunities")
             if not isinstance(entries, list):
                 raise ValueError(f"{name} opportunities must be a list")
+            if any(not isinstance(entry, str) or not entry for entry in entries):
+                raise ValueError(f"{name} membership identities are invalid")
+            if len(entries) != len(set(entries)):
+                raise ValueError(
+                    f"{name} membership ids must not contain duplicates"
+                )
             member_ids = set(entries)
             unknown = member_ids - opportunity_ids
             if unknown:
@@ -1449,14 +1648,61 @@ class EvaluationService:
             resolved = dict(opportunity)
             resolved["label"] = labels[opportunity["opportunity_id"]]
             resolved["label_custody"] = label_manifest.get("label_custody")
+            resolved["run_id"] = run_id_by_opportunity[
+                opportunity["opportunity_id"]
+            ]
             resolved_opportunities.append(resolved)
 
-        # Build frozen RunSpecs server-side from the resolved snapshots.
+        # Universe equality: every declared run reference must be covered by
+        # the frozen opportunities, and the opportunity application universe
+        # must equal the clustered applications minus explicit cohort
+        # exclusions.  Nothing can enter the run silently.
+        covered_references = {
+            (
+                opportunity["application_id"],
+                int(opportunity["cycle"]),
+                opportunity["evidence_snapshot_id"],
+            )
+            for opportunity in opportunities
+        }
+        uncovered_references = set(resolved_snapshots) - covered_references
+        if uncovered_references:
+            raise ValueError(
+                "evidence reference has no opportunity: "
+                + ", ".join(
+                    sorted(f"{key[0]}:{key[1]}:{key[2]}" for key in uncovered_references)
+                )
+            )
+        excluded_items = {
+            str(exclusion["item"])
+            for exclusion in (cohort.get("exclusions", []) if cohort else [])
+        }
+        opportunity_applications = {
+            opportunity["application_id"] for opportunity in opportunities
+        }
+        expected_applications = set(owned_applications) - excluded_items
+        if opportunity_applications != expected_applications:
+            raise ValueError(
+                "opportunity applications must exactly equal the clustered "
+                "applications minus cohort exclusions"
+            )
+
+        # Build one frozen RunSpec per logical run, keyed by the immutable
+        # run-reference identity: two cycles or snapshots of one application
+        # are two distinct runs.
         public = resolved_release["target_release"].public_manifest()
         run_specs: dict[str, dict[str, Any]] = {}
-        for application_id, snapshot in sorted(resolved_snapshots.items()):
-            run_specs[application_id] = self._build_run_spec(
-                application_id, snapshot, resolved_release, public
+        for opportunity in opportunities:
+            run_id = run_id_by_opportunity[opportunity["opportunity_id"]]
+            snapshot = resolved_snapshots[
+                (
+                    opportunity["application_id"],
+                    int(opportunity["cycle"]),
+                    opportunity["evidence_snapshot_id"],
+                )
+            ]
+            run_specs[run_id] = self._build_run_spec(
+                run_id, opportunity, snapshot, resolved_release, public
             )
 
         environment = {
@@ -1480,6 +1726,7 @@ class EvaluationService:
                 "manifest_id": label_manifest["manifest_id"],
                 "manifest_digest": label_reference["manifest_digest"],
                 "label_custody": label_manifest.get("label_custody"),
+                "labels": copy.deepcopy(labels),
             },
             "environment": environment,
             "release": {
@@ -1499,21 +1746,48 @@ class EvaluationService:
             },
             "checker_artifact": resolved_release["checker_artifact"],
             "run_specs": run_specs,
-            "evidence_references": {
-                application_id: {
-                    "snapshot_id": snapshot["evidence_snapshot_id"],
-                    "snapshot_digest": snapshot["evidence_snapshot_digest"],
-                    "cycle": snapshot["cycle"],
+            "evidence_references": [
+                {
+                    "application_id": reference["application_id"],
+                    "cycle": reference["cycle"],
+                    "snapshot_id": reference["snapshot_id"],
+                    "snapshot_digest": reference["snapshot_digest"],
                 }
-                for application_id, snapshot in resolved_snapshots.items()
-            },
+                for reference in evidence_references
+            ],
             "mandatory_check_families": mandatory_check_families,
             "cohort": cohort,
         }
 
     @staticmethod
-    def _build_run_spec(
+    def _run_reference_id(
+        *,
         application_id: str,
+        cycle: int,
+        snapshot_id: str,
+        check_id: str,
+        target_scope: str,
+        variant_id: str | None,
+    ) -> str:
+        """One immutable run-reference identity: the canonical digest of the
+        full frozen run reference (application, cycle, snapshot, check,
+        target scope, optional variant).  Two cycles or snapshots of one
+        application produce distinct run ids; operational plan/job identity
+        is never part of this scientific identity."""
+        material = {
+            "application_id": application_id,
+            "cycle": cycle,
+            "snapshot_id": snapshot_id,
+            "check_id": check_id,
+            "target_scope": target_scope,
+            "variant_id": variant_id,
+        }
+        return f"run_{content_digest(material)[:24]}"
+
+    @staticmethod
+    def _build_run_spec(
+        run_id: str,
+        opportunity: dict[str, Any],
         snapshot: dict[str, Any],
         resolved_release: dict[str, Any],
         public: dict[str, Any],
@@ -1524,14 +1798,17 @@ class EvaluationService:
         if snapshot_digest != snapshot["evidence_snapshot_digest"]:
             raise ValueError("evidence snapshot digest does not verify")
         return {
-            "run_id": f"run_{application_id}",
-            "application_id": application_id,
-            "cycle": int(snapshot.get("cycle") or 1),
+            "run_id": run_id,
+            "application_id": opportunity["application_id"],
+            "cycle": int(opportunity["cycle"]),
             "lifecycle_revision": int(snapshot.get("lifecycle_revision") or 0),
             "evidence_snapshot_id": snapshot["evidence_snapshot_id"],
             "evidence_snapshot_digest": snapshot_digest,
             "evidence_snapshot": copy.deepcopy(snapshot_payload),
             "evidence_revision": int(snapshot.get("evidence_revision") or 0),
+            "check_id": str(opportunity["check_id"]),
+            "target_scope": str(opportunity["target_scope"]),
+            "variant_id": opportunity.get("variant_id"),
             "evidence_readiness_policy": "c-demo-readiness/1",
             "baseline_release": copy.deepcopy(public),
             "release_id": resolved_release["release_id"],
@@ -1556,7 +1833,8 @@ class EvaluationService:
             dependency_bytes = b""
         return hashlib.sha256(dependency_bytes).hexdigest()
 
-    def start_job(self, plan_id: str, worker_id: str) -> dict[str, Any]:
+    def start_job(self, plan_id: str) -> dict[str, Any]:
+        worker_id = self._worker_subject
         with self._lock:
             self._store.reload()
             plan = self._require_plan(plan_id)
@@ -1580,7 +1858,8 @@ class EvaluationService:
             self._store.insert_job(job_id, job)
             return job
 
-    def rerun_job(self, job_id: str, worker_id: str) -> dict[str, Any]:
+    def rerun_job(self, job_id: str) -> dict[str, Any]:
+        worker_id = self._worker_subject
         with self._lock:
             self._store.reload()
             source = self._store.jobs.get(job_id)
@@ -1589,7 +1868,24 @@ class EvaluationService:
             source_bundle = source.get("result", {}).get("bundle_id")
             if not source_bundle:
                 raise ValueError("job has no published bundle to rerun")
-            plan = self._require_plan(source["plan_id"])
+            source_bundle_row = self._store.bundles.get(source_bundle)
+            if source_bundle_row is None:
+                raise ValueError("job has no published bundle to rerun")
+            replay = source_bundle_row.get("replay_package")
+            if (
+                not isinstance(replay, dict)
+                or content_digest(replay)
+                != source_bundle_row.get("replay_package_digest")
+            ):
+                raise ValueError("source bundle replay package is invalid")
+            embedded_plan = replay.get("plan")
+            plan_digest = (
+                embedded_plan.get("plan_digest")
+                if isinstance(embedded_plan, dict)
+                else None
+            )
+            if not isinstance(plan_digest, str) or len(plan_digest) != 64:
+                raise ValueError("source bundle replay plan is invalid")
             rerun_job_id = self._stable_id(
                 "s12job",
                 f"{source['plan_id']}:{worker_id}:{int(self._clock())}:"
@@ -1599,7 +1895,7 @@ class EvaluationService:
                 "schema_version": JOB_SCHEMA,
                 "job_id": rerun_job_id,
                 "plan_id": source["plan_id"],
-                "plan_digest": plan["plan_digest"],
+                "plan_digest": plan_digest,
                 "worker_id": worker_id,
                 "status": "queued",
                 "fence": 0,
@@ -1631,6 +1927,30 @@ class EvaluationService:
             if bundle is None:
                 raise ValueError(f"bundle {bundle_id} does not exist")
             _verify_bundle_content_address(bundle_id, bundle)
+            replay = bundle.get("replay_package")
+            if (
+                not isinstance(replay, dict)
+                or content_digest(replay)
+                != bundle.get("replay_package_digest")
+            ):
+                raise S12IntegrityError(
+                    "bundle replay package digest does not verify"
+                )
+            embedded_plan = replay.get("plan")
+            if (
+                not isinstance(embedded_plan, dict)
+                or content_digest(
+                    {
+                        key: value
+                        for key, value in embedded_plan.items()
+                        if key != "plan_digest"
+                    }
+                )
+                != embedded_plan.get("plan_digest")
+            ):
+                raise S12IntegrityError(
+                    "bundle replay plan digest does not verify"
+                )
             return bundle
 
     # -- durable worker -----------------------------------------------------
@@ -1640,18 +1960,56 @@ class EvaluationService:
         job_id: str,
         *,
         runner_result: dict[str, Any] | None = None,
-        worker_id: str | None = None,
     ) -> dict[str, Any]:
-        claim = self._claim_job(job_id, worker_id=worker_id)
+        claim = self._claim_job(job_id)
         if "reason_code" in claim:
             return claim
         job, observed_now, snapshot = claim
         worker_id = job["worker_id"]
-        plan = snapshot.plans[job["plan_id"]]
-        if content_digest(
-            {k: v for k, v in plan.items() if k != "plan_digest"}
-        ) != plan["plan_digest"]:
-            return self._settle_diagnostic(snapshot, job, observed_now, ["PLAN_DIGEST_MISMATCH"])
+        rerun_of_bundle_id = job.get("rerun_of_bundle_id")
+        if rerun_of_bundle_id:
+            # Rerun materializes exclusively from the verified source
+            # bundle's replay package: the current plan row and the current
+            # authority providers are never consulted (SP-08).
+            source_bundle = snapshot.bundles.get(rerun_of_bundle_id)
+            if source_bundle is None:
+                return self._settle_diagnostic(
+                    snapshot, job, observed_now, ["SOURCE_BUNDLE_MISSING"]
+                )
+            try:
+                _verify_bundle_content_address(rerun_of_bundle_id, source_bundle)
+                replay = source_bundle.get("replay_package")
+                if (
+                    not isinstance(replay, dict)
+                    or content_digest(replay)
+                    != source_bundle.get("replay_package_digest")
+                ):
+                    raise S12IntegrityError(
+                        "source bundle replay package digest does not verify"
+                    )
+                plan = replay.get("plan")
+                if (
+                    not isinstance(plan, dict)
+                    or content_digest(
+                        {k: v for k, v in plan.items() if k != "plan_digest"}
+                    )
+                    != plan.get("plan_digest")
+                ):
+                    raise S12IntegrityError(
+                        "source bundle replay plan digest does not verify"
+                    )
+            except S12IntegrityError:
+                return self._settle_diagnostic(
+                    snapshot, job, observed_now, ["SOURCE_BUNDLE_INVALID"]
+                )
+        else:
+            plan = snapshot.plans[job["plan_id"]]
+            if content_digest(
+                {k: v for k, v in plan.items() if k != "plan_digest"}
+            ) != plan["plan_digest"]:
+                return self._settle_diagnostic(
+                    snapshot, job, observed_now, ["PLAN_DIGEST_MISMATCH"]
+                )
         runner_request = {
             "schema_version": RUNNER_REQUEST_SCHEMA,
             "checker_artifact": plan["checker_artifact"],
@@ -1763,6 +2121,7 @@ class EvaluationService:
             plan["scope"],
             holdout_eligible=holdout_eligible,
             mandatory_families_ok=mandatory_families_ok,
+            stop_rule_satisfied=stop_rule_satisfied,
         )
         scope_reasons = list(holdout_reasons)
         scope_reasons.extend(family_failures)
@@ -1824,8 +2183,8 @@ class EvaluationService:
             "stop_rule": plan["stop_rule"],
             "stop_reason": stop_reason,
             "stop_elapsed_ms": stop_observation["elapsed_ms"],
-            "completed_application_ids": copy.deepcopy(
-                stop_observation["completed_application_ids"]
+            "completed_run_ids": copy.deepcopy(
+                stop_observation["completed_run_ids"]
             ),
             "stop_rule_satisfied": stop_rule_satisfied,
             "evidence_snapshot_ids": sorted(
@@ -1840,8 +2199,6 @@ class EvaluationService:
             "command": f"s12:process:{job['job_id']}",
         }
         result_material = {
-            "plan_id": plan["plan_id"],
-            "plan_digest": plan["plan_digest"],
             "scope": plan["scope"],
             "seed": plan["seed"],
             "budget": copy.deepcopy(plan["budget"]),
@@ -1873,14 +2230,38 @@ class EvaluationService:
             "status": status,
             "status_reasons": status_reasons,
             "stop_reason": stop_reason,
-            "completed_application_ids": stop_observation[
-                "completed_application_ids"
+            "completed_run_ids": stop_observation[
+                "completed_run_ids"
             ],
             "business_before": copy.deepcopy(business_before),
             "business_after": copy.deepcopy(business_after),
             "business_deltas": _business_deltas(business_before, business_after),
         }
         bundle_content["result_digest"] = content_digest(result_material)
+        replay_package = {
+            "schema_version": "s12-replay-package/1",
+            "plan": copy.deepcopy(plan),
+            "predictions": predictions,
+            "errors": errors,
+            "missing_opportunities": missing,
+            "applications": runner_result["applications"],
+            "stop": stop_observation,
+            "status": status,
+            "status_reasons": status_reasons,
+            "scope_eligibility": {
+                "holdout_eligible": holdout_eligible,
+                "reasons": sorted(set(scope_reasons)),
+            },
+            "tracks_statistics": track_statistics,
+            "views_statistics": view_statistics,
+            "mandatory_family_statistics": mandatory_family_statistics,
+            "strata": strata,
+            "business_before": copy.deepcopy(business_before),
+            "business_after": copy.deepcopy(business_after),
+            "business_deltas": _business_deltas(business_before, business_after),
+        }
+        bundle_content["replay_package"] = replay_package
+        bundle_content["replay_package_digest"] = content_digest(replay_package)
         digest = content_digest(
             {k: v for k, v in bundle_content.items() if k != "bundle_id"}
         )
@@ -1927,14 +2308,14 @@ class EvaluationService:
         }
 
     def _claim_job(
-        self, job_id: str, *, worker_id: str | None = None
+        self, job_id: str
     ) -> dict[str, Any] | tuple[dict[str, Any], int, _EvalStore]:
         with self._lock:
             for _ in range(2):
                 try:
                     result = self._store.claim_job_transaction(
                         job_id,
-                        worker_id=worker_id,
+                        worker_id=self._worker_subject,
                         now=int(self._clock()),
                     )
                 except sqlite3.OperationalError:
@@ -2066,31 +2447,34 @@ class EvaluationService:
             or isinstance(stop.get("elapsed_ms"), bool)
             or not isinstance(stop.get("elapsed_ms"), int)
             or stop["elapsed_ms"] < 0
-            or not isinstance(stop.get("completed_application_ids"), list)
+            or not isinstance(stop.get("completed_run_ids"), list)
         ):
             return ["RUNNER_STOP_OBSERVATION_INVALID"]
         if not isinstance(runner_result.get("applications"), list):
             return ["RUNNER_OUTPUT_MALFORMED"]
-        known_apps = set(plan["run_specs"])
+        known_runs = set(plan["run_specs"])
         seen: set[str] = set()
         for application in runner_result["applications"]:
             if not isinstance(application, dict):
                 return ["RUNNER_OUTPUT_MALFORMED"]
+            run_id = application.get("run_id")
+            if not isinstance(run_id, str) or not run_id:
+                return ["RUNNER_OUTPUT_MALFORMED"]
             application_id = application.get("application_id")
             if not isinstance(application_id, str) or not application_id:
                 return ["RUNNER_OUTPUT_MALFORMED"]
-            if application_id in seen:
+            if run_id in seen:
                 return ["RUNNER_DUPLICATE_APPLICATION"]
-            seen.add(application_id)
-            if application_id not in known_apps:
+            seen.add(run_id)
+            if run_id not in known_runs:
                 return ["RUNNER_UNKNOWN_APPLICATION"]
+            run_spec = plan["run_specs"][run_id]
+            if run_spec["application_id"] != application_id:
+                return ["RUNNER_IDENTITY_MISMATCH"]
             if "error" in application:
                 if not isinstance(application["error"], str) or not application["error"]:
                     return ["RUNNER_OUTPUT_MALFORMED"]
                 continue
-            run_spec = plan["run_specs"][application_id]
-            if application.get("run_id") != run_spec["run_id"]:
-                return ["RUNNER_IDENTITY_MISMATCH"]
             checks = application.get("checks")
             if not isinstance(checks, list):
                 return ["RUNNER_OUTPUT_MALFORMED"]
@@ -2109,9 +2493,25 @@ class EvaluationService:
                 ):
                     return ["RUNNER_CHECK_INVALID"]
                 rule_ids.add(rule_id)
-        completed_ids = stop["completed_application_ids"]
-        if set(completed_ids) != seen:
+        completed_ids = stop["completed_run_ids"]
+        if (
+            any(not isinstance(item, str) or not item for item in completed_ids)
+            or len(completed_ids) != len(set(completed_ids))
+            or set(completed_ids) != seen
+        ):
             return ["RUNNER_STOP_OBSERVATION_INVALID"]
+        known_runs = set(plan["run_specs"])
+        max_runtime_ms = int(plan["budget"]["max_runtime_ms"])
+        # The frozen global runtime window bounds every observed stop: at
+        # most one in-flight run may exceed the window, plus a fixed 1s
+        # boundary for sub-millisecond budgets.  Anything beyond that is a
+        # forged or unauthenticated stop observation.
+        elapsed_bound = max(2 * max_runtime_ms, max_runtime_ms + 1000)
+        if stop["elapsed_ms"] > elapsed_bound:
+            return ["RUNNER_STOP_OBSERVATION_INVALID"]
+        if stop["stop_reason"] == "plan-exhausted":
+            if set(completed_ids) != known_runs:
+                return ["RUNNER_STOP_OBSERVATION_INVALID"]
         return None
 
     @staticmethod
@@ -2121,8 +2521,8 @@ class EvaluationService:
         """Per-opportunity predictions over the frozen alphabet.  Omitted
         runner output becomes explicit ``missing``; per-known-opportunity
         checker failure becomes ``error``."""
-        by_app: dict[str, dict[str, Any]] = {
-            application["application_id"]: application
+        by_run: dict[str, dict[str, Any]] = {
+            application["run_id"]: application
             for application in runner_result["applications"]
         }
         predictions: dict[str, str] = {}
@@ -2130,7 +2530,7 @@ class EvaluationService:
         missing: list[str] = []
         for opportunity in plan["opportunities"]:
             opportunity_id = opportunity["opportunity_id"]
-            application = by_app.get(opportunity["application_id"])
+            application = by_run.get(opportunity["run_id"])
             if application is None:
                 predictions[opportunity_id] = "missing"
                 missing.append(opportunity_id)

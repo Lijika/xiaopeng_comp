@@ -5755,3 +5755,51 @@ def test_activation_persistent_claim_corruption_settles_discarded(
         for event in service._store.policy_governance_events
     )
     assert service.query_active(ADMIN)["candidate_id"] == prior_active["candidate_id"]
+
+
+# ---------------------------------------------------------------------------
+# Ticket #28 R2 Slice 4 — complete S08 governance measurement (SP-12)
+# ---------------------------------------------------------------------------
+
+
+def test_evaluation_governance_measurement_changes_for_any_event_payload_or_revision(
+    tmp_path: Path,
+) -> None:
+    """A governance event payload change that keeps its event id changes the
+    measurement: every event row is measured, not only activation ids."""
+    import sqlite3 as _sqlite3
+
+    from task4_consistency.controlled.s01_store import _integrity_digest
+
+    service, _rules_path, _kb_path = make_policy_service(tmp_path)
+    state_path = tmp_path / "governance.sqlite3"
+    before = service.evaluation_governance_measurement()
+    store = SQLiteTargetStore(state_path)
+    store.reload()
+    assert store.policy_governance_events
+    event = store.policy_governance_events[-1]
+    mutated = copy.deepcopy(event)
+    mutated["reason_code"] = "MUTATED-GOVERNANCE-REASON"
+    payload_text = json.dumps(
+        mutated, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    digest = _integrity_digest(
+        "policy_governance_events", event["event_id"], payload_text
+    )
+    connection = _sqlite3.connect(state_path)
+    try:
+        connection.execute(
+            "UPDATE policy_governance_events SET payload = ?, integrity_sha256 = ? "
+            "WHERE item_id = ?",
+            (payload_text, digest, event["event_id"]),
+        )
+        connection.execute(
+            "UPDATE s01_immutable_catalog SET integrity_sha256 = ? "
+            "WHERE table_name = 'policy_governance_events' AND item_id = ?",
+            (digest, event["event_id"]),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    after = service.evaluation_governance_measurement()
+    assert after != before

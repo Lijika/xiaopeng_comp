@@ -314,16 +314,17 @@ except Exception as error:
 S12_CONFIGURATION_ERROR: str | None = None
 S12_CREDENTIAL = os.environ.get("TASK4_S12_CREDENTIAL", "").strip()
 S12_SUBJECT = os.environ.get("TASK4_S12_SUBJECT", "").strip()
-S12_WORKER_SUBJECT = (
-    os.environ.get("TASK4_S12_WORKER_SUBJECT", "").strip()
-    or S12_SUBJECT
-)
+S12_WORKER_SUBJECT = os.environ.get("TASK4_S12_WORKER_SUBJECT", "").strip()
 S12_SERVICE: EvaluationService | None = None
 
 
 def _s12_evaluation_service() -> EvaluationService | None:
     state_value = os.environ.get("TASK4_S12_STATE_PATH", "").strip()
     if not state_value or not S12_CREDENTIAL or not S12_SUBJECT:
+        return None
+    if not S12_WORKER_SUBJECT:
+        # A distinct evaluator worker subject is required: without it the
+        # evaluation plane must not silently alias the operator identity.
         return None
     state_path = Path(state_value)
     if not state_path.is_absolute():
@@ -362,6 +363,14 @@ def _s12_evaluation_service() -> EvaluationService | None:
     }
     if S12_CREDENTIAL in controlled_credentials or S12_SUBJECT in controlled_subjects:
         raise ValueError("TASK4_S12 identity aliases a controlled identity")
+    if (
+        S12_WORKER_SUBJECT == S12_SUBJECT
+        or S12_WORKER_SUBJECT in controlled_subjects
+    ):
+        raise ValueError(
+            "TASK4_S12_WORKER_SUBJECT aliases the operator or a controlled "
+            "subject; the evaluator worker must be distinct"
+        )
     label_root_value = os.environ.get("TASK4_S12_LABEL_MANIFESTS_DIR", "").strip()
     if not label_root_value:
         raise ValueError("TASK4_S12_LABEL_MANIFESTS_DIR is required")

@@ -539,6 +539,12 @@ class PolicyUnavailable(RuntimeError):
     """Registry/Ledger integrity cannot be proven; resolution fails closed."""
 
 
+class GovernedReleaseNotFound(PolicyUnavailable):
+    """The governed release identity resolves to no single verified release:
+    a healthy unknown reference (a caller command error), distinct from an
+    authority outage or corruption."""
+
+
 @dataclass(frozen=True)
 class PolicyPrincipal:
     subject: str
@@ -7657,7 +7663,7 @@ class PolicyGovernanceService:
                         }
                     )
             if len(candidates) != 1:
-                raise PolicyUnavailable(
+                raise GovernedReleaseNotFound(
                     "release identity does not resolve to exactly one governed release"
                 )
             return candidates[0]
@@ -7692,6 +7698,113 @@ class PolicyGovernanceService:
                 "governance_revision": len(self._store.policy_governance_events),
                 "activation_count": len(activated),
                 "activation_digest": activation_digest,
+                # Canonical ordered vectors over every relevant governance
+                # row: a change to any event payload, manifest or artifact
+                # changes the measurement even when ids and counts stay
+                # constant (SP-12).
+                "governance_events_vector": [
+                    {
+                        "event_id": str(event.get("event_id") or ""),
+                        "revision": int(event.get("revision") or 0),
+                        "kind": str(event.get("kind") or ""),
+                        "scope": str(event.get("scope") or ""),
+                        "reason_code": str(event.get("reason_code") or ""),
+                        "payload_digest": hashlib.sha256(
+                            json.dumps(
+                                event,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ).encode("utf-8")
+                        ).hexdigest(),
+                    }
+                    for event in sorted(
+                        self._store.policy_governance_events,
+                        key=lambda item: str(item.get("event_id") or ""),
+                    )
+                ],
+                "governance_events_id_list_digest": hashlib.sha256(
+                    json.dumps(
+                        [
+                            str(event.get("event_id") or "")
+                            for event in sorted(
+                                self._store.policy_governance_events,
+                                key=lambda item: str(item.get("event_id") or ""),
+                            )
+                        ],
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+                "manifests_vector": [
+                    {
+                        "manifest_id": str(manifest.get("manifest_id") or ""),
+                        "schema_version": str(
+                            manifest.get("schema_version") or ""
+                        ),
+                        "declared_digest": str(manifest.get("digest") or ""),
+                        "content_digest": hashlib.sha256(
+                            canonical_bytes(
+                                json.loads(manifest["canonical_json"])
+                                if isinstance(
+                                    manifest.get("canonical_json"), str
+                                )
+                                else {}
+                            )
+                        ).hexdigest(),
+                    }
+                    for manifest in sorted(
+                        self._store.policy_manifests,
+                        key=lambda item: str(item.get("manifest_id") or ""),
+                    )
+                ],
+                "manifests_id_list_digest": hashlib.sha256(
+                    json.dumps(
+                        [
+                            str(manifest.get("manifest_id") or "")
+                            for manifest in sorted(
+                                self._store.policy_manifests,
+                                key=lambda item: str(item.get("manifest_id") or ""),
+                            )
+                        ],
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+                "artifacts_vector": [
+                    {
+                        "artifact_id": str(artifact.get("artifact_id") or ""),
+                        "content_digest": hashlib.sha256(
+                            canonical_bytes(
+                                json.loads(artifact["canonical_json"])
+                                if isinstance(
+                                    artifact.get("canonical_json"), str
+                                )
+                                else {}
+                            )
+                        ).hexdigest(),
+                    }
+                    for artifact in sorted(
+                        self._store.policy_artifacts,
+                        key=lambda item: str(item.get("artifact_id") or ""),
+                    )
+                ],
+                "artifacts_id_list_digest": hashlib.sha256(
+                    json.dumps(
+                        [
+                            str(artifact.get("artifact_id") or "")
+                            for artifact in sorted(
+                                self._store.policy_artifacts,
+                                key=lambda item: str(item.get("artifact_id") or ""),
+                            )
+                        ],
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
             }
 
     # --------------------------------------------------------------- helpers

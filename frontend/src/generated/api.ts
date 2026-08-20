@@ -6243,6 +6243,43 @@ export interface components {
             /** Trusted Time */
             trusted_time: number;
         };
+        /** S12ApplicationVector */
+        S12ApplicationVector: {
+            /** Application Id */
+            application_id: string;
+            /** Current Evidence Snapshot Id */
+            current_evidence_snapshot_id: string;
+            /** Current Run Id */
+            current_run_id: string;
+            /** Cycle */
+            cycle: number;
+            /** Evidence Revision */
+            evidence_revision: number;
+            /** Lifecycle Revision */
+            lifecycle_revision: number;
+            /** Phase */
+            phase: string;
+            /** Route */
+            route: string;
+        };
+        /** S12ArtifactVector */
+        S12ArtifactVector: {
+            /** Artifact Id */
+            artifact_id: string;
+            /** Content Digest */
+            content_digest: string;
+        };
+        /** S12AuditEventVector */
+        S12AuditEventVector: {
+            /** Event Id */
+            event_id: string;
+            /** Reason Code */
+            reason_code: string;
+            /** Recorded At */
+            recorded_at: number;
+            /** Revision */
+            revision: number;
+        };
         /** S12Budget */
         S12Budget: {
             /** Max Opportunities */
@@ -6254,48 +6291,24 @@ export interface components {
         S12BundleResponse: {
             /** Attempt No */
             attempt_no: number;
-            /** Budget */
-            budget: {
-                [key: string]: number;
-            };
+            budget: components["schemas"]["S12Budget"];
             /** Bundle Id */
             bundle_id: string;
-            /** Business After */
-            business_after: {
-                [key: string]: unknown;
-            };
-            /** Business Before */
-            business_before: {
-                [key: string]: unknown;
-            };
-            /** Business Deltas */
-            business_deltas: {
-                [key: string]: unknown;
-            };
+            business_after: components["schemas"]["S12BusinessMeasurement"];
+            business_before: components["schemas"]["S12BusinessMeasurement"];
+            business_deltas: components["schemas"]["S12BusinessDeltas"];
             /** Clusters */
-            clusters: {
-                [key: string]: unknown;
-            }[];
-            /** Cohort */
-            cohort: {
-                [key: string]: unknown;
-            } | null;
+            clusters: components["schemas"]["S12ClusterResponse"][];
+            cohort: components["schemas"]["S12CohortResponse"] | null;
             /** Command */
             command: string;
-            /** Completed Application Ids */
-            completed_application_ids: string[];
-            /** Environment */
-            environment: {
-                [key: string]: unknown;
-            };
+            /** Completed Run Ids */
+            completed_run_ids: string[];
+            environment: components["schemas"]["S12EnvironmentResponse"];
             /** Errors */
-            errors: {
-                [key: string]: string;
-            }[];
+            errors: components["schemas"]["S12PredictionError"][];
             /** Evidence References */
-            evidence_references: {
-                [key: string]: unknown;
-            };
+            evidence_references: components["schemas"]["S12EvidenceReferenceResponse"][];
             /** Evidence Snapshot Ids */
             evidence_snapshot_ids: string[];
             /** Fence */
@@ -6304,20 +6317,15 @@ export interface components {
             gold_alphabet: string[];
             /** Job Id */
             job_id: string;
-            /** Label Manifest */
-            label_manifest: {
-                [key: string]: unknown;
-            };
+            label_manifest: components["schemas"]["S12LabelManifestResponse"];
             /** Mandatory Check Families */
             mandatory_check_families: {
-                [key: string]: unknown;
+                [key: string]: components["schemas"]["S12StatisticsBlock"];
             };
             /** Missing Opportunities */
             missing_opportunities: string[];
             /** Opportunities */
-            opportunities: {
-                [key: string]: unknown;
-            }[];
+            opportunities: components["schemas"]["S12OpportunityResponse"][];
             /** Plan Digest */
             plan_digest: string;
             /** Plan Id */
@@ -6328,10 +6336,13 @@ export interface components {
             predictions: {
                 [key: string]: string;
             };
-            /** Release */
-            release: {
+            release: components["schemas"]["S12ReleaseResponse"];
+            /** Replay Package */
+            replay_package: {
                 [key: string]: unknown;
             };
+            /** Replay Package Digest */
+            replay_package_digest: string;
             /** Rerun Of Bundle Id */
             rerun_of_bundle_id: string | null;
             /** Result Digest */
@@ -6347,16 +6358,10 @@ export interface components {
             schema_version: "s12-evaluation-bundle/1";
             /** Scope */
             scope: string;
-            /** Scope Eligibility */
-            scope_eligibility: {
-                [key: string]: unknown;
-            };
+            scope_eligibility: components["schemas"]["S12ScopeEligibility"];
             /** Seed */
             seed: number;
-            /** Split */
-            split: {
-                [key: string]: unknown;
-            };
+            split: components["schemas"]["S12Split"];
             /** Status */
             status: string;
             /** Status Reasons */
@@ -6371,26 +6376,117 @@ export interface components {
             stop_rule_satisfied: boolean;
             /** Strata */
             strata: {
-                [key: string]: unknown;
+                [key: string]: {
+                    [key: string]: components["schemas"]["S12StatisticsBlock"];
+                };
             };
             /** Tracks */
             tracks: {
-                [key: string]: unknown;
+                [key: string]: components["schemas"]["S12StatisticsBlock"];
             };
             /** Tracks Declared */
             tracks_declared: {
-                [key: string]: unknown;
+                [key: string]: components["schemas"]["S12Membership"];
             };
             /** Views */
             views: {
-                [key: string]: unknown;
+                [key: string]: components["schemas"]["S12StatisticsBlock"];
             };
             /** Views Declared */
             views_declared: {
-                [key: string]: unknown;
+                [key: string]: components["schemas"]["S12Membership"];
             };
             /** Worker Id */
             worker_id: string;
+        };
+        /** S12BusinessDeltas */
+        S12BusinessDeltas: {
+            /** Current Run Pointer */
+            current_run_pointer: number;
+            /** Evidence Digest */
+            evidence_digest?: string | null;
+            /** Evidence Rows */
+            evidence_rows: number;
+            /** Governance Revision */
+            governance_revision: number;
+            /** Lifecycle Revision */
+            lifecycle_revision: number;
+            /** Policy Revision */
+            policy_revision: number;
+        };
+        /** S12BusinessMeasurement */
+        S12BusinessMeasurement: {
+            /**
+             * Activation Count
+             * @default 0
+             */
+            activation_count: number;
+            /** Activation Digest */
+            activation_digest?: string | null;
+            /**
+             * Applications Id List Digest
+             * @default
+             */
+            applications_id_list_digest: string;
+            /** Applications Vector */
+            applications_vector?: components["schemas"]["S12ApplicationVector"][];
+            /**
+             * Artifacts Id List Digest
+             * @default
+             */
+            artifacts_id_list_digest: string;
+            /** Artifacts Vector */
+            artifacts_vector?: components["schemas"]["S12ArtifactVector"][];
+            /**
+             * Audit Events Id List Digest
+             * @default
+             */
+            audit_events_id_list_digest: string;
+            /** Audit Events Vector */
+            audit_events_vector?: components["schemas"]["S12AuditEventVector"][];
+            /** Current Run Reference */
+            current_run_reference?: string | null;
+            /** Evidence Count */
+            evidence_count: number;
+            /** Evidence Digest */
+            evidence_digest?: string | null;
+            /**
+             * Evidence Events Id List Digest
+             * @default
+             */
+            evidence_events_id_list_digest: string;
+            /** Evidence Events Vector */
+            evidence_events_vector?: components["schemas"]["S12EvidenceEventVector"][];
+            /** Evidence Revision */
+            evidence_revision: number;
+            /**
+             * Governance Events Id List Digest
+             * @default
+             */
+            governance_events_id_list_digest: string;
+            /** Governance Events Vector */
+            governance_events_vector?: components["schemas"]["S12GovernanceEventVector"][];
+            /**
+             * Governance Revision
+             * @default 0
+             */
+            governance_revision: number;
+            /**
+             * Lifecycle Events Id List Digest
+             * @default
+             */
+            lifecycle_events_id_list_digest: string;
+            /** Lifecycle Events Vector */
+            lifecycle_events_vector?: components["schemas"]["S12LifecycleEventVector"][];
+            /** Lifecycle Revision */
+            lifecycle_revision: number;
+            /**
+             * Manifests Id List Digest
+             * @default
+             */
+            manifests_id_list_digest: string;
+            /** Manifests Vector */
+            manifests_vector?: components["schemas"]["S12ManifestVector"][];
         };
         /** S12Cluster */
         S12Cluster: {
@@ -6408,13 +6504,99 @@ export interface components {
             /** Variants */
             variants?: string[] | null;
         };
+        /** S12ClusterResponse */
+        S12ClusterResponse: {
+            /** Applications */
+            applications: string[];
+            /** Cluster Id */
+            cluster_id: string;
+            /** Stratum */
+            stratum: string;
+            /** Usage */
+            usage: string;
+            /** Variants */
+            variants?: string[] | null;
+        };
         /** S12Cohort */
         S12Cohort: {
             /** Exclusions */
             exclusions: components["schemas"]["S12Exclusion"][];
         };
+        /** S12CohortResponse */
+        S12CohortResponse: {
+            /** Exclusions */
+            exclusions: components["schemas"]["S12Exclusion"][];
+        };
+        /** S12Denominators */
+        S12Denominators: {
+            /** E */
+            E: number;
+            /** E All */
+            E_all: number;
+            /** Conditional Fpr */
+            conditional_fpr: number;
+            /** Error Rate */
+            error_rate: number;
+            /** Labelability */
+            labelability: number;
+            /** Missing Rate */
+            missing_rate: number;
+            /** N Consistent */
+            n_consistent: number;
+            /** N Consistent Decisive */
+            n_consistent_decisive: number;
+            /** N Inconsistent */
+            n_inconsistent: number;
+            /** Skipped Rate */
+            skipped_rate: number;
+            /** Uncertain On Inconsistent */
+            uncertain_on_inconsistent: number;
+        };
+        /** S12EnvironmentResponse */
+        S12EnvironmentResponse: {
+            /** Dependency Identity */
+            dependency_identity: string;
+            /** Evaluator Build */
+            evaluator_build: string;
+            /** Python */
+            python: string;
+            /** Schema Version */
+            schema_version: string;
+        };
+        /** S12EvidenceEventVector */
+        S12EvidenceEventVector: {
+            /** Application Id */
+            application_id: string;
+            /** Cycle */
+            cycle: number;
+            /** Declared Content Sha256 */
+            declared_content_sha256: string;
+            /** Event Id */
+            event_id: string;
+            /** Kind */
+            kind: string;
+            /** Payload Digest */
+            payload_digest: string;
+            /** Revision */
+            revision: number;
+            /** Snapshot Id */
+            snapshot_id: string;
+        };
         /** S12EvidenceReference */
         S12EvidenceReference: {
+            /** Application Id */
+            application_id: string;
+            /** Cycle */
+            cycle: number;
+            /** Snapshot Digest */
+            snapshot_digest: string;
+            /** Snapshot Id */
+            snapshot_id: string;
+        };
+        /** S12EvidenceReferenceResponse */
+        S12EvidenceReferenceResponse: {
+            /** Application Id */
+            application_id: string;
             /** Cycle */
             cycle: number;
             /** Snapshot Digest */
@@ -6438,9 +6620,7 @@ export interface components {
             clusters: components["schemas"]["S12Cluster"][];
             cohort?: components["schemas"]["S12Cohort"] | null;
             /** Evidence References */
-            evidence_references: {
-                [key: string]: components["schemas"]["S12EvidenceReference"];
-            };
+            evidence_references: components["schemas"]["S12EvidenceReference"][];
             label_manifest: components["schemas"]["S12LabelManifestReference"];
             /** Mandatory Check Families */
             mandatory_check_families: components["schemas"]["S12MandatoryFamily"][];
@@ -6473,6 +6653,21 @@ export interface components {
                 [key: string]: components["schemas"]["S12Membership"];
             };
         };
+        /** S12GovernanceEventVector */
+        S12GovernanceEventVector: {
+            /** Event Id */
+            event_id: string;
+            /** Kind */
+            kind: string;
+            /** Payload Digest */
+            payload_digest: string;
+            /** Reason Code */
+            reason_code: string;
+            /** Revision */
+            revision: number;
+            /** Scope */
+            scope: string;
+        };
         /** S12JobResponse */
         S12JobResponse: {
             /** Attempt No */
@@ -6493,10 +6688,7 @@ export interface components {
             reason_codes?: string[] | null;
             /** Rerun Of Bundle Id */
             rerun_of_bundle_id?: string | null;
-            /** Result */
-            result?: {
-                [key: string]: unknown;
-            } | null;
+            result?: components["schemas"]["S12JobResult"] | null;
             /**
              * Schema Version
              * @constant
@@ -6507,6 +6699,15 @@ export interface components {
             /** Worker Id */
             worker_id: string;
         };
+        /** S12JobResult */
+        S12JobResult: {
+            /** Bundle Id */
+            bundle_id?: string | null;
+            /** Reason Codes */
+            reason_codes?: string[] | null;
+            /** Status */
+            status?: string | null;
+        };
         /** S12LabelManifestReference */
         S12LabelManifestReference: {
             /** Manifest Digest */
@@ -6514,12 +6715,58 @@ export interface components {
             /** Manifest Id */
             manifest_id: string;
         };
+        /** S12LabelManifestResponse */
+        S12LabelManifestResponse: {
+            /** Label Custody */
+            label_custody?: string | null;
+            /** Labels */
+            labels?: {
+                [key: string]: string;
+            };
+            /** Manifest Digest */
+            manifest_digest: string;
+            /** Manifest Id */
+            manifest_id: string;
+        };
+        /** S12LifecycleEventVector */
+        S12LifecycleEventVector: {
+            /** Application Id */
+            application_id: string;
+            /** Cycle */
+            cycle: number;
+            /** Event Id */
+            event_id: string;
+            /** Phase */
+            phase: string;
+            /** Reason Code */
+            reason_code: string;
+            /** Revision */
+            revision: number;
+        };
         /** S12MandatoryFamily */
         S12MandatoryFamily: {
             /** Check Ids */
             check_ids: string[];
             /** Family Id */
             family_id: string;
+        };
+        /** S12MandatoryFamilyResponse */
+        S12MandatoryFamilyResponse: {
+            /** Check Ids */
+            check_ids: string[];
+            /** Family Id */
+            family_id: string;
+        };
+        /** S12ManifestVector */
+        S12ManifestVector: {
+            /** Content Digest */
+            content_digest: string;
+            /** Declared Digest */
+            declared_digest: string;
+            /** Manifest Id */
+            manifest_id: string;
+            /** Schema Version */
+            schema_version: string;
         };
         /** S12Membership */
         S12Membership: {
@@ -6556,58 +6803,67 @@ export interface components {
              */
             track: "R" | "C";
         };
+        /** S12OpportunityResponse */
+        S12OpportunityResponse: {
+            /** Application Id */
+            application_id: string;
+            /** Check Id */
+            check_id: string;
+            /** Cluster */
+            cluster: string;
+            /** Cycle */
+            cycle: number;
+            /** Data Source */
+            data_source?: string | null;
+            /** Difficulty */
+            difficulty?: string | null;
+            /** Document Combination */
+            document_combination?: string | null;
+            /** Evidence Snapshot Id */
+            evidence_snapshot_id: string;
+            /** Label */
+            label: string;
+            /** Label Custody */
+            label_custody?: string | null;
+            /** Opportunity Id */
+            opportunity_id: string;
+            /** Perturbation Family */
+            perturbation_family?: string | null;
+            /** Run Id */
+            run_id: string;
+            /** Target Scope */
+            target_scope: string;
+            /** Track */
+            track: string;
+            /** Variant Id */
+            variant_id?: string | null;
+        };
         /** S12PlanResponse */
         S12PlanResponse: {
-            /** Budget */
-            budget: {
-                [key: string]: number;
-            };
-            /** Business Before */
-            business_before: {
-                [key: string]: unknown;
-            };
+            budget: components["schemas"]["S12Budget"];
+            business_before: components["schemas"]["S12BusinessMeasurement"];
             /** Checker Artifact */
             checker_artifact: {
                 [key: string]: unknown;
             };
             /** Clusters */
-            clusters: {
-                [key: string]: unknown;
-            }[];
-            /** Cohort */
-            cohort: {
-                [key: string]: unknown;
-            } | null;
-            /** Environment */
-            environment: {
-                [key: string]: unknown;
-            };
+            clusters: components["schemas"]["S12ClusterResponse"][];
+            cohort?: components["schemas"]["S12CohortResponse"] | null;
+            environment: components["schemas"]["S12EnvironmentResponse"];
             /** Evidence References */
-            evidence_references: {
-                [key: string]: unknown;
-            };
+            evidence_references: components["schemas"]["S12EvidenceReferenceResponse"][];
             /** Frozen At */
             frozen_at: number;
-            /** Label Manifest */
-            label_manifest: {
-                [key: string]: unknown;
-            };
+            label_manifest: components["schemas"]["S12LabelManifestResponse"];
             /** Mandatory Check Families */
-            mandatory_check_families: {
-                [key: string]: unknown;
-            }[];
+            mandatory_check_families: components["schemas"]["S12MandatoryFamilyResponse"][];
             /** Opportunities */
-            opportunities: {
-                [key: string]: unknown;
-            }[];
+            opportunities: components["schemas"]["S12OpportunityResponse"][];
             /** Plan Digest */
             plan_digest: string;
             /** Plan Id */
             plan_id: string;
-            /** Release */
-            release: {
-                [key: string]: unknown;
-            };
+            release: components["schemas"]["S12ReleaseResponse"];
             /** Run Specs */
             run_specs: {
                 [key: string]: unknown;
@@ -6621,24 +6877,47 @@ export interface components {
             scope: string;
             /** Seed */
             seed: number;
-            /** Split */
-            split: {
-                [key: string]: unknown;
-            };
+            split: components["schemas"]["S12Split"];
             /** Stop Rule */
             stop_rule: string;
             /** Tracks */
             tracks: {
-                [key: string]: {
-                    [key: string]: unknown;
-                };
+                [key: string]: components["schemas"]["S12Membership"];
             };
             /** Views */
             views: {
-                [key: string]: {
-                    [key: string]: unknown;
-                };
+                [key: string]: components["schemas"]["S12Membership"];
             };
+        };
+        /** S12PointMetrics */
+        S12PointMetrics: {
+            /** Conditional Fpr */
+            conditional_fpr?: number | null;
+            /** Coverage */
+            coverage?: number | null;
+            /** Error Rate */
+            error_rate?: number | null;
+            /** False Negative Rate */
+            false_negative_rate?: number | null;
+            /** False Positive Rate */
+            false_positive_rate?: number | null;
+            /** Labelability */
+            labelability?: number | null;
+            /** Miss Rate */
+            miss_rate?: number | null;
+            /** Missing Rate */
+            missing_rate?: number | null;
+            /** Skipped Rate */
+            skipped_rate?: number | null;
+            /** Uncertain On Inconsistent */
+            uncertain_on_inconsistent?: number | null;
+        };
+        /** S12PredictionError */
+        S12PredictionError: {
+            /** Opportunity Id */
+            opportunity_id: string;
+            /** Reason Code */
+            reason_code: string;
         };
         /** S12ProcessResponse */
         S12ProcessResponse: {
@@ -6668,6 +6947,36 @@ export interface components {
             /** Release Id */
             release_id: string;
         };
+        /** S12ReleaseResponse */
+        S12ReleaseResponse: {
+            /** Applicable Check Count */
+            applicable_check_count: number;
+            /** Applicable Check Ids */
+            applicable_check_ids: string[];
+            /** Checker Build */
+            checker_build: string;
+            /** Limits */
+            limits: {
+                [key: string]: number;
+            };
+            /** Manifest Digest */
+            manifest_digest: string;
+            /** Manifest Id */
+            manifest_id: string;
+            /** Protected Baseline Digest */
+            protected_baseline_digest: string;
+            /** Release Digest */
+            release_digest: string;
+            /** Release Id */
+            release_id: string;
+        };
+        /** S12ScopeEligibility */
+        S12ScopeEligibility: {
+            /** Holdout Eligible */
+            holdout_eligible: boolean;
+            /** Reasons */
+            reasons: string[];
+        };
         /** S12Split */
         S12Split: {
             /** Scheme */
@@ -6679,6 +6988,33 @@ export interface components {
         S12StartJobBody: {
             /** Plan Id */
             plan_id: string;
+        };
+        /** S12StatisticsBlock */
+        S12StatisticsBlock: {
+            /** Bounds 95 One Sided */
+            bounds_95_one_sided?: {
+                [key: string]: number | null;
+            } | null;
+            /** Conclusion */
+            conclusion: string;
+            denominators: components["schemas"]["S12Denominators"];
+            /** Estimable */
+            estimable: boolean;
+            /** Interval 95 Two Sided */
+            interval_95_two_sided?: {
+                [key: string]: number[];
+            } | null;
+            /** Membership */
+            membership: string;
+            /** Not Estimable Reasons */
+            not_estimable_reasons: string[];
+            /** Opportunity Count */
+            opportunity_count: number;
+            point: components["schemas"]["S12PointMetrics"];
+            /** Prediction Counts */
+            prediction_counts: {
+                [key: string]: number;
+            };
         };
         /** T05BusinessExceptionOperationsResult */
         T05BusinessExceptionOperationsResult: {

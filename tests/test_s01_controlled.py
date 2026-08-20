@@ -6279,3 +6279,108 @@ def test_idempotency_fingerprint_cache_warm_hit_rejects_tamper_like_fresh(
     with pytest.raises(RuntimeError) as fresh_error:
         build()
     assert type(warm_error.value) is type(fresh_error.value)
+
+
+# ---------------------------------------------------------------------------
+# Ticket #28 R2 Slice 4 — complete S01 authority measurements (SP-12)
+# ---------------------------------------------------------------------------
+
+
+def _s12_two_application_business(tmp_path: Path) -> tuple[ControlledScenarioService, Path]:
+    """Two admitted applications with immutable snapshots on one business
+    database: a mutation of one application must never be masked by maxima
+    over the other."""
+    state_path = tmp_path / "business.sqlite3"
+    services: list[ControlledScenarioService] = []
+    for index, scenario in enumerate(
+        ("app_r53_bad_engine.json", "app_s04_bad_vin.json")
+    ):
+        service = ControlledScenarioService(
+            fixture_root=ROOT / "fixtures" / "applications",
+            rules_path=ROOT / "configs" / "rules_auto_lease.yaml",
+            state_path=state_path,
+            scenario_id=scenario,
+        )
+        admitted = service.submit_demo(
+            principal=TEST_INTEGRATOR,
+            scenario_id=scenario,
+            idempotency_key=f"s12-r2-s01-vector-{index}",
+        )
+        assert admitted.disposition is AdmissionDisposition.ACCEPTED
+        ControlledScenarioTestDriver(service).process_next_job(now=0)
+        services.append(service)
+    return services[0], state_path
+
+
+def _tamper_s01_row(
+    state_path: Path, table: str, item_id: str, new_payload: dict[str, Any]
+) -> None:
+    """Rewrite one stored row directly (payload + recomputed integrity
+    digest): the authority must detect the payload change by content, never
+    trust the declared digest alone."""
+    import sqlite3 as _sqlite3
+    from task4_consistency.controlled.s01_store import _integrity_digest
+
+    payload_text = json.dumps(
+        new_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    digest = _integrity_digest(table, item_id, payload_text)
+    connection = _sqlite3.connect(state_path)
+    try:
+        connection.execute(
+            f"UPDATE {table} SET payload = ?, integrity_sha256 = ? WHERE item_id = ?",
+            (payload_text, digest, item_id),
+        )
+        connection.execute(
+            "UPDATE s01_immutable_catalog SET integrity_sha256 = ? "
+            "WHERE table_name = ? AND item_id = ?",
+            (digest, table, item_id),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def test_evaluation_business_measurement_changes_for_any_application_revision(
+    tmp_path: Path,
+) -> None:
+    """A change to a NON-max application revision changes the measurement,
+    even when ids, counts and the maximum revision stay constant."""
+    service, state_path = _s12_two_application_business(tmp_path)
+    before = service.evaluation_business_measurement()
+    store = SQLiteTargetStore(state_path)
+    store.reload()
+    application = next(iter(store.applications.values()))
+    application["lifecycle_revision"] = (
+        int(application["lifecycle_revision"] or 0) - 1
+    )
+    store.persist()
+    after = service.evaluation_business_measurement()
+    assert after != before
+
+
+def test_evaluation_evidence_measurement_changes_for_payload_with_same_snapshot_id(
+    tmp_path: Path,
+) -> None:
+    """An evidence payload change that keeps its snapshot id changes the
+    measurement: the payload content itself is measured, not only the
+    snapshot ids."""
+    service, state_path = _s12_two_application_business(tmp_path)
+    before = service.evaluation_business_measurement()
+    store = SQLiteTargetStore(state_path)
+    store.reload()
+    snapshot_event = next(
+        event
+        for event in store.evidence_events
+        if event.get("kind") == "immutable_ready_snapshot"
+    )
+    mutated = copy.deepcopy(snapshot_event)
+    mutated["payload"]["evidence"][0]["raw"] = "MUTATED-EVIDENCE"
+    _tamper_s01_row(
+        state_path,
+        "evidence_events",
+        snapshot_event["event_id"],
+        mutated,
+    )
+    after = service.evaluation_business_measurement()
+    assert after != before

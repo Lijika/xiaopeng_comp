@@ -103,13 +103,6 @@ def _s12_require_operator(request: Request) -> None:
         )
 
 
-def _s12_worker_subject(request: Request) -> str:
-    """The server-bound evaluator worker identity from registered
-    configuration; callers never supply it."""
-    module = _s12_app_module(request)
-    return str(getattr(module, "S12_WORKER_SUBJECT", "") or module.S12_SUBJECT)
-
-
 def _s12_invalid_command() -> HTTPException:
     return HTTPException(
         422,
@@ -214,6 +207,7 @@ class S12LabelManifestReference(BaseModel):
 class S12EvidenceReference(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    application_id: str
     snapshot_id: str
     snapshot_digest: str = Field(pattern=_DIGEST64)
     cycle: int = Field(ge=1)
@@ -254,11 +248,280 @@ class S12FreezePlanBody(BaseModel):
     tracks: dict[str, S12Membership]
     views: dict[str, S12Membership]
     opportunities: list[S12Opportunity] = Field(min_length=1)
-    evidence_references: dict[str, S12EvidenceReference]
+    evidence_references: list[S12EvidenceReference] = Field(min_length=1)
     release_reference: S12ReleaseReference
     label_manifest: S12LabelManifestReference
     mandatory_check_families: list[S12MandatoryFamily] = Field(min_length=1)
     cohort: S12Cohort | None = None
+
+
+# Closed response models: every S12-typed nested object is an explicit
+# keyed model.  Opaque S01/S08-owned content (checker artifact, RunSpecs,
+# replay package) stays dict-shaped: the S12 surface never re-types
+# authority content (ADR-0008 role-minimized typed query interfaces).
+
+
+class S12ClusterResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    cluster_id: str
+    stratum: str
+    applications: list[str]
+    usage: str
+    variants: list[str] | None = None
+
+
+class S12OpportunityResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    opportunity_id: str
+    track: str
+    cluster: str
+    application_id: str
+    cycle: int
+    check_id: str
+    target_scope: str
+    evidence_snapshot_id: str
+    variant_id: str | None = None
+    label: str
+    label_custody: str | None = None
+    run_id: str
+    difficulty: str | None = None
+    data_source: str | None = None
+    document_combination: str | None = None
+    perturbation_family: str | None = None
+
+
+class S12LabelManifestResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    manifest_id: str
+    manifest_digest: str
+    label_custody: str | None = None
+    labels: dict[str, str] = Field(default_factory=dict)
+
+
+class S12EnvironmentResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    python: str
+    evaluator_build: str
+    dependency_identity: str
+    schema_version: str
+
+
+class S12ReleaseResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    release_id: str
+    release_digest: str
+    checker_build: str
+    manifest_id: str
+    manifest_digest: str
+    protected_baseline_digest: str
+    limits: dict[str, int]
+    applicable_check_ids: list[str]
+    applicable_check_count: int
+
+
+class S12EvidenceReferenceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    application_id: str
+    cycle: int
+    snapshot_id: str
+    snapshot_digest: str
+
+
+class S12MandatoryFamilyResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    family_id: str
+    check_ids: list[str]
+
+
+class S12CohortResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    exclusions: list[S12Exclusion]
+
+
+class S12ApplicationVector(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    application_id: str
+    cycle: int
+    lifecycle_revision: int
+    evidence_revision: int
+    current_run_id: str
+    current_evidence_snapshot_id: str
+    phase: str
+    route: str
+
+
+class S12EvidenceEventVector(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str
+    kind: str
+    application_id: str
+    cycle: int
+    revision: int
+    snapshot_id: str
+    declared_content_sha256: str
+    payload_digest: str
+
+
+class S12LifecycleEventVector(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str
+    application_id: str
+    cycle: int
+    revision: int
+    reason_code: str
+    phase: str
+
+
+class S12AuditEventVector(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str
+    reason_code: str
+    revision: int
+    recorded_at: int
+
+
+class S12GovernanceEventVector(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str
+    revision: int
+    kind: str
+    scope: str
+    reason_code: str
+    payload_digest: str
+
+
+class S12ManifestVector(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    manifest_id: str
+    schema_version: str
+    declared_digest: str
+    content_digest: str
+
+
+class S12ArtifactVector(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    artifact_id: str
+    content_digest: str
+
+
+class S12BusinessMeasurement(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    lifecycle_revision: int
+    evidence_revision: int
+    evidence_count: int
+    evidence_digest: str | None = None
+    current_run_reference: str | None = None
+    governance_revision: int = 0
+    activation_count: int = 0
+    activation_digest: str | None = None
+    applications_vector: list[S12ApplicationVector] = Field(default_factory=list)
+    applications_id_list_digest: str = ""
+    evidence_events_vector: list[S12EvidenceEventVector] = Field(
+        default_factory=list
+    )
+    evidence_events_id_list_digest: str = ""
+    lifecycle_events_vector: list[S12LifecycleEventVector] = Field(
+        default_factory=list
+    )
+    lifecycle_events_id_list_digest: str = ""
+    audit_events_vector: list[S12AuditEventVector] = Field(default_factory=list)
+    audit_events_id_list_digest: str = ""
+    governance_events_vector: list[S12GovernanceEventVector] = Field(
+        default_factory=list
+    )
+    governance_events_id_list_digest: str = ""
+    manifests_vector: list[S12ManifestVector] = Field(default_factory=list)
+    manifests_id_list_digest: str = ""
+    artifacts_vector: list[S12ArtifactVector] = Field(default_factory=list)
+    artifacts_id_list_digest: str = ""
+
+
+class S12Denominators(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    E: int
+    E_all: int
+    n_consistent: int
+    n_inconsistent: int
+    n_consistent_decisive: int
+    labelability: int
+    uncertain_on_inconsistent: int
+    skipped_rate: int
+    missing_rate: int
+    error_rate: int
+    conditional_fpr: int
+
+
+class S12PointMetrics(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    coverage: float | None = None
+    false_positive_rate: float | None = None
+    false_negative_rate: float | None = None
+    miss_rate: float | None = None
+    labelability: float | None = None
+    uncertain_on_inconsistent: float | None = None
+    skipped_rate: float | None = None
+    missing_rate: float | None = None
+    error_rate: float | None = None
+    conditional_fpr: float | None = None
+
+
+class S12StatisticsBlock(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    membership: str
+    opportunity_count: int
+    denominators: S12Denominators
+    prediction_counts: dict[str, int]
+    point: S12PointMetrics
+    # Two-sided 95% bootstrap intervals are per-metric [low, high] pairs.
+    interval_95_two_sided: dict[str, list[float]] | None = None
+    bounds_95_one_sided: dict[str, float | None] | None = None
+    estimable: bool
+    not_estimable_reasons: list[str]
+    conclusion: str
+
+
+class S12ScopeEligibility(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    holdout_eligible: bool
+    reasons: list[str]
+
+
+class S12PredictionError(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    opportunity_id: str
+    reason_code: str
+
+
+class S12BusinessDeltas(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    lifecycle_revision: int
+    evidence_rows: int
+    evidence_digest: str | None = None
+    current_run_pointer: int
+    policy_revision: int
+    governance_revision: int
 
 
 class S12PlanResponse(BaseModel):
@@ -268,22 +531,22 @@ class S12PlanResponse(BaseModel):
     plan_id: str
     scope: str
     seed: int
-    budget: dict[str, int]
+    budget: S12Budget
     stop_rule: str
-    split: dict[str, Any]
-    clusters: list[dict[str, Any]]
-    tracks: dict[str, dict[str, Any]]
-    views: dict[str, dict[str, Any]]
-    opportunities: list[dict[str, Any]]
-    label_manifest: dict[str, Any]
-    environment: dict[str, Any]
-    release: dict[str, Any]
+    split: S12Split
+    clusters: list[S12ClusterResponse]
+    tracks: dict[str, S12Membership]
+    views: dict[str, S12Membership]
+    opportunities: list[S12OpportunityResponse]
+    label_manifest: S12LabelManifestResponse
+    environment: S12EnvironmentResponse
+    release: S12ReleaseResponse
     checker_artifact: dict[str, Any]
     run_specs: dict[str, Any]
-    evidence_references: dict[str, Any]
-    mandatory_check_families: list[dict[str, Any]]
-    cohort: dict[str, Any] | None
-    business_before: dict[str, Any]
+    evidence_references: list[S12EvidenceReferenceResponse]
+    mandatory_check_families: list[S12MandatoryFamilyResponse]
+    cohort: S12CohortResponse | None = None
+    business_before: S12BusinessMeasurement
     frozen_at: int
     plan_digest: str
 
@@ -292,6 +555,14 @@ class S12StartJobBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     plan_id: str
+
+
+class S12JobResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    bundle_id: str | None = None
+    status: str | None = None
+    reason_codes: list[str] | None = None
 
 
 class S12JobResponse(BaseModel):
@@ -307,7 +578,7 @@ class S12JobResponse(BaseModel):
     attempt_no: int
     lease_until: int | None = None
     rerun_of_bundle_id: str | None = None
-    result: dict[str, Any] | None = None
+    result: S12JobResult | None = None
     reason_codes: list[str] | None = None
     created_at: int
 
@@ -340,38 +611,40 @@ class S12BundleResponse(BaseModel):
     status: str
     scope: str
     status_reasons: list[str]
-    tracks: dict[str, Any]
-    views: dict[str, Any]
-    mandatory_check_families: dict[str, Any]
-    strata: dict[str, Any]
-    scope_eligibility: dict[str, Any]
-    clusters: list[dict[str, Any]]
-    opportunities: list[dict[str, Any]]
-    tracks_declared: dict[str, Any]
-    views_declared: dict[str, Any]
-    evidence_references: dict[str, Any]
-    label_manifest: dict[str, Any]
-    cohort: dict[str, Any] | None
+    tracks: dict[str, S12StatisticsBlock]
+    views: dict[str, S12StatisticsBlock]
+    mandatory_check_families: dict[str, S12StatisticsBlock]
+    strata: dict[str, dict[str, S12StatisticsBlock]]
+    scope_eligibility: S12ScopeEligibility
+    clusters: list[S12ClusterResponse]
+    opportunities: list[S12OpportunityResponse]
+    tracks_declared: dict[str, S12Membership]
+    views_declared: dict[str, S12Membership]
+    evidence_references: list[S12EvidenceReferenceResponse]
+    label_manifest: S12LabelManifestResponse
+    cohort: S12CohortResponse | None
     predictions: dict[str, str]
     prediction_alphabet: list[str]
     gold_alphabet: list[str]
-    errors: list[dict[str, str]]
+    errors: list[S12PredictionError]
     missing_opportunities: list[str]
-    release: dict[str, Any]
-    environment: dict[str, Any]
+    release: S12ReleaseResponse
+    environment: S12EnvironmentResponse
     stop_rule: str
     stop_reason: str
     stop_elapsed_ms: int
-    completed_application_ids: list[str]
+    completed_run_ids: list[str]
     stop_rule_satisfied: bool
     evidence_snapshot_ids: list[str]
     seed: int
-    budget: dict[str, int]
-    split: dict[str, Any]
-    business_before: dict[str, Any]
-    business_after: dict[str, Any]
-    business_deltas: dict[str, Any]
+    budget: S12Budget
+    split: S12Split
+    business_before: S12BusinessMeasurement
+    business_after: S12BusinessMeasurement
+    business_deltas: S12BusinessDeltas
     result_digest: str
+    replay_package: dict[str, Any]
+    replay_package_digest: str
     command: str
 
 
@@ -401,9 +674,7 @@ def s12_start_job(body: S12StartJobBody, request: Request) -> dict[str, Any]:
     registered server worker identity."""
     _s12_require_operator(request)
     try:
-        return _s12_service(request).start_job(
-            body.plan_id, _s12_worker_subject(request)
-        )
+        return _s12_service(request).start_job(body.plan_id)
     except ValueError:
         raise _s12_not_found()
     except (S12IntegrityError, S12Unavailable):
@@ -461,9 +732,7 @@ def s12_rerun_job(job_id: str, request: Request) -> dict[str, Any]:
     ``rerun_of_bundle_id`` and never overwrite it."""
     _s12_require_operator(request)
     try:
-        return _s12_service(request).rerun_job(
-            job_id, _s12_worker_subject(request)
-        )
+        return _s12_service(request).rerun_job(job_id)
     except ValueError:
         raise _s12_not_found()
     except (S12IntegrityError, S12Unavailable):

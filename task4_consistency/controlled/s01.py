@@ -5569,6 +5569,146 @@ class ControlledScenarioService:
                 "evidence_count": len(self._store.evidence_events),
                 "evidence_digest": evidence_digest,
                 "current_run_reference": current_run_reference,
+                # Canonical ordered vectors over every relevant application,
+                # lifecycle/evidence/audit row and immutable snapshot payload:
+                # a change to ANY covered row, revision or payload changes the
+                # measurement even when ids, counts and maxima stay constant
+                # (Ticket #28 R2 SP-12).
+                "applications_vector": [
+                    {
+                        "application_id": str(app.get("application_id") or ""),
+                        "cycle": int(app.get("cycle") or 0),
+                        "lifecycle_revision": int(
+                            app.get("lifecycle_revision") or 0
+                        ),
+                        "evidence_revision": int(
+                            app.get("evidence_revision") or 0
+                        ),
+                        "current_run_id": str(app.get("current_run_id") or ""),
+                        "current_evidence_snapshot_id": str(
+                            app.get("current_evidence_snapshot_id") or ""
+                        ),
+                        "phase": str(app.get("phase") or ""),
+                        "route": str(app.get("route") or ""),
+                    }
+                    for app in sorted(
+                        apps,
+                        key=lambda item: str(item.get("application_id") or ""),
+                    )
+                ],
+                "applications_id_list_digest": hashlib.sha256(
+                    json.dumps(
+                        [
+                            str(app.get("application_id") or "")
+                            for app in sorted(
+                                apps,
+                                key=lambda item: str(
+                                    item.get("application_id") or ""
+                                ),
+                            )
+                        ],
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+                "evidence_events_vector": [
+                    {
+                        "event_id": str(event.get("event_id") or ""),
+                        "kind": str(event.get("kind") or ""),
+                        "application_id": str(
+                            event.get("application_id") or ""
+                        ),
+                        "cycle": int(event.get("cycle") or 0),
+                        "revision": int(event.get("revision") or 0),
+                        "snapshot_id": str(event.get("snapshot_id") or ""),
+                        "declared_content_sha256": str(
+                            event.get("content_sha256") or ""
+                        ),
+                        "payload_digest": hashlib.sha256(
+                            json.dumps(
+                                event.get("payload") or {},
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ).encode("utf-8")
+                        ).hexdigest(),
+                    }
+                    for event in sorted(
+                        self._store.evidence_events,
+                        key=lambda item: str(item.get("event_id") or ""),
+                    )
+                ],
+                "evidence_events_id_list_digest": hashlib.sha256(
+                    json.dumps(
+                        [
+                            str(event.get("event_id") or "")
+                            for event in sorted(
+                                self._store.evidence_events,
+                                key=lambda item: str(item.get("event_id") or ""),
+                            )
+                        ],
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+                "lifecycle_events_vector": [
+                    {
+                        "event_id": str(event.get("event_id") or ""),
+                        "application_id": str(
+                            event.get("application_id") or ""
+                        ),
+                        "cycle": int(event.get("cycle") or 0),
+                        "revision": int(event.get("revision") or 0),
+                        "reason_code": str(event.get("reason_code") or ""),
+                        "phase": str(event.get("phase") or ""),
+                    }
+                    for event in sorted(
+                        self._store.lifecycle_events,
+                        key=lambda item: str(item.get("event_id") or ""),
+                    )
+                ],
+                "lifecycle_events_id_list_digest": hashlib.sha256(
+                    json.dumps(
+                        [
+                            str(event.get("event_id") or "")
+                            for event in sorted(
+                                self._store.lifecycle_events,
+                                key=lambda item: str(item.get("event_id") or ""),
+                            )
+                        ],
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+                "audit_events_vector": [
+                    {
+                        "event_id": str(event.get("event_id") or ""),
+                        "reason_code": str(event.get("reason_code") or ""),
+                        "revision": int(event.get("revision") or 0),
+                        "recorded_at": int(event.get("recorded_at") or 0),
+                    }
+                    for event in sorted(
+                        self._store.audit_events,
+                        key=lambda item: str(item.get("event_id") or ""),
+                    )
+                ],
+                "audit_events_id_list_digest": hashlib.sha256(
+                    json.dumps(
+                        [
+                            str(event.get("event_id") or "")
+                            for event in sorted(
+                                self._store.audit_events,
+                                key=lambda item: str(item.get("event_id") or ""),
+                            )
+                        ],
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
             }
 
     def issue_session(

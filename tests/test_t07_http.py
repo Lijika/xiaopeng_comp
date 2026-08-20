@@ -672,3 +672,30 @@ def test_openapi_t07_contract_closed():
     for name in CLOSED_T07_SCHEMAS:
         assert name in schemas, name
         assert schemas[name]["additionalProperties"] is False, name
+
+
+def test_startup_without_s12_worker_configuration_keeps_demo_routes_serving(
+    monkeypatch,
+) -> None:
+    """Shared application construction with the Ticket #28 R2 required S12
+    worker configuration: when TASK4_S12_WORKER_SUBJECT is absent the S12
+    plane stays closed while the S07/S11 demo routes keep serving."""
+    import os
+
+    monkeypatch.delenv("TASK4_S12_WORKER_SUBJECT", raising=False)
+    monkeypatch.delenv("TASK4_S12_STATE_PATH", raising=False)
+    monkeypatch.delenv("TASK4_S12_CREDENTIAL", raising=False)
+    monkeypatch.delenv("TASK4_S12_SUBJECT", raising=False)
+    monkeypatch.setattr(webapp, "S12_WORKER_SUBJECT", "")
+    monkeypatch.setattr(webapp, "S12_SERVICE", None)
+    assert webapp.S12_WORKER_SUBJECT == ""
+    assert webapp._s12_evaluation_service() is None
+    client = make_client()
+    assert client.get("/api/demo/fixtures").status_code == 200
+    response = client.post(
+        "/api/demo/check/batch",
+        json={"fixture_ids": [FIXTURE_OK]},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["completed"] == 1
+    assert response.json()["outcome"] == "completed"

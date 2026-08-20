@@ -166,7 +166,7 @@ def _plan_command(
 ) -> dict[str, object]:
     opportunities: list[dict[str, object]] = []
     clusters: list[dict[str, object]] = []
-    evidence_references: dict[str, object] = {}
+    evidence_references: list[dict[str, object]] = []
     for index, (scenario, application_id) in enumerate(admitted):
         snapshot_id, snapshot_digest = snapshots[application_id]
         opportunities.append(
@@ -189,11 +189,14 @@ def _plan_command(
                 "usage": "development",
             }
         )
-        evidence_references[application_id] = {
-            "snapshot_id": snapshot_id,
-            "snapshot_digest": snapshot_digest,
-            "cycle": 1,
-        }
+        evidence_references.append(
+            {
+                "application_id": application_id,
+                "snapshot_id": snapshot_id,
+                "snapshot_digest": snapshot_digest,
+                "cycle": 1,
+            }
+        )
     return {
         "schema_version": "s12-plan-command/1",
         "plan_id": "plan-c-probe",
@@ -263,72 +266,169 @@ def _probe_s12_disablement(plan_command: dict[str, object]) -> dict[str, object]
         }
 
 
-def _prior_artifact_probe(
-    prior_source_root: Path, business_path: Path, expected_applications: int
-) -> dict[str, object]:
-    """Run the archived fixed-base code against the business database created
-    before S12 operations: the prior code must reopen and serve the preserved
-    application state read-only."""
-    source_digest = hashlib.sha256(
-        subprocess.run(
-            [
-                "git",
-                "archive",
-                FIXED_BASE,
-                "task4_consistency",
-                "configs",
-                "fixtures",
-            ],
-            cwd=ROOT,
-            check=True,
-            stdout=subprocess.PIPE,
-        ).stdout
-    ).hexdigest()
-    probe = (
-        "import json, sys\n"
-        "from pathlib import Path\n"
-        "from task4_consistency.controlled.s01 import ControlledScenarioService\n"
-        "root = Path(sys.argv[1])\n"
-        "service = ControlledScenarioService(\n"
-        "    fixture_root=root / 'fixtures' / 'applications',\n"
-        "    rules_path=root / 'configs' / 'rules_auto_lease.yaml',\n"
-        "    state_path=Path(sys.argv[2]),\n"
-        ")\n"
-        "print(json.dumps({'applications': service.fact_counts()['applications']}))\n"
-    )
-    environment = os.environ.copy()
-    environment.update(
-        PYTHONPATH=str(prior_source_root), PYTHONDONTWRITEBYTECODE="1"
-    )
-    completed = subprocess.run(
+def _canonical_tree_digest(root: Path) -> str:
+    """One canonical digest over every file under ``root``: relative paths
+    plus contents, sorted.  Two trees from the same archive compare equal;
+    any candidate root with different content or paths compares unequal."""
+    hasher = hashlib.sha256()
+    for relative in sorted(
+        path.relative_to(root)
+        for path in root.rglob("*")
+        if path.is_file()
+    ):
+        hasher.update(str(relative).encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update((root / relative).read_bytes())
+        hasher.update(b"\0")
+    return hasher.hexdigest()
+
+
+def _extract_fixed_base(
+    fixed_base: str, work: Path
+) -> tuple[Path, str, str]:
+    """Extract the exact fixed-base archive into ``work`` and return the
+    extraction root, the archive byte digest and the canonical tree digest."""
+    archive_bytes = subprocess.run(
         [
-            str(ROOT / ".venv" / "bin" / "python"),
-            "-c",
-            probe,
-            str(prior_source_root),
-            str(business_path),
+            "git",
+            "archive",
+            fixed_base,
+            "task4_consistency",
+            "configs",
+            "fixtures",
         ],
-        cwd=prior_source_root,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=120,
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+    ).stdout
+    import io as _io
+    import tarfile as _tarfile
+
+    extraction = work / "fixed-base"
+    extraction.mkdir(parents=True, exist_ok=True)
+    with _tarfile.open(fileobj=_io.BytesIO(archive_bytes), mode="r:") as bundle:
+        bundle.extractall(extraction)
+    return extraction, hashlib.sha256(archive_bytes).hexdigest(), _canonical_tree_digest(
+        extraction
     )
-    served = False
-    if completed.returncode == 0:
-        try:
-            result = json.loads(completed.stdout)
-            served = int(result.get("applications") or 0) == expected_applications
-        except (json.JSONDecodeError, TypeError, ValueError):
-            served = False
-    return {
-        "archived_base": FIXED_BASE,
-        "source_digest": source_digest,
-        "prior_command_exit": completed.returncode,
-        "prior_stderr_tail": completed.stderr[-400:],
-        "prior_code_serves_business_state": served,
-        "expected_applications": expected_applications,
-    }
+
+
+def _prior_artifact_probe(
+    fixed_base: str,
+    prior_source_root: Path | None,
+    business_path: Path,
+    expected_applications: int,
+) -> dict[str, object]:
+    """Prove that the EXACT fixed-base artifact reopens the unchanged
+    business database and serves the preserved application state read-only.
+    The probe extracts the fixed base itself; a caller-supplied prior root
+    is usable only after exact canonical tree-digest comparison and any
+    mismatch terminates the probe nonzero (ST-03 / SP-16)."""
+    with tempfile.TemporaryDirectory(prefix="s12-fixed-base-") as raw:
+        work = Path(raw)
+        extraction, archive_digest, tree_digest = _extract_fixed_base(
+            fixed_base, work
+        )
+        supplied_digest: str | None = None
+        tree_digest_matches: bool = True
+        if prior_source_root is not None:
+            supplied_digest = _canonical_tree_digest(prior_source_root)
+            tree_digest_matches = supplied_digest == tree_digest
+        if not tree_digest_matches:
+            return {
+                "archived_base": fixed_base,
+                "source_digest": archive_digest,
+                "tree_digest": tree_digest,
+                "supplied_tree_digest": supplied_digest,
+                "tree_digest_matches": False,
+                "prior_code_serves_business_state": False,
+                "prior_command_exit": None,
+                "expected_applications": expected_applications,
+            }
+        probe = (
+            "import json, sys\n"
+            "from pathlib import Path\n"
+            "import hashlib\n"
+            "import task4_consistency.controlled.s01 as s01_module\n"
+            "root = Path(sys.argv[1])\n"
+            "expected = sys.argv[3]\n"
+            # Deliberate verbatim copy of _canonical_tree_digest above: the
+            # subprocess must prove the digest from inside the extraction,
+            # so it cannot import the probe module (which lives outside the
+            # fixed-base import root).  Divergence fails closed via
+            # tree_verified False.
+            "def tree_digest(base):\n"
+            "    hasher = hashlib.sha256()\n"
+            "    files = sorted(p.relative_to(base) for p in base.rglob('*') if p.is_file())\n"
+            "    for rel in files:\n"
+            "        hasher.update(str(rel).encode('utf-8')); hasher.update(b'\\0')\n"
+            "        hasher.update((base / rel).read_bytes()); hasher.update(b'\\0')\n"
+            "    return hasher.hexdigest()\n"
+            "module_path = Path(s01_module.__file__).resolve()\n"
+            "origin_verified = module_path.is_relative_to(root)\n"
+            "tree = tree_digest(root)\n"
+            "tree_verified = tree == expected\n"
+            "if not (origin_verified and tree_verified):\n"
+            "    print(json.dumps({'origin_verified': origin_verified, "
+            "'tree_verified': tree_verified, 'module_path': str(module_path), "
+            "'tree_digest': tree})); raise SystemExit(3)\n"
+            "from task4_consistency.controlled.s01 import ControlledScenarioService\n"
+            "service = ControlledScenarioService(\n"
+            "    fixture_root=root / 'fixtures' / 'applications',\n"
+            "    rules_path=root / 'configs' / 'rules_auto_lease.yaml',\n"
+            "    state_path=Path(sys.argv[2]),\n"
+            ")\n"
+            "print(json.dumps({'applications': service.fact_counts()['applications'], "
+            "'origin_verified': True, 'tree_verified': True, "
+            "'module_path': str(module_path), 'tree_digest': tree}))\n"
+        )
+        environment = os.environ.copy()
+        environment.update(
+            PYTHONPATH=str(extraction), PYTHONDONTWRITEBYTECODE="1"
+        )
+        completed = subprocess.run(
+            [
+                str(ROOT / ".venv" / "bin" / "python"),
+                "-c",
+                probe,
+                str(extraction),
+                str(business_path),
+                tree_digest,
+            ],
+            cwd=extraction,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        served = False
+        module_path = ""
+        module_tree_digest = ""
+        if completed.returncode == 0:
+            try:
+                result = json.loads(completed.stdout)
+                served = (
+                    bool(result.get("origin_verified"))
+                    and bool(result.get("tree_verified"))
+                    and int(result.get("applications") or 0)
+                    == expected_applications
+                )
+                module_path = str(result.get("module_path") or "")
+                module_tree_digest = str(result.get("tree_digest") or "")
+            except (json.JSONDecodeError, TypeError, ValueError):
+                served = False
+        return {
+            "archived_base": fixed_base,
+            "source_digest": archive_digest,
+            "tree_digest": tree_digest,
+            "tree_digest_matches": True,
+            "module_path": module_path,
+            "module_tree_digest": module_tree_digest,
+            "prior_command_exit": completed.returncode,
+            "prior_stderr_tail": completed.stderr[-400:],
+            "prior_code_serves_business_state": served,
+            "expected_applications": expected_applications,
+        }
 
 
 def main() -> int:
@@ -372,13 +472,13 @@ def main() -> int:
         )
         plan = service.freeze_plan(command)
         business_before = hashlib.sha256(business_path.read_bytes()).hexdigest()
-        job = service.start_job(plan["plan_id"], worker_id="s12-probe-worker")
+        job = service.start_job(plan["plan_id"])
         outcome = service.process_job(job["job_id"])
         bundle_id = outcome["bundle_id"]
         bundle = service.query_bundle(bundle_id)
         business_mid = hashlib.sha256(business_path.read_bytes()).hexdigest()
 
-        job_cancel = service.start_job(plan["plan_id"], worker_id="s12-probe-cancel")
+        job_cancel = service.start_job(plan["plan_id"])
         service.cancel_job(job_cancel["job_id"])
         business_after_cancel = hashlib.sha256(business_path.read_bytes()).hexdigest()
 
@@ -406,7 +506,7 @@ def main() -> int:
                 {k: v for k, v in replayed.items() if k != "bundle_id"}
             )
         )
-        rerun_job = service2.rerun_job(job["job_id"], worker_id="s12-probe-worker")
+        rerun_job = service2.rerun_job(job["job_id"])
         rerun_outcome = service2.process_job(rerun_job["job_id"])
         rerun_bundle = service2.query_bundle(rerun_outcome["bundle_id"])
         source_preserved = service2.query_bundle(bundle_id) == bundle
@@ -417,11 +517,28 @@ def main() -> int:
             and business_services[0].fact_counts()["applications"] == len(admitted)
         )
 
-        prior_artifact: dict[str, object] = {"skipped": True}
-        if len(sys.argv) > 2 and sys.argv[1] == "--prior-source-root":
-            prior_artifact = _prior_artifact_probe(
-                Path(sys.argv[2]), business_path, len(admitted)
-            )
+        fixed_base = FIXED_BASE
+        supplied_root: Path | None = None
+        argument_index = 1
+        while argument_index < len(sys.argv):
+            if (
+                sys.argv[argument_index] == "--fixed-base"
+                and argument_index + 1 < len(sys.argv)
+            ):
+                fixed_base = sys.argv[argument_index + 1]
+                argument_index += 2
+                continue
+            if (
+                sys.argv[argument_index] == "--prior-source-root"
+                and argument_index + 1 < len(sys.argv)
+            ):
+                supplied_root = Path(sys.argv[argument_index + 1])
+                argument_index += 2
+                continue
+            argument_index += 1
+        prior_artifact = _prior_artifact_probe(
+            fixed_base, supplied_root, business_path, len(admitted)
+        )
 
         findings.update(
             {
@@ -506,8 +623,8 @@ def main() -> int:
         )
     )
     prior = findings["prior_artifact"]
-    if prior.get("skipped") is not True:
-        passed = passed and bool(prior.get("prior_code_serves_business_state"))
+    passed = passed and bool(prior.get("prior_code_serves_business_state"))
+    passed = passed and bool(prior.get("tree_digest_matches", True))
     findings["probe"] = "PASS" if passed else "FAIL"
     print(json.dumps(findings, ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if passed else 1

@@ -33,6 +33,7 @@ from task4_consistency.controlled.s12 import (
     LabelManifestStore,
     _clopper_pearson_upper,
     _cluster_statistics,
+    _opportunity_point_metrics,
     _select_status,
     content_digest,
 )
@@ -212,6 +213,7 @@ def _reference_plan_command(
     }
     opportunities: list[dict[str, Any]] = []
     clusters: list[dict[str, Any]] = []
+    evidence_references: list[dict[str, Any]] = []
     for index, (scenario, application_id) in enumerate(admitted):
         opportunity_id = f"opp-{index}"
         snapshot_id, snapshot_digest = snapshot_by_application[application_id]
@@ -225,6 +227,10 @@ def _reference_plan_command(
                 "check_id": check_by_scenario[scenario],
                 "target_scope": "C",
                 "evidence_snapshot_id": snapshot_id,
+                "difficulty": "standard",
+                "data_source": "demo",
+                "document_combination": "single",
+                "perturbation_family": "none",
             }
         )
         clusters.append(
@@ -233,6 +239,14 @@ def _reference_plan_command(
                 "stratum": "c",
                 "applications": [application_id],
                 "usage": "development",
+            }
+        )
+        evidence_references.append(
+            {
+                "application_id": application_id,
+                "cycle": 1,
+                "snapshot_id": snapshot_id,
+                "snapshot_digest": snapshot_digest,
             }
         )
     default_labels = {
@@ -268,14 +282,7 @@ def _reference_plan_command(
             "R-T4-conditional": {"opportunities": []},
         },
         "opportunities": opportunities,
-        "evidence_references": {
-            application_id: {
-                "snapshot_id": snapshot_by_application[application_id][0],
-                "snapshot_digest": snapshot_by_application[application_id][1],
-                "cycle": 1,
-            }
-            for _scenario, application_id in admitted
-        },
+        "evidence_references": evidence_references,
         "release_reference": {"release_id": release_id, "release_digest": release_digest},
         "label_manifest": {"manifest_id": manifest_id, "manifest_digest": manifest_digest},
         "mandatory_check_families": [
@@ -553,7 +560,7 @@ def test_frozen_run_is_isolated_insufficient_replayable_and_rerunnable(
     )
     business_before = hashlib.sha256(business_path.read_bytes()).hexdigest()
 
-    job = service.start_job("plan-c-1", worker_id="s12-test-worker")
+    job = service.start_job("plan-c-1")
     assert job["status"] == "queued"
     assert job["fence"] == 0
     assert job["attempt_no"] == 0
@@ -570,12 +577,12 @@ def test_frozen_run_is_isolated_insufficient_replayable_and_rerunnable(
     }
     runner_output = run_s12_runner(projection)
     assert runner_output is not None
-    returned = [item["application_id"] for item in runner_output["applications"]]
-    assert set(returned) == set(plan["run_specs"])
-    by_app = {item["application_id"]: item for item in runner_output["applications"]}
+    returned_runs = [item["run_id"] for item in runner_output["applications"]]
+    assert set(returned_runs) == set(plan["run_specs"])
+    by_run = {item["run_id"]: item for item in runner_output["applications"]}
     ground_truth: dict[str, str] = {}
     for opportunity in plan["opportunities"]:
-        application = by_app[opportunity["application_id"]]
+        application = by_run[opportunity["run_id"]]
         ground_truth[opportunity["opportunity_id"]] = next(
             check["verdict"]
             for check in application["checks"]
@@ -585,14 +592,15 @@ def test_frozen_run_is_isolated_insufficient_replayable_and_rerunnable(
     # Omit the last application from the runner result via an authenticated
     # budget stop: the parent must materialize an explicit ``missing``
     # prediction and keep the opportunity in its denominator.
-    omitted_application = returned[-1]
+    omitted_run = returned_runs[-1]
     omitted_opportunity = next(
         opportunity["opportunity_id"]
         for opportunity in plan["opportunities"]
-        if opportunity["application_id"] == omitted_application
+        if opportunity["run_id"] == omitted_run
     )
     runner_output = _stopped_runner_result(
-        runner_output, completed_ids=[app for app in returned if app != omitted_application]
+        runner_output,
+        completed_ids=[run for run in returned_runs if run != omitted_run],
     )
 
     outcome = service.process_job(job["job_id"], runner_result=runner_output)
@@ -640,7 +648,7 @@ def test_frozen_run_is_isolated_insufficient_replayable_and_rerunnable(
 
     # Linked non-overwriting rerun: a new job and a new bundle that reference
     # the source bundle; the source bundle stays byte-identical.
-    rerun_job = service2.rerun_job(job["job_id"], worker_id="s12-test-worker")
+    rerun_job = service2.rerun_job(job["job_id"])
     assert rerun_job["rerun_of_bundle_id"] == bundle_id
     rerun_outcome = service2.process_job(rerun_job["job_id"], runner_result=runner_output)
     assert rerun_outcome["bundle_id"] != bundle_id
@@ -887,11 +895,11 @@ def test_cancel_between_start_and_process_is_durable_and_zero_delta(
         for cluster in trimmed["clusters"]
         if cluster["cluster_id"] == first_opportunity["cluster"]
     ]
-    trimmed["evidence_references"] = {
-        application_id: reference
-        for application_id, reference in trimmed["evidence_references"].items()
-        if application_id == first_application
-    }
+    trimmed["evidence_references"] = [
+        reference
+        for reference in trimmed["evidence_references"]
+        if reference["application_id"] == first_application
+    ]
     trimmed["budget"] = {"max_opportunities": 4, "max_runtime_ms": 5000}
     trimmed["mandatory_check_families"] = [
         {"family_id": "cross-document", "check_ids": [first_opportunity["check_id"]]}
@@ -911,7 +919,7 @@ def test_cancel_between_start_and_process_is_durable_and_zero_delta(
         label_root=label_root,
     )
     service.freeze_plan(trimmed)
-    job = service.start_job("plan-c-cancel", worker_id=service._worker_subject)
+    job = service.start_job("plan-c-cancel")
     cancelled = service.cancel_job(job["job_id"])
     assert cancelled["status"] == "cancelled"
 
@@ -956,6 +964,7 @@ def test_lease_takeover_fences_stale_worker_and_publishes_one_bundle(
         state_path=eval_path,
         clock=clock,
         runner_override=slow_runner,
+        worker_subject="s12-worker-a",
         snapshot_provider=lambda application_id, snapshot_id: context[
             "business_services"
         ][0].evaluation_evidence_snapshot(
@@ -972,6 +981,7 @@ def test_lease_takeover_fences_stale_worker_and_publishes_one_bundle(
     service_b = EvaluationService(
         state_path=eval_path,
         clock=clock,
+        worker_subject="s12-worker-b",
         snapshot_provider=lambda application_id, snapshot_id: context[
             "business_services"
         ][0].evaluation_evidence_snapshot(
@@ -997,28 +1007,27 @@ def test_lease_takeover_fences_stale_worker_and_publishes_one_bundle(
     )
     assert runner_output is not None
     prepared["runner_output"] = runner_output
-    job = service_a.start_job(plan["plan_id"], worker_id="s12-worker-a")
+    job = service_a.start_job(plan["plan_id"])
 
     worker_a_results: dict[str, Any] = {}
 
     def run_a() -> None:
         worker_a_results["outcome"] = service_a.process_job(
-            job["job_id"], worker_id="s12-worker-a"
-        )
+            job["job_id"])
 
     thread_a = threading.Thread(target=run_a)
     thread_a.start()
     assert claimed.wait(timeout=30)
     # Worker B cannot claim while the lease is live.
     busy = service_b.process_job(
-        job["job_id"], runner_result=runner_output, worker_id="s12-worker-b"
+        job["job_id"], runner_result=runner_output
     )
     assert busy["status"] == "busy"
     assert busy["reason_code"] == "JOB_LEASE_ACTIVE"
     # The lease expires: worker B reclaims with a higher fence/attempt.
     clock_state["now"] += 31
     winner = service_b.process_job(
-        job["job_id"], runner_result=runner_output, worker_id="s12-worker-b"
+        job["job_id"], runner_result=runner_output
     )
     assert winner["status"] == "INSUFFICIENT"
     assert winner["bundle_id"] is not None
@@ -1139,8 +1148,9 @@ def test_freeze_resolves_s01_snapshot_and_s08_release_by_verified_reference(
     # Every frozen RunSpec was built server-side from the resolved snapshots
     # and pins the resolved release identity.
     assert set(plan["run_specs"]) == {
-        application_id for _scenario, application_id in _context["admitted"]
+        opportunity["run_id"] for opportunity in plan["opportunities"]
     }
+    assert len(plan["run_specs"]) == len(_context["admitted"])
     for run_spec in plan["run_specs"].values():
         assert run_spec["release_digest"] == plan["release"]["release_digest"]
         assert run_spec["checker_build"] == plan["release"]["checker_build"]
@@ -1172,8 +1182,7 @@ def test_freeze_rejects_release_pin_checker_artifact_or_snapshot_mismatch(
     with pytest.raises(ValueError):
         service.freeze_plan(tampered_release)
     tampered_snapshot = copy.deepcopy(command)
-    first = next(iter(tampered_snapshot["evidence_references"]))
-    tampered_snapshot["evidence_references"][first]["snapshot_digest"] = "0" * 64
+    tampered_snapshot["evidence_references"][0]["snapshot_digest"] = "0" * 64
     with pytest.raises(ValueError):
         service.freeze_plan(tampered_snapshot)
 
@@ -1186,7 +1195,11 @@ def test_freeze_rejects_unregistered_label_manifest_and_caller_environment_claim
     service, command, _context = _slice1_harness(tmp_path)
     unknown_manifest = copy.deepcopy(command)
     unknown_manifest["label_manifest"]["manifest_id"] = "manifest_sha256_" + "0" * 64
-    with pytest.raises(ValueError):
+    # An unregistered label manifest is an evaluation-owned authority
+    # condition (S12_UNAVAILABLE), never a caller syntax error (SP-09).
+    from task4_consistency.controlled.s12 import S12Unavailable
+
+    with pytest.raises(S12Unavailable):
         service.freeze_plan(unknown_manifest)
     fabricated = copy.deepcopy(command)
     fabricated["environment"] = {"python": "9.9.9", "evaluator_build": "fake"}
@@ -1217,7 +1230,7 @@ def test_business_authority_measurements_are_captured_and_unchanged(
         "activation_count",
     ):
         assert key in before, key
-    job = service.start_job(plan["plan_id"], worker_id=service._worker_subject)
+    job = service.start_job(plan["plan_id"])
     outcome = service.process_job(job["job_id"])
     assert outcome["status"] in {"INSUFFICIENT", "FAIL", "SMOKE_ONLY"}
     bundle = service.query_bundle(outcome["bundle_id"])
@@ -1240,7 +1253,7 @@ def test_business_authority_change_prevents_formal_publication(
     prevents formal publication and records the exact changed fact."""
     service, command, _context = _slice1_harness(tmp_path)
     plan = service.freeze_plan(command)
-    job = service.start_job(plan["plan_id"], worker_id=service._worker_subject)
+    job = service.start_job(plan["plan_id"])
     # Change the business authority after freeze: admit a new application.
     rules_path = ROOT / "configs" / "rules_auto_lease.yaml"
     extra = ControlledScenarioService(
@@ -1349,7 +1362,7 @@ def test_development_and_calibration_clusters_cannot_produce_formal_pass() -> No
     status, reasons = _select(
         {"R": _empty_stats("R"), "C": _empty_stats("C")},
         {"R-E2E": dev_passing, "R-T4-conditional": _empty_stats("R-T4-conditional")},
-        scope="R",
+        scope="R-E2E",
         holdout_eligible=False,
     )
     assert status == "INSUFFICIENT"
@@ -1376,7 +1389,7 @@ def test_scope_is_derived_from_verified_holdout_membership(tmp_path: Path) -> No
     # The derived scope is recorded on the published bundle.
     service, command, context = _slice1_harness(tmp_path)
     plan = service.freeze_plan(command)
-    job = service.start_job(plan["plan_id"], worker_id=service._worker_subject)
+    job = service.start_job(plan["plan_id"])
     outcome = service.process_job(job["job_id"])
     bundle = service.query_bundle(outcome["bundle_id"])
     assert bundle["scope_eligibility"]["holdout_eligible"] is False
@@ -1397,7 +1410,7 @@ def test_every_mandatory_check_family_must_be_estimable_and_pass(tmp_path: Path)
     with pytest.raises(ValueError):
         service.freeze_plan(unknown_family)
     plan = service.freeze_plan(command)
-    job = service.start_job(plan["plan_id"], worker_id=service._worker_subject)
+    job = service.start_job(plan["plan_id"])
     outcome = service.process_job(job["job_id"])
     bundle = service.query_bundle(outcome["bundle_id"])
     family_ids = set(bundle["mandatory_check_families"])
@@ -1492,6 +1505,1117 @@ def test_opportunity_application_cycle_check_and_snapshot_match_frozen_run_spec(
 
 
 # ---------------------------------------------------------------------------
+# R2 Slice 1 — exact scope and run-reference identity
+# ---------------------------------------------------------------------------
+
+
+def _r2_baseline(tmp_path: Path) -> dict[str, Any]:
+    """One real S01/S08/label authority context for R2 reference commands."""
+    rules_path = ROOT / "configs" / "rules_auto_lease.yaml"
+    business_services, admitted, snapshots, business_path = _make_business_harness(
+        tmp_path, rules_path
+    )
+    governance_service, release_id, release_digest, _manifest = _make_governed_release(
+        tmp_path
+    )
+    label_root, manifest_id, manifest_digest = _write_label_manifest(
+        tmp_path,
+        labels={
+            f"opp-{index}": "consistent" for index in range(len(admitted))
+        },
+    )
+    return {
+        "admitted": admitted,
+        "snapshots": snapshots,
+        "business_services": business_services,
+        "governance_service": governance_service,
+        "release_id": release_id,
+        "release_digest": release_digest,
+        "manifest_id": manifest_id,
+        "manifest_digest": manifest_digest,
+        "label_root": label_root,
+        "business_path": business_path,
+    }
+
+
+def _r2_reference_command(
+    context: dict[str, Any],
+    *,
+    plan_id: str = "plan-r2-1",
+    scope_declared: str = "C",
+    labels: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """The R2 reference command: evidence references are a LIST of immutable
+    run references (application, cycle, snapshot); one opportunity per run."""
+    check_by_scenario = {
+        "app_r53_bad_engine.json": "R_ENGINE_CROSS",
+        "app_s04_bad_vin.json": "R_VIN_CROSS",
+        "app_bad_brand.json": "R_BRAND_CROSS",
+        "app_bad_model.json": "R_MODEL_CROSS",
+    }
+    admitted = context["admitted"]
+    snapshot_by_application = context["snapshots"]
+    opportunities: list[dict[str, Any]] = []
+    clusters: list[dict[str, Any]] = []
+    evidence_references: list[dict[str, Any]] = []
+    for index, (scenario, application_id) in enumerate(admitted):
+        opportunity_id = f"opp-{index}"
+        snapshot_id, snapshot_digest = snapshot_by_application[application_id]
+        opportunities.append(
+            {
+                "opportunity_id": opportunity_id,
+                "track": "C",
+                "cluster": f"cl-{index}",
+                "application_id": application_id,
+                "cycle": 1,
+                "check_id": check_by_scenario[scenario],
+                "target_scope": "C",
+                "evidence_snapshot_id": snapshot_id,
+            }
+        )
+        clusters.append(
+            {
+                "cluster_id": f"cl-{index}",
+                "stratum": "c",
+                "applications": [application_id],
+                "usage": "development",
+            }
+        )
+        evidence_references.append(
+            {
+                "application_id": application_id,
+                "cycle": 1,
+                "snapshot_id": snapshot_id,
+                "snapshot_digest": snapshot_digest,
+            }
+        )
+    default_labels = {
+        opportunity["opportunity_id"]: "consistent"
+        for opportunity in opportunities
+    }
+    return {
+        "schema_version": "s12-plan-command/1",
+        "plan_id": plan_id,
+        "scope_declared": scope_declared,
+        "seed": 20260820,
+        "budget": {"max_opportunities": 10, "max_runtime_ms": 5000},
+        "stop_rule": "plan-exhausted",
+        "split": {
+            "scheme": "cluster_usage_partition",
+            "usage_partitions": [
+                "development",
+                "calibration",
+                "acceptance_holdout",
+            ],
+        },
+        "clusters": clusters,
+        "tracks": {
+            "R": {"opportunities": []},
+            "C": {
+                "opportunities": [
+                    opportunity["opportunity_id"] for opportunity in opportunities
+                ]
+            },
+        },
+        "views": {
+            "R-E2E": {"opportunities": []},
+            "R-T4-conditional": {"opportunities": []},
+        },
+        "opportunities": opportunities,
+        "evidence_references": evidence_references,
+        "release_reference": {
+            "release_id": context["release_id"],
+            "release_digest": context["release_digest"],
+        },
+        "label_manifest": {
+            "manifest_id": context["manifest_id"],
+            "manifest_digest": context["manifest_digest"],
+        },
+        "mandatory_check_families": [
+            {
+                "family_id": "cross-document",
+                "check_ids": ["R_ENGINE_CROSS", "R_VIN_CROSS"],
+            },
+            {
+                "family_id": "brand-model",
+                "check_ids": ["R_BRAND_CROSS", "R_MODEL_CROSS"],
+            },
+        ],
+    }
+
+
+def _r2_service(
+    tmp_path: Path, context: dict[str, Any], *, snapshot_provider: Any = None
+) -> EvaluationService:
+    def measure() -> dict[str, Any]:
+        facts: dict[str, Any] = {}
+        for business_service in context["business_services"]:
+            facts.update(business_service.evaluation_business_measurement())
+        facts.update(
+            context["governance_service"].evaluation_governance_measurement()
+        )
+        return facts
+
+    return EvaluationService(
+        state_path=tmp_path / "evaluation.sqlite3",
+        clock=lambda: 1700000000,
+        snapshot_provider=snapshot_provider
+        or (lambda application_id, snapshot_id: context["business_services"][
+            0
+        ].evaluation_evidence_snapshot(
+            application_id=application_id, snapshot_id=snapshot_id
+        )),
+        release_provider=lambda release_id, release_digest: context[
+            "governance_service"
+        ].resolve_evaluation_release(
+            release_id=release_id, release_digest=release_digest
+        ),
+        label_manifest_provider=LabelManifestStore(context["label_root"]).resolve,
+        business_state_provider=measure,
+    )
+
+
+def test_freeze_rejects_unknown_or_mixed_formal_scope(tmp_path: Path) -> None:
+    """Freeze accepts only the finite formal scopes C, R-E2E and
+    R-T4-conditional; mixed or unknown scope values are command errors."""
+    context = _r2_baseline(tmp_path)
+    service = _r2_service(tmp_path, context)
+    for bad_scope in ("R+C", "unknown-scope", ""):
+        command = _r2_reference_command(context, scope_declared=bad_scope)
+        with pytest.raises(ValueError, match="formal scope"):
+            service.freeze_plan(command)
+    command = _r2_reference_command(context, scope_declared="C")
+    assert service.freeze_plan(command)["scope"] == "C"
+
+
+def test_formal_status_uses_only_the_selected_scope_and_required_views() -> None:
+    """Status evaluates only the selected formal scope: C uses the C track;
+    an R scope uses the R track plus exactly its required view."""
+    opportunities, clusters, predictions = _synthetic_track(
+        consistent_clusters=60, inconsistent_clusters=100
+    )
+    passing_c = _cluster_statistics(
+        opportunities, clusters, predictions, seed=15, membership="C"
+    )
+    failing_r = _cluster_statistics(
+        opportunities, clusters, {"opp-0": "wrong"}, seed=16, membership="R"
+    )
+    status, reasons = _select_status(
+        {"R": failing_r, "C": passing_c},
+        {"R-E2E": _empty_stats("R-E2E"), "R-T4-conditional": _empty_stats("R-T4-conditional")},
+        scope="C",
+    )
+    assert status == "PASS(scope=C)", reasons
+
+    passing_r = _cluster_statistics(
+        opportunities, clusters, predictions, seed=17, membership="R"
+    )
+    status, _reasons = _select_status(
+        {"R": passing_r, "C": passing_c},
+        {"R-E2E": _empty_stats("R-E2E"), "R-T4-conditional": _empty_stats("R-T4-conditional")},
+        scope="R-E2E",
+    )
+    assert status == "PASS(scope=R-E2E)"
+
+    status, _reasons = _select_status(
+        {"R": passing_r, "C": passing_c},
+        {"R-E2E": _empty_stats("R-E2E"), "R-T4-conditional": _empty_stats("R-T4-conditional")},
+        scope="R-T4-conditional",
+    )
+    assert status == "PASS(scope=R-T4-conditional)"
+
+    with pytest.raises(ValueError, match="formal scope"):
+        _select_status(
+            {"R": passing_r, "C": passing_c},
+            {"R-E2E": _empty_stats("R-E2E"), "R-T4-conditional": _empty_stats("R-T4-conditional")},
+            scope="R",
+        )
+
+
+def test_duplicate_track_and_view_membership_ids_are_rejected(tmp_path: Path) -> None:
+    """Duplicate membership IDs are rejected before set conversion."""
+    context = _r2_baseline(tmp_path)
+    service = _r2_service(tmp_path, context)
+    command = _r2_reference_command(context)
+    duplicated = copy.deepcopy(command)
+    duplicated["tracks"]["C"]["opportunities"].append("opp-0")
+    with pytest.raises(ValueError, match="duplicate"):
+        service.freeze_plan(duplicated)
+    duplicated_view = copy.deepcopy(command)
+    duplicated_view["views"]["R-E2E"]["opportunities"] = ["opp-0", "opp-0"]
+    with pytest.raises(ValueError, match="duplicate"):
+        service.freeze_plan(duplicated_view)
+
+
+def test_opportunity_application_and_variant_belong_to_base_cluster(tmp_path: Path) -> None:
+    """Every opportunity application (and optional variant) is owned by the
+    opportunity's named base cluster; cross-cluster ownership is rejected."""
+    context = _r2_baseline(tmp_path)
+    service = _r2_service(tmp_path, context)
+    command = _r2_reference_command(context)
+    cross_cluster = copy.deepcopy(command)
+    cross_cluster["opportunities"][0]["cluster"] = "cl-1"
+    with pytest.raises(ValueError, match="base cluster"):
+        service.freeze_plan(cross_cluster)
+
+    with_variant = copy.deepcopy(command)
+    with_variant["clusters"][0]["variants"] = ["variant-0"]
+    with_variant["opportunities"][0]["variant_id"] = "variant-1"
+    with pytest.raises(ValueError, match="base cluster"):
+        service.freeze_plan(with_variant)
+
+
+def test_clustered_application_run_reference_and_opportunity_universes_match_exactly(
+    tmp_path: Path,
+) -> None:
+    """The clustered application universe, the declared run-reference
+    universe and the opportunity universe match exactly."""
+    context = _r2_baseline(tmp_path)
+    service = _r2_service(tmp_path, context)
+    command = _r2_reference_command(context)
+    # Remove one opportunity (and its track membership) while keeping its
+    # evidence reference: the declared run reference has no opportunity.
+    extra_reference = copy.deepcopy(command)
+    dropped = extra_reference["opportunities"].pop(0)
+    extra_reference["tracks"]["C"]["opportunities"].remove(dropped["opportunity_id"])
+    extra_reference["mandatory_check_families"] = [
+        {
+            "family_id": "brand-model",
+            "check_ids": ["R_BRAND_CROSS", "R_MODEL_CROSS"],
+        }
+    ]
+    remaining_labels = {
+        opportunity["opportunity_id"]: "consistent"
+        for opportunity in extra_reference["opportunities"]
+    }
+    label_root, manifest_id, manifest_digest = _write_label_manifest(
+        tmp_path, remaining_labels
+    )
+    extra_reference["label_manifest"] = {
+        "manifest_id": manifest_id,
+        "manifest_digest": manifest_digest,
+    }
+    with pytest.raises(ValueError, match="no opportunity"):
+        service.freeze_plan(extra_reference)
+
+    unowned = copy.deepcopy(command)
+    unowned["opportunities"][0]["application_id"] = "not-in-any-cluster"
+    with pytest.raises(ValueError, match="base cluster"):
+        service.freeze_plan(unowned)
+
+
+def test_same_application_two_cycles_and_snapshots_freeze_as_distinct_runs(
+    tmp_path: Path,
+) -> None:
+    """Two immutable snapshots of one application across cycles freeze as two
+    distinct runs keyed by immutable run-reference identity."""
+    context = _r2_baseline(tmp_path)
+    digest_a = content_digest({"application_id": "app-dual", "cycle": 1})
+    digest_b = content_digest({"application_id": "app-dual", "cycle": 2})
+    snapshots_by_id = {
+        f"snapshot_sha256_{digest_a}": {
+            "application_id": "app-dual",
+            "cycle": 1,
+            "evidence_snapshot_id": f"snapshot_sha256_{digest_a}",
+            "evidence_snapshot_digest": digest_a,
+            "evidence_snapshot": {"application_id": "app-dual", "cycle": 1},
+            "evidence_revision": 1,
+        },
+        f"snapshot_sha256_{digest_b}": {
+            "application_id": "app-dual",
+            "cycle": 2,
+            "evidence_snapshot_id": f"snapshot_sha256_{digest_b}",
+            "evidence_snapshot_digest": digest_b,
+            "evidence_snapshot": {"application_id": "app-dual", "cycle": 2},
+            "evidence_revision": 2,
+        },
+    }
+    provider = lambda application_id, snapshot_id: snapshots_by_id[snapshot_id]
+    service = _r2_service(tmp_path, context, snapshot_provider=provider)
+    label_root, manifest_id, manifest_digest = _write_label_manifest(
+        tmp_path, {"opp-a": "consistent", "opp-b": "consistent"}
+    )
+    command = {
+        "schema_version": "s12-plan-command/1",
+        "plan_id": "plan-dual",
+        "scope_declared": "C",
+        "seed": 20260820,
+        "budget": {"max_opportunities": 10, "max_runtime_ms": 5000},
+        "stop_rule": "plan-exhausted",
+        "split": {
+            "scheme": "cluster_usage_partition",
+            "usage_partitions": [
+                "development",
+                "calibration",
+                "acceptance_holdout",
+            ],
+        },
+        "clusters": [
+            {
+                "cluster_id": "cl-0",
+                "stratum": "c",
+                "applications": ["app-dual"],
+                "usage": "development",
+            }
+        ],
+        "tracks": {
+            "R": {"opportunities": []},
+            "C": {"opportunities": ["opp-a", "opp-b"]},
+        },
+        "views": {
+            "R-E2E": {"opportunities": []},
+            "R-T4-conditional": {"opportunities": []},
+        },
+        "opportunities": [
+            {
+                "opportunity_id": "opp-a",
+                "track": "C",
+                "cluster": "cl-0",
+                "application_id": "app-dual",
+                "cycle": 1,
+                "check_id": "R_ENGINE_CROSS",
+                "target_scope": "C",
+                "evidence_snapshot_id": f"snapshot_sha256_{digest_a}",
+            },
+            {
+                "opportunity_id": "opp-b",
+                "track": "C",
+                "cluster": "cl-0",
+                "application_id": "app-dual",
+                "cycle": 2,
+                "check_id": "R_ENGINE_CROSS",
+                "target_scope": "C",
+                "evidence_snapshot_id": f"snapshot_sha256_{digest_b}",
+            },
+        ],
+        "evidence_references": [
+            {
+                "application_id": "app-dual",
+                "cycle": 1,
+                "snapshot_id": f"snapshot_sha256_{digest_a}",
+                "snapshot_digest": digest_a,
+            },
+            {
+                "application_id": "app-dual",
+                "cycle": 2,
+                "snapshot_id": f"snapshot_sha256_{digest_b}",
+                "snapshot_digest": digest_b,
+            },
+        ],
+        "release_reference": {
+            "release_id": context["release_id"],
+            "release_digest": context["release_digest"],
+        },
+        "label_manifest": {
+            "manifest_id": manifest_id,
+            "manifest_digest": manifest_digest,
+        },
+        "mandatory_check_families": [
+            {"family_id": "engine", "check_ids": ["R_ENGINE_CROSS"]}
+        ],
+    }
+    plan = service.freeze_plan(command)
+    run_specs = plan["run_specs"]
+    assert len(run_specs) == 2
+    assert {spec["cycle"] for spec in run_specs.values()} == {1, 2}
+    assert {spec["evidence_snapshot_id"] for spec in run_specs.values()} == {
+        f"snapshot_sha256_{digest_a}",
+        f"snapshot_sha256_{digest_b}",
+    }
+    assert all(spec["application_id"] == "app-dual" for spec in run_specs.values())
+    assert {opportunity["run_id"] for opportunity in plan["opportunities"]} == set(
+        run_specs
+    )
+
+
+# ---------------------------------------------------------------------------
+# R2 Slice 2 — complete required metrics (ADR-0007 §4 auxiliary rates)
+# ---------------------------------------------------------------------------
+
+
+def _auxiliary_metric_fixture() -> tuple[
+    list[dict[str, Any]], dict[str, str], dict[str, float]
+]:
+    """Ten frozen opportunities covering every prediction outcome with gold
+    consistent/inconsistent/indeterminate/not_applicable, and the exact
+    expected values for every required auxiliary metric."""
+    golds = (
+        ["consistent"] * 4
+        + ["inconsistent"] * 4
+        + ["indeterminate"]
+        + ["not_applicable"]
+    )
+    predictions = {
+        "opp-0": "consistent",
+        "opp-1": "consistent",
+        "opp-2": "inconsistent",
+        "opp-3": "skipped",
+        "opp-4": "inconsistent",
+        "opp-5": "inconsistent",
+        "opp-6": "consistent",
+        "opp-7": "uncertain",
+        "opp-8": "missing",
+        "opp-9": "error",
+    }
+    opportunities = [
+        {
+            "opportunity_id": f"opp-{index}",
+            "track": "C",
+            "cluster": f"cl-{index}",
+            "label": gold,
+        }
+        for index, gold in enumerate(golds)
+    ]
+    expected = {
+        "labelability": 0.8,  # 8 C/I-gold among 10 applicable (ADR-0007 §4)
+        "uncertain_on_inconsistent": 0.25,  # 1 uncertain among 4 gold-inconsistent
+        "skipped_rate": 0.1,  # 1/10
+        "missing_rate": 0.1,  # 1/10
+        "error_rate": 0.1,  # 1/10
+        "conditional_fpr": 1 / 3,  # 1 fp among 3 decisive gold-consistent
+    }
+    return opportunities, predictions, expected
+
+
+def test_statistics_report_labelability_and_all_auxiliary_rates() -> None:
+    """Point estimates carry every required auxiliary rate: labelability,
+    uncertain-on-inconsistent, skipped, missing, error, and conditional
+    FPR, alongside the existing primary metrics."""
+    opportunities, predictions, expected = _auxiliary_metric_fixture()
+    metrics = _opportunity_point_metrics(opportunities, predictions)
+    point = metrics["point"]
+    for name, value in expected.items():
+        assert name in point, name
+        assert point[name] == value, (name, point[name])
+    for name in (
+        "coverage",
+        "false_positive_rate",
+        "false_negative_rate",
+        "miss_rate",
+    ):
+        assert name in point, name
+
+
+def test_auxiliary_metric_denominators_follow_fixed_applicability_rules() -> None:
+    """Each auxiliary metric uses its fixed applicable-opportunity
+    denominator; empty or degenerate denominators never silently change."""
+    opportunities, predictions, _expected = _auxiliary_metric_fixture()
+    metrics = _opportunity_point_metrics(opportunities, predictions)
+    denominators = metrics["denominators"]
+    # E_all counts every frozen opportunity, not only eligible gold.
+    assert denominators["E_all"] == 10
+    assert denominators["n_consistent"] == 4
+    assert denominators["n_inconsistent"] == 4
+    assert denominators["n_consistent_decisive"] == 3
+    # Every auxiliary metric carries its explicit denominator.
+    for name in (
+        "labelability",
+        "uncertain_on_inconsistent",
+        "skipped_rate",
+        "missing_rate",
+        "error_rate",
+        "conditional_fpr",
+    ):
+        assert name in metrics["denominators"], name
+    assert metrics["denominators"]["labelability"] == 10
+    assert metrics["denominators"]["uncertain_on_inconsistent"] == 4
+    assert metrics["denominators"]["skipped_rate"] == 10
+    assert metrics["denominators"]["missing_rate"] == 10
+    assert metrics["denominators"]["error_rate"] == 10
+    assert metrics["denominators"]["conditional_fpr"] == 3
+    # A degenerate class denominator yields the contract-defined 0.0 rate
+    # without silently shrinking the denominator.
+    only_consistent = [opportunities[0]]
+    degenerate = _opportunity_point_metrics(
+        only_consistent, {"opp-0": "consistent"}
+    )
+    assert degenerate["point"]["uncertain_on_inconsistent"] == 0.0
+    assert degenerate["point"]["conditional_fpr"] == 0.0
+    assert degenerate["denominators"]["uncertain_on_inconsistent"] == 0
+
+
+def test_required_auxiliary_metrics_are_global_and_in_every_required_stratum(
+    tmp_path: Path,
+) -> None:
+    """The auxiliary rates appear in the global track blocks, the view
+    blocks, and every published required stratum."""
+    service, command, _context = _slice1_harness(tmp_path)
+    plan = service.freeze_plan(command)
+    job = service.start_job(plan["plan_id"])
+    outcome = service.process_job(job["job_id"])
+    bundle = service.query_bundle(outcome["bundle_id"])
+    auxiliary = {
+        "labelability",
+        "uncertain_on_inconsistent",
+        "skipped_rate",
+        "missing_rate",
+        "error_rate",
+        "conditional_fpr",
+    }
+    for block in (
+        bundle["tracks"]["C"],
+        bundle["tracks"]["R"],
+        bundle["views"]["R-E2E"],
+        bundle["views"]["R-T4-conditional"],
+    ):
+        assert auxiliary <= set(block["point"]), block["membership"]
+    for group_by, groups in bundle["strata"].items():
+        for _value, statistics in groups.items():
+            assert auxiliary <= set(statistics["point"]), (group_by, statistics)
+
+
+# ---------------------------------------------------------------------------
+# R2 Slice 3 — authenticated runner identity and stop
+# ---------------------------------------------------------------------------
+
+
+def _invalidate_and_run(
+    service: EvaluationService,
+    plan: dict[str, Any],
+    tampered: dict[str, Any],
+    expected_reason: str,
+) -> dict[str, Any]:
+    """Start a fresh job, process the tampered result, and assert the closed
+    INVALID diagnostic with the exact reason and no bundle."""
+    job = service.start_job(plan["plan_id"])
+    outcome = service.process_job(job["job_id"], runner_result=tampered)
+    assert outcome["status"] == "INVALID", outcome
+    assert expected_reason in (outcome.get("reason_codes") or []), outcome
+    assert outcome["bundle_id"] is None
+    return outcome
+
+
+def _recompute_digest(tampered: dict[str, Any]) -> dict[str, Any]:
+    tampered["digest"] = content_digest(
+        {key: value for key, value in tampered.items() if key != "digest"}
+    )
+    return tampered
+
+
+def test_runner_error_requires_frozen_run_reference_application_and_run_id(
+    tmp_path: Path,
+) -> None:
+    """Every runner record -- success or error -- must bind the frozen
+    run-reference id, the application id and the run id before any
+    outcome-specific validation."""
+    service, command, _context = _slice1_harness(tmp_path)
+    plan = service.freeze_plan(command)
+    runner_output = _runner_output_for_plan(plan)
+
+    missing_run_id = copy.deepcopy(runner_output)
+    del missing_run_id["applications"][0]["run_id"]
+    _invalidate_and_run(
+        service, plan, _recompute_digest(missing_run_id), "RUNNER_OUTPUT_MALFORMED"
+    )
+
+    forged_run = copy.deepcopy(runner_output)
+    forged_run["applications"][0]["run_id"] = "forged-run"
+    forged_run["applications"][0]["error"] = "CHECKER_EXECUTION_FAILED"
+    _invalidate_and_run(
+        service, plan, _recompute_digest(forged_run), "RUNNER_UNKNOWN_APPLICATION"
+    )
+
+    cross_application_error = copy.deepcopy(runner_output)
+    cross_application_error["applications"][0]["run_id"] = runner_output[
+        "applications"
+    ][1]["run_id"]
+    cross_application_error["applications"][0][
+        "error"
+    ] = "CHECKER_EXECUTION_FAILED"
+    _invalidate_and_run(
+        service,
+        plan,
+        _recompute_digest(cross_application_error),
+        "RUNNER_IDENTITY_MISMATCH",
+    )
+
+
+def test_runner_result_rejects_duplicate_or_cross_application_run_identity(
+    tmp_path: Path,
+) -> None:
+    """Duplicate run identities (in records or in the completion list) and
+    cross-application run identities are INVALID."""
+    service, command, _context = _slice1_harness(tmp_path)
+    plan = service.freeze_plan(command)
+    runner_output = _runner_output_for_plan(plan)
+
+    duplicated_record = copy.deepcopy(runner_output)
+    duplicated_record["applications"].append(
+        copy.deepcopy(duplicated_record["applications"][0])
+    )
+    _invalidate_and_run(
+        service,
+        plan,
+        _recompute_digest(duplicated_record),
+        "RUNNER_DUPLICATE_APPLICATION",
+    )
+
+    duplicated_completion = copy.deepcopy(runner_output)
+    duplicated_completion["stop"]["completed_run_ids"] = [
+        duplicated_completion["stop"]["completed_run_ids"][0],
+        *duplicated_completion["stop"]["completed_run_ids"],
+    ]
+    _invalidate_and_run(
+        service,
+        plan,
+        _recompute_digest(duplicated_completion),
+        "RUNNER_STOP_OBSERVATION_INVALID",
+    )
+
+    cross_application = copy.deepcopy(runner_output)
+    other_application = next(
+        application["application_id"]
+        for application in runner_output["applications"]
+        if application["run_id"] != runner_output["applications"][0]["run_id"]
+    )
+    cross_application["applications"][0]["application_id"] = other_application
+    _invalidate_and_run(
+        service,
+        plan,
+        _recompute_digest(cross_application),
+        "RUNNER_IDENTITY_MISMATCH",
+    )
+
+
+def test_plan_exhausted_requires_every_frozen_run_reference_exactly_once(
+    tmp_path: Path,
+) -> None:
+    """A plan-exhausted stop must account for the complete frozen run
+    universe exactly once: a subset or duplicated completion list is
+    INVALID."""
+    service, command, _context = _slice1_harness(tmp_path)
+    plan = service.freeze_plan(command)
+    runner_output = _runner_output_for_plan(plan)
+    assert runner_output["stop"]["stop_reason"] == "plan-exhausted"
+
+    subset = copy.deepcopy(runner_output)
+    subset["applications"] = subset["applications"][:2]
+    subset["stop"]["completed_run_ids"] = [
+        application["run_id"] for application in subset["applications"]
+    ]
+    _invalidate_and_run(
+        service,
+        plan,
+        _recompute_digest(subset),
+        "RUNNER_STOP_OBSERVATION_INVALID",
+    )
+
+    duplicated = copy.deepcopy(runner_output)
+    duplicated["stop"]["completed_run_ids"] = [
+        duplicated["stop"]["completed_run_ids"][0],
+        *duplicated["stop"]["completed_run_ids"],
+    ]
+    _invalidate_and_run(
+        service,
+        plan,
+        _recompute_digest(duplicated),
+        "RUNNER_STOP_OBSERVATION_INVALID",
+    )
+
+    complete = copy.deepcopy(runner_output)
+    job = service.start_job(plan["plan_id"])
+    outcome = service.process_job(job["job_id"], runner_result=complete)
+    assert outcome["status"] != "INVALID"
+    assert outcome["bundle_id"] is not None
+
+
+def test_budget_stop_rejects_elapsed_time_outside_frozen_global_budget(
+    tmp_path: Path,
+) -> None:
+    """The observed elapsed time of a budget stop must respect the frozen
+    global runtime window; an over-budget elapsed vector is INVALID."""
+    service, command, _context = _slice1_harness(tmp_path)
+    plan = service.freeze_plan(command)
+    max_runtime_ms = plan["budget"]["max_runtime_ms"]
+    runner_output = _runner_output_for_plan(plan)
+
+    over_budget = copy.deepcopy(runner_output)
+    over_budget["stop"]["stop_reason"] = "budget-or-plan"
+    over_budget["stop"]["elapsed_ms"] = max_runtime_ms * 3
+    _invalidate_and_run(
+        service,
+        plan,
+        _recompute_digest(over_budget),
+        "RUNNER_STOP_OBSERVATION_INVALID",
+    )
+
+    within_budget = copy.deepcopy(runner_output)
+    within_budget["stop"]["stop_reason"] = "budget-or-plan"
+    within_budget["stop"]["elapsed_ms"] = max_runtime_ms
+    _recompute_digest(within_budget)
+    job = service.start_job(plan["plan_id"])
+    outcome = service.process_job(job["job_id"], runner_result=within_budget)
+    assert outcome["status"] != "INVALID"
+
+
+def test_incomplete_budget_stop_is_always_insufficient() -> None:
+    """A stop observation that does not satisfy the frozen stop rule gates
+    formal status selection: the run is INSUFFICIENT even when the selected
+    scope's statistics would otherwise pass."""
+    opportunities, clusters, predictions = _synthetic_track(
+        consistent_clusters=60, inconsistent_clusters=100
+    )
+    passing = _cluster_statistics(
+        opportunities, clusters, predictions, seed=30, membership="C"
+    )
+    assert passing["conclusion"] == "pass"
+    status, reasons = _select_status(
+        {"R": _empty_stats("R"), "C": passing},
+        {"R-E2E": _empty_stats("R-E2E"), "R-T4-conditional": _empty_stats("R-T4-conditional")},
+        scope="C",
+        stop_rule_satisfied=False,
+    )
+    assert status == "INSUFFICIENT"
+    assert any("stop" in reason for reason in reasons)
+
+
+# ---------------------------------------------------------------------------
+# R2 Slice 4 — complete authority vectors reject any business change
+# ---------------------------------------------------------------------------
+
+
+def test_publication_rejects_any_s01_or_s08_vector_change(tmp_path: Path) -> None:
+    """A change to any covered S01 or S08 row or payload between freeze and
+    terminal publication prevents the formal bundle: the complete measured
+    vectors must be unchanged."""
+    service, command, context = _slice1_harness(tmp_path)
+    plan = service.freeze_plan(command)
+    job = service.start_job(plan["plan_id"])
+    store = SQLiteTargetStore(context["business_path"])
+    store.reload()
+    application = next(iter(store.applications.values()))
+    application["lifecycle_revision"] = (
+        int(application["lifecycle_revision"] or 0) - 1
+    )
+    store.persist()
+    outcome = service.process_job(job["job_id"])
+    assert outcome["status"] == "INVALID"
+    assert outcome["bundle_id"] is None
+    assert any(
+        reason.startswith("BUSINESS_AUTHORITY_CHANGED:")
+        for reason in (outcome.get("reason_codes") or [])
+    )
+
+
+def test_healthy_unknown_snapshot_reference_is_an_invalid_command(
+    tmp_path: Path,
+) -> None:
+    """A healthy authority with an unknown snapshot reference is a caller
+    command error (ValueError), not an authority outage."""
+    context = _r2_baseline(tmp_path)
+    service = _r2_service(tmp_path, context)
+    command = _r2_reference_command(context)
+    command["evidence_references"][0]["snapshot_id"] = (
+        "snapshot_sha256_" + "b" * 64
+    )
+    command["evidence_references"][0]["snapshot_digest"] = "b" * 64
+    with pytest.raises(ValueError):
+        service.freeze_plan(command)
+
+
+# ---------------------------------------------------------------------------
+# R2 Slice 5 — scientific identity and self-contained replay
+# ---------------------------------------------------------------------------
+
+
+def _scientific_harness(
+    tmp_path: Path, *, clock: Any = None
+) -> tuple[EvaluationService, dict[str, Any], dict[str, Any]]:
+    service, command, context = _slice1_harness(tmp_path)
+    if clock is not None:
+        service = EvaluationService(
+            state_path=tmp_path / "evaluation.sqlite3",
+            clock=clock,
+            snapshot_provider=lambda application_id, snapshot_id: context[
+                "business_services"
+            ][0].evaluation_evidence_snapshot(
+                application_id=application_id, snapshot_id=snapshot_id
+            ),
+            release_provider=lambda release_id, release_digest: context[
+                "governance_service"
+            ].resolve_evaluation_release(
+                release_id=release_id, release_digest=release_digest
+            ),
+            label_manifest_provider=LabelManifestStore(
+                context["label_root"]
+            ).resolve,
+            business_state_provider=context["measure"],
+        )
+    return service, command, context
+
+
+def test_result_digest_ignores_plan_id_freeze_time_job_attempt_worker_and_lineage(
+    tmp_path: Path,
+) -> None:
+    """result_digest identifies the scientific inputs and observed results:
+    operational plan id, freeze time, job/attempt identity, worker and
+    lineage never change it."""
+    _service_a, command, context = _slice1_harness(tmp_path)
+    service_a = EvaluationService(
+        state_path=tmp_path / "evaluation.sqlite3",
+        clock=lambda: 1700000000,
+        snapshot_provider=lambda application_id, snapshot_id: context[
+            "business_services"
+        ][0].evaluation_evidence_snapshot(
+            application_id=application_id, snapshot_id=snapshot_id
+        ),
+        release_provider=lambda release_id, release_digest: context[
+            "governance_service"
+        ].resolve_evaluation_release(
+            release_id=release_id, release_digest=release_digest
+        ),
+        label_manifest_provider=LabelManifestStore(context["label_root"]).resolve,
+        business_state_provider=context["measure"],
+    )
+    plan_a = service_a.freeze_plan(command)
+    later_command = copy.deepcopy(command)
+    later_command["plan_id"] = "plan-c-1-later-clock"
+    service_b = EvaluationService(
+        state_path=tmp_path / "evaluation-later.sqlite3",
+        clock=lambda: 1700000001,
+        snapshot_provider=lambda application_id, snapshot_id: context[
+            "business_services"
+        ][0].evaluation_evidence_snapshot(
+            application_id=application_id, snapshot_id=snapshot_id
+        ),
+        release_provider=lambda release_id, release_digest: context[
+            "governance_service"
+        ].resolve_evaluation_release(
+            release_id=release_id, release_digest=release_digest
+        ),
+        label_manifest_provider=LabelManifestStore(context["label_root"]).resolve,
+        business_state_provider=context["measure"],
+    )
+    plan_b = service_b.freeze_plan(later_command)
+    assert plan_a["plan_digest"] != plan_b["plan_digest"]
+    runner_a = _runner_output_for_plan(plan_a)
+    runner_b = _runner_output_for_plan(plan_b)
+    job_a = service_a.start_job(plan_a["plan_id"])
+    outcome_a = service_a.process_job(job_a["job_id"], runner_result=runner_a)
+    job_b = service_b.start_job(plan_b["plan_id"])
+    outcome_b = service_b.process_job(job_b["job_id"], runner_result=runner_b)
+    bundle_a = service_a.query_bundle(outcome_a["bundle_id"])
+    bundle_b = service_b.query_bundle(outcome_b["bundle_id"])
+    assert bundle_a["result_digest"] == bundle_b["result_digest"]
+    assert bundle_a["bundle_id"] != bundle_b["bundle_id"]
+
+
+def test_result_digest_changes_when_scientific_input_or_observation_changes(
+    tmp_path: Path,
+) -> None:
+    """A scientific input (budget) or an observed result (prediction)
+    change alters the result digest."""
+    service, command, _context = _slice1_harness(tmp_path)
+    plan = service.freeze_plan(command)
+    runner_output = _runner_output_for_plan(plan)
+    job = service.start_job(plan["plan_id"])
+    outcome = service.process_job(job["job_id"], runner_result=runner_output)
+    baseline = service.query_bundle(outcome["bundle_id"])["result_digest"]
+
+    changed_budget_command = copy.deepcopy(command)
+    changed_budget_command["budget"]["max_runtime_ms"] = 6000
+    changed_budget_command["plan_id"] = "plan-c-1-changed-budget"
+    changed_plan = service.freeze_plan(changed_budget_command)
+    changed_job = service.start_job(
+        changed_plan["plan_id"]
+    )
+    changed_outcome = service.process_job(
+        changed_job["job_id"],
+        runner_result=_runner_output_for_plan(changed_plan),
+    )
+    changed = service.query_bundle(changed_outcome["bundle_id"])["result_digest"]
+    assert changed != baseline
+
+    tampered_observation = copy.deepcopy(runner_output)
+    target_opportunity = plan["opportunities"][0]
+    target_application = next(
+        application
+        for application in tampered_observation["applications"]
+        if application["run_id"] == target_opportunity["run_id"]
+    )
+    target_check = next(
+        check
+        for check in target_application["checks"]
+        if check["rule_id"] == target_opportunity["check_id"]
+    )
+    target_check["verdict"] = "uncertain"
+    tampered_observation = _recompute_digest(tampered_observation)
+    job2 = service.start_job(plan["plan_id"])
+    outcome2 = service.process_job(job2["job_id"], runner_result=tampered_observation)
+    changed_observation = service.query_bundle(outcome2["bundle_id"])[
+        "result_digest"
+    ]
+    assert changed_observation != baseline
+
+
+def test_bundle_embeds_complete_content_addressed_replay_package(
+    tmp_path: Path,
+) -> None:
+    """The published bundle embeds the complete immutable replay package:
+    the frozen plan (with checker artifact, RunSpecs and evidence payloads,
+    release material, label-manifest content, membership, budgets and
+    statistical configuration) plus the observed runner material, all under
+    one verified content address."""
+    service, command, _context = _slice1_harness(tmp_path)
+    plan = service.freeze_plan(command)
+    job = service.start_job(plan["plan_id"])
+    outcome = service.process_job(job["job_id"])
+    bundle = service.query_bundle(outcome["bundle_id"])
+    replay = bundle["replay_package"]
+    assert replay["schema_version"] == "s12-replay-package/1"
+    embedded_plan = replay["plan"]
+    round_trip_plan = json.loads(
+        json.dumps(plan, ensure_ascii=False, sort_keys=True)
+    )
+    assert embedded_plan["plan_id"] == plan["plan_id"]
+    assert embedded_plan["plan_digest"] == plan["plan_digest"]
+    assert embedded_plan["checker_artifact"] == round_trip_plan["checker_artifact"]
+    assert embedded_plan["run_specs"] == round_trip_plan["run_specs"]
+    assert embedded_plan["label_manifest"].get("labels") == {
+        opportunity["opportunity_id"]: opportunity["label"]
+        for opportunity in plan["opportunities"]
+    }
+    assert replay["applications"] == bundle["predictions"] or replay["predictions"]
+    assert bundle["replay_package_digest"] == content_digest(replay)
+    assert replay["plan"]["release"]["release_id"]
+    assert replay["plan"]["budget"] == round_trip_plan["budget"]
+
+
+def test_bundle_query_rejects_missing_or_corrupt_nested_replay_material(
+    tmp_path: Path,
+) -> None:
+    """Query verifies the outer bundle plus the nested replay material: a
+    stored bundle whose nested material is missing or digest-mismatched
+    fails closed."""
+    service, command, _context = _slice1_harness(tmp_path)
+    plan = service.freeze_plan(command)
+    job = service.start_job(plan["plan_id"])
+    outcome = service.process_job(job["job_id"])
+    bundle_id = outcome["bundle_id"]
+    assert service.query_bundle(bundle_id)["bundle_id"] == bundle_id
+
+    import sqlite3 as _sqlite3
+
+    from task4_consistency.controlled.s12 import _integrity_digest
+
+    store_path = tmp_path / "evaluation.sqlite3"
+    connection = _sqlite3.connect(store_path)
+    try:
+        row = connection.execute(
+            "SELECT payload FROM s12_bundles WHERE item_id = ?", (bundle_id,)
+        ).fetchone()
+        assert row is not None
+        bundle = json.loads(row[0])
+        del bundle["replay_package"]["plan"]["checker_artifact"]
+        payload_text = json.dumps(
+            bundle, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        digest = _integrity_digest("s12_bundles", bundle_id, payload_text)
+        connection.execute(
+            "UPDATE s12_bundles SET payload = ?, integrity_sha256 = ? "
+            "WHERE item_id = ?",
+            (payload_text, digest, bundle_id),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    with pytest.raises((ValueError, RuntimeError)):
+        service.query_bundle(bundle_id)
+
+
+def _delete_plan_row(state_path: Path, plan_id: str) -> None:
+    import sqlite3 as _sqlite3
+
+    connection = _sqlite3.connect(state_path)
+    try:
+        connection.execute(
+            "DELETE FROM s12_plans WHERE item_id = ?", (plan_id,)
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def test_rerun_uses_source_bundle_after_plan_row_is_removed_or_changed(
+    tmp_path: Path,
+) -> None:
+    """A rerun materializes exclusively from the verified source bundle: it
+    survives deletion of the current plan row."""
+    service, command, _context = _slice1_harness(tmp_path)
+    plan = service.freeze_plan(command)
+    runner_output = _runner_output_for_plan(plan)
+    job = service.start_job(plan["plan_id"])
+    outcome = service.process_job(job["job_id"], runner_result=runner_output)
+    bundle_id = outcome["bundle_id"]
+    _delete_plan_row(tmp_path / "evaluation.sqlite3", plan["plan_id"])
+    rerun_job = service.rerun_job(job["job_id"])
+    assert rerun_job["rerun_of_bundle_id"] == bundle_id
+    rerun_outcome = service.process_job(
+        rerun_job["job_id"], runner_result=runner_output
+    )
+    rerun_bundle = service.query_bundle(rerun_outcome["bundle_id"])
+    assert rerun_bundle["rerun_of_bundle_id"] == bundle_id
+    assert rerun_bundle["result_digest"] == service.query_bundle(bundle_id)[
+        "result_digest"
+    ]
+
+
+def test_rerun_never_resolves_current_authority_providers(tmp_path: Path) -> None:
+    """Rerun performs no current snapshot/release/label/business provider
+    resolution: the source bundle's frozen package is the only authority."""
+    service, command, context = _slice1_harness(tmp_path)
+    counters = {"snapshot": 0, "release": 0, "label": 0, "business": 0}
+
+    def counted_snapshot(application_id: str, snapshot_id: str) -> Any:
+        counters["snapshot"] += 1
+        return context["business_services"][0].evaluation_evidence_snapshot(
+            application_id=application_id, snapshot_id=snapshot_id
+        )
+
+    def counted_release(release_id: str, release_digest: str) -> Any:
+        counters["release"] += 1
+        return context["governance_service"].resolve_evaluation_release(
+            release_id=release_id, release_digest=release_digest
+        )
+
+    def counted_label(manifest_id: str, manifest_digest: str) -> Any:
+        counters["label"] += 1
+        return LabelManifestStore(context["label_root"]).resolve(
+            manifest_id, manifest_digest
+        )
+
+    def counted_business() -> Any:
+        counters["business"] += 1
+        return context["measure"]()
+
+    service = EvaluationService(
+        state_path=tmp_path / "evaluation.sqlite3",
+        clock=lambda: 1700000000,
+        snapshot_provider=counted_snapshot,
+        release_provider=counted_release,
+        label_manifest_provider=counted_label,
+        business_state_provider=counted_business,
+    )
+    plan = service.freeze_plan(command)
+    runner_output = _runner_output_for_plan(plan)
+    job = service.start_job(plan["plan_id"])
+    outcome = service.process_job(job["job_id"], runner_result=runner_output)
+    freeze_calls = dict(counters)
+    assert freeze_calls["snapshot"] > 0
+    rerun_job = service.rerun_job(job["job_id"])
+    rerun_outcome = service.process_job(
+        rerun_job["job_id"], runner_result=runner_output
+    )
+    assert rerun_outcome["bundle_id"]
+    # Snapshot/release/label authority providers are never resolved on
+    # rerun; the business measurement gate at publication remains required
+    # by the frozen zero-delta contract.
+    assert counters["snapshot"] == freeze_calls["snapshot"]
+    assert counters["release"] == freeze_calls["release"]
+    assert counters["label"] == freeze_calls["label"]
+
+
+# ---------------------------------------------------------------------------
 # Slice 3 — runner digest and frozen global budget
 # ---------------------------------------------------------------------------
 
@@ -1505,12 +2629,12 @@ def _stopped_runner_result(
     applications = [
         application
         for application in runner_output["applications"]
-        if application["application_id"] in completed_ids
+        if application["run_id"] in completed_ids
     ]
     stop = {
         "stop_reason": "budget-or-plan",
         "elapsed_ms": 1,
-        "completed_application_ids": list(completed_ids),
+        "completed_run_ids": list(completed_ids),
     }
     material = {
         "schema_version": "s12-runner-result/1",
@@ -1547,7 +2671,7 @@ def test_parent_rejects_tampered_runner_digest_checks_errors_and_identity(
     runner_output = _runner_output_for_plan(plan)
 
     def _run_case(tampered: dict[str, Any], expected_reason: str) -> None:
-        tampered_job = service.start_job(plan["plan_id"], worker_id=service._worker_subject)
+        tampered_job = service.start_job(plan["plan_id"])
         outcome = service.process_job(
             tampered_job["job_id"], runner_result=tampered
         )
@@ -1571,12 +2695,25 @@ def test_parent_rejects_tampered_runner_digest_checks_errors_and_identity(
     unknown_app["digest"] = content_digest(
         {key: value for key, value in unknown_app.items() if key != "digest"}
     )
-    _run_case(unknown_app, "RUNNER_UNKNOWN_APPLICATION")
+    # A record whose run id is frozen but whose application id is not the
+    # frozen application of that run is a cross-application identity.
+    _run_case(unknown_app, "RUNNER_IDENTITY_MISMATCH")
+
+    unknown_run = copy.deepcopy(runner_output)
+    unknown_run["applications"][0]["run_id"] = "forged-run"
+    unknown_run["stop"]["completed_run_ids"] = [
+        "forged-run",
+        *unknown_run["stop"]["completed_run_ids"][1:],
+    ]
+    unknown_run["digest"] = content_digest(
+        {key: value for key, value in unknown_run.items() if key != "digest"}
+    )
+    _run_case(unknown_run, "RUNNER_UNKNOWN_APPLICATION")
 
     duplicated = copy.deepcopy(runner_output)
     duplicated["applications"].append(copy.deepcopy(duplicated["applications"][0]))
-    duplicated["stop"]["completed_application_ids"].append(
-        duplicated["applications"][0]["application_id"]
+    duplicated["stop"]["completed_run_ids"].append(
+        duplicated["applications"][0]["run_id"]
     )
     duplicated["digest"] = content_digest(
         {key: value for key, value in duplicated.items() if key != "digest"}
@@ -1591,12 +2728,17 @@ def test_runner_error_record_keeps_frozen_application_and_run_identity(
     run identity and materializes an explicit ``error`` prediction."""
     service, command, context = _slice1_harness(tmp_path)
     plan = service.freeze_plan(command)
-    job = service.start_job(plan["plan_id"], worker_id=service._worker_subject)
+    job = service.start_job(plan["plan_id"])
     runner_output = _runner_output_for_plan(plan)
     failed_application = runner_output["applications"][0]["application_id"]
+    failed_run = runner_output["applications"][0]["run_id"]
     error_result = copy.deepcopy(runner_output)
     error_result["applications"] = [
-        {"application_id": failed_application, "run_id": plan["run_specs"][failed_application]["run_id"], "error": "CHECKER_EXECUTION_FAILED"},
+        {
+            "application_id": failed_application,
+            "run_id": failed_run,
+            "error": "CHECKER_EXECUTION_FAILED",
+        },
         *[application for application in error_result["applications"] if application["application_id"] != failed_application],
     ]
     error_result["digest"] = content_digest(
@@ -1627,10 +2769,10 @@ def test_global_runtime_budget_is_shared_across_applications(tmp_path: Path) -> 
     budget_command["plan_id"] = "plan-c-budget"
     budget_command["budget"] = {"max_opportunities": 10, "max_runtime_ms": 1}
     plan = service.freeze_plan(budget_command)
-    job = service.start_job(plan["plan_id"], worker_id=service._worker_subject)
+    job = service.start_job(plan["plan_id"])
     runner_output = _runner_output_for_plan(plan)
     assert runner_output["stop"]["stop_reason"] == "budget-or-plan"
-    assert len(runner_output["stop"]["completed_application_ids"]) < len(
+    assert len(runner_output["stop"]["completed_run_ids"]) < len(
         plan["run_specs"]
     )
     assert runner_output["stop"]["elapsed_ms"] <= 1000
@@ -1643,9 +2785,9 @@ def test_budget_stop_materializes_unfinished_opportunities_and_is_insufficient(
     ``missing`` and the run is INSUFFICIENT."""
     service, command, _context = _slice1_harness(tmp_path)
     plan = service.freeze_plan(command)
-    job = service.start_job(plan["plan_id"], worker_id=service._worker_subject)
+    job = service.start_job(plan["plan_id"])
     runner_output = _runner_output_for_plan(plan)
-    completed_ids = runner_output["stop"]["completed_application_ids"]
+    completed_ids = runner_output["stop"]["completed_run_ids"]
     stopped = _stopped_runner_result(runner_output, completed_ids=completed_ids[:2])
     outcome = service.process_job(job["job_id"], runner_result=stopped)
     assert outcome["status"] == "INSUFFICIENT"
@@ -1653,7 +2795,7 @@ def test_budget_stop_materializes_unfinished_opportunities_and_is_insufficient(
     unfinished = [
         opportunity["opportunity_id"]
         for opportunity in plan["opportunities"]
-        if opportunity["application_id"] not in completed_ids[:2]
+        if opportunity["run_id"] not in completed_ids[:2]
     ]
     for opportunity_id in unfinished:
         assert bundle["predictions"][opportunity_id] == "missing"
@@ -1667,14 +2809,14 @@ def test_stop_rule_observation_is_recorded_from_execution(tmp_path: Path) -> Non
     stop_rule_satisfied True from the verified child observation."""
     service, command, _context = _slice1_harness(tmp_path)
     plan = service.freeze_plan(command)
-    job = service.start_job(plan["plan_id"], worker_id=service._worker_subject)
+    job = service.start_job(plan["plan_id"])
     runner_output = _runner_output_for_plan(plan)
     assert runner_output["stop"]["stop_reason"] == "plan-exhausted"
     outcome = service.process_job(job["job_id"], runner_result=runner_output)
     bundle = service.query_bundle(outcome["bundle_id"])
     assert bundle["stop_reason"] == "plan-exhausted"
     assert bundle["stop_rule_satisfied"] is True
-    assert len(bundle["completed_application_ids"]) == len(plan["run_specs"])
+    assert len(bundle["completed_run_ids"]) == len(plan["run_specs"])
 
 
 # ---------------------------------------------------------------------------
@@ -1705,10 +2847,10 @@ def test_claim_rejects_payload_with_invalid_stored_integrity_digest(
 
     service, command, _context = _slice1_harness(tmp_path)
     plan = service.freeze_plan(command)
-    job = service.start_job(plan["plan_id"], worker_id=service._worker_subject)
+    job = service.start_job(plan["plan_id"])
     _tamper_stored_job_payload(tmp_path / "evaluation.sqlite3", job["job_id"])
     with pytest.raises(S12IntegrityError):
-        service.process_job(job["job_id"], worker_id=service._worker_subject)
+        service.process_job(job["job_id"])
 
 
 def test_publication_cas_rejects_fence_advanced_after_ownership_read(
@@ -1738,6 +2880,7 @@ def test_publication_cas_rejects_fence_advanced_after_ownership_read(
         state_path=eval_path,
         clock=clock,
         runner_override=slow_runner,
+        worker_subject="s12-worker-a",
         snapshot_provider=lambda application_id, snapshot_id: context[
             "business_services"
         ][0].evaluation_evidence_snapshot(
@@ -1754,6 +2897,7 @@ def test_publication_cas_rejects_fence_advanced_after_ownership_read(
     service_b = EvaluationService(
         state_path=eval_path,
         clock=clock,
+        worker_subject="s12-worker-b",
         snapshot_provider=lambda application_id, snapshot_id: context[
             "business_services"
         ][0].evaluation_evidence_snapshot(
@@ -1767,20 +2911,19 @@ def test_publication_cas_rejects_fence_advanced_after_ownership_read(
         label_manifest_provider=LabelManifestStore(context["label_root"]).resolve,
         business_state_provider=context["measure"],
     )
-    job = service_a.start_job(plan["plan_id"], worker_id="s12-worker-a")
+    job = service_a.start_job(plan["plan_id"])
     worker_a_results: dict[str, Any] = {}
 
     def run_a() -> None:
         worker_a_results["outcome"] = service_a.process_job(
-            job["job_id"], worker_id="s12-worker-a"
-        )
+            job["job_id"])
 
     thread_a = threading.Thread(target=run_a)
     thread_a.start()
     assert claimed.wait(timeout=30)
     clock_state["now"] += 31
     winner = service_b.process_job(
-        job["job_id"], runner_result=runner_output, worker_id="s12-worker-b"
+        job["job_id"], runner_result=runner_output
     )
     assert winner["bundle_id"] is not None
     release_stale.set()
@@ -1812,7 +2955,7 @@ def test_cancel_claim_diagnostic_and_publish_are_row_scoped_transactions(
     reopens the exact terminal row after each transition."""
     service, command, _context = _slice1_harness(tmp_path)
     plan = service.freeze_plan(command)
-    job = service.start_job(plan["plan_id"], worker_id=service._worker_subject)
+    job = service.start_job(plan["plan_id"])
     cancelled = service.cancel_job(job["job_id"])
     assert cancelled["status"] == "cancelled"
     fresh = EvaluationService(
@@ -1859,10 +3002,10 @@ def test_concurrent_start_and_rerun_create_distinct_jobs(tmp_path: Path) -> None
     results: dict[str, Any] = {}
 
     def start_a() -> None:
-        results["a"] = service_a.start_job(plan["plan_id"], worker_id="s12-worker-a")
+        results["a"] = service_a.start_job(plan["plan_id"])
 
     def start_b() -> None:
-        results["b"] = service_b.start_job(plan["plan_id"], worker_id="s12-worker-a")
+        results["b"] = service_b.start_job(plan["plan_id"])
 
     thread_a = threading.Thread(target=start_a)
     thread_b = threading.Thread(target=start_b)
@@ -1898,11 +3041,10 @@ def test_stale_service_cache_cannot_overwrite_newer_job_state(
         label_manifest_provider=LabelManifestStore(context["label_root"]).resolve,
         business_state_provider=context["measure"],
     )
-    job = service_a.start_job(plan["plan_id"], worker_id=service_a._worker_subject)
+    job = service_a.start_job(plan["plan_id"])
     service_b.cancel_job(job["job_id"])
     outcome = service_a.process_job(
-        job["job_id"], worker_id=service_a._worker_subject
-    )
+        job["job_id"])
     assert outcome["status"] == "failed"
     assert outcome["reason_code"] == "JOB_CANCELLED"
     assert service_a.query_job(job["job_id"])["status"] == "cancelled"
@@ -1932,7 +3074,7 @@ def test_bundle_resolves_complete_frozen_replay_package(tmp_path: Path) -> None:
     intervals, status, and lineage."""
     service, command, _context = _slice1_harness(tmp_path)
     plan = service.freeze_plan(command)
-    job = service.start_job(plan["plan_id"], worker_id=service._worker_subject)
+    job = service.start_job(plan["plan_id"])
     outcome = service.process_job(job["job_id"])
     bundle = service.query_bundle(outcome["bundle_id"])
     def _round_trip(value: Any) -> Any:
@@ -1976,7 +3118,7 @@ def test_bundle_contains_cohort_exclusions_clusters_gold_evidence_and_versions(
         ]
     }
     plan = service.freeze_plan(command)
-    job = service.start_job(plan["plan_id"], worker_id=service._worker_subject)
+    job = service.start_job(plan["plan_id"])
     outcome = service.process_job(job["job_id"])
     bundle = service.query_bundle(outcome["bundle_id"])
     assert bundle["cohort"]["exclusions"][0]["reason"] == "unverifiable label custody"
@@ -2003,10 +3145,10 @@ def test_result_digest_is_stable_across_identical_rerun_lineage(
     stable across an identical rerun, independent of job/attempt/lineage."""
     service, command, _context = _slice1_harness(tmp_path)
     plan = service.freeze_plan(command)
-    job = service.start_job(plan["plan_id"], worker_id=service._worker_subject)
+    job = service.start_job(plan["plan_id"])
     outcome = service.process_job(job["job_id"])
     bundle = service.query_bundle(outcome["bundle_id"])
-    rerun_job = service.rerun_job(job["job_id"], worker_id=service._worker_subject)
+    rerun_job = service.rerun_job(job["job_id"])
     rerun_outcome = service.process_job(rerun_job["job_id"])
     rerun_bundle = service.query_bundle(rerun_outcome["bundle_id"])
     assert rerun_bundle["result_digest"] == bundle["result_digest"]
@@ -2017,10 +3159,10 @@ def test_bundle_id_changes_with_job_or_rerun_lineage(tmp_path: Path) -> None:
     same scientific result gets a distinct bundle id."""
     service, command, _context = _slice1_harness(tmp_path)
     plan = service.freeze_plan(command)
-    job = service.start_job(plan["plan_id"], worker_id=service._worker_subject)
+    job = service.start_job(plan["plan_id"])
     outcome = service.process_job(job["job_id"])
     bundle_id = outcome["bundle_id"]
-    rerun_job = service.rerun_job(job["job_id"], worker_id=service._worker_subject)
+    rerun_job = service.rerun_job(job["job_id"])
     rerun_outcome = service.process_job(rerun_job["job_id"])
     assert rerun_outcome["bundle_id"] != bundle_id
     rerun_bundle = service.query_bundle(rerun_outcome["bundle_id"])
@@ -2035,7 +3177,7 @@ def test_replay_uses_bundle_frozen_inputs_without_current_authority_resolution(
     store: broken current S01/S08/label authorities must not be consulted."""
     service, command, context = _slice1_harness(tmp_path)
     plan = service.freeze_plan(command)
-    job = service.start_job(plan["plan_id"], worker_id=service._worker_subject)
+    job = service.start_job(plan["plan_id"])
     outcome = service.process_job(job["job_id"])
     bundle_id = outcome["bundle_id"]
 
@@ -2051,7 +3193,7 @@ def test_replay_uses_bundle_frozen_inputs_without_current_authority_resolution(
         business_state_provider=context["measure"],
     )
     assert replay.query_bundle(bundle_id)["bundle_id"] == bundle_id
-    rerun_job = replay.rerun_job(job["job_id"], worker_id="s12-replay-worker")
+    rerun_job = replay.rerun_job(job["job_id"])
     assert rerun_job["rerun_of_bundle_id"] == bundle_id
     runner_output = _runner_output_for_plan(plan)
     rerun_outcome = replay.process_job(
@@ -2069,7 +3211,7 @@ def test_bundle_query_rejects_missing_or_digest_mismatched_manifest(
 
     service, command, _context = _slice1_harness(tmp_path)
     plan = service.freeze_plan(command)
-    job = service.start_job(plan["plan_id"], worker_id=service._worker_subject)
+    job = service.start_job(plan["plan_id"])
     outcome = service.process_job(job["job_id"])
     bundle_id = outcome["bundle_id"]
     with pytest.raises(ValueError):
@@ -2144,3 +3286,61 @@ def test_rollback_probe_reopens_business_state_with_fixed_base_code(
     assert report["prior_artifact"]["archived_base"] == (
         "8a8d7f1bfe37fe97e713dfa92350a56fef31266d"
     )
+
+
+# ---------------------------------------------------------------------------
+# Ticket #28 R2 Slice 7 — exact fixed-base rollback proof (ST-03 / SP-16)
+# ---------------------------------------------------------------------------
+
+
+def _run_rollback_probe(*arguments: str) -> tuple[int, dict[str, Any]]:
+    import json as _json
+    import subprocess as _subprocess
+
+    completed = _subprocess.run(
+        [
+            str(ROOT / ".venv" / "bin" / "python"),
+            "scripts/s12_rollback_probe.py",
+            *arguments,
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=240,
+    )
+    report = _json.loads(completed.stdout) if completed.stdout else {}
+    return completed.returncode, report
+
+
+def test_rollback_probe_extracts_and_executes_the_exact_fixed_base_archive(
+    tmp_path: Path,
+) -> None:
+    """The probe extracts the exact fixed base itself and executes the
+    prior-artifact reader with that extraction as the only import root:
+    the reported module path lives inside the verified extraction."""
+    exit_code, report = _run_rollback_probe(
+        "--fixed-base", "8a8d7f1bfe37fe97e713dfa92350a56fef31266d"
+    )
+    assert exit_code == 0, report
+    assert report["probe"] == "PASS"
+    prior = report["prior_artifact"]
+    assert prior["archived_base"] == "8a8d7f1bfe37fe97e713dfa92350a56fef31266d"
+    assert prior["prior_code_serves_business_state"] is True
+    assert prior["source_digest"]
+    assert prior["tree_digest"] == prior["module_tree_digest"]
+    assert "s01.py" in prior["module_path"]
+
+
+def test_rollback_probe_rejects_prior_source_root_mismatch(tmp_path: Path) -> None:
+    """A supplied prior root that does not match the fixed-base archive is
+    rejected: the probe terminates nonzero with the comparison recorded."""
+    exit_code, report = _run_rollback_probe(
+        "--fixed-base",
+        "8a8d7f1bfe37fe97e713dfa92350a56fef31266d",
+        "--prior-source-root",
+        str(ROOT),
+    )
+    assert exit_code != 0, report
+    assert report["probe"] == "FAIL"
+    assert report["prior_artifact"]["tree_digest_matches"] is False
+    assert report["prior_artifact"]["prior_code_serves_business_state"] is False
