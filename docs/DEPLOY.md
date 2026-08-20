@@ -240,7 +240,7 @@ curl -s -H "Authorization: Bearer change-me" http://127.0.0.1:8765/api/fixtures
 ## 6. 健康检查清单
 
 1. `pytest -q` 全绿  
-2. `evaluate` 输出 `THRESHOLD PASS`  
+2. `evaluate` 输出 `C-DEV-REG PASS`（开发回归证据；正式验收只读 S12 不可变评估包，旧阈值验收语义已退役）
 3. `attack_probes.py` `release_open=0`  
 4. Web 能加载 fixture 并完成一次校验  
 5. `GET /api/rules` 可读且 `POST /api/rules/validate` 干跑通过（不写盘）

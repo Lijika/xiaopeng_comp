@@ -12013,6 +12013,27 @@
         "title": "S09WorkspaceEventRef",
         "type": "object"
       },
+      "S12Budget": {
+        "additionalProperties": false,
+        "properties": {
+          "max_opportunities": {
+            "exclusiveMinimum": 0.0,
+            "title": "Max Opportunities",
+            "type": "integer"
+          },
+          "max_runtime_ms": {
+            "exclusiveMinimum": 0.0,
+            "title": "Max Runtime Ms",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "max_opportunities",
+          "max_runtime_ms"
+        ],
+        "title": "S12Budget",
+        "type": "object"
+      },
       "S12BundleResponse": {
         "additionalProperties": false,
         "properties": {
@@ -12031,14 +12052,51 @@
             "title": "Bundle Id",
             "type": "string"
           },
+          "business_after": {
+            "additionalProperties": true,
+            "title": "Business After",
+            "type": "object"
+          },
+          "business_before": {
+            "additionalProperties": true,
+            "title": "Business Before",
+            "type": "object"
+          },
           "business_deltas": {
             "additionalProperties": true,
             "title": "Business Deltas",
             "type": "object"
           },
+          "clusters": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Clusters",
+            "type": "array"
+          },
+          "cohort": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cohort"
+          },
           "command": {
             "title": "Command",
             "type": "string"
+          },
+          "completed_application_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Completed Application Ids",
+            "type": "array"
           },
           "environment": {
             "additionalProperties": true,
@@ -12054,6 +12112,11 @@
             },
             "title": "Errors",
             "type": "array"
+          },
+          "evidence_references": {
+            "additionalProperties": true,
+            "title": "Evidence References",
+            "type": "object"
           },
           "evidence_snapshot_ids": {
             "items": {
@@ -12077,11 +12140,29 @@
             "title": "Job Id",
             "type": "string"
           },
+          "label_manifest": {
+            "additionalProperties": true,
+            "title": "Label Manifest",
+            "type": "object"
+          },
+          "mandatory_check_families": {
+            "additionalProperties": true,
+            "title": "Mandatory Check Families",
+            "type": "object"
+          },
           "missing_opportunities": {
             "items": {
               "type": "string"
             },
             "title": "Missing Opportunities",
+            "type": "array"
+          },
+          "opportunities": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Opportunities",
             "type": "array"
           },
           "plan_digest": {
@@ -12122,6 +12203,10 @@
             ],
             "title": "Rerun Of Bundle Id"
           },
+          "result_digest": {
+            "title": "Result Digest",
+            "type": "string"
+          },
           "run_settled_at": {
             "title": "Run Settled At",
             "type": "integer"
@@ -12138,6 +12223,11 @@
           "scope": {
             "title": "Scope",
             "type": "string"
+          },
+          "scope_eligibility": {
+            "additionalProperties": true,
+            "title": "Scope Eligibility",
+            "type": "object"
           },
           "seed": {
             "title": "Seed",
@@ -12159,6 +12249,14 @@
             "title": "Status Reasons",
             "type": "array"
           },
+          "stop_elapsed_ms": {
+            "title": "Stop Elapsed Ms",
+            "type": "integer"
+          },
+          "stop_reason": {
+            "title": "Stop Reason",
+            "type": "string"
+          },
           "stop_rule": {
             "title": "Stop Rule",
             "type": "string"
@@ -12167,14 +12265,29 @@
             "title": "Stop Rule Satisfied",
             "type": "boolean"
           },
+          "strata": {
+            "additionalProperties": true,
+            "title": "Strata",
+            "type": "object"
+          },
           "tracks": {
             "additionalProperties": true,
             "title": "Tracks",
             "type": "object"
           },
+          "tracks_declared": {
+            "additionalProperties": true,
+            "title": "Tracks Declared",
+            "type": "object"
+          },
           "views": {
             "additionalProperties": true,
             "title": "Views",
+            "type": "object"
+          },
+          "views_declared": {
+            "additionalProperties": true,
+            "title": "Views Declared",
             "type": "object"
           },
           "worker_id": {
@@ -12199,6 +12312,16 @@
           "status_reasons",
           "tracks",
           "views",
+          "mandatory_check_families",
+          "strata",
+          "scope_eligibility",
+          "clusters",
+          "opportunities",
+          "tracks_declared",
+          "views_declared",
+          "evidence_references",
+          "label_manifest",
+          "cohort",
           "predictions",
           "prediction_alphabet",
           "gold_alphabet",
@@ -12206,13 +12329,19 @@
           "missing_opportunities",
           "release",
           "environment",
+          "stop_rule",
+          "stop_reason",
+          "stop_elapsed_ms",
+          "completed_application_ids",
           "stop_rule_satisfied",
-          "split",
           "evidence_snapshot_ids",
           "seed",
           "budget",
-          "stop_rule",
+          "split",
+          "business_before",
+          "business_after",
           "business_deltas",
+          "result_digest",
           "command"
         ],
         "title": "S12BundleResponse",
@@ -12225,6 +12354,7 @@
             "items": {
               "type": "string"
             },
+            "minItems": 1,
             "title": "Applications",
             "type": "array"
           },
@@ -12244,6 +12374,20 @@
             ],
             "title": "Usage",
             "type": "string"
+          },
+          "variants": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Variants"
           }
         },
         "required": [
@@ -12255,37 +12399,121 @@
         "title": "S12Cluster",
         "type": "object"
       },
+      "S12Cohort": {
+        "additionalProperties": false,
+        "properties": {
+          "exclusions": {
+            "items": {
+              "$ref": "#/components/schemas/S12Exclusion"
+            },
+            "title": "Exclusions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "exclusions"
+        ],
+        "title": "S12Cohort",
+        "type": "object"
+      },
+      "S12EvidenceReference": {
+        "additionalProperties": false,
+        "properties": {
+          "cycle": {
+            "minimum": 1.0,
+            "title": "Cycle",
+            "type": "integer"
+          },
+          "snapshot_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Snapshot Digest",
+            "type": "string"
+          },
+          "snapshot_id": {
+            "title": "Snapshot Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshot_id",
+          "snapshot_digest",
+          "cycle"
+        ],
+        "title": "S12EvidenceReference",
+        "type": "object"
+      },
+      "S12Exclusion": {
+        "additionalProperties": false,
+        "properties": {
+          "item": {
+            "title": "Item",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "reference_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Reference Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "item",
+          "reason",
+          "reference_sha256"
+        ],
+        "title": "S12Exclusion",
+        "type": "object"
+      },
       "S12FreezePlanBody": {
         "additionalProperties": false,
         "properties": {
           "budget": {
-            "additionalProperties": {
-              "type": "integer"
-            },
-            "title": "Budget",
-            "type": "object"
-          },
-          "checker_artifact": {
-            "additionalProperties": true,
-            "title": "Checker Artifact",
-            "type": "object"
+            "$ref": "#/components/schemas/S12Budget"
           },
           "clusters": {
             "items": {
               "$ref": "#/components/schemas/S12Cluster"
             },
+            "minItems": 1,
             "title": "Clusters",
             "type": "array"
           },
-          "environment": {
-            "additionalProperties": true,
-            "title": "Environment",
+          "cohort": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/S12Cohort"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "evidence_references": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/S12EvidenceReference"
+            },
+            "title": "Evidence References",
             "type": "object"
+          },
+          "label_manifest": {
+            "$ref": "#/components/schemas/S12LabelManifestReference"
+          },
+          "mandatory_check_families": {
+            "items": {
+              "$ref": "#/components/schemas/S12MandatoryFamily"
+            },
+            "minItems": 1,
+            "title": "Mandatory Check Families",
+            "type": "array"
           },
           "opportunities": {
             "items": {
               "$ref": "#/components/schemas/S12Opportunity"
             },
+            "minItems": 1,
             "title": "Opportunities",
             "type": "array"
           },
@@ -12293,35 +12521,31 @@
             "title": "Plan Id",
             "type": "string"
           },
-          "release": {
-            "additionalProperties": true,
-            "title": "Release",
-            "type": "object"
-          },
-          "run_specs": {
-            "additionalProperties": true,
-            "title": "Run Specs",
-            "type": "object"
+          "release_reference": {
+            "$ref": "#/components/schemas/S12ReleaseReference"
           },
           "schema_version": {
             "const": "s12-plan-command/1",
             "title": "Schema Version",
             "type": "string"
           },
-          "scope": {
-            "title": "Scope",
+          "scope_declared": {
+            "title": "Scope Declared",
             "type": "string"
           },
           "seed": {
+            "minimum": 0.0,
             "title": "Seed",
             "type": "integer"
           },
           "split": {
-            "additionalProperties": true,
-            "title": "Split",
-            "type": "object"
+            "$ref": "#/components/schemas/S12Split"
           },
           "stop_rule": {
+            "enum": [
+              "plan-exhausted",
+              "budget-or-plan"
+            ],
             "title": "Stop Rule",
             "type": "string"
           },
@@ -12343,19 +12567,19 @@
         "required": [
           "schema_version",
           "plan_id",
-          "scope",
+          "scope_declared",
           "seed",
           "budget",
           "stop_rule",
           "split",
-          "environment",
-          "release",
-          "checker_artifact",
-          "run_specs",
           "clusters",
           "tracks",
           "views",
-          "opportunities"
+          "opportunities",
+          "evidence_references",
+          "release_reference",
+          "label_manifest",
+          "mandatory_check_families"
         ],
         "title": "S12FreezePlanBody",
         "type": "object"
@@ -12458,10 +12682,52 @@
           "status",
           "fence",
           "attempt_no",
-          "rerun_of_bundle_id",
           "created_at"
         ],
         "title": "S12JobResponse",
+        "type": "object"
+      },
+      "S12LabelManifestReference": {
+        "additionalProperties": false,
+        "properties": {
+          "manifest_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Manifest Digest",
+            "type": "string"
+          },
+          "manifest_id": {
+            "title": "Manifest Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "manifest_id",
+          "manifest_digest"
+        ],
+        "title": "S12LabelManifestReference",
+        "type": "object"
+      },
+      "S12MandatoryFamily": {
+        "additionalProperties": false,
+        "properties": {
+          "check_ids": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Check Ids",
+            "type": "array"
+          },
+          "family_id": {
+            "title": "Family Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "family_id",
+          "check_ids"
+        ],
+        "title": "S12MandatoryFamily",
         "type": "object"
       },
       "S12Membership": {
@@ -12497,26 +12763,61 @@
             "type": "string"
           },
           "cycle": {
+            "minimum": 1.0,
             "title": "Cycle",
             "type": "integer"
+          },
+          "data_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Data Source"
+          },
+          "difficulty": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Difficulty"
+          },
+          "document_combination": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Combination"
           },
           "evidence_snapshot_id": {
             "title": "Evidence Snapshot Id",
             "type": "string"
           },
-          "label": {
-            "enum": [
-              "consistent",
-              "inconsistent",
-              "indeterminate",
-              "not_applicable"
-            ],
-            "title": "Label",
-            "type": "string"
-          },
           "opportunity_id": {
             "title": "Opportunity Id",
             "type": "string"
+          },
+          "perturbation_family": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Perturbation Family"
           },
           "target_scope": {
             "title": "Target Scope",
@@ -12539,8 +12840,7 @@
           "cycle",
           "check_id",
           "target_scope",
-          "evidence_snapshot_id",
-          "label"
+          "evidence_snapshot_id"
         ],
         "title": "S12Opportunity",
         "type": "object"
@@ -12553,6 +12853,11 @@
               "type": "integer"
             },
             "title": "Budget",
+            "type": "object"
+          },
+          "business_before": {
+            "additionalProperties": true,
+            "title": "Business Before",
             "type": "object"
           },
           "checker_artifact": {
@@ -12568,14 +12873,44 @@
             "title": "Clusters",
             "type": "array"
           },
+          "cohort": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cohort"
+          },
           "environment": {
             "additionalProperties": true,
             "title": "Environment",
             "type": "object"
           },
+          "evidence_references": {
+            "additionalProperties": true,
+            "title": "Evidence References",
+            "type": "object"
+          },
           "frozen_at": {
             "title": "Frozen At",
             "type": "integer"
+          },
+          "label_manifest": {
+            "additionalProperties": true,
+            "title": "Label Manifest",
+            "type": "object"
+          },
+          "mandatory_check_families": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Mandatory Check Families",
+            "type": "array"
           },
           "opportunities": {
             "items": {
@@ -12650,14 +12985,19 @@
           "budget",
           "stop_rule",
           "split",
-          "environment",
-          "release",
-          "checker_artifact",
-          "run_specs",
           "clusters",
           "tracks",
           "views",
           "opportunities",
+          "label_manifest",
+          "environment",
+          "release",
+          "checker_artifact",
+          "run_specs",
+          "evidence_references",
+          "mandatory_check_families",
+          "cohort",
+          "business_before",
           "frozen_at",
           "plan_digest"
         ],
@@ -12724,21 +13064,63 @@
         "title": "S12ProcessResponse",
         "type": "object"
       },
+      "S12ReleaseReference": {
+        "additionalProperties": false,
+        "properties": {
+          "release_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Release Digest",
+            "type": "string"
+          },
+          "release_id": {
+            "title": "Release Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "release_id",
+          "release_digest"
+        ],
+        "title": "S12ReleaseReference",
+        "type": "object"
+      },
+      "S12Split": {
+        "additionalProperties": false,
+        "properties": {
+          "scheme": {
+            "title": "Scheme",
+            "type": "string"
+          },
+          "usage_partitions": {
+            "items": {
+              "enum": [
+                "development",
+                "calibration",
+                "acceptance_holdout"
+              ],
+              "type": "string"
+            },
+            "title": "Usage Partitions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "scheme",
+          "usage_partitions"
+        ],
+        "title": "S12Split",
+        "type": "object"
+      },
       "S12StartJobBody": {
         "additionalProperties": false,
         "properties": {
           "plan_id": {
             "title": "Plan Id",
             "type": "string"
-          },
-          "worker_id": {
-            "title": "Worker Id",
-            "type": "string"
           }
         },
         "required": [
-          "plan_id",
-          "worker_id"
+          "plan_id"
         ],
         "title": "S12StartJobBody",
         "type": "object"
@@ -20679,7 +21061,7 @@
     },
     "/controlled/s12/bundles/{bundle_id}": {
       "get": {
-        "description": "Query one immutable content-addressed evaluation bundle.",
+        "description": "Query one immutable content-addressed evaluation bundle (the complete\nfrozen replay package with the independent result digest).",
         "operationId": "s12_query_bundle_controlled_s12_bundles__bundle_id__get",
         "parameters": [
           {
@@ -20719,7 +21101,7 @@
     },
     "/controlled/s12/jobs/start": {
       "post": {
-        "description": "Start one durable evaluation job for a frozen plan.",
+        "description": "Start one durable evaluation job for a frozen plan, bound to the\nregistered server worker identity.",
         "operationId": "s12_start_job_controlled_s12_jobs_start_post",
         "requestBody": {
           "content": {
@@ -20838,7 +21220,7 @@
     },
     "/controlled/s12/jobs/{job_id}/process": {
       "post": {
-        "description": "Execute one claimed durable job: restricted runner, parent\nmaterialization, statistics, status selection, bundle publication.",
+        "description": "Execute one claimed durable job: restricted runner, parent\nverification/materialization, eligibility and statistics, status\nselection, and atomic bundle publication.",
         "operationId": "s12_process_job_controlled_s12_jobs__job_id__process_post",
         "parameters": [
           {
@@ -20878,7 +21260,7 @@
     },
     "/controlled/s12/jobs/{job_id}/rerun": {
       "post": {
-        "description": "Start a linked rerun job: its bundle will reference the source\nbundle via ``rerun_of_bundle_id`` and never overwrite it.",
+        "description": "Start a linked rerun job from the source bundle's frozen replay\npackage: its bundle will reference the source bundle via\n``rerun_of_bundle_id`` and never overwrite it.",
         "operationId": "s12_rerun_job_controlled_s12_jobs__job_id__rerun_post",
         "parameters": [
           {
@@ -20918,7 +21300,7 @@
     },
     "/controlled/s12/plans/freeze": {
       "post": {
-        "description": "Freeze one evaluation plan: cohorts, clusters, splits, opportunities,\nindependent gold labels, evidence snapshots, release/checker/build\nidentities, seed, budget and stop rule become one immutable plan.",
+        "description": "Freeze one evaluation plan from stable references: the authority\nresolves the S01 evidence snapshots, the governed S08 release and the\nindependent label manifest, derives the environment, and measures\nbusiness state.",
         "operationId": "s12_freeze_plan_controlled_s12_plans_freeze_post",
         "requestBody": {
           "content": {

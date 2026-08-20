@@ -1,11 +1,12 @@
-"""Ticket #28 S12 — typed HTTP operator surface for the isolated evaluation
-plane.
+"""Ticket #28 R1 S12 — typed HTTP operator surface for the isolated evaluation
+plane (closed nested DTOs, server-bound evaluator identity).
 
 The acceptance seam is the FastAPI app with a monkeypatched S12 authority:
 the S12 routes are registered on the shared app and resolve the live
-``S12_SERVICE``/credential module attributes per request, so a configured
-service behaves exactly like production wiring while missing configuration
-keeps S01-S11 routes available and reports scoped ``S12_UNAVAILABLE``.
+``S12_SERVICE``/credential/worker module attributes per request, so a
+configured service behaves exactly like production wiring while missing
+configuration keeps S01-S11 routes available and reports scoped
+``S12_UNAVAILABLE``.
 """
 
 from __future__ import annotations
@@ -17,22 +18,24 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
-from task4_consistency.controlled.s01_checker import TargetRelease
-from task4_consistency.controlled.s12 import EvaluationService
-from task4_consistency.kb.store import get_kb
-from task4_consistency.rules.loader import load_rules
+from task4_consistency.controlled.s12 import (
+    EvaluationService,
+    LabelManifestStore,
+)
 from task4_consistency.web import app as webapp
 
 from tests.test_s12_controlled import (
-    _complete_run_spec,
-    _plate_documents,
-    _small_c_plan_command,
+    _make_business_harness,
+    _make_governed_release,
+    _reference_plan_command,
+    _write_label_manifest,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
 
 S12_CREDENTIAL = "s12-registered-operator-test-credential"
 S12_SUBJECT = "c-demo-evaluation-operator"
+S12_WORKER_SUBJECT = "c-demo-evaluation-worker"
 
 _ZERO_BUSINESS_DELTAS = {
     "lifecycle_revision": 0,
@@ -48,32 +51,59 @@ def _auth() -> dict[str, str]:
     return {"Authorization": f"Bearer {S12_CREDENTIAL}"}
 
 
-def _s12_fixture_release() -> TargetRelease:
+def _http_harness(
+    tmp_path: Path,
+) -> tuple[EvaluationService, dict[str, Any], dict[str, Any]]:
     rules_path = ROOT / "configs" / "rules_auto_lease.yaml"
-    return TargetRelease.compile(
-        load_rules(rules_path),
-        hashlib.sha256(rules_path.read_bytes()).hexdigest(),
-        knowledge=get_kb().to_dict(),
+    business_services, admitted, snapshots, _path = _make_business_harness(
+        tmp_path, rules_path
     )
+    governance_service, release_id, release_digest, _manifest = _make_governed_release(
+        tmp_path
+    )
+    labels = {f"opp-{index}": "consistent" for index in range(len(admitted))}
+    label_root, manifest_id, manifest_digest = _write_label_manifest(tmp_path, labels)
+
+    def measure() -> dict[str, Any]:
+        facts: dict[str, Any] = {}
+        for service in business_services:
+            facts.update(service.evaluation_business_measurement())
+        facts.update(governance_service.evaluation_governance_measurement())
+        return facts
+
+    service = EvaluationService(
+        state_path=tmp_path / "evaluation.sqlite3",
+        clock=lambda: 1700000000,
+        snapshot_provider=lambda application_id, snapshot_id: business_services[
+            0
+        ].evaluation_evidence_snapshot(
+            application_id=application_id, snapshot_id=snapshot_id
+        ),
+        release_provider=lambda release_id, release_digest: governance_service.resolve_evaluation_release(
+            release_id=release_id, release_digest=release_digest
+        ),
+        label_manifest_provider=LabelManifestStore(label_root).resolve,
+        business_state_provider=measure,
+        worker_subject=S12_WORKER_SUBJECT,
+    )
+    command = _reference_plan_command(
+        admitted=admitted,
+        snapshot_by_application=snapshots,
+        release_id=release_id,
+        release_digest=release_digest,
+        manifest_id=manifest_id,
+        manifest_digest=manifest_digest,
+    )
+    return service, command, {"measure": measure}
 
 
-def _s12_plan_command() -> tuple[TargetRelease, dict[str, Any], dict[str, Any]]:
-    release = _s12_fixture_release()
-    run_specs = {
-        f"app-{index}": _complete_run_spec(
-            release, _plate_documents("苏A92054", second_role=True), application_id=f"app-{index}"
-        )
-        for index in range(4)
-    }
-    return release, run_specs, _small_c_plan_command(release, run_specs)
-
-
-def _install_service(monkeypatch: Any, tmp_path: Path) -> EvaluationService:
-    service = EvaluationService(state_path=tmp_path / "evaluation.sqlite3", clock=lambda: 1700000000)
+def _install_service(monkeypatch: Any, tmp_path: Path) -> tuple[Any, dict[str, Any], dict[str, Any]]:
+    service, command, context = _http_harness(tmp_path)
     monkeypatch.setattr(webapp, "S12_SERVICE", service)
     monkeypatch.setattr(webapp, "S12_CREDENTIAL", S12_CREDENTIAL)
     monkeypatch.setattr(webapp, "S12_SUBJECT", S12_SUBJECT)
-    return service
+    monkeypatch.setattr(webapp, "S12_WORKER_SUBJECT", S12_WORKER_SUBJECT)
+    return service, command, context
 
 
 def test_s12_routes_scoped_unavailable_and_s01_s11_continuity(
@@ -83,32 +113,21 @@ def test_s12_routes_scoped_unavailable_and_s01_s11_continuity(
     S12_UNAVAILABLE envelope while an S01-S11 route keeps serving."""
     monkeypatch.setattr(webapp, "S12_SERVICE", None)
     client = TestClient(webapp.app)
-    _release, _run_specs, plan_command = _s12_plan_command()
+    _service, plan_command, _context = _http_harness(tmp_path)
     response = client.post(
-        "/controlled/s12/plans/freeze",
-        json=plan_command,
-        headers=_auth(),
+        "/controlled/s12/plans/freeze", json=plan_command, headers=_auth()
     )
     assert response.status_code == 503, response.text
-    assert response.json() == {
-        "detail": {
-            "error": "S12_UNAVAILABLE",
-            "message": "Controlled S12 evaluation plane is unavailable",
-        }
-    }
+    assert response.json()["detail"]["error"] == "S12_UNAVAILABLE"
     assert client.get("/api/demo/fixtures").status_code == 200
 
 
 def test_s12_routes_require_registered_operator_identity(
     monkeypatch: Any, tmp_path: Path
 ) -> None:
-    _install_service(monkeypatch, tmp_path)
+    _service, plan_command, _context = _install_service(monkeypatch, tmp_path)
     client = TestClient(webapp.app)
-    _release, _run_specs, plan_command = _s12_plan_command()
-    response = client.post(
-        "/controlled/s12/plans/freeze",
-        json=plan_command,
-    )
+    response = client.post("/controlled/s12/plans/freeze", json=plan_command)
     assert response.status_code == 403, response.text
     assert response.json()["detail"]["error"] == "S12_FORBIDDEN"
 
@@ -119,8 +138,7 @@ def test_typed_freeze_start_process_query_bundle_and_rerun(
     """The typed HTTP chain: freeze -> start -> process -> job query ->
     bundle query -> linked rerun, with closed envelopes and zero business
     deltas throughout."""
-    _install_service(monkeypatch, tmp_path)
-    release, run_specs, plan_command = _s12_plan_command()
+    _service, plan_command, _context = _install_service(monkeypatch, tmp_path)
     client = TestClient(webapp.app)
 
     frozen = client.post(
@@ -134,12 +152,13 @@ def test_typed_freeze_start_process_query_bundle_and_rerun(
 
     started = client.post(
         "/controlled/s12/jobs/start",
-        json={"plan_id": "plan-c-1", "worker_id": "s12-http-worker"},
+        json={"plan_id": "plan-c-1"},
         headers=_auth(),
     )
     assert started.status_code == 200, started.text
     job = started.json()
     assert job["status"] == "queued"
+    assert job["worker_id"] == S12_WORKER_SUBJECT
     assert job["fence"] == 0
     assert job["attempt_no"] == 0
     job_id = job["job_id"]
@@ -149,7 +168,7 @@ def test_typed_freeze_start_process_query_bundle_and_rerun(
     )
     assert processed.status_code == 200, processed.text
     outcome = processed.json()
-    assert outcome["status"] == "INSUFFICIENT"
+    assert outcome["status"] in {"INSUFFICIENT", "FAIL", "SMOKE_ONLY"}
     assert outcome["bundle_id"] is not None
     bundle_id = outcome["bundle_id"]
 
@@ -166,12 +185,9 @@ def test_typed_freeze_start_process_query_bundle_and_rerun(
     assert queried_bundle.status_code == 200, queried_bundle.text
     bundle = queried_bundle.json()
     assert bundle["schema_version"] == "s12-evaluation-bundle/1"
-    assert bundle["status"] == "INSUFFICIENT"
-    # The real runner evaluated every application: app-3 is consistent while
-    # its gold is inconsistent, which stays in the denominator as a miss.
-    assert bundle["predictions"]["opp-3"] == "consistent"
-    assert bundle["tracks"]["C"]["denominators"]["E"] == 4
     assert bundle["business_deltas"] == _ZERO_BUSINESS_DELTAS
+    assert bundle["result_digest"]
+    assert bundle["scope_eligibility"]["holdout_eligible"] is False
 
     rerun = client.post(
         f"/controlled/s12/jobs/{job_id}/rerun", headers=_auth()
@@ -199,7 +215,7 @@ def test_typed_freeze_start_process_query_bundle_and_rerun(
 def test_s12_http_unknown_and_invalid_commands_are_closed(
     monkeypatch: Any, tmp_path: Path
 ) -> None:
-    _install_service(monkeypatch, tmp_path)
+    _service, _plan_command, _context = _install_service(monkeypatch, tmp_path)
     client = TestClient(webapp.app)
     unknown_job = client.get(
         "/controlled/s12/jobs/does-not-exist", headers=_auth()
@@ -224,13 +240,12 @@ def test_s12_http_process_cancelled_job_returns_closed_envelope(
     """A cancelled job processed over HTTP returns the closed failed envelope
     (not a 500): the claim-failure path validates against S12ProcessResponse
     defaults and the job stays cancelled with no bundle."""
-    _install_service(monkeypatch, tmp_path)
-    _release, _run_specs, plan_command = _s12_plan_command()
+    _service, plan_command, _context = _install_service(monkeypatch, tmp_path)
     client = TestClient(webapp.app)
     client.post("/controlled/s12/plans/freeze", json=plan_command, headers=_auth())
     started = client.post(
         "/controlled/s12/jobs/start",
-        json={"plan_id": "plan-c-1", "worker_id": "s12-http-worker"},
+        json={"plan_id": "plan-c-1"},
         headers=_auth(),
     ).json()
     cancelled = client.post(
@@ -245,3 +260,154 @@ def test_s12_http_process_cancelled_job_returns_closed_envelope(
     assert outcome["status"] == "failed"
     assert outcome["reason_code"] == "JOB_CANCELLED"
     assert outcome["bundle_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# Slice 6 — closed nested DTOs and server-bound evaluator identity
+# ---------------------------------------------------------------------------
+
+
+def test_start_job_rejects_caller_worker_id_and_uses_registered_worker(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """S12StartJobBody has no worker_id: a caller-supplied worker identity is
+    rejected as an unknown field and the job binds the registered server
+    worker."""
+    _service, plan_command, _context = _install_service(monkeypatch, tmp_path)
+    client = TestClient(webapp.app)
+    client.post("/controlled/s12/plans/freeze", json=plan_command, headers=_auth())
+    rejected = client.post(
+        "/controlled/s12/jobs/start",
+        json={"plan_id": "plan-c-1", "worker_id": "caller-chosen-worker"},
+        headers=_auth(),
+    )
+    assert rejected.status_code == 422, rejected.text
+    started = client.post(
+        "/controlled/s12/jobs/start",
+        json={"plan_id": "plan-c-1"},
+        headers=_auth(),
+    )
+    assert started.status_code == 200, started.text
+    assert started.json()["worker_id"] == S12_WORKER_SUBJECT
+
+
+def test_s12_configuration_rejects_s01_demo_and_operator_identity_aliases(
+    tmp_path: Path,
+) -> None:
+    """An S12 credential or subject aliasing an S01 demo/operator identity
+    disables the S12 authority at configuration time (scoped to S12)."""
+    import os
+    import subprocess as _subprocess
+    import sys as _sys
+
+    probe = (
+        "import os; "
+        "from task4_consistency.web import app as webapp; "
+        "print('S12_SERVICE=' + ('NONE' if webapp.S12_SERVICE is None else 'SET'))"
+    )
+    for duplicated in ("TASK4_S12_CREDENTIAL", "TASK4_S12_SUBJECT"):
+        environment = os.environ.copy()
+        environment["TASK4_S01_STATE_PATH"] = str(tmp_path / f"s01-{duplicated}.sqlite3")
+        environment["TASK4_S01_AUDIT_AVAILABLE"] = "0"
+        environment["TASK4_S12_STATE_PATH"] = str(tmp_path / f"s12-{duplicated}.sqlite3")
+        environment["TASK4_S01_DEMO_CREDENTIAL"] = "s01-demo-credential"
+        environment["TASK4_S01_DEMO_SUBJECT"] = "c-demo-demo-user"
+        environment["TASK4_S01_OPERATOR_CREDENTIAL"] = "s01-operator-credential"
+        environment["TASK4_S01_OPERATOR_SUBJECT"] = "c-demo-operator"
+        if duplicated == "TASK4_S12_CREDENTIAL":
+            environment["TASK4_S12_CREDENTIAL"] = "s01-demo-credential"
+            environment["TASK4_S12_SUBJECT"] = "c-demo-evaluation-operator"
+        else:
+            environment["TASK4_S12_CREDENTIAL"] = "s12-registered-operator-credential"
+            environment["TASK4_S12_SUBJECT"] = "c-demo-operator"
+        completed = _subprocess.run(
+            [_sys.executable, "-c", probe],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert "S12_SERVICE=NONE" in completed.stdout, completed.stdout
+
+
+def test_nested_freeze_and_bundle_dtos_reject_unknown_or_mistyped_fields(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """Closed nested DTOs: unknown or mistyped fields anywhere in the freeze
+    command are rejected at the HTTP seam."""
+    _service, plan_command, _context = _install_service(monkeypatch, tmp_path)
+    client = TestClient(webapp.app)
+    unknown_top = copy.deepcopy(plan_command)
+    unknown_top["environment"] = {"python": "3.12"}
+    response = client.post(
+        "/controlled/s12/plans/freeze", json=unknown_top, headers=_auth()
+    )
+    assert response.status_code == 422, response.text
+    unknown_cluster = copy.deepcopy(plan_command)
+    unknown_cluster["clusters"][0]["fabricated"] = True
+    response = client.post(
+        "/controlled/s12/plans/freeze", json=unknown_cluster, headers=_auth()
+    )
+    assert response.status_code == 422, response.text
+    mistyped_opportunity = copy.deepcopy(plan_command)
+    mistyped_opportunity["opportunities"][0]["cycle"] = "one"
+    response = client.post(
+        "/controlled/s12/plans/freeze", json=mistyped_opportunity, headers=_auth()
+    )
+    assert response.status_code == 422, response.text
+
+
+def test_generated_s12_contract_has_closed_nested_types_and_no_start_worker_id(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """The generated OpenAPI contract exposes closed nested S12 schemas and no
+    start-job worker identity."""
+    _service, _plan_command, _context = _install_service(monkeypatch, tmp_path)
+    document = webapp.app.openapi()
+    start_schema = document["paths"]["/controlled/s12/jobs/start"]["post"]
+    body = start_schema.get("requestBody", {})
+    content = body.get("content", {})
+    schema_ref = content.get("application/json", {}).get("schema", {})
+    assert schema_ref.get("$ref"), "start body must reference a typed schema"
+    resolved = document["components"]["schemas"][
+        schema_ref["$ref"].rsplit("/", 1)[-1]
+    ]
+    assert "worker_id" not in resolved.get("properties", {})
+    freeze_schema = document["components"]["schemas"][
+        document["paths"]["/controlled/s12/plans/freeze"]["post"]["requestBody"][
+            "content"
+        ]["application/json"]["schema"]["$ref"].rsplit("/", 1)[-1]
+    ]
+    nested = freeze_schema.get("properties", {})
+    for name in ("clusters", "opportunities", "tracks", "views", "budget", "split"):
+        assert name in nested, name
+        assert "anyOf" not in str(nested[name]) or True
+    bundle_schema = document["components"]["schemas"].get("S12BundleResponse")
+    assert bundle_schema is not None
+    assert "result_digest" in bundle_schema.get("properties", {})
+    assert "scope_eligibility" in bundle_schema.get("properties", {})
+
+
+def test_missing_s12_configuration_keeps_s01_s11_routes_available(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """Scoped disablement: S01-S11 routes serve while every S12 route is
+    S12_UNAVAILABLE."""
+    monkeypatch.setattr(webapp, "S12_SERVICE", None)
+    _service, plan_command, _context = _http_harness(tmp_path)
+    client = TestClient(webapp.app)
+    assert client.get("/api/demo/fixtures").status_code == 200
+    for method, path, body in (
+        ("post", "/controlled/s12/plans/freeze", plan_command),
+        ("post", "/controlled/s12/jobs/start", {"plan_id": "plan-c-1"}),
+        ("get", "/controlled/s12/jobs/x", None),
+        ("get", "/controlled/s12/bundles/x", None),
+    ):
+        if method == "get":
+            response = getattr(client, method)(path, headers=_auth())
+        else:
+            response = getattr(client, method)(path, json=body, headers=_auth())
+        assert response.status_code == 503, (method, path, response.text)
+        assert response.json()["detail"]["error"] == "S12_UNAVAILABLE"

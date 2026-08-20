@@ -1883,7 +1883,8 @@ export interface paths {
         };
         /**
          * S12 Query Bundle
-         * @description Query one immutable content-addressed evaluation bundle.
+         * @description Query one immutable content-addressed evaluation bundle (the complete
+         *     frozen replay package with the independent result digest).
          */
         get: operations["s12_query_bundle_controlled_s12_bundles__bundle_id__get"];
         put?: never;
@@ -1905,7 +1906,8 @@ export interface paths {
         put?: never;
         /**
          * S12 Start Job
-         * @description Start one durable evaluation job for a frozen plan.
+         * @description Start one durable evaluation job for a frozen plan, bound to the
+         *     registered server worker identity.
          */
         post: operations["s12_start_job_controlled_s12_jobs_start_post"];
         delete?: never;
@@ -1966,7 +1968,8 @@ export interface paths {
         /**
          * S12 Process Job
          * @description Execute one claimed durable job: restricted runner, parent
-         *     materialization, statistics, status selection, bundle publication.
+         *     verification/materialization, eligibility and statistics, status
+         *     selection, and atomic bundle publication.
          */
         post: operations["s12_process_job_controlled_s12_jobs__job_id__process_post"];
         delete?: never;
@@ -1986,8 +1989,9 @@ export interface paths {
         put?: never;
         /**
          * S12 Rerun Job
-         * @description Start a linked rerun job: its bundle will reference the source
-         *     bundle via ``rerun_of_bundle_id`` and never overwrite it.
+         * @description Start a linked rerun job from the source bundle's frozen replay
+         *     package: its bundle will reference the source bundle via
+         *     ``rerun_of_bundle_id`` and never overwrite it.
          */
         post: operations["s12_rerun_job_controlled_s12_jobs__job_id__rerun_post"];
         delete?: never;
@@ -2007,9 +2011,10 @@ export interface paths {
         put?: never;
         /**
          * S12 Freeze Plan
-         * @description Freeze one evaluation plan: cohorts, clusters, splits, opportunities,
-         *     independent gold labels, evidence snapshots, release/checker/build
-         *     identities, seed, budget and stop rule become one immutable plan.
+         * @description Freeze one evaluation plan from stable references: the authority
+         *     resolves the S01 evidence snapshots, the governed S08 release and the
+         *     independent label manifest, derives the environment, and measures
+         *     business state.
          */
         post: operations["s12_freeze_plan_controlled_s12_plans_freeze_post"];
         delete?: never;
@@ -6238,6 +6243,13 @@ export interface components {
             /** Trusted Time */
             trusted_time: number;
         };
+        /** S12Budget */
+        S12Budget: {
+            /** Max Opportunities */
+            max_opportunities: number;
+            /** Max Runtime Ms */
+            max_runtime_ms: number;
+        };
         /** S12BundleResponse */
         S12BundleResponse: {
             /** Attempt No */
@@ -6248,12 +6260,30 @@ export interface components {
             };
             /** Bundle Id */
             bundle_id: string;
+            /** Business After */
+            business_after: {
+                [key: string]: unknown;
+            };
+            /** Business Before */
+            business_before: {
+                [key: string]: unknown;
+            };
             /** Business Deltas */
             business_deltas: {
                 [key: string]: unknown;
             };
+            /** Clusters */
+            clusters: {
+                [key: string]: unknown;
+            }[];
+            /** Cohort */
+            cohort: {
+                [key: string]: unknown;
+            } | null;
             /** Command */
             command: string;
+            /** Completed Application Ids */
+            completed_application_ids: string[];
             /** Environment */
             environment: {
                 [key: string]: unknown;
@@ -6262,6 +6292,10 @@ export interface components {
             errors: {
                 [key: string]: string;
             }[];
+            /** Evidence References */
+            evidence_references: {
+                [key: string]: unknown;
+            };
             /** Evidence Snapshot Ids */
             evidence_snapshot_ids: string[];
             /** Fence */
@@ -6270,8 +6304,20 @@ export interface components {
             gold_alphabet: string[];
             /** Job Id */
             job_id: string;
+            /** Label Manifest */
+            label_manifest: {
+                [key: string]: unknown;
+            };
+            /** Mandatory Check Families */
+            mandatory_check_families: {
+                [key: string]: unknown;
+            };
             /** Missing Opportunities */
             missing_opportunities: string[];
+            /** Opportunities */
+            opportunities: {
+                [key: string]: unknown;
+            }[];
             /** Plan Digest */
             plan_digest: string;
             /** Plan Id */
@@ -6288,6 +6334,8 @@ export interface components {
             };
             /** Rerun Of Bundle Id */
             rerun_of_bundle_id: string | null;
+            /** Result Digest */
+            result_digest: string;
             /** Run Settled At */
             run_settled_at: number;
             /** Run Started At */
@@ -6299,6 +6347,10 @@ export interface components {
             schema_version: "s12-evaluation-bundle/1";
             /** Scope */
             scope: string;
+            /** Scope Eligibility */
+            scope_eligibility: {
+                [key: string]: unknown;
+            };
             /** Seed */
             seed: number;
             /** Split */
@@ -6309,16 +6361,32 @@ export interface components {
             status: string;
             /** Status Reasons */
             status_reasons: string[];
+            /** Stop Elapsed Ms */
+            stop_elapsed_ms: number;
+            /** Stop Reason */
+            stop_reason: string;
             /** Stop Rule */
             stop_rule: string;
             /** Stop Rule Satisfied */
             stop_rule_satisfied: boolean;
+            /** Strata */
+            strata: {
+                [key: string]: unknown;
+            };
             /** Tracks */
             tracks: {
                 [key: string]: unknown;
             };
+            /** Tracks Declared */
+            tracks_declared: {
+                [key: string]: unknown;
+            };
             /** Views */
             views: {
+                [key: string]: unknown;
+            };
+            /** Views Declared */
+            views_declared: {
                 [key: string]: unknown;
             };
             /** Worker Id */
@@ -6337,50 +6405,65 @@ export interface components {
              * @enum {string}
              */
             usage: "development" | "calibration" | "acceptance_holdout";
+            /** Variants */
+            variants?: string[] | null;
+        };
+        /** S12Cohort */
+        S12Cohort: {
+            /** Exclusions */
+            exclusions: components["schemas"]["S12Exclusion"][];
+        };
+        /** S12EvidenceReference */
+        S12EvidenceReference: {
+            /** Cycle */
+            cycle: number;
+            /** Snapshot Digest */
+            snapshot_digest: string;
+            /** Snapshot Id */
+            snapshot_id: string;
+        };
+        /** S12Exclusion */
+        S12Exclusion: {
+            /** Item */
+            item: string;
+            /** Reason */
+            reason: string;
+            /** Reference Sha256 */
+            reference_sha256: string;
         };
         /** S12FreezePlanBody */
         S12FreezePlanBody: {
-            /** Budget */
-            budget: {
-                [key: string]: number;
-            };
-            /** Checker Artifact */
-            checker_artifact: {
-                [key: string]: unknown;
-            };
+            budget: components["schemas"]["S12Budget"];
             /** Clusters */
             clusters: components["schemas"]["S12Cluster"][];
-            /** Environment */
-            environment: {
-                [key: string]: unknown;
+            cohort?: components["schemas"]["S12Cohort"] | null;
+            /** Evidence References */
+            evidence_references: {
+                [key: string]: components["schemas"]["S12EvidenceReference"];
             };
+            label_manifest: components["schemas"]["S12LabelManifestReference"];
+            /** Mandatory Check Families */
+            mandatory_check_families: components["schemas"]["S12MandatoryFamily"][];
             /** Opportunities */
             opportunities: components["schemas"]["S12Opportunity"][];
             /** Plan Id */
             plan_id: string;
-            /** Release */
-            release: {
-                [key: string]: unknown;
-            };
-            /** Run Specs */
-            run_specs: {
-                [key: string]: unknown;
-            };
+            release_reference: components["schemas"]["S12ReleaseReference"];
             /**
              * Schema Version
              * @constant
              */
             schema_version: "s12-plan-command/1";
-            /** Scope */
-            scope: string;
+            /** Scope Declared */
+            scope_declared: string;
             /** Seed */
             seed: number;
-            /** Split */
-            split: {
-                [key: string]: unknown;
-            };
-            /** Stop Rule */
-            stop_rule: string;
+            split: components["schemas"]["S12Split"];
+            /**
+             * Stop Rule
+             * @enum {string}
+             */
+            stop_rule: "plan-exhausted" | "budget-or-plan";
             /** Tracks */
             tracks: {
                 [key: string]: components["schemas"]["S12Membership"];
@@ -6409,7 +6492,7 @@ export interface components {
             /** Reason Codes */
             reason_codes?: string[] | null;
             /** Rerun Of Bundle Id */
-            rerun_of_bundle_id: string | null;
+            rerun_of_bundle_id?: string | null;
             /** Result */
             result?: {
                 [key: string]: unknown;
@@ -6423,6 +6506,20 @@ export interface components {
             status: string;
             /** Worker Id */
             worker_id: string;
+        };
+        /** S12LabelManifestReference */
+        S12LabelManifestReference: {
+            /** Manifest Digest */
+            manifest_digest: string;
+            /** Manifest Id */
+            manifest_id: string;
+        };
+        /** S12MandatoryFamily */
+        S12MandatoryFamily: {
+            /** Check Ids */
+            check_ids: string[];
+            /** Family Id */
+            family_id: string;
         };
         /** S12Membership */
         S12Membership: {
@@ -6439,15 +6536,18 @@ export interface components {
             cluster: string;
             /** Cycle */
             cycle: number;
+            /** Data Source */
+            data_source?: string | null;
+            /** Difficulty */
+            difficulty?: string | null;
+            /** Document Combination */
+            document_combination?: string | null;
             /** Evidence Snapshot Id */
             evidence_snapshot_id: string;
-            /**
-             * Label
-             * @enum {string}
-             */
-            label: "consistent" | "inconsistent" | "indeterminate" | "not_applicable";
             /** Opportunity Id */
             opportunity_id: string;
+            /** Perturbation Family */
+            perturbation_family?: string | null;
             /** Target Scope */
             target_scope: string;
             /**
@@ -6462,6 +6562,10 @@ export interface components {
             budget: {
                 [key: string]: number;
             };
+            /** Business Before */
+            business_before: {
+                [key: string]: unknown;
+            };
             /** Checker Artifact */
             checker_artifact: {
                 [key: string]: unknown;
@@ -6470,12 +6574,28 @@ export interface components {
             clusters: {
                 [key: string]: unknown;
             }[];
+            /** Cohort */
+            cohort: {
+                [key: string]: unknown;
+            } | null;
             /** Environment */
             environment: {
                 [key: string]: unknown;
             };
+            /** Evidence References */
+            evidence_references: {
+                [key: string]: unknown;
+            };
             /** Frozen At */
             frozen_at: number;
+            /** Label Manifest */
+            label_manifest: {
+                [key: string]: unknown;
+            };
+            /** Mandatory Check Families */
+            mandatory_check_families: {
+                [key: string]: unknown;
+            }[];
             /** Opportunities */
             opportunities: {
                 [key: string]: unknown;
@@ -6541,12 +6661,24 @@ export interface components {
             /** Status */
             status: string;
         };
+        /** S12ReleaseReference */
+        S12ReleaseReference: {
+            /** Release Digest */
+            release_digest: string;
+            /** Release Id */
+            release_id: string;
+        };
+        /** S12Split */
+        S12Split: {
+            /** Scheme */
+            scheme: string;
+            /** Usage Partitions */
+            usage_partitions: ("development" | "calibration" | "acceptance_holdout")[];
+        };
         /** S12StartJobBody */
         S12StartJobBody: {
             /** Plan Id */
             plan_id: string;
-            /** Worker Id */
-            worker_id: string;
         };
         /** T05BusinessExceptionOperationsResult */
         T05BusinessExceptionOperationsResult: {

@@ -314,6 +314,10 @@ except Exception as error:
 S12_CONFIGURATION_ERROR: str | None = None
 S12_CREDENTIAL = os.environ.get("TASK4_S12_CREDENTIAL", "").strip()
 S12_SUBJECT = os.environ.get("TASK4_S12_SUBJECT", "").strip()
+S12_WORKER_SUBJECT = (
+    os.environ.get("TASK4_S12_WORKER_SUBJECT", "").strip()
+    or S12_SUBJECT
+)
 S12_SERVICE: EvaluationService | None = None
 
 
@@ -358,7 +362,42 @@ def _s12_evaluation_service() -> EvaluationService | None:
     }
     if S12_CREDENTIAL in controlled_credentials or S12_SUBJECT in controlled_subjects:
         raise ValueError("TASK4_S12 identity aliases a controlled identity")
-    return EvaluationService(state_path=state_path, clock=lambda: int(time.time()))
+    label_root_value = os.environ.get("TASK4_S12_LABEL_MANIFESTS_DIR", "").strip()
+    if not label_root_value:
+        raise ValueError("TASK4_S12_LABEL_MANIFESTS_DIR is required")
+    from task4_consistency.controlled.s12 import LabelManifestStore
+
+    def snapshot_provider(application_id: str, snapshot_id: str) -> dict[str, Any]:
+        if S01_SERVICE is None:
+            raise RuntimeError("S01 authority is not configured")
+        return S01_SERVICE.evaluation_evidence_snapshot(
+            application_id=application_id, snapshot_id=snapshot_id
+        )
+
+    def release_provider(release_id: str, release_digest: str) -> dict[str, Any]:
+        if S08_SERVICE is None:
+            raise RuntimeError("S08 authority is not configured")
+        return S08_SERVICE.resolve_evaluation_release(
+            release_id=release_id, release_digest=release_digest
+        )
+
+    def business_state_provider() -> dict[str, Any]:
+        facts: dict[str, Any] = {}
+        if S01_SERVICE is not None:
+            facts.update(S01_SERVICE.evaluation_business_measurement())
+        if S08_SERVICE is not None:
+            facts.update(S08_SERVICE.evaluation_governance_measurement())
+        return facts
+
+    return EvaluationService(
+        state_path=state_path,
+        clock=lambda: int(time.time()),
+        snapshot_provider=snapshot_provider,
+        release_provider=release_provider,
+        label_manifest_provider=LabelManifestStore(label_root_value).resolve,
+        business_state_provider=business_state_provider,
+        worker_subject=S12_WORKER_SUBJECT,
+    )
 
 
 try:

@@ -7604,6 +7604,96 @@ class PolicyGovernanceService:
                 "drafts": drafts,
             }
 
+    def resolve_evaluation_release(
+        self, *, release_id: str, release_digest: str
+    ) -> dict[str, Any]:
+        """S12 verified read: resolve exactly one governed release by its
+        public release identity.  The manifest digest, every component
+        artifact digest, and the materialized checker release are re-verified
+        against the Registry before any value is returned; the read never
+        writes governance state."""
+        if not self.audit_available or not self.storage_available:
+            raise PolicyUnavailable(
+                "required audit or storage trust is unavailable for resolution"
+            )
+        with self._lock:
+            self._store.reload()
+            candidates: list[dict[str, Any]] = []
+            for manifest in self._store.policy_manifests:
+                if manifest.get("schema_version") != MANIFEST_SCHEMA:
+                    continue
+                verified = self._verify_pinned_manifest(
+                    self._store, manifest["manifest_id"], manifest["digest"]
+                )
+                checker_id = self._component_id(verified, "checker")
+                artifact = self._artifact(self._store, checker_id)
+                try:
+                    release = TargetRelease.from_artifact(artifact)
+                except (KeyError, TypeError, ValueError):
+                    raise PolicyUnavailable(
+                        "registry checker artifact is not materializable"
+                    )
+                public = release.public_manifest()
+                if (
+                    public["release_id"] == release_id
+                    and public["digest"] == release_digest
+                ):
+                    candidates.append(
+                        {
+                            "release_id": public["release_id"],
+                            "release_digest": public["digest"],
+                            "checker_build": public["checker_build"],
+                            "checker_artifact": artifact,
+                            "target_release": release,
+                            "manifest_id": verified["manifest_id"],
+                            "manifest_digest": verified["digest"],
+                            "components": verified["components"],
+                            "limits": public["limits"],
+                            "applicable_check_ids": public["applicable_check_ids"],
+                            "applicable_check_count": public[
+                                "applicable_check_count"
+                            ],
+                            "protected_baseline_digest": public["digest"],
+                        }
+                    )
+            if len(candidates) != 1:
+                raise PolicyUnavailable(
+                    "release identity does not resolve to exactly one governed release"
+                )
+            return candidates[0]
+
+    def evaluation_governance_measurement(self) -> dict[str, Any]:
+        """S12 verified read: authoritative governance-ledger facts used to
+        measure deltas across an evaluation freeze and its terminal
+        publication.  Purely read-only; never writes governance state."""
+        with self._lock:
+            self._store.reload()
+            activated = [
+                event
+                for event in self._store.policy_governance_events
+                if event.get("kind") == "activated"
+            ]
+            activation_digest = (
+                hashlib.sha256(
+                    json.dumps(
+                        sorted(
+                            str(event.get("event_id") or "")
+                            for event in activated
+                        ),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+                if activated
+                else None
+            )
+            return {
+                "governance_revision": len(self._store.policy_governance_events),
+                "activation_count": len(activated),
+                "activation_digest": activation_digest,
+            }
+
     # --------------------------------------------------------------- helpers
 
     @staticmethod

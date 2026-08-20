@@ -18,6 +18,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -148,10 +149,20 @@ def main() -> int:
     max_runtime_ms = int(budget["max_runtime_ms"])
     if max_runtime_ms <= 0:
         return _fail("checker max_runtime_ms limit is invalid")
+    stop_rule = payload.get("stop_rule")
+    if stop_rule not in {"plan-exhausted", "budget-or-plan"}:
+        return _fail("frozen stop rule is missing or invalid")
 
     applications: list[dict[str, Any]] = []
     seen: set[str] = set()
+    started_at = time.monotonic()
+    deadline = started_at + max_runtime_ms / 1000.0
+    stop_reason = "plan-exhausted"
     for application_id, run_spec in run_specs.items():
+        remaining_ms = int((deadline - time.monotonic()) * 1000.0)
+        if remaining_ms <= 0:
+            stop_reason = "budget-or-plan"
+            break
         if not isinstance(application_id, str) or not application_id:
             return _fail("run_spec application identity is invalid")
         if application_id in seen:
@@ -162,12 +173,19 @@ def main() -> int:
         if str(run_spec.get("application_id") or "") != application_id:
             return _fail("run_spec application identity mismatch")
         applications.append(
-            _application_checks(release, run_spec, max_runtime_ms)
+            _application_checks(release, run_spec, remaining_ms)
         )
 
     material = {
         "schema_version": RUNNER_RESULT_SCHEMA,
         "applications": applications,
+        "stop": {
+            "stop_reason": stop_reason,
+            "elapsed_ms": int((time.monotonic() - started_at) * 1000.0),
+            "completed_application_ids": [
+                application["application_id"] for application in applications
+            ],
+        },
     }
     digest = hashlib.sha256(
         json.dumps(

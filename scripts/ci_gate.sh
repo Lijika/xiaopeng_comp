@@ -34,7 +34,9 @@ run() {
 }
 
 run "pytest" "$PYTEST" -q
-run "evaluate suite=main" "$PY" -m task4_consistency evaluate \
+# C-DEV-REG: the fixture evaluator is development regression evidence only;
+# formal acceptance wording is reserved for immutable S12 bundles.
+run "evaluate suite=main (C-DEV-REG)" "$PY" -m task4_consistency evaluate \
   -c configs/rules_auto_lease.yaml \
   --suite main \
   -o out/metrics_main.json

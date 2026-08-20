@@ -5457,6 +5457,120 @@ class ControlledScenarioService:
                 "outbox": len(self._store.outbox),
             }
 
+    def evaluation_evidence_snapshot(
+        self, *, application_id: str, snapshot_id: str
+    ) -> dict[str, Any]:
+        """S12 verified read: resolve one frozen evidence snapshot by its
+        immutable reference.  The snapshot payload is re-verified against the
+        authority's stored content digest and the content-addressed snapshot
+        id before any value is returned; the read never writes business
+        state."""
+        with self._lock:
+            self._reload_store()
+            app = self._store.applications.get(application_id)
+            if app is None:
+                raise QueryNotFound(application_id)
+            matches = [
+                event
+                for event in self._store.evidence_events
+                if event.get("application_id") == application_id
+                and event.get("kind") == "immutable_ready_snapshot"
+                and event.get("snapshot_id") == snapshot_id
+            ]
+            if len(matches) != 1:
+                raise QueryNotFound(f"evidence snapshot {snapshot_id}")
+            event = matches[0]
+            payload = event.get("payload")
+            declared = event.get("content_sha256")
+            if not isinstance(payload, dict) or not isinstance(declared, str):
+                raise RuntimeError("evidence snapshot content is unreadable")
+            recomputed = hashlib.sha256(
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            if declared != recomputed or snapshot_id != f"snapshot_sha256_{recomputed}":
+                raise RuntimeError("evidence snapshot digest does not verify")
+            return {
+                "application_id": application_id,
+                "cycle": int(app.get("cycle") or 1),
+                "lifecycle_revision": int(app.get("lifecycle_revision") or 0),
+                "evidence_revision": int(event.get("revision") or 0),
+                "evidence_snapshot_id": snapshot_id,
+                "evidence_snapshot_digest": declared,
+                "evidence_snapshot": copy.deepcopy(payload),
+                "current_run_id": app.get("current_run_id"),
+                "current_evidence_snapshot_id": app.get(
+                    "current_evidence_snapshot_id"
+                ),
+            }
+
+    def evaluation_business_measurement(self) -> dict[str, Any]:
+        """S12 verified read: authoritative S01 business-state facts used to
+        measure deltas across an evaluation freeze and its terminal
+        publication.  Purely read-only; never writes business state."""
+        with self._lock:
+            self._reload_store()
+            apps = list(self._store.applications.values())
+            lifecycle_revision = max(
+                (int(app.get("lifecycle_revision") or 0) for app in apps),
+                default=0,
+            )
+            evidence_revision = max(
+                (
+                    int(event.get("revision") or 0)
+                    for event in self._store.evidence_events
+                ),
+                default=0,
+            )
+            snapshot_ids = sorted(
+                str(event.get("snapshot_id") or "")
+                for event in self._store.evidence_events
+                if event.get("snapshot_id")
+            )
+            evidence_digest = (
+                hashlib.sha256(
+                    json.dumps(
+                        snapshot_ids,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+                if snapshot_ids
+                else None
+            )
+            current_runs = sorted(
+                (
+                    str(app.get("application_id") or ""),
+                    str(app.get("current_run_id") or ""),
+                )
+                for app in apps
+                if app.get("current_run_id")
+            )
+            current_run_reference = (
+                hashlib.sha256(
+                    json.dumps(
+                        current_runs,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+                if current_runs
+                else None
+            )
+            return {
+                "lifecycle_revision": lifecycle_revision,
+                "evidence_revision": evidence_revision,
+                "evidence_count": len(self._store.evidence_events),
+                "evidence_digest": evidence_digest,
+                "current_run_reference": current_run_reference,
+            }
+
     def issue_session(
         self,
         *,
