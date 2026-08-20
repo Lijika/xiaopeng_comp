@@ -2751,24 +2751,28 @@ def _runner_output_for_plan(plan: dict[str, Any]) -> dict[str, Any]:
     return output
 
 
-def test_runner_tail_crossing_deadline_records_bounded_budget_stop(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize("stop_rule", ["plan-exhausted", "budget-or-plan"])
+def test_runner_tail_crossing_deadline_cannot_satisfy_formal_stop_rule(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stop_rule: str
 ) -> None:
     service, command, _context = _slice1_harness(tmp_path)
+    command["stop_rule"] = stop_rule
+    command["budget"]["max_runtime_ms"] = 5
     plan = service.freeze_plan(command)
     run_id, run_spec = next(iter(plan["run_specs"].items()))
     payload = {
         "schema_version": "s12-runner-request/1",
         "checker_artifact": plan["checker_artifact"],
-        "run_specs": {run_id: run_spec},
-        "budget": {"max_runtime_ms": 5},
-        "stop_rule": "plan-exhausted",
+        "run_specs": {run_id: copy.deepcopy(run_spec)},
+        "budget": copy.deepcopy(plan["budget"]),
+        "stop_rule": stop_rule,
     }
     stdin = io.TextIOWrapper(
         io.BytesIO(json.dumps(payload).encode("utf-8")), encoding="utf-8"
     )
     stdout = io.StringIO()
     clock = iter((100.0, 100.0, 100.006))
+    run_ids = [run_id]
     monkeypatch.setattr(s12_runner_module, "_apply_process_boundaries", lambda: None)
     monkeypatch.setattr(s12_runner_module.sys, "stdin", stdin)
     monkeypatch.setattr(s12_runner_module.sys, "stdout", stdout)
@@ -2780,8 +2784,17 @@ def test_runner_tail_crossing_deadline_records_bounded_budget_stop(
     assert result["stop"] == {
         "stop_reason": "budget-or-plan",
         "elapsed_ms": 5,
-        "completed_run_ids": [run_id],
+        "completed_run_ids": run_ids,
     }
+    assert [application["run_id"] for application in result["applications"]] == (
+        run_ids
+    )
+
+    job = service.start_job(plan["plan_id"])
+    outcome = service.process_job(job["job_id"], runner_result=result)
+    bundle = service.query_bundle(outcome["bundle_id"])
+
+    assert bundle["stop_rule_satisfied"] is False
 
 
 def test_parent_rejects_tampered_runner_digest_checks_errors_and_identity(
@@ -3630,6 +3643,48 @@ def test_mandatory_checks_must_come_from_governed_release(
     )
 
     with pytest.raises(ValueError, match="governed release"):
+        service.freeze_plan(command)
+
+
+def test_governed_mandatory_check_cannot_be_omitted_with_its_local_universe(
+    tmp_path: Path,
+) -> None:
+    context = _r2_baseline(tmp_path)
+    service = _r2_service(tmp_path, context)
+    command = _r2_reference_command(context, plan_id="omitted-governed-check")
+    omitted = next(
+        opportunity
+        for opportunity in command["opportunities"]
+        if opportunity["check_id"] == "R_MODEL_CROSS"
+    )
+    command["opportunities"].remove(omitted)
+    command["tracks"]["C"]["opportunities"].remove(omitted["opportunity_id"])
+    command["clusters"] = [
+        cluster
+        for cluster in command["clusters"]
+        if cluster["cluster_id"] != omitted["cluster"]
+    ]
+    command["evidence_references"] = [
+        reference
+        for reference in command["evidence_references"]
+        if reference["application_id"] != omitted["application_id"]
+    ]
+    for family in command["mandatory_check_families"]:
+        if omitted["check_id"] in family["check_ids"]:
+            family["check_ids"].remove(omitted["check_id"])
+    _root, manifest_id, manifest_digest = _write_label_manifest(
+        tmp_path,
+        {
+            opportunity["opportunity_id"]: "consistent"
+            for opportunity in command["opportunities"]
+        },
+    )
+    command["label_manifest"] = {
+        "manifest_id": manifest_id,
+        "manifest_digest": manifest_digest,
+    }
+
+    with pytest.raises(ValueError, match="governed mandatory checks"):
         service.freeze_plan(command)
 
 

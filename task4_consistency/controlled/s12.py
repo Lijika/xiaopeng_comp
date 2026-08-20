@@ -1805,6 +1805,19 @@ class EvaluationService:
             for opportunity in opportunities
             if opportunity["opportunity_id"] in scope_opportunity_ids
         }
+        required_mandatory_check_ids = {
+            check_id
+            for _family_id, registered_checks in _MANDATORY_FAMILY_REGISTRY
+            for check_id in registered_checks
+            if check_id in governed_check_ids
+        }
+        declared_check_ids = {
+            str(opportunity["check_id"]) for opportunity in opportunities
+        }
+        if not required_mandatory_check_ids <= declared_check_ids:
+            raise ValueError(
+                "selected scope omits governed mandatory checks"
+            )
         expected_families = _server_mandatory_families(selected_check_ids)
         declared_families: dict[str, tuple[str, ...]] = {}
         declared_checks: set[str] = set()
@@ -2330,9 +2343,9 @@ class EvaluationService:
             completed_all_runs = set(replay["stop"]["completed_run_ids"]) == set(
                 plan["run_specs"]
             )
-            stop_rule_satisfied = completed_all_runs and (
-                replay["stop"]["stop_reason"] == "plan-exhausted"
-                or plan["stop_rule"] == "budget-or-plan"
+            stop_rule_satisfied = (
+                completed_all_runs
+                and replay["stop"]["stop_reason"] == "plan-exhausted"
             )
             derived = cls._derive_evaluation(
                 plan,
@@ -2523,10 +2536,7 @@ class EvaluationService:
         completed_all_runs = set(stop_observation["completed_run_ids"]) == set(
             plan["run_specs"]
         )
-        stop_rule_satisfied = completed_all_runs and (
-            stop_reason == "plan-exhausted"
-            or plan["stop_rule"] == "budget-or-plan"
-        )
+        stop_rule_satisfied = completed_all_runs and stop_reason == "plan-exhausted"
         opportunities = plan["opportunities"]
         derived = self._derive_evaluation(
             plan,
