@@ -912,29 +912,15 @@ def test_cancel_between_start_and_process_is_durable_and_zero_delta(
     service, command, context = _slice1_harness(tmp_path)
     business_path = context["business_path"]
     business_before = hashlib.sha256(business_path.read_bytes()).hexdigest()
-    first_opportunity = command["opportunities"][0]
-    first_application = first_opportunity["application_id"]
     trimmed = copy.deepcopy(command)
     trimmed["plan_id"] = "plan-c-cancel"
-    trimmed["opportunities"] = [first_opportunity]
-    trimmed["tracks"]["C"] = {"opportunities": [first_opportunity["opportunity_id"]]}
-    trimmed["clusters"] = [
-        cluster
-        for cluster in trimmed["clusters"]
-        if cluster["cluster_id"] == first_opportunity["cluster"]
-    ]
-    trimmed["evidence_references"] = [
-        reference
-        for reference in trimmed["evidence_references"]
-        if reference["application_id"] == first_application
-    ]
     trimmed["budget"] = {"max_opportunities": 4, "max_runtime_ms": 5000}
-    trimmed["mandatory_check_families"] = [
-        {"family_id": "cross-document", "check_ids": [first_opportunity["check_id"]]}
-    ]
     label_root, manifest_id, manifest_digest = _write_label_manifest(
         tmp_path,
-        {first_opportunity["opportunity_id"]: "consistent"},
+        {
+            opportunity["opportunity_id"]: "consistent"
+            for opportunity in trimmed["opportunities"]
+        },
     )
     trimmed["label_manifest"] = {
         "manifest_id": manifest_id,
@@ -1838,6 +1824,13 @@ def test_clustered_application_run_reference_and_opportunity_universes_match_exa
     extra_reference = copy.deepcopy(command)
     dropped = extra_reference["opportunities"].pop(0)
     extra_reference["tracks"]["C"]["opportunities"].remove(dropped["opportunity_id"])
+    replacement = copy.deepcopy(extra_reference["opportunities"][0])
+    replacement["opportunity_id"] = "opp-mandatory-replacement"
+    replacement["check_id"] = dropped["check_id"]
+    extra_reference["opportunities"].append(replacement)
+    extra_reference["tracks"]["C"]["opportunities"].append(
+        replacement["opportunity_id"]
+    )
     extra_reference["mandatory_check_families"] = _server_mandatory_families(
         {
             opportunity["check_id"]
@@ -1893,7 +1886,14 @@ def test_same_application_two_cycles_and_snapshots_freeze_as_distinct_runs(
     provider = lambda application_id, snapshot_id: snapshots_by_id[snapshot_id]
     service = _r2_service(tmp_path, context, snapshot_provider=provider)
     label_root, manifest_id, manifest_digest = _write_label_manifest(
-        tmp_path, {"opp-a": "consistent", "opp-b": "consistent"}
+        tmp_path,
+        {
+            "opp-a": "consistent",
+            "opp-b": "consistent",
+            "opp-mandatory-1": "consistent",
+            "opp-mandatory-2": "consistent",
+            "opp-mandatory-3": "consistent",
+        },
     )
     command = {
         "schema_version": "s12-plan-command/1",
@@ -1971,21 +1971,51 @@ def test_same_application_two_cycles_and_snapshots_freeze_as_distinct_runs(
             "manifest_digest": manifest_digest,
         },
         "mandatory_check_families": [
-            {"family_id": "cross-document", "check_ids": ["R_ENGINE_CROSS"]}
+            {
+                "family_id": "cross-document",
+                "check_ids": ["R_ENGINE_CROSS", "R_VIN_CROSS"],
+            },
+            {
+                "family_id": "brand-model",
+                "check_ids": ["R_BRAND_CROSS", "R_MODEL_CROSS"],
+            },
         ],
     }
+    for index, check_id in enumerate(
+        ("R_VIN_CROSS", "R_BRAND_CROSS", "R_MODEL_CROSS"),
+        start=1,
+    ):
+        command["opportunities"].append(
+            {
+                "opportunity_id": f"opp-mandatory-{index}",
+                "track": "C",
+                "cluster": "cl-0",
+                "application_id": "app-dual",
+                "cycle": 1,
+                "check_id": check_id,
+                "target_scope": "C",
+                "evidence_snapshot_id": f"snapshot_sha256_{digest_a}",
+            }
+        )
+        command["tracks"]["C"]["opportunities"].append(
+            f"opp-mandatory-{index}"
+        )
     plan = service.freeze_plan(command)
     run_specs = plan["run_specs"]
-    assert len(run_specs) == 2
+    assert len(run_specs) == 5
     assert {spec["cycle"] for spec in run_specs.values()} == {1, 2}
     assert {spec["evidence_snapshot_id"] for spec in run_specs.values()} == {
         f"snapshot_sha256_{digest_a}",
         f"snapshot_sha256_{digest_b}",
     }
     assert all(spec["application_id"] == "app-dual" for spec in run_specs.values())
-    assert {opportunity["run_id"] for opportunity in plan["opportunities"]} == set(
-        run_specs
-    )
+    target_runs = {
+        opportunity["run_id"]
+        for opportunity in plan["opportunities"]
+        if opportunity["opportunity_id"] in {"opp-a", "opp-b"}
+    }
+    assert len(target_runs) == 2
+    assert target_runs <= set(run_specs)
 
 
 # ---------------------------------------------------------------------------
