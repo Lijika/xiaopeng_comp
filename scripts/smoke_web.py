@@ -87,8 +87,9 @@ def main() -> int:
 
     # 3) HTML shell
     r = client.get("/")
-    if r.status_code != 200 or "校验" not in r.text:
-        errors.append("index HTML missing or not 200")
+    react_shell = 'type="module"' in r.text and "/static/react/assets/" in r.text
+    if r.status_code != 200 or not react_shell:
+        errors.append("canonical React shell missing or not 200")
     else:
         print("index OK")
 
