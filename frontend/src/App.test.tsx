@@ -1173,3 +1173,78 @@ describe("governed policy-release shell (T08)", () => {
     ).toHaveLength(0);
   });
 });
+
+describe("evaluation operator shell (T14)", () => {
+  it("mounts the S12 shell on /controlled/s12 and reads only the frozen-plan catalog", async () => {
+    const router = fetchRouter({
+      "GET /controlled/s12/plans": () =>
+        new Response(
+          JSON.stringify({
+            schema_version: "s12-plan-catalog/1",
+            plans: [
+              {
+                plan_id: "plan-c-1",
+                plan_digest: "b".repeat(64),
+                scope: "C",
+                frozen_at: 1700000000,
+                budget: { max_opportunities: 10, max_runtime_ms: 5000 },
+                stop_rule: "plan-exhausted",
+                opportunity_count: 4,
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    window.history.replaceState(null, "", "/controlled/s12");
+    renderWithQuery(<App />);
+    await waitFor(() =>
+      expect(screen.getByTestId("s12-plan-select")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("s12-boundary-gate")).toHaveTextContent("S12");
+    expect(screen.queryByTestId("queue-panel")).not.toBeInTheDocument();
+    expect(
+      router.calls.filter((call) => call.url.includes("/controlled/s01/")),
+    ).toHaveLength(0);
+    expect(
+      router.calls.filter((call) => call.url.includes("/controlled/s02/")),
+    ).toHaveLength(0);
+    expect(
+      router.calls.filter((call) => call.url.includes("/controlled/s05/")),
+    ).toHaveLength(0);
+    expect(
+      router.calls.filter((call) => call.url.includes("/controlled/s08/")),
+    ).toHaveLength(0);
+    expect(
+      router.calls.filter((call) => call.url.includes("/controlled/s09/")),
+    ).toHaveLength(0);
+    expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(
+      0,
+    );
+    expect(router.calls.map((call) => call.url)).toEqual([
+      "/controlled/s12/plans",
+    ]);
+  });
+
+  it("mounts the same operator shell on the /controlled/s12/react alias", async () => {
+    const router = fetchRouter({
+      "GET /controlled/s12/plans": () =>
+        new Response(
+          JSON.stringify({
+            schema_version: "s12-plan-catalog/1",
+            plans: [],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    window.history.pushState(null, "", "/controlled/s12/react");
+    renderWithQuery(<App />);
+    await waitFor(() =>
+      expect(screen.getByTestId("s12-catalog-empty")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("s12-boundary-gate")).toHaveTextContent("S12");
+    expect(router.calls.map((call) => call.url)).toEqual([
+      "/controlled/s12/plans",
+    ]);
+  });
+});

@@ -1874,6 +1874,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/controlled/s12": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Controlled S12 Page
+         * @description Canonical S12 Evaluation Operator React shell (Ticket #48/T14): the
+         *     same shared qualified React build as the other controlled shells, served
+         *     only to the registered S12 operator credential with no-store shell
+         *     headers and no S01 reviewer session.
+         */
+        get: operations["controlled_s12_page_controlled_s12_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/controlled/s12/bundles/{bundle_id}": {
         parameters: {
             query?: never;
@@ -2000,6 +2023,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/controlled/s12/plans": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * S12 List Plans
+         * @description Read-only frozen-plan catalog: server-derived selection summaries of
+         *     the frozen plan rows.  The browser submits only the selected plan id to
+         *     start; a stale or unknown id is rejected there as S12_NOT_FOUND.
+         */
+        get: operations["s12_list_plans_controlled_s12_plans_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/controlled/s12/plans/freeze": {
         parameters: {
             query?: never;
@@ -2017,6 +2062,27 @@ export interface paths {
          *     business state.
          */
         post: operations["s12_freeze_plan_controlled_s12_plans_freeze_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s12/react": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Controlled S12 React Page
+         * @description The S12 /react alias: the same closed shell contract as the canonical
+         *     route.
+         */
+        get: operations["controlled_s12_react_page_controlled_s12_react_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -7102,6 +7168,48 @@ export interface components {
             track: "R" | "C";
             /** Variant Id */
             variant_id?: string | null;
+        };
+        /**
+         * S12PlanCatalogItem
+         * @description One closed selection summary of a frozen server plan row.  The
+         *     browser may choose only by ``plan_id``; every other field is server-owned
+         *     context that start resolves again from the frozen row.
+         */
+        S12PlanCatalogItem: {
+            budget: components["schemas"]["S12Budget"];
+            /** Frozen At */
+            frozen_at: number;
+            /** Opportunity Count */
+            opportunity_count: number;
+            /** Plan Digest */
+            plan_digest: string;
+            /** Plan Id */
+            plan_id: string;
+            /**
+             * Scope
+             * @enum {string}
+             */
+            scope: "C" | "R-E2E" | "R-T4-conditional";
+            /**
+             * Stop Rule
+             * @enum {string}
+             */
+            stop_rule: "plan-exhausted" | "budget-or-plan";
+        };
+        /**
+         * S12PlanCatalogResponse
+         * @description The read-only frozen-plan catalog.  No freeze material (opportunities,
+         *     labels, environment, run specs, checker artifact, worker identity or
+         *     business state) is exposed to the browser.
+         */
+        S12PlanCatalogResponse: {
+            /** Plans */
+            plans: components["schemas"]["S12PlanCatalogItem"][];
+            /**
+             * Schema Version
+             * @constant
+             */
+            schema_version: "s12-plan-catalog/1";
         };
         /** S12PlanResponse */
         S12PlanResponse: {
@@ -13293,6 +13401,26 @@ export interface operations {
             };
         };
     };
+    controlled_s12_page_controlled_s12_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
+            };
+        };
+    };
     s12_query_bundle_controlled_s12_bundles__bundle_id__get: {
         parameters: {
             query?: never;
@@ -13481,6 +13609,26 @@ export interface operations {
             };
         };
     };
+    s12_list_plans_controlled_s12_plans_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S12PlanCatalogResponse"];
+                };
+            };
+        };
+    };
     s12_freeze_plan_controlled_s12_plans_freeze_post: {
         parameters: {
             query?: never;
@@ -13510,6 +13658,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    controlled_s12_react_page_controlled_s12_react_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
                 };
             };
         };

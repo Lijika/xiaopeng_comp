@@ -847,6 +847,33 @@ class S12StartJobBody(BaseModel):
     plan_id: str
 
 
+class S12PlanCatalogItem(BaseModel):
+    """One closed selection summary of a frozen server plan row.  The
+    browser may choose only by ``plan_id``; every other field is server-owned
+    context that start resolves again from the frozen row."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    plan_id: str
+    plan_digest: str = Field(pattern=_DIGEST64)
+    scope: Literal["C", "R-E2E", "R-T4-conditional"]
+    frozen_at: int
+    budget: S12Budget
+    stop_rule: Literal["plan-exhausted", "budget-or-plan"]
+    opportunity_count: int = Field(gt=0)
+
+
+class S12PlanCatalogResponse(BaseModel):
+    """The read-only frozen-plan catalog.  No freeze material (opportunities,
+    labels, environment, run specs, checker artifact, worker identity or
+    business state) is exposed to the browser."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["s12-plan-catalog/1"]
+    plans: list[S12PlanCatalogItem]
+
+
 class S12JobResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1078,6 +1105,21 @@ class S12BundleResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
+
+@s12_router.get("/controlled/s12/plans", response_model=S12PlanCatalogResponse)
+def s12_list_plans(request: Request) -> dict[str, Any]:
+    """Read-only frozen-plan catalog: server-derived selection summaries of
+    the frozen plan rows.  The browser submits only the selected plan id to
+    start; a stale or unknown id is rejected there as S12_NOT_FOUND."""
+    _s12_require_operator(request)
+    try:
+        return {
+            "schema_version": "s12-plan-catalog/1",
+            "plans": _s12_service(request).list_plans(),
+        }
+    except (S12IntegrityError, S12Unavailable):
+        raise _s12_closed_failure()
 
 
 @s12_router.post("/controlled/s12/plans/freeze", response_model=S12PlanResponse)

@@ -14,6 +14,7 @@ import {
   HttpError,
   isDefinitiveRejection,
   isDefinitiveS08Rejection,
+  isDefinitiveS12Rejection,
   type ApplicationHistoryResponse,
   type ClaimResult,
   type CurrentRouteResponse,
@@ -22,6 +23,11 @@ import {
   type ReleaseResult,
   type RenewResult,
   type ReviewWorkResponse,
+  type S12BundleResponse,
+  type S12JobResponse,
+  type S12PlanCatalogResponse,
+  type S12ProcessResponse,
+  type S12StartJobBody,
   type S08ApproveResponse,
   type S08CancelResponse,
   type S08CandidateWorkspaceResponse,
@@ -494,7 +500,7 @@ export function useEvidenceConvergence(
     void poll();
     return () => {
       cancelled = true;
-      if (timer !== undefined) clearTimeout(timer);
+      clearTimeout(timer);
     };
   }, [applicationId, acceptedEvidenceRevision, queryClient]);
   return outcome;
@@ -1043,5 +1049,178 @@ export function useImpactReconciliation(
         `/controlled/s01/api/queries/impact-dispositions/reconciliation?final_impact_digest=${encodeURIComponent(digest ?? "")}`,
       ),
     retry: retryPolicy,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// T14 — S12 Evaluation Operator workflow
+// ---------------------------------------------------------------------------
+
+export const S12_PLANS_KEY = ["s12", "plans"] as const;
+export const S12_JOB_KEY = (jobId: string) => ["s12", "job", jobId] as const;
+export const S12_BUNDLE_KEY = (bundleId: string) =>
+  ["s12", "bundle", bundleId] as const;
+
+/** The durable job lifecycle terminal statuses.  These are server-owned
+ * values rendered exactly; the result class (INVALID / INSUFFICIENT / FAIL /
+ * scoped PASS / SMOKE_ONLY) is never derived from them. */
+export const S12_TERMINAL_JOB_STATUSES: readonly string[] = [
+  "complete",
+  "failed",
+  "cancelled",
+  "diagnostic",
+];
+
+/**
+ * The read-only frozen-plan catalog.  Only selection metadata is exposed;
+ * start resolves the frozen row again server-side.  No hidden retry: a
+ * failed closed read stays failed so the operator surface never guesses at
+ * plan availability.
+ */
+export function useS12Plans(): UseQueryResult<S12PlanCatalogResponse> {
+  return useQuery({
+    queryKey: S12_PLANS_KEY,
+    queryFn: () => request<S12PlanCatalogResponse>("/controlled/s12/plans"),
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+}
+
+export interface S12StartProcessResult {
+  job: S12JobResponse;
+  process: S12ProcessResponse;
+}
+
+/**
+ * One operator action creates one durable job: the start body is the closed
+ * ``{plan_id}`` DTO and the returned job is processed exactly once.  The
+ * mutation never retries (a lost response never creates a replacement job)
+ * and the UI polls the original job id afterwards.
+ */
+export function useS12StartProcess(): UseMutationResult<
+  S12StartProcessResult,
+  Error,
+  S12StartJobBody
+> {
+  return useMutation({
+    mutationFn: async (body: S12StartJobBody): Promise<S12StartProcessResult> => {
+      const job = await request<S12JobResponse>("/controlled/s12/jobs/start", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      const process = await request<S12ProcessResponse>(
+        `/controlled/s12/jobs/${encodeURIComponent(job.job_id)}/process`,
+        { method: "POST" },
+      );
+      return { job, process };
+    },
+    retry: false,
+  });
+}
+
+/**
+ * The one authoritative durable job read.  ``retry: false`` keeps the fixed
+ * polling budget exact: hidden query retries are disabled so every job GET
+ * counts against the bounded cycle limit.
+ */
+export function useS12Job(jobId: string | null): UseQueryResult<S12JobResponse> {
+  return useQuery({
+    queryKey: S12_JOB_KEY(jobId ?? ""),
+    enabled: jobId !== null,
+    queryFn: () =>
+      request<S12JobResponse>(
+        `/controlled/s12/jobs/${encodeURIComponent(jobId ?? "")}`,
+      ),
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+}
+
+export type S12JobPollOutcome =
+  | "idle"
+  | "waiting"
+  | "terminal"
+  | "timed_out";
+
+/**
+ * Bounded polling for one durable S12 job: one job GET per second for at
+ * most ``maxAttempts`` cycles (production default 120).  Terminal lifecycle
+ * statuses and definitive closed rejections stop the poll immediately;
+ * ``timed_out`` is the explicit bounded/unknown end and never claims a
+ * terminal report.  The caller never creates another job or execution
+ * request from this outcome.
+ */
+export function useS12JobPoll(
+  jobId: string | null,
+  active: boolean,
+  options: { intervalMs?: number; maxAttempts?: number } = {},
+): S12JobPollOutcome {
+  const { intervalMs = 1000, maxAttempts = 120 } = options;
+  const queryClient = useQueryClient();
+  const [outcome, setOutcome] = useState<S12JobPollOutcome>("idle");
+  useEffect(() => {
+    if (jobId === null || !active) {
+      setOutcome("idle");
+      return;
+    }
+    setOutcome("waiting");
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let attempts = 0;
+    const poll = async () => {
+      if (cancelled) return;
+      attempts += 1;
+      await queryClient.refetchQueries({
+        queryKey: S12_JOB_KEY(jobId),
+      });
+      if (cancelled) return;
+      const state = queryClient.getQueryState(S12_JOB_KEY(jobId));
+      const error = state?.error;
+      const hasError = error !== undefined && error !== null;
+      if (hasError && isDefinitiveS12Rejection(error)) {
+        setOutcome("terminal");
+        return;
+      }
+      if (!hasError) {
+        const data = queryClient.getQueryData<S12JobResponse>(
+          S12_JOB_KEY(jobId),
+        );
+        if (data !== undefined && S12_TERMINAL_JOB_STATUSES.includes(data.status)) {
+          setOutcome("terminal");
+          return;
+        }
+      }
+      if (attempts >= maxAttempts) {
+        setOutcome("timed_out");
+        return;
+      }
+      timer = setTimeout(poll, intervalMs);
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [jobId, active, intervalMs, maxAttempts, queryClient]);
+  return outcome;
+}
+
+/**
+ * The immutable content-addressed bundle read, enabled only after the
+ * terminal job exposes a ``bundle_id``.  The browser performs GET reads only
+ * and renders the returned sealed bundle without modification.
+ */
+export function useS12Bundle(
+  bundleId: string | null,
+): UseQueryResult<S12BundleResponse> {
+  return useQuery({
+    queryKey: S12_BUNDLE_KEY(bundleId ?? ""),
+    enabled: bundleId !== null,
+    queryFn: () =>
+      request<S12BundleResponse>(
+        `/controlled/s12/bundles/${encodeURIComponent(bundleId ?? "")}`,
+      ),
+    retry: false,
+    refetchOnWindowFocus: false,
   });
 }

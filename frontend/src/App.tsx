@@ -10,6 +10,7 @@ import PolicyReleasePanel, {
 } from "./components/PolicyReleasePanel";
 import QueuePanel from "./components/QueuePanel";
 import RecoveryWorkPanel from "./components/RecoveryWorkPanel";
+import S12EvaluationOperator from "./components/S12EvaluationOperator";
 import ReviewWorkPanel from "./components/ReviewWorkPanel";
 
 function readParam(name: string): string | null {
@@ -22,7 +23,9 @@ function readParam(name: string): string | null {
  * ``/controlled/s01/react``), ``/controlled/s02`` the canonical Integrator
  * shell (alias ``/controlled/s02/react``), ``/controlled/s05`` the Exception
  * Approver shell, ``/controlled/s08`` the policy-release shell and
- * ``/controlled/s09`` the governance workspace shell. */
+ * ``/controlled/s09`` the governance workspace shell and
+ * ``/controlled/s12`` (alias ``/controlled/s12/react``) the Evaluation
+ * Operator shell. */
 function isDemoShell(): boolean {
   const pathname = window.location.pathname;
   return pathname === "/" || pathname === "/demo/react";
@@ -38,6 +41,9 @@ function isS08Shell(): boolean {
 }
 function isS09Shell(): boolean {
   return window.location.pathname.startsWith("/controlled/s09");
+}
+function isS12Shell(): boolean {
+  return window.location.pathname.startsWith("/controlled/s12");
 }
 
 /** The T06/T07 competition demo shell: only the closed synthetic facade
@@ -159,6 +165,28 @@ function GovernanceWorkspaceShell() {
   );
 }
 
+/** The T14 Evaluation Operator shell mounted only for ``/controlled/s12``
+ * and its alias: it reads the frozen-plan catalog, starts one durable job
+ * per explicit action, processes it once, polls the original job within a
+ * fixed budget, and renders the sealed server bundle verbatim.  No S01/S02/
+ * S05/S08/S09 read can fire here; every call carries only the closed S12
+ * contract payloads. */
+function EvaluationOperatorShell() {
+  return (
+    <div className="mx-auto max-w-4xl px-4 py-6">
+      <header className="app-header">
+        <h1>评价操作台</h1>
+        <span className="boundary" data-testid="s12-boundary-gate">
+          S12
+        </span>
+      </header>
+      <main>
+        <S12EvaluationOperator />
+      </main>
+    </div>
+  );
+}
+
 /** The Reviewer workbench owns every S01 read; it is never mounted on the
  * Integrator shell, so no S01 query can fire there. */
 function ReviewerWorkbench() {
@@ -232,6 +260,9 @@ export default function App() {
   }
   if (isS09Shell()) {
     return <GovernanceWorkspaceShell />;
+  }
+  if (isS12Shell()) {
+    return <EvaluationOperatorShell />;
   }
   return <ReviewerWorkbench />;
 }

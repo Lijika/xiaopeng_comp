@@ -14647,6 +14647,85 @@
         "title": "S12OpportunityResponse",
         "type": "object"
       },
+      "S12PlanCatalogItem": {
+        "additionalProperties": false,
+        "description": "One closed selection summary of a frozen server plan row.  The\nbrowser may choose only by ``plan_id``; every other field is server-owned\ncontext that start resolves again from the frozen row.",
+        "properties": {
+          "budget": {
+            "$ref": "#/components/schemas/S12Budget"
+          },
+          "frozen_at": {
+            "title": "Frozen At",
+            "type": "integer"
+          },
+          "opportunity_count": {
+            "exclusiveMinimum": 0.0,
+            "title": "Opportunity Count",
+            "type": "integer"
+          },
+          "plan_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Plan Digest",
+            "type": "string"
+          },
+          "plan_id": {
+            "title": "Plan Id",
+            "type": "string"
+          },
+          "scope": {
+            "enum": [
+              "C",
+              "R-E2E",
+              "R-T4-conditional"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "stop_rule": {
+            "enum": [
+              "plan-exhausted",
+              "budget-or-plan"
+            ],
+            "title": "Stop Rule",
+            "type": "string"
+          }
+        },
+        "required": [
+          "plan_id",
+          "plan_digest",
+          "scope",
+          "frozen_at",
+          "budget",
+          "stop_rule",
+          "opportunity_count"
+        ],
+        "title": "S12PlanCatalogItem",
+        "type": "object"
+      },
+      "S12PlanCatalogResponse": {
+        "additionalProperties": false,
+        "description": "The read-only frozen-plan catalog.  No freeze material (opportunities,\nlabels, environment, run specs, checker artifact, worker identity or\nbusiness state) is exposed to the browser.",
+        "properties": {
+          "plans": {
+            "items": {
+              "$ref": "#/components/schemas/S12PlanCatalogItem"
+            },
+            "title": "Plans",
+            "type": "array"
+          },
+          "schema_version": {
+            "const": "s12-plan-catalog/1",
+            "title": "Schema Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "plans"
+        ],
+        "title": "S12PlanCatalogResponse",
+        "type": "object"
+      },
       "S12PlanResponse": {
         "additionalProperties": false,
         "properties": {
@@ -24183,6 +24262,25 @@
         "summary": "Controlled S09 React Page"
       }
     },
+    "/controlled/s12": {
+      "get": {
+        "description": "Canonical S12 Evaluation Operator React shell (Ticket #48/T14): the\nsame shared qualified React build as the other controlled shells, served\nonly to the registered S12 operator credential with no-store shell\nheaders and no S01 reviewer session.",
+        "operationId": "controlled_s12_page_controlled_s12_get",
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Controlled S12 Page"
+      }
+    },
     "/controlled/s12/bundles/{bundle_id}": {
       "get": {
         "description": "Query one immutable content-addressed evaluation bundle (the complete\nfrozen replay package with the independent result digest).",
@@ -24422,6 +24520,25 @@
         "summary": "S12 Rerun Job"
       }
     },
+    "/controlled/s12/plans": {
+      "get": {
+        "description": "Read-only frozen-plan catalog: server-derived selection summaries of\nthe frozen plan rows.  The browser submits only the selected plan id to\nstart; a stale or unknown id is rejected there as S12_NOT_FOUND.",
+        "operationId": "s12_list_plans_controlled_s12_plans_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S12PlanCatalogResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "S12 List Plans"
+      }
+    },
     "/controlled/s12/plans/freeze": {
       "post": {
         "description": "Freeze one evaluation plan from stable references: the authority\nresolves the S01 evidence snapshots, the governed S08 release and the\nindependent label manifest, derives the environment, and measures\nbusiness state.",
@@ -24459,6 +24576,25 @@
           }
         },
         "summary": "S12 Freeze Plan"
+      }
+    },
+    "/controlled/s12/react": {
+      "get": {
+        "description": "The S12 /react alias: the same closed shell contract as the canonical\nroute.",
+        "operationId": "controlled_s12_react_page_controlled_s12_react_get",
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Controlled S12 React Page"
       }
     },
     "/demo/react": {

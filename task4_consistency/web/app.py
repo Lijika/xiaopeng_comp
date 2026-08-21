@@ -5681,9 +5681,53 @@ register_router(app, sys.modules[__name__])
 # TASK4_S12_STATE_PATH plus distinct TASK4_S12_CREDENTIAL/SUBJECT are
 # configured; every S12 route then reports scoped S12_UNAVAILABLE without
 # affecting any S01-S11 route.
-from task4_consistency.web.s12_http import register_router as register_s12_router
+from task4_consistency.web.s12_http import (
+    _s12_require_operator,
+    register_router as register_s12_router,
+)
 
 register_s12_router(app, sys.modules[__name__])
+
+
+def _s12_react_shell() -> Response:
+    """The shared qualified React build under the S12 operator boundary, or
+    the minimized closed S12 503 when the build is missing or partial.  The
+    shell never creates an S01/S02 reviewer session and the existing governed
+    routes stay available."""
+    index_html = _react_shell_index_html()
+    if index_html is None:
+        response = JSONResponse(
+            status_code=503,
+            content={
+                "detail": {
+                    "error": "S12_REACT_UNAVAILABLE",
+                    "message": "Controlled S12 React shell is not built",
+                }
+            },
+        )
+        _s01_disable_cache(response)
+        return response
+    response = HTMLResponse(index_html)
+    _s01_disable_cache(response)
+    return response
+
+
+@app.get("/controlled/s12", response_class=HTMLResponse)
+def controlled_s12_page(request: Request) -> Response:
+    """Canonical S12 Evaluation Operator React shell (Ticket #48/T14): the
+    same shared qualified React build as the other controlled shells, served
+    only to the registered S12 operator credential with no-store shell
+    headers and no S01 reviewer session."""
+    _s12_require_operator(request)
+    return _s12_react_shell()
+
+
+@app.get("/controlled/s12/react", response_class=HTMLResponse)
+def controlled_s12_react_page(request: Request) -> Response:
+    """The S12 /react alias: the same closed shell contract as the canonical
+    route."""
+    _s12_require_operator(request)
+    return _s12_react_shell()
 
 
 def create_s01_test_app() -> FastAPI:

@@ -70,6 +70,13 @@ export type S09ProposeRollbackResponse =
 export type S09RecoverHoldResponse = components["schemas"]["S09RecoverHoldResponse"];
 export type S09ImpactDispositionsResponse =
   components["schemas"]["S09ImpactDispositionsResponse"];
+export type S12PlanCatalogResponse =
+  components["schemas"]["S12PlanCatalogResponse"];
+export type S12PlanCatalogItem = components["schemas"]["S12PlanCatalogItem"];
+export type S12JobResponse = components["schemas"]["S12JobResponse"];
+export type S12ProcessResponse = components["schemas"]["S12ProcessResponse"];
+export type S12BundleResponse = components["schemas"]["S12BundleResponse"];
+export type S12StartJobBody = components["schemas"]["S12StartJobBody"];
 
 /** A structured server rejection; never invents identifiers or evidence. */
 export class HttpError extends Error {
@@ -232,6 +239,42 @@ export function isDefinitiveS08Rejection(
     );
   }
   return S08_DEFINITIVE_STATUSES.has(error.status);
+}
+
+/**
+ * The S12 command surface's definitive-rejection classifier.  The registered
+ * S12 envelopes are the evidence: a structured ``S12_FORBIDDEN`` 403 or
+ * ``S12_UNAVAILABLE`` 503 is definitive (the evaluation plane failed closed
+ * before commit), as are the registered 404/422 statuses.  A generic
+ * 403/503, an unreadable payload, or a transport/lost response stays unknown
+ * so a bounded poll can keep observing the durable job until its cycle
+ * limit.
+ */
+const S12_DEFINITIVE_STATUSES: ReadonlySet<number> = new Set([404, 422]);
+const S12_403_DEFINITIVE_ERROR_CODES: ReadonlySet<string> = new Set([
+  "S12_FORBIDDEN",
+]);
+const S12_503_DEFINITIVE_ERROR_CODES: ReadonlySet<string> = new Set([
+  "S12_UNAVAILABLE",
+]);
+
+export function isDefinitiveS12Rejection(
+  error: unknown,
+): error is HttpError {
+  if (!(error instanceof HttpError)) return false;
+  if (error.status === 403) {
+    return (
+      error.errorCode !== undefined &&
+      S12_403_DEFINITIVE_ERROR_CODES.has(error.errorCode)
+    );
+  }
+  if (error.status === 503) {
+    return (
+      error.errorCode !== undefined &&
+      S12_503_DEFINITIVE_ERROR_CODES.has(error.errorCode)
+    );
+  }
+  return S12_DEFINITIVE_STATUSES.has(error.status);
 }
 
 /**

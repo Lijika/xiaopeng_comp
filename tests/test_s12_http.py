@@ -32,6 +32,7 @@ from task4_consistency.web.s12_http import (
     S12EvidenceField,
     S12FreezePlanBody,
     S12OpportunityResponse,
+    S12PlanCatalogItem,
     S12PlanResponse,
     S12StatisticsBlock,
 )
@@ -1175,3 +1176,167 @@ def test_statistics_block_with_intervals_serializes_closed(
         S12StatisticsBlock.model_validate(
             {**block, "point": {**block["point"], "bogus_metric": 0.5}}
         )
+
+
+# ---------------------------------------------------------------------------
+# T14 — read-only frozen-plan catalog and the S12 React shell adapter
+# ---------------------------------------------------------------------------
+
+
+def _react_asset_paths(index_html: str) -> list[str]:
+    """The absolute hashed asset references the shell must serve immutable."""
+    import re
+
+    return re.findall(r'(?:src|href)="(/static/react/[^"]+)"', index_html)
+
+
+def test_s12_plan_catalog_requires_registered_operator_and_is_read_only(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """The catalog is a read-only authenticated seam: without the registered
+    S12 operator identity it is S12_FORBIDDEN, and it exposes only selection
+    metadata derived from the frozen server plan row -- never freeze material,
+    worker identity, or business state."""
+    _service, plan_command, _context = _install_service(monkeypatch, tmp_path)
+    client = TestClient(webapp.app)
+
+    denied = client.get("/controlled/s12/plans")
+    assert denied.status_code == 403, denied.text
+    assert denied.json()["detail"]["error"] == "S12_FORBIDDEN"
+
+    empty = client.get("/controlled/s12/plans", headers=_auth())
+    assert empty.status_code == 200, empty.text
+    assert empty.json() == {"schema_version": "s12-plan-catalog/1", "plans": []}
+
+    frozen = client.post(
+        "/controlled/s12/plans/freeze", json=plan_command, headers=_auth()
+    )
+    assert frozen.status_code == 200, frozen.text
+    frozen_plan = frozen.json()
+
+    catalog = client.get("/controlled/s12/plans", headers=_auth())
+    assert catalog.status_code == 200, catalog.text
+    plans = catalog.json()["plans"]
+    assert len(plans) == 1
+    item = plans[0]
+    assert set(item) == {
+        "plan_id",
+        "plan_digest",
+        "scope",
+        "frozen_at",
+        "budget",
+        "stop_rule",
+        "opportunity_count",
+    }
+    assert item["plan_id"] == frozen_plan["plan_id"]
+    assert item["plan_digest"] == frozen_plan["plan_digest"]
+    assert item["scope"] == frozen_plan["scope"]
+    assert item["frozen_at"] == frozen_plan["frozen_at"]
+    assert item["budget"] == frozen_plan["budget"]
+    assert item["stop_rule"] == frozen_plan["stop_rule"]
+    assert item["opportunity_count"] == len(frozen_plan["opportunities"])
+
+    # The closed catalog DTO rejects every selection-foreign claim.
+    with pytest.raises(ValidationError):
+        S12PlanCatalogItem.model_validate({**item, "worker_id": "caller"})
+    with pytest.raises(ValidationError):
+        S12PlanCatalogItem.model_validate({**item, "opportunities": []})
+    with pytest.raises(ValidationError):
+        S12PlanCatalogItem.model_validate({**item, "plan_digest": "short"})
+    with pytest.raises(ValidationError):
+        S12PlanCatalogItem.model_validate({**item, "scope": "R-DEMO"})
+    with pytest.raises(ValidationError):
+        S12PlanCatalogItem.model_validate(
+            {**item, "schema_version": "s12-plan-catalog/9"}
+        )
+
+
+def test_s12_plan_catalog_unavailable_when_authority_missing(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """A missing S12 authority keeps the catalog closed at S12_UNAVAILABLE
+    while an S01-S11 route keeps serving."""
+    monkeypatch.setattr(webapp, "S12_SERVICE", None)
+    _service, _plan_command, _context = _http_harness(tmp_path)
+    client = TestClient(webapp.app)
+    response = client.get("/controlled/s12/plans", headers=_auth())
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"]["error"] == "S12_UNAVAILABLE"
+    assert client.get("/api/demo/fixtures").status_code == 200
+
+
+def test_s12_react_shell_serves_shared_build_no_store_and_no_s01_session(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """The canonical /controlled/s12 and alias /controlled/s12/react serve
+    the shared qualified React build under the S12 operator identity with
+    no-store shell headers, immutable hashed assets, and no S01 session."""
+    _service, _plan_command, _context = _install_service(monkeypatch, tmp_path)
+    client = TestClient(webapp.app)
+    for path in ("/controlled/s12", "/controlled/s12/react"):
+        denied = client.get(path)
+        assert denied.status_code == 403, (path, denied.text)
+        assert denied.json()["detail"]["error"] == "S12_FORBIDDEN"
+
+        shell = client.get(path, headers=_auth())
+        assert shell.status_code == 200, (path, shell.text[:200])
+        assert shell.headers["cache-control"] == "no-store"
+        assert shell.headers["pragma"] == "no-cache"
+        assert "set-cookie" not in shell.headers, path
+        assets = _react_asset_paths(shell.text)
+        assert assets, path
+        for asset in assets:
+            asset_response = client.get(asset)
+            assert asset_response.status_code == 200, (path, asset)
+            assert "immutable" in asset_response.headers.get(
+                "cache-control", ""
+            ), (path, asset)
+    assert client.get("/controlled/s12/plans", headers=_auth()).status_code == 200
+
+
+def test_s12_react_shell_missing_build_fails_closed_on_canonical_and_alias(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """A missing shared React build is an explicit minimized S12-scoped 503
+    with no-store on both shell routes; the S12 API and the prior governed
+    routes keep serving."""
+    _service, _plan_command, _context = _install_service(monkeypatch, tmp_path)
+    missing = tmp_path / "no-s12-build"
+    missing.mkdir()
+    monkeypatch.setattr(webapp, "S01_REACT_INDEX", missing / "index.html")
+    client = TestClient(webapp.app)
+    for path in ("/controlled/s12", "/controlled/s12/react"):
+        unavailable = client.get(path, headers=_auth())
+        assert unavailable.status_code == 503, (path, unavailable.text)
+        assert unavailable.json() == {
+            "detail": {
+                "error": "S12_REACT_UNAVAILABLE",
+                "message": "Controlled S12 React shell is not built",
+            }
+        }
+        assert unavailable.headers["cache-control"] == "no-store"
+        assert str(missing) not in unavailable.text
+    assert client.get("/controlled/s12/plans", headers=_auth()).status_code == 200
+    assert client.get("/api/demo/fixtures").status_code == 200
+
+
+def test_s12_react_shell_rejects_partial_builds_with_closed_503(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """A partial build (no unambiguous module entry) fails closed exactly
+    like a missing build; the canonical route never serves it."""
+    _service, _plan_command, _context = _install_service(monkeypatch, tmp_path)
+    partial = tmp_path / "partial-s12-build"
+    partial.mkdir()
+    (partial / "index.html").write_text(
+        '<html><body><script src="/static/react/assets/classic.js"></script>'
+        "</body></html>",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(webapp, "S01_REACT_INDEX", partial / "index.html")
+    client = TestClient(webapp.app)
+    for path in ("/controlled/s12", "/controlled/s12/react"):
+        unavailable = client.get(path, headers=_auth())
+        assert unavailable.status_code == 503, (path, unavailable.text)
+        assert unavailable.json()["detail"]["error"] == "S12_REACT_UNAVAILABLE"
+        assert unavailable.headers["cache-control"] == "no-store"

@@ -1417,6 +1417,35 @@ class EvaluationService:
             self._store.reload()
         return plan
 
+    def list_plans(self) -> list[dict[str, Any]]:
+        """Read-only frozen-plan catalog: server-derived selection summaries
+        of the frozen plan rows, ordered by frozen time then plan id.  The
+        query never freezes and never exposes the frozen material
+        (opportunities, labels, environment, run specs, worker identity or
+        business state); a stale or unknown id selected by a caller is
+        rejected by start_job as not found."""
+        with self._lock:
+            self._store.reload()
+            plans = sorted(
+                self._store.plans.values(),
+                key=lambda plan: (
+                    int(plan.get("frozen_at") or 0),
+                    plan["plan_id"],
+                ),
+            )
+            return [
+                {
+                    "plan_id": plan["plan_id"],
+                    "plan_digest": plan["plan_digest"],
+                    "scope": plan["scope"],
+                    "frozen_at": plan["frozen_at"],
+                    "budget": copy.deepcopy(plan["budget"]),
+                    "stop_rule": plan["stop_rule"],
+                    "opportunity_count": len(plan["opportunities"]),
+                }
+                for plan in plans
+            ]
+
     def _resolve_freeze_material(self, command: dict[str, Any]) -> dict[str, Any]:
         """Validate the reference command and resolve every immutable
         reference from the configured authorities.  Caller-supplied content
