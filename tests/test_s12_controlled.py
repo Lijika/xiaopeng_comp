@@ -2009,13 +2009,9 @@ def test_same_application_two_cycles_and_snapshots_freeze_as_distinct_runs(
         f"snapshot_sha256_{digest_b}",
     }
     assert all(spec["application_id"] == "app-dual" for spec in run_specs.values())
-    target_runs = {
-        opportunity["run_id"]
-        for opportunity in plan["opportunities"]
-        if opportunity["opportunity_id"] in {"opp-a", "opp-b"}
-    }
-    assert len(target_runs) == 2
-    assert target_runs <= set(run_specs)
+    assert {opportunity["run_id"] for opportunity in plan["opportunities"]} == set(
+        run_specs
+    )
 
 
 # ---------------------------------------------------------------------------
