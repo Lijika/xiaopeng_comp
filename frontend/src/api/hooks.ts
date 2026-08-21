@@ -500,7 +500,7 @@ export function useEvidenceConvergence(
     void poll();
     return () => {
       cancelled = true;
-      clearTimeout(timer);
+      if (timer !== undefined) clearTimeout(timer);
     };
   }, [applicationId, acceptedEvidenceRevision, queryClient]);
   return outcome;
@@ -1091,13 +1091,17 @@ export interface S12StartProcessResult {
   process: S12ProcessResponse;
 }
 
+export type S12JobStartedCallback = (job: S12JobResponse) => void;
+
 /**
  * One operator action creates one durable job: the start body is the closed
  * ``{plan_id}`` DTO and the returned job is processed exactly once.  The
  * mutation never retries (a lost response never creates a replacement job)
  * and the UI polls the original job id afterwards.
  */
-export function useS12StartProcess(): UseMutationResult<
+export function useS12StartProcess(
+  onJobStarted?: S12JobStartedCallback,
+): UseMutationResult<
   S12StartProcessResult,
   Error,
   S12StartJobBody
@@ -1108,6 +1112,7 @@ export function useS12StartProcess(): UseMutationResult<
         method: "POST",
         body: JSON.stringify(body),
       });
+      onJobStarted?.(job);
       const process = await request<S12ProcessResponse>(
         `/controlled/s12/jobs/${encodeURIComponent(job.job_id)}/process`,
         { method: "POST" },
@@ -1169,6 +1174,16 @@ export function useS12JobPoll(
     let attempts = 0;
     const poll = async () => {
       if (cancelled) return;
+      const cached = queryClient.getQueryData<S12JobResponse>(
+        S12_JOB_KEY(jobId),
+      );
+      if (
+        cached !== undefined &&
+        S12_TERMINAL_JOB_STATUSES.includes(cached.status)
+      ) {
+        setOutcome("terminal");
+        return;
+      }
       attempts += 1;
       await queryClient.refetchQueries({
         queryKey: S12_JOB_KEY(jobId),
@@ -1196,7 +1211,7 @@ export function useS12JobPoll(
       }
       timer = setTimeout(poll, intervalMs);
     };
-    void poll();
+    timer = setTimeout(poll, intervalMs);
     return () => {
       cancelled = true;
       clearTimeout(timer);

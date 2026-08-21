@@ -82,8 +82,8 @@ describe("S12EvaluationOperator (T14)", () => {
     const start = calls.find((call) => call.url === START_PATH);
     expect(start?.body).toEqual({ plan_id: S12_PLAN_ID });
     expect(calls.some((call) => call.url === PROCESS_PATH)).toBe(true);
-    // Terminal on the first poll: initial read + at most one refetch.
-    expect(jobRequests).toBeLessThanOrEqual(2);
+    // The initial authoritative read already observed the terminal job.
+    expect(jobRequests).toBe(1);
     expect(jobRequests).toBeGreaterThanOrEqual(1);
     expect(calls.filter((call) => call.url === BUNDLE_PATH)).toHaveLength(1);
   });
@@ -106,6 +106,10 @@ describe("S12EvaluationOperator (T14)", () => {
     expect(screen.getByTestId("s12-job-status")).toHaveTextContent("complete");
     expect(screen.getByTestId("s12-job-fence")).toHaveTextContent("1");
     expect(screen.getByTestId("s12-job-attempt")).toHaveTextContent("1");
+    expect(screen.getByTestId("s12-job-created-at")).toHaveTextContent(
+      "1700000000",
+    );
+    expect(screen.getByTestId("s12-job-reasons")).toHaveTextContent("—");
     expect(screen.getByTestId("s12-result-status")).toHaveTextContent(
       "PASS(scope=C)",
     );
@@ -416,6 +420,54 @@ describe("S12EvaluationOperator (T14)", () => {
     );
     // Prior identifiers stay visible only as stale context.
     expect(document.body.textContent ?? "").toContain(S12_JOB_ID);
+  });
+
+  it("keeps the original job visible when process acknowledgement fails", async () => {
+    fetchRouter({
+      [`GET ${PLANS_PATH}`]: () => json(s12CatalogPayload()),
+      [`POST ${START_PATH}`]: () =>
+        json(s12JobPayload({ status: "queued" }, { bundle_id: null, status: null, reason_codes: [] })),
+      [`POST ${PROCESS_PATH}`]: () => error(503, "S12_UNAVAILABLE"),
+      [`GET ${JOB_PATH}`]: () =>
+        json(
+          s12JobPayload(
+            { status: "queued", reason_codes: ["PROCESS_PENDING"] },
+            { bundle_id: null, status: null, reason_codes: [] },
+          ),
+        ),
+    });
+    renderWithQuery(<S12EvaluationOperator />);
+    await selectPlanAndStart();
+    await waitFor(() =>
+      expect(screen.getByTestId("s12-process-error")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("s12-job-live")).toHaveTextContent(S12_JOB_ID);
+    expect(screen.getByTestId("s12-job-reasons")).toHaveTextContent(
+      "PROCESS_PENDING",
+    );
+    expect(screen.queryByTestId("s12-sealed-report")).not.toBeInTheDocument();
+    expect(screen.getByTestId("s12-start-button")).toBeDisabled();
+  });
+
+  it("renders an exact job-query rejection and never reads a bundle", async () => {
+    const router = fetchRouter({
+      [`GET ${PLANS_PATH}`]: () => json(s12CatalogPayload()),
+      [`POST ${START_PATH}`]: () => json(s12JobPayload()),
+      [`POST ${PROCESS_PATH}`]: () => json(s12ProcessPayload()),
+      [`GET ${JOB_PATH}`]: () => error(404, "S12_NOT_FOUND"),
+    });
+    renderWithQuery(<S12EvaluationOperator />);
+    await selectPlanAndStart();
+    await waitFor(() =>
+      expect(screen.getByTestId("s12-job-error")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("s12-error-code")).toHaveTextContent(
+      "S12_NOT_FOUND",
+    );
+    expect(screen.getByTestId("s12-job-live")).toHaveTextContent(
+      "任务状态读取失败",
+    );
+    expect(router.calls.some((call) => call.url === BUNDLE_PATH)).toBe(false);
   });
 
   it("stops at a failed terminal job without reading any bundle", async () => {

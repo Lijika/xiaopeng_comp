@@ -2,6 +2,7 @@ import { useState } from "react";
 
 import {
   HttpError,
+  isDefinitiveS12Rejection,
   type S12BundleResponse,
 } from "../api/client";
 import {
@@ -112,14 +113,10 @@ function SealedValue({ value }: { value: unknown }) {
   return <SealedLeaf value={value} />;
 }
 
-const REPORT_EXCLUDED_KEYS = new Set(["replay_package"]);
-
 /** The complete sealed report: every top-level field of the server-provided
  * bundle renders exactly once in server (DTO insertion) order, with values
- * verbatim.  ``replay_package`` renders as its digest pair only -- the
- * browser reads it as lineage identity, never as a re-executed payload.
- * No metric calculation, digest derivation, denominator filtering or status
- * inference happens here. */
+ * verbatim.  No metric calculation, digest derivation, denominator filtering
+ * or status inference happens here. */
 function S12SealedReport({ bundle }: { bundle: S12BundleResponse }) {
   return (
     <section
@@ -131,18 +128,12 @@ function S12SealedReport({ bundle }: { bundle: S12BundleResponse }) {
       <p className="text-sm text-muted-foreground">
         封存包不可变且按内容寻址；浏览器只读展示，不做任何计算或改写。
       </p>
-      {Object.entries(bundle)
-        .filter(([key]) => !REPORT_EXCLUDED_KEYS.has(key))
-        .map(([key, value]) => (
+      {Object.entries(bundle).map(([key, value]) => (
           <section key={key} data-testid="s12-report-section">
             <h4 data-testid="s12-report-section-name">{key}</h4>
             <SealedValue value={value} />
           </section>
         ))}
-      <section data-testid="s12-report-section">
-        <h4 data-testid="s12-report-section-name">replay_package_digest</h4>
-        <SealedLeaf value={bundle.replay_package_digest} />
-      </section>
     </section>
   );
 }
@@ -160,21 +151,32 @@ function S12SealedReport({ bundle }: { bundle: S12BundleResponse }) {
 export default function S12EvaluationOperator() {
   const plans = useS12Plans();
   const [selectedPlanId, setSelectedPlanId] = useState("");
-  const start = useS12StartProcess();
   const [jobId, setJobId] = useState<string | null>(null);
+  const [startUncertain, setStartUncertain] = useState(false);
+  const start = useS12StartProcess((started) => setJobId(started.job_id));
   const job = useS12Job(jobId);
   const poll = useS12JobPoll(jobId, jobId !== null);
   const terminal =
-    job.data !== undefined && S12_TERMINAL_JOB_STATUSES.includes(job.data.status);
+    job.error === null &&
+    job.data !== undefined &&
+    S12_TERMINAL_JOB_STATUSES.includes(job.data.status);
   const bundleId = terminal ? job.data?.result?.bundle_id ?? null : null;
   const bundle = useS12Bundle(bundleId);
 
   const handleStart = () => {
-    if (selectedPlanId === "" || start.isPending || jobId !== null) return;
+    if (
+      selectedPlanId === "" ||
+      start.isPending ||
+      jobId !== null ||
+      startUncertain
+    )
+      return;
     start.mutate(
       { plan_id: selectedPlanId },
       {
-        onSuccess: ({ job: started }) => setJobId(started.job_id),
+        onError: (error) => {
+          if (!isDefinitiveS12Rejection(error)) setStartUncertain(true);
+        },
       },
     );
   };
@@ -219,7 +221,7 @@ export default function S12EvaluationOperator() {
           data-testid="s12-plan-select"
           value={selectedPlanId}
           onChange={(event) => setSelectedPlanId(event.target.value)}
-          disabled={start.isPending || jobId !== null}
+          disabled={start.isPending || jobId !== null || startUncertain}
         >
           <option value="">请选择…</option>
           {catalog.map((plan) => (
@@ -232,7 +234,10 @@ export default function S12EvaluationOperator() {
           type="button"
           data-testid="s12-start-button"
           disabled={
-            selectedPlanId === "" || start.isPending || jobId !== null
+            selectedPlanId === "" ||
+            start.isPending ||
+            jobId !== null ||
+            startUncertain
           }
           onClick={handleStart}
         >
@@ -268,6 +273,12 @@ export default function S12EvaluationOperator() {
         <S12ErrorState error={startError} />
       )}
 
+      {jobId === null && startUncertain && (
+        <p data-testid="s12-start-unknown" role="alert">
+          启动响应未知：页面不会重复创建任务，请通过服务端任务状态确认。
+        </p>
+      )}
+
       {jobId !== null && (
         <>
           <p
@@ -275,11 +286,23 @@ export default function S12EvaluationOperator() {
             aria-live="polite"
             data-testid="s12-job-live"
           >
-            {job.data === undefined
+            {job.error !== null && job.error !== undefined
+              ? "任务状态读取失败"
+              : job.data === undefined
               ? "任务查询中…"
               : `任务 ${jobId} · 状态 ${job.data.status}`}
           </p>
-          {job.data !== undefined && (
+          {start.error !== null && start.error !== undefined && (
+            <div data-testid="s12-process-error">
+              <S12ErrorState error={start.error} />
+            </div>
+          )}
+          {job.error !== null && job.error !== undefined && (
+            <div data-testid="s12-job-error">
+              <S12ErrorState error={job.error} />
+            </div>
+          )}
+          {job.error === null && job.data !== undefined && (
             <dl className="facts" data-testid="s12-job-facts">
               <div>
                 <dt>任务状态</dt>
@@ -302,6 +325,16 @@ export default function S12EvaluationOperator() {
               <div>
                 <dt>工作身份</dt>
                 <dd data-testid="s12-job-worker">{job.data.worker_id}</dd>
+              </div>
+              <div>
+                <dt>创建时间（epoch）</dt>
+                <dd data-testid="s12-job-created-at">{job.data.created_at}</dd>
+              </div>
+              <div>
+                <dt>任务原因码</dt>
+                <dd data-testid="s12-job-reasons">
+                  {(job.data.reason_codes ?? []).join("，") || "—"}
+                </dd>
               </div>
               <div>
                 <dt>结果状态（服务端原样）</dt>

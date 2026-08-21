@@ -193,6 +193,37 @@ def test_s12_routes_require_registered_operator_identity(
     assert response.json()["detail"]["error"] == "S12_FORBIDDEN"
 
 
+def test_s12_validation_preserves_auth_boundary_and_global_token_is_not_authority(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    _service, _plan_command, _context = _install_service(monkeypatch, tmp_path)
+    client = TestClient(webapp.app)
+
+    unauthenticated = client.post(
+        "/controlled/s12/jobs/start", json={"unexpected": "field"}
+    )
+    assert unauthenticated.status_code == 403, unauthenticated.text
+    assert unauthenticated.json()["detail"]["error"] == "S12_FORBIDDEN"
+
+    malformed = client.post(
+        "/controlled/s12/jobs/start",
+        json={"unexpected": "field"},
+        headers=_auth(),
+    )
+    assert malformed.status_code == 422, malformed.text
+    assert malformed.json()["detail"]["error"] == "S12_INVALID_COMMAND"
+
+    monkeypatch.setenv("TASK4_WEB_TOKEN", "global-token")
+    allowed = client.get("/controlled/s12/plans", headers=_auth())
+    assert allowed.status_code == 200, allowed.text
+    global_only = client.get(
+        "/controlled/s12/plans",
+        headers={"Authorization": "Bearer global-token"},
+    )
+    assert global_only.status_code == 403, global_only.text
+    assert global_only.json()["detail"]["error"] == "S12_FORBIDDEN"
+
+
 def test_typed_freeze_start_process_query_bundle_and_rerun(
     monkeypatch: Any, tmp_path: Path
 ) -> None:

@@ -48,7 +48,7 @@ function cleanupTree(root) {
   }
 }
 
-async function startServer(fixtureRoot) {
+async function startServer(fixtureRoot, reactRoot = null) {
   const port = await reservePort();
   const output = [];
   const child = spawn(
@@ -70,6 +70,7 @@ async function startServer(fixtureRoot) {
       env: {
         ...process.env,
         TASK4_T14_FIXTURE_ROOT: fixtureRoot,
+        ...(reactRoot === null ? {} : { TASK4_T14_REACT_DIR: reactRoot }),
         NO_PROXY: "127.0.0.1,localhost",
         no_proxy: "127.0.0.1,localhost",
         PYTHONDONTWRITEBYTECODE: "1",
@@ -135,26 +136,32 @@ function readFixture(fixtureRoot) {
  * catalog/start/process/job/bundle calls plus static assets may appear. */
 function assertAllowlistedRequests(requests) {
   const allowed = [
-    /^\/api\/health$/,
-    /^\/controlled\/s12$/,
-    /^\/controlled\/s12\/react$/,
-    /^\/static\/react\//,
-    /\/favicon\.ico$/,
-    /^\/controlled\/s12\/plans$/,
-    /^\/controlled\/s12\/jobs\/start$/,
-    /^\/controlled\/s12\/jobs\/[^/]+\/process$/,
-    /^\/controlled\/s12\/jobs\/[^/]+$/,
-    /^\/controlled\/s12\/bundles\/[^/]+$/,
+    { method: "GET", pattern: /^\/api\/health$/ },
+    { method: "GET", pattern: /^\/controlled\/s12$/ },
+    { method: "GET", pattern: /^\/controlled\/s12\/react$/ },
+    { method: "GET", pattern: /^\/static\/react\/(?:index\.html|assets\/[A-Za-z0-9._-]+\.(?:js|css))$/ },
+    { method: "GET", pattern: /^\/favicon\.ico$/ },
+    { method: "GET", pattern: /^\/controlled\/s12\/plans$/ },
+    { method: "POST", pattern: /^\/controlled\/s12\/jobs\/start$/ },
+    { method: "POST", pattern: /^\/controlled\/s12\/jobs\/[^/]+\/process$/ },
+    { method: "GET", pattern: /^\/controlled\/s12\/jobs\/[^/]+$/ },
+    { method: "GET", pattern: /^\/controlled\/s12\/bundles\/[^/]+$/ },
   ];
   const violations = requests.filter(
-    (url) => !allowed.some((pattern) => pattern.test(new URL(url).pathname)),
+    ({ method, url }) =>
+      !allowed.some(
+        (entry) =>
+          entry.method === method && entry.pattern.test(new URL(url).pathname),
+      ),
   );
   expect(violations).toEqual([]);
 }
 
 async function runOperatorWorkflow(page, baseURL, fixture, viewport) {
   const requests = [];
-  page.on("request", (request) => requests.push(request.url()));
+  page.on("request", (request) =>
+    requests.push({ method: request.method(), url: request.url() }),
+  );
 
   await page.setViewportSize(viewport);
   await page.goto(`${baseURL}${CANONICAL}`, { waitUntil: "domcontentloaded" });
@@ -207,7 +214,7 @@ async function runOperatorWorkflow(page, baseURL, fixture, viewport) {
   assertAllowlistedRequests(requests);
   const posts = [];
   const jobGets = new Set();
-  for (const url of requests) {
+  for (const { url } of requests) {
     const pathname = new URL(url).pathname;
     if (/\/jobs\/start$/.test(pathname)) posts.push(pathname);
     if (/\/jobs\/[^/]+\/process$/.test(pathname)) posts.push(pathname);
@@ -283,10 +290,21 @@ test("shell alias serves the same build and denial hides every identifier", asyn
 
 test("missing build fails closed on both S12 shell routes", async ({ request }) => {
   server = await startServer(fixtureRoot);
-  // Simulate the missing-build contract by pointing the check at a route
-  // that exists regardless of artifact state: the API stays up while the
-  // shell would 503.  The dedicated 503 path is covered by the focused HTTP
-  // suite (monkeypatched artifact); here we prove the API plane survives.
+  const missingRoot = path.join(fixtureRoot, "missing-react-build");
+  fs.mkdirSync(missingRoot, { recursive: true });
+  await stopServer(server, fixtureRoot);
+  server = await startServer(fixtureRoot, missingRoot);
+  for (const shellPath of [CANONICAL, ALIAS]) {
+    const shell = await request.get(`${server.baseURL}${shellPath}`);
+    expect(shell.status()).toBe(503);
+    expect(await shell.json()).toEqual({
+      detail: {
+        error: "S12_REACT_UNAVAILABLE",
+        message: "Controlled S12 React shell is not built",
+      },
+    });
+    expect(shell.headers()["cache-control"]).toBe("no-store");
+  }
   const plans = await request.get(`${server.baseURL}/controlled/s12/plans`);
   expect(plans.status()).toBe(200);
   const health = await request.get(`${server.baseURL}/api/health`);

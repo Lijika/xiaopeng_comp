@@ -725,15 +725,15 @@ REL_PORT="${REL_RESULT##* }"
 
 # Frozen Playwright collection gate + full matrix (operator-simulated cohort;
 # every spec child inherits the observation environment).
-step "9/10 window: playwright collection gate (must equal '51 tests in 11 files')"
+step "9/10 window: playwright collection gate (must equal '55 tests in 12 files')"
 rm -rf "$PLAYWRIGHT_OUT"
 mkdir -p "$PLAYWRIGHT_OUT"
 touch "$TMP/t54-playwright-started"
 list_output="$(npm run test:e2e -- --list --output "$PLAYWRIGHT_OUT" 2>&1 | tee -a "$LOG")"
 collected="$(printf '%s\n' "$list_output" | grep -oE '[0-9]+ tests? in [0-9]+ files?' | tail -1 || true)"
 echo "collected: ${collected:-unparsable}" >>"$LOG"
-if [[ "${collected:-}" != "51 tests in 11 files" ]]; then
-  echo "ERROR: expected '51 tests in 11 files', observed '${collected:-unparsable}'" >>"$LOG"
+if [[ "${collected:-}" != "55 tests in 12 files" ]]; then
+  echo "ERROR: expected '55 tests in 12 files', observed '${collected:-unparsable}'" >>"$LOG"
   exit 1
 fi
 printf '%s\n' "$list_output" | grep -oE '[A-Za-z0-9_.-]+\.spec\.js:[0-9]+:[0-9]+ › .*' \

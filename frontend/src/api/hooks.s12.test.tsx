@@ -483,7 +483,7 @@ describe("S12 bounded job polling", () => {
       expect(jobRequests).toBe(1);
       rerender({ active: true });
       await settleWithTimers(() => result.current.poll === "terminal");
-      expect(jobRequests).toBe(2); // initial read + one terminal refetch
+      expect(jobRequests).toBe(1); // the initial read already observed terminal
       expect(router.calls.filter((call) => call.method !== "GET")).toEqual([]);
       const settled = jobRequests;
       await vi.advanceTimersByTimeAsync(20_000);

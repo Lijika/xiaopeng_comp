@@ -616,6 +616,36 @@ async def _sanitized_validation_handler(
                 }
             },
         )
+    if request.url.path.startswith("/controlled/s12"):
+        if S12_SERVICE is None:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "detail": {
+                        "error": "S12_UNAVAILABLE",
+                        "message": "Controlled S12 evaluation plane is unavailable",
+                    }
+                },
+            )
+        if not S12_SUBJECT or not _s01_has_credential(request, S12_CREDENTIAL):
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "detail": {
+                        "error": "S12_FORBIDDEN",
+                        "message": "Registered S12 operator identity required",
+                    }
+                },
+            )
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": {
+                    "error": "S12_INVALID_COMMAND",
+                    "message": "S12 command does not match the registered contract",
+                }
+            },
+        )
     return JSONResponse(
         status_code=422,
         content={"detail": _sanitized_validation_detail(exc.errors())},
@@ -668,6 +698,7 @@ class OptionalTokenAuth(BaseHTTPMiddleware):
         "/controlled/s05",
         "/controlled/s08",
         "/controlled/s09",
+        "/controlled/s12",
     )
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:

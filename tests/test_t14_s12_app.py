@@ -103,16 +103,18 @@ def create_t14_s12_test_app():
     web.S01_REQUIRE_CONFIGURED_STARTUP = False
 
     fixture_root = Path(os.environ["TASK4_T14_FIXTURE_ROOT"])
-    marker = fixture_root / "fixture.json"
-    if marker.is_file():
-        # Rebuild the providers against the persisted state so a restarted
-        # server observes the same frozen rows and bundle bytes.
-        service = _build_fixture_authorities(fixture_root)
-    else:
-        service = _build_fixture_authorities(fixture_root)
+    # Rebuild the providers against the persisted state so a restarted server
+    # observes the same frozen rows and bundle bytes.
+    service = _build_fixture_authorities(fixture_root)
 
     web.S12_SERVICE = service
     web.S12_CREDENTIAL = S12_CREDENTIAL
     web.S12_SUBJECT = S12_SUBJECT
     web.S12_WORKER_SUBJECT = S12_WORKER_SUBJECT
+    react_dir = os.environ.get("TASK4_T14_REACT_DIR", "").strip()
+    web.S01_REACT_INDEX = (
+        Path(react_dir).resolve() / "index.html"
+        if react_dir
+        else web.S01_REACT_STATIC / "index.html"
+    )
     return web.app
