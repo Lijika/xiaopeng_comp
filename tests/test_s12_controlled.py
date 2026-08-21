@@ -3413,57 +3413,6 @@ def test_deployment_and_ci_labels_contain_no_formal_threshold_pass_claim() -> No
     assert "C-DEV-REG" in ci_gate
 
 
-def test_rollback_probe_reopens_business_state_with_fixed_base_code(
-    tmp_path: Path,
-) -> None:
-    """The prior-artifact probe mode reopens the business database created
-    before S12 operations with the archived fixed-base code and serves the
-    preserved application state."""
-    import subprocess as _subprocess
-
-    archive_root = tmp_path / "prior-source"
-    archive_root.mkdir(parents=True, exist_ok=True)
-    archive = _subprocess.run(
-        [
-            "git",
-            "archive",
-            "8a8d7f1bfe37fe97e713dfa92350a56fef31266d",
-            "task4_consistency",
-            "configs",
-            "fixtures",
-        ],
-        cwd=ROOT,
-        check=True,
-        stdout=_subprocess.PIPE,
-    )
-    import tarfile as _tarfile
-    import io as _io
-
-    with _tarfile.open(fileobj=_io.BytesIO(archive.stdout), mode="r:") as bundle:
-        bundle.extractall(archive_root)
-    completed = _subprocess.run(
-        [
-            str(ROOT / ".venv" / "bin" / "python"),
-            "scripts/s12_rollback_probe.py",
-            "--prior-source-root",
-            str(archive_root),
-        ],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        timeout=180,
-    )
-    assert completed.returncode == 0, completed.stderr[-2000:]
-    import json as _json
-
-    report = _json.loads(completed.stdout)
-    assert report["probe"] == "PASS"
-    assert report["prior_artifact"]["prior_code_serves_business_state"] is True
-    assert report["prior_artifact"]["archived_base"] == (
-        "8a8d7f1bfe37fe97e713dfa92350a56fef31266d"
-    )
-
-
 # ---------------------------------------------------------------------------
 # Ticket #28 R2 Slice 7 — exact fixed-base rollback proof (ST-03 / SP-16)
 # ---------------------------------------------------------------------------
@@ -3488,19 +3437,44 @@ def _run_rollback_probe(*arguments: str) -> tuple[int, dict[str, Any]]:
     return completed.returncode, report
 
 
-def test_rollback_probe_extracts_and_executes_the_exact_fixed_base_archive(
+def test_rollback_probe_extracts_exact_base_and_accepts_matching_prior_root(
     tmp_path: Path,
 ) -> None:
     """The probe extracts the exact fixed base itself and executes the
-    prior-artifact reader with that extraction as the only import root:
-    the reported module path lives inside the verified extraction."""
+    prior-artifact reader with its verified extraction as the only import
+    root while accepting an independently supplied matching tree."""
+    import io as _io
+    import subprocess as _subprocess
+    import tarfile as _tarfile
+
+    fixed_base = "8a8d7f1bfe37fe97e713dfa92350a56fef31266d"
+    archive_root = tmp_path / "prior-source"
+    archive_root.mkdir()
+    archive = _subprocess.run(
+        [
+            "git",
+            "archive",
+            fixed_base,
+            "task4_consistency",
+            "configs",
+            "fixtures",
+        ],
+        cwd=ROOT,
+        check=True,
+        stdout=_subprocess.PIPE,
+    )
+    with _tarfile.open(fileobj=_io.BytesIO(archive.stdout), mode="r:") as bundle:
+        bundle.extractall(archive_root)
+
     exit_code, report = _run_rollback_probe(
-        "--fixed-base", "8a8d7f1bfe37fe97e713dfa92350a56fef31266d"
+        "--prior-source-root",
+        str(archive_root),
     )
     assert exit_code == 0, report
     assert report["probe"] == "PASS"
     prior = report["prior_artifact"]
-    assert prior["archived_base"] == "8a8d7f1bfe37fe97e713dfa92350a56fef31266d"
+    assert prior["archived_base"] == fixed_base
+    assert prior["tree_digest_matches"] is True
     assert prior["prior_code_serves_business_state"] is True
     assert prior["source_digest"]
     assert prior["tree_digest"] == prior["module_tree_digest"]
@@ -3510,11 +3484,14 @@ def test_rollback_probe_extracts_and_executes_the_exact_fixed_base_archive(
 def test_rollback_probe_rejects_prior_source_root_mismatch(tmp_path: Path) -> None:
     """A supplied prior root that does not match the fixed-base archive is
     rejected: the probe terminates nonzero with the comparison recorded."""
+    wrong_root = tmp_path / "wrong-prior-source"
+    wrong_root.mkdir()
+    (wrong_root / "unexpected.txt").write_text("mismatch", encoding="utf-8")
     exit_code, report = _run_rollback_probe(
         "--fixed-base",
         "8a8d7f1bfe37fe97e713dfa92350a56fef31266d",
         "--prior-source-root",
-        str(ROOT),
+        str(wrong_root),
     )
     assert exit_code != 0, report
     assert report["probe"] == "FAIL"

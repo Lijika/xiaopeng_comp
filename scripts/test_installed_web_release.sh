@@ -736,7 +736,7 @@ if [[ "${collected:-}" != "51 tests in 11 files" ]]; then
   echo "ERROR: expected '51 tests in 11 files', observed '${collected:-unparsable}'" >>"$LOG"
   exit 1
 fi
-npm run test:e2e -- --list | grep -oE '[A-Za-z0-9_.-]+\.spec\.js:[0-9]+:[0-9]+ › .*' \
+printf '%s\n' "$list_output" | grep -oE '[A-Za-z0-9_.-]+\.spec\.js:[0-9]+:[0-9]+ › .*' \
   | sort > "$TMP/cohort-node-ids.txt"
 sha256sum tests/*.spec.js playwright.config.js > "$TMP/cohort-spec-sha256.txt"
 sha256sum "$TMP/cohort-node-ids.txt" "$TMP/cohort-spec-sha256.txt" >>"$LOG"
