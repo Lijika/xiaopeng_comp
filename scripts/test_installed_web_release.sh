@@ -448,6 +448,12 @@ set -euo pipefail
 
 step() { printf '\n== %s ==\n' "$1" >>"$LOG"; }
 
+# Every runtime request targets the namespace-local loopback server.  Override
+# inherited proxy settings so urllib and browser subprocesses cannot route
+# these probes through the host proxy.
+export NO_PROXY="127.0.0.1,localhost"
+export no_proxy="127.0.0.1,localhost"
+
 : > "$TMP/t54-window-pids"
 cleanup_window() {
   # Best-effort teardown of every server started in this window, so no
