@@ -2089,6 +2089,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/controlled/s13": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Controlled S13 Page
+         * @description Canonical S13 delivery console React shell (Ticket #49/T15): the
+         *     same shared qualified React build as the other controlled shells, served
+         *     only to the registered S13 operator credential with no-store headers and
+         *     no S01 reviewer session.  The application_id query value is
+         *     presentation/navigation only; the S13 query remains the sole
+         *     authorization/existence authority.
+         */
+        get: operations["controlled_s13_page_controlled_s13_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/controlled/s13/api/commands/compensate": {
         parameters: {
             query?: never;
@@ -2158,6 +2183,27 @@ export interface paths {
         };
         /** S13 Delivery Query */
         get: operations["s13_delivery_query_controlled_s13_delivery__application_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s13/react": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Controlled S13 React Page
+         * @description The S13 /react alias: the same closed shell contract as the canonical
+         *     route.
+         */
+        get: operations["controlled_s13_react_page_controlled_s13_react_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -13864,6 +13910,26 @@ export interface operations {
             };
         };
     };
+    controlled_s13_page_controlled_s13_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
+            };
+        };
+    };
     s13_compensate_controlled_s13_api_commands_compensate_post: {
         parameters: {
             query?: never;
@@ -14063,6 +14129,26 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    controlled_s13_react_page_controlled_s13_react_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
             };
         };
     };

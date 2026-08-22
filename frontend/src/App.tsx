@@ -12,6 +12,7 @@ import QueuePanel from "./components/QueuePanel";
 import RecoveryWorkPanel from "./components/RecoveryWorkPanel";
 import S12EvaluationOperator from "./components/S12EvaluationOperator";
 import ReviewWorkPanel from "./components/ReviewWorkPanel";
+import T15DeliveryPanel from "./components/T15DeliveryPanel";
 
 function readParam(name: string): string | null {
   return new URLSearchParams(window.location.search).get(name);
@@ -44,6 +45,10 @@ function isS09Shell(): boolean {
 }
 function isS12Shell(): boolean {
   return window.location.pathname.startsWith("/controlled/s12");
+}
+
+function isS13Shell(): boolean {
+  return window.location.pathname.startsWith("/controlled/s13");
 }
 
 /** The T06/T07 competition demo shell: only the closed synthetic facade
@@ -187,6 +192,39 @@ function EvaluationOperatorShell() {
   );
 }
 
+/** The T15 delivery console shell mounted only for ``/controlled/s13``
+ * and its alias: it reads the S13 delivery view for one application id
+ * supplied via the ``application`` query value (presentation/navigation
+ * only; the S13 delivery query remains the sole
+ * authorization/existence/provenance authority).  No S01 queue/history or
+ * demo read can fire here; every call carries only the closed S13
+ * contract payloads.  The UI never describes Verification Routing as a
+ * disbursement decision and never equates obligation creation with
+ * downstream delivery receipt. */
+function DeliveryConsoleShell() {
+  const [applicationId, setApplicationId] = useState<string | null>(() =>
+    readParam("application"),
+  );
+  useEffect(() => {
+    const sync = () => setApplicationId(readParam("application"));
+    window.addEventListener("popstate", sync);
+    return () => window.removeEventListener("popstate", sync);
+  }, []);
+  return (
+    <div className="mx-auto max-w-4xl px-4 py-6">
+      <header className="app-header">
+        <h1>投递控制台</h1>
+        <span className="boundary" data-testid="s13-boundary-gate">
+          S13
+        </span>
+      </header>
+      <main>
+        <T15DeliveryPanel applicationId={applicationId} />
+      </main>
+    </div>
+  );
+}
+
 /** The Reviewer workbench owns every S01 read; it is never mounted on the
  * Integrator shell, so no S01 query can fire there. */
 function ReviewerWorkbench() {
@@ -263,6 +301,9 @@ export default function App() {
   }
   if (isS12Shell()) {
     return <EvaluationOperatorShell />;
+  }
+  if (isS13Shell()) {
+    return <DeliveryConsoleShell />;
   }
   return <ReviewerWorkbench />;
 }

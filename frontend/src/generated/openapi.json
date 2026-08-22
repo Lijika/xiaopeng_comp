@@ -24934,6 +24934,25 @@
         "summary": "Controlled S12 React Page"
       }
     },
+    "/controlled/s13": {
+      "get": {
+        "description": "Canonical S13 delivery console React shell (Ticket #49/T15): the\nsame shared qualified React build as the other controlled shells, served\nonly to the registered S13 operator credential with no-store headers and\nno S01 reviewer session.  The application_id query value is\npresentation/navigation only; the S13 query remains the sole\nauthorization/existence authority.",
+        "operationId": "controlled_s13_page_controlled_s13_get",
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Controlled S13 Page"
+      }
+    },
     "/controlled/s13/api/commands/compensate": {
       "post": {
         "operationId": "s13_compensate_controlled_s13_api_commands_compensate_post",
@@ -25084,6 +25103,25 @@
           }
         },
         "summary": "S13 Delivery Query"
+      }
+    },
+    "/controlled/s13/react": {
+      "get": {
+        "description": "The S13 /react alias: the same closed shell contract as the canonical\nroute.",
+        "operationId": "controlled_s13_react_page_controlled_s13_react_get",
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Controlled S13 React Page"
       }
     },
     "/demo/react": {

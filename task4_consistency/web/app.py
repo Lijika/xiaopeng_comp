@@ -5758,6 +5758,29 @@ def _s12_react_shell() -> Response:
     return response
 
 
+def _s13_react_shell() -> Response:
+    """The shared qualified React build under the S13 operator boundary, or
+    the minimized closed S13 503 when the build is missing or partial.  The
+    shell never creates an S01/S02 reviewer session and the existing
+    governed routes stay available."""
+    index_html = _react_shell_index_html()
+    if index_html is None:
+        response = JSONResponse(
+            status_code=503,
+            content={
+                "detail": {
+                    "error": "S13_REACT_UNAVAILABLE",
+                    "message": "Controlled S13 delivery shell is not built",
+                }
+            },
+        )
+        _s01_disable_cache(response)
+        return response
+    response = HTMLResponse(index_html)
+    _s01_disable_cache(response)
+    return response
+
+
 @app.get("/controlled/s12", response_class=HTMLResponse)
 def controlled_s12_page(request: Request) -> Response:
     """Canonical S12 Evaluation Operator React shell (Ticket #48/T14): the
@@ -5769,11 +5792,35 @@ def controlled_s12_page(request: Request) -> Response:
 
 
 @app.get("/controlled/s12/react", response_class=HTMLResponse)
-def controlled_s12_react_page(request: Request) -> Response:
+def controlled_s12_react_page(request: Request) -> HTMLResponse:
     """The S12 /react alias: the same closed shell contract as the canonical
     route."""
     _s12_require_operator(request)
     return _s12_react_shell()
+
+
+@app.get("/controlled/s13", response_class=HTMLResponse)
+def controlled_s13_page(request: Request) -> Response:
+    """Canonical S13 delivery console React shell (Ticket #49/T15): the
+    same shared qualified React build as the other controlled shells, served
+    only to the registered S13 operator credential with no-store headers and
+    no S01 reviewer session.  The application_id query value is
+    presentation/navigation only; the S13 query remains the sole
+    authorization/existence authority."""
+    from task4_consistency.web.s13_http import _s13_require_operator
+
+    _s13_require_operator(request)
+    return _s13_react_shell()
+
+
+@app.get("/controlled/s13/react", response_class=HTMLResponse)
+def controlled_s13_react_page(request: Request) -> Response:
+    """The S13 /react alias: the same closed shell contract as the canonical
+    route."""
+    from task4_consistency.web.s13_http import _s13_require_operator
+
+    _s13_require_operator(request)
+    return _s13_react_shell()
 
 
 def create_s01_test_app() -> FastAPI:
