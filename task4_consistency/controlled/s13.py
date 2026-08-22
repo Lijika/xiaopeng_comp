@@ -132,6 +132,7 @@ class RegisteredDownstreamRegistry:
                     "route_type": item.route_type,
                     "adapter_id": item.adapter_id,
                     "adapter_version": item.adapter_version,
+                    "payload_schema_version": item.payload_schema_version,
                     "enabled": item.enabled,
                     "compensation_policy_id": item.compensation_policy_id,
                     "compensation_policy_version": item.compensation_policy_version,
@@ -159,8 +160,10 @@ class RegisteredDownstreamRegistry:
                 "scope": registration.scope,
                 "recipient_registration_id": registration.recipient_registration_id,
                 "recipient_id": registration.recipient_id,
+                "route_type": registration.route_type,
                 "adapter_id": registration.adapter_id,
                 "adapter_version": registration.adapter_version,
+                "payload_schema_version": registration.payload_schema_version,
                 "compensation_policy_id": registration.compensation_policy_id,
                 "compensation_policy_version": registration.compensation_policy_version,
             }
@@ -196,10 +199,19 @@ class RegisteredDownstreamRegistry:
         registration = matches[0]
         if not registration.enabled:
             raise S13CompletionBlocked(REASON_DELIVERY_TARGET_DISABLED)
+        if (
+            registration.payload_schema_version != S13_PAYLOAD_SCHEMA
+            or not registration.compensation_policy_id
+            or not registration.compensation_policy_version
+        ):
+            raise S13CompletionBlocked(REASON_DELIVERY_REGISTRATION_MISMATCH)
         adapter = self._adapters.get(registration.adapter_id)
         if adapter is None:
             raise S13CompletionBlocked(REASON_DELIVERY_TARGET_UNREGISTERED)
-        if getattr(adapter, "adapter_version", registration.adapter_version) != registration.adapter_version:
+        if (
+            getattr(adapter, "adapter_id", None) != registration.adapter_id
+            or getattr(adapter, "adapter_version", None) != registration.adapter_version
+        ):
             raise S13CompletionBlocked(REASON_DELIVERY_REGISTRATION_MISMATCH)
         return ResolvedDownstreamTarget(
             registration=registration,
@@ -215,25 +227,37 @@ class RegisteredDownstreamRegistry:
         matches = [
             item
             for item in self._registrations
-            if item.recipient_registration_id == obligation.get("recipient_registration_id")
+            if self._scope_matches(item.scope, scope)
+            and item.recipient_registration_id == obligation.get("recipient_registration_id")
             and item.recipient_id == obligation.get("recipient_id")
+            and item.route_type == obligation.get("route_type")
             and item.adapter_id == obligation.get("adapter_id")
             and item.adapter_version == obligation.get("adapter_version")
         ]
-        if not matches:
+        if len(matches) != 1:
             raise LookupError(REASON_DELIVERY_TARGET_UNREGISTERED)
         registration = matches[0]
         if not registration.enabled:
             raise LookupError(REASON_DELIVERY_TARGET_DISABLED)
+        if (
+            registration.payload_schema_version != S13_PAYLOAD_SCHEMA
+            or str(obligation.get("payload_schema") or "")
+            != registration.payload_schema_version
+            or not registration.compensation_policy_id
+            or not registration.compensation_policy_version
+        ):
+            raise LookupError(REASON_DELIVERY_REGISTRATION_MISMATCH)
         adapter = self._adapters.get(registration.adapter_id)
         if adapter is None:
             raise LookupError(REASON_DELIVERY_TARGET_UNREGISTERED)
+        if (
+            getattr(adapter, "adapter_id", None) != registration.adapter_id
+            or getattr(adapter, "adapter_version", None) != registration.adapter_version
+        ):
+            raise LookupError(REASON_DELIVERY_REGISTRATION_MISMATCH)
         expected_digest = self.adapter_registration_digest(registration)
         if str(obligation.get("adapter_registration_digest") or "") != expected_digest:
             raise LookupError(REASON_DELIVERY_REGISTRATION_MISMATCH)
-        if str(obligation.get("scope") or "") != registration.scope:
-            # Legacy drift guard — obligation scope must match registration scope.
-            pass
         return ResolvedDownstreamTarget(
             registration=registration,
             adapter=adapter,

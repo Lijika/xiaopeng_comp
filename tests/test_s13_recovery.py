@@ -4,17 +4,25 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from task4_consistency.controlled.s01 import ControlledScenarioService, S01CommandPrincipal
+from task4_consistency.controlled.s01 import (
+    ControlledScenarioService,
+    QueryNotFound,
+    S01CommandPrincipal,
+)
 from task4_consistency.controlled.s01_store import SQLiteTargetStore
 from task4_consistency.controlled.s13 import (
+    DeliveryLookupResult,
+    DeliverySendResult,
     DownstreamRecipientRegistration,
     InMemoryDownstreamAdapter,
     RegisteredDownstreamRegistry,
+    S13CompletionBlocked,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -82,6 +90,84 @@ def test_sender_claims_before_send_and_duplicate_claim_is_idle(
     assert len(store.delivery_attempts) == 1
 
 
+def test_expired_claim_becomes_unknown_and_reconciles_after_worker_crash(
+    tmp_path: Path,
+) -> None:
+    adapter = InMemoryDownstreamAdapter()
+    reg = DownstreamRecipientRegistration(
+        scope="C-DEMO",
+        recipient_registration_id="c-demo-downstream-review-default",
+        recipient_id="downstream-review-desk",
+        adapter_id=adapter.adapter_id,
+        adapter_version=adapter.adapter_version,
+    )
+    registry = RegisteredDownstreamRegistry([reg], {adapter.adapter_id: adapter})
+    clock = [100]
+    service = ControlledScenarioService(
+        fixture_root=ROOT / "fixtures" / "applications",
+        rules_path=RULES,
+        state_path=tmp_path / "target.sqlite3",
+        downstream_registry=registry,
+        clock=lambda: clock[0],
+    )
+    app_id = _admit_and_complete(service)
+    original_send = adapter.send
+
+    def crash(_request: Any) -> Any:
+        raise KeyboardInterrupt("worker crashed after claim")
+
+    adapter.send = crash  # type: ignore[method-assign]
+    with pytest.raises(KeyboardInterrupt):
+        service.process_next_delivery()
+
+    clock[0] = 131
+    reloaded = ControlledScenarioService(
+        fixture_root=ROOT / "fixtures" / "applications",
+        rules_path=RULES,
+        state_path=tmp_path / "target.sqlite3",
+        downstream_registry=registry,
+        clock=lambda: clock[0],
+    )
+    assert reloaded.delivery_view(application_id=app_id)["delivery_status"] == "unknown"
+    obligation = reloaded.delivery_view(application_id=app_id)["obligation"]
+    reconciliation = reloaded.reconcile_delivery(
+        obligation_id=obligation["obligation_id"]
+    )
+    assert reconciliation["status"] == "retry_scheduled"
+    assert any(
+        item.get("reason_code") == "S13_CLAIM_LEASE_EXPIRED"
+        for item in reloaded._store.delivery_reconciliations
+    )
+
+    adapter.send = original_send  # type: ignore[method-assign]
+    retried = reloaded.process_next_delivery()
+    assert retried["status"] == "received"
+    assert retried["operation_id"] == obligation["operation_id"]
+
+
+def test_delayed_worker_is_fenced_until_same_operation_reconciliation(
+    tmp_path: Path,
+) -> None:
+    adapter = InMemoryDownstreamAdapter()
+    service, _, adapter = _service_with_adapter(tmp_path, adapter)
+    app_id = _admit_and_complete(service)
+    clock = [100]
+    service._clock = lambda: clock[0]  # type: ignore[method-assign]
+    original_send = adapter.send
+
+    def delayed(request: Any) -> Any:
+        clock[0] = 131
+        return original_send(request)
+
+    adapter.send = delayed  # type: ignore[method-assign]
+    result = service.process_next_delivery(now=100)
+    assert result["status"] == "stale"
+    assert service.delivery_view(application_id=app_id)["delivery_status"] == "unknown"
+    obligation = service.delivery_view(application_id=app_id)["obligation"]
+    reconciled = service.reconcile_delivery(obligation_id=obligation["obligation_id"])
+    assert reconciled["status"] == "received"
+
+
 def test_timeout_after_remote_execution_becomes_unknown_and_same_operation_reconcile_confirms(
     tmp_path: Path,
 ) -> None:
@@ -135,6 +221,52 @@ def test_timeout_without_execution_reconcile_not_executed_allows_same_operation_
     assert len([e for e in service._store.inbox if e.get("kind") == "s13_delivery_receipt"]) == 1
 
 
+def test_active_retry_claim_is_not_claimed_by_a_second_worker(tmp_path: Path) -> None:
+    adapter = InMemoryDownstreamAdapter(behavior="timeout_without_execute")
+    service, _, adapter = _service_with_adapter(tmp_path, adapter)
+    app_id = _admit_and_complete(service)
+    service.process_next_delivery()
+    obligation = service.delivery_view(application_id=app_id)["obligation"]
+    service.reconcile_delivery(obligation_id=obligation["obligation_id"])
+
+    entered = threading.Event()
+    release = threading.Event()
+    calls = 0
+    call_lock = threading.Lock()
+    adapter_result = DeliverySendResult(
+        outcome="confirmed", remote_message_id="m-retry"
+    )
+
+    def delayed_confirm(_request: Any) -> Any:
+        nonlocal calls
+        with call_lock:
+            calls += 1
+            call_no = calls
+        entered.set()
+        if call_no == 1:
+            assert release.wait(timeout=5)
+        return adapter_result
+
+    adapter.send = delayed_confirm  # type: ignore[method-assign]
+    first_result: list[dict[str, Any]] = []
+    first = threading.Thread(
+        target=lambda: first_result.append(
+            service.process_next_delivery(worker_id="w1")
+        ),
+        daemon=True,
+    )
+    first.start()
+    assert entered.wait(timeout=5)
+    assert service.delivery_view(application_id=app_id)["delivery_status"] == "sent"
+    second = service.process_next_delivery(worker_id="w2")
+    assert second["status"] == "idle"
+    release.set()
+    first.join(timeout=5)
+    assert not first.is_alive()
+    assert first_result[0]["status"] == "received"
+    assert calls == 1
+
+
 def test_unknown_without_reconciliation_cannot_be_blindly_retried(tmp_path: Path) -> None:
     adapter = InMemoryDownstreamAdapter(behavior="timeout_without_execute")
     service, _, adapter = _service_with_adapter(tmp_path, adapter)
@@ -145,6 +277,44 @@ def test_unknown_without_reconciliation_cannot_be_blindly_retried(tmp_path: Path
     # status is unknown, not retry_scheduled, so the sender does not pick it.
     blind = service.process_next_delivery()
     assert blind["status"] == "idle"
+
+
+def test_indeterminate_reconciliation_is_idempotent_at_same_timestamp(
+    tmp_path: Path,
+) -> None:
+    adapter = InMemoryDownstreamAdapter(behavior="timeout_without_execute")
+    service, _, adapter = _service_with_adapter(tmp_path, adapter)
+    app_id = _admit_and_complete(service)
+    service.process_next_delivery(now=100)
+    adapter.lookup = lambda **_: DeliveryLookupResult(outcome="indeterminate")  # type: ignore[method-assign]
+    obligation = service.delivery_view(application_id=app_id)["obligation"]
+
+    first = service.reconcile_delivery(obligation_id=obligation["obligation_id"], now=200)
+    second = service.reconcile_delivery(obligation_id=obligation["obligation_id"], now=200)
+
+    assert first["status"] == "indeterminate"
+    assert second["status"] == "indeterminate"
+    indeterminate = [
+        item
+        for item in service._store.delivery_reconciliations
+        if item.get("outcome") == "indeterminate"
+    ]
+    assert len(indeterminate) == 2
+
+
+def test_transport_exception_remains_unknown_for_reconciliation(tmp_path: Path) -> None:
+    adapter = InMemoryDownstreamAdapter()
+    service, _, adapter = _service_with_adapter(tmp_path, adapter)
+    app_id = _admit_and_complete(service)
+
+    def raise_transport(_request: Any) -> Any:
+        raise RuntimeError("transport connection lost")
+
+    adapter.send = raise_transport  # type: ignore[method-assign]
+    result = service.process_next_delivery()
+
+    assert result["status"] == "unknown"
+    assert service.delivery_view(application_id=app_id)["delivery_status"] == "unknown"
 
 
 def test_duplicate_adapter_response_one_business_effect(tmp_path: Path) -> None:
@@ -216,6 +386,65 @@ def test_compensation_failure_creates_recovery_work_and_keeps_obligation_unresol
     assert service._s13_obligation(ob["obligation_id"]) is not None
 
 
+def test_compensation_failure_can_be_retried_forward(tmp_path: Path) -> None:
+    adapter = InMemoryDownstreamAdapter(compensation_behavior="fail")
+    service, _, adapter = _service_with_adapter(tmp_path, adapter)
+    app_id = _admit_and_complete(service)
+    service.process_next_delivery()
+    obligation = service.delivery_view(application_id=app_id)["obligation"]
+    first = service.compensate_delivery(obligation_id=obligation["obligation_id"])
+    assert first["status"] == "failed"
+    adapter.compensation_behavior = "succeed"
+    second = service.compensate_delivery(obligation_id=obligation["obligation_id"])
+    assert second["status"] == "compensated"
+    assert service.delivery_view(application_id=app_id)["delivery_status"] == "compensated"
+
+
+def test_compensation_rejects_rotated_policy_pin(tmp_path: Path) -> None:
+    adapter = InMemoryDownstreamAdapter()
+    service, registration, adapter = _service_with_adapter(tmp_path, adapter)
+    app_id = _admit_and_complete(service)
+    service.process_next_delivery()
+    obligation = service.delivery_view(application_id=app_id)["obligation"]
+    rotated = DownstreamRecipientRegistration(
+        scope=registration.scope,
+        recipient_registration_id=registration.recipient_registration_id,
+        recipient_id=registration.recipient_id,
+        adapter_id=registration.adapter_id,
+        adapter_version=registration.adapter_version,
+        compensation_policy_id=registration.compensation_policy_id,
+        compensation_policy_version="2",
+    )
+    service._downstream_registry = RegisteredDownstreamRegistry(
+        [rotated], {adapter.adapter_id: adapter}
+    )
+    result = service.compensate_delivery(obligation_id=obligation["obligation_id"])
+    assert result["status"] == "blocked"
+    assert result["reason_code"] in {
+        "S13_DELIVERY_REGISTRATION_MISMATCH",
+        "S13_COMPENSATION_POLICY_UNAVAILABLE",
+    }
+
+
+def test_s13_operator_scope_cannot_access_other_registered_scope(tmp_path: Path) -> None:
+    service, _, _ = _service_with_adapter(tmp_path, InMemoryDownstreamAdapter())
+    app_id = _admit_and_complete(service)
+    foreign = S01CommandPrincipal(
+        subject="foreign-s13-operator",
+        role="operator",
+        scope="R-OBSERVED/tenant-test",
+        source_id="s13-delivery-console",
+        expires_at=float("inf"),
+    )
+    with pytest.raises(QueryNotFound):
+        service.delivery_view(principal=foreign, application_id=app_id)
+    obligation = service.delivery_view(application_id=app_id)["obligation"]
+    with pytest.raises(QueryNotFound):
+        service.reconcile_delivery(
+            principal=foreign, obligation_id=obligation["obligation_id"]
+        )
+
+
 def test_compensation_succeeds_marks_obligation_compensated(tmp_path: Path) -> None:
     adapter = InMemoryDownstreamAdapter(compensation_behavior="succeed")
     service, _, adapter = _service_with_adapter(tmp_path, adapter)
@@ -244,6 +473,63 @@ def test_sender_disable_stops_new_claims_and_obligations_remain_queryable(
     service._delivery_sender_enabled = True
     sent = service.process_next_delivery()
     assert sent["status"] == "received"
+
+
+def test_disabled_registration_is_replayable_after_reenable(tmp_path: Path) -> None:
+    adapter = InMemoryDownstreamAdapter()
+    service, registration, adapter = _service_with_adapter(tmp_path, adapter)
+    app_id = _admit_and_complete(service)
+    original_registry = service._downstream_registry
+    disabled = DownstreamRecipientRegistration(
+        scope=registration.scope,
+        recipient_registration_id=registration.recipient_registration_id,
+        recipient_id=registration.recipient_id,
+        adapter_id=registration.adapter_id,
+        adapter_version=registration.adapter_version,
+        enabled=False,
+    )
+    service._downstream_registry = RegisteredDownstreamRegistry(
+        [disabled], {adapter.adapter_id: adapter}
+    )
+    blocked = service.process_next_delivery()
+    assert blocked["status"] == "blocked"
+    assert service.delivery_view(application_id=app_id)["delivery_status"] == "blocked"
+    store = SQLiteTargetStore(tmp_path / "target.sqlite3")
+    assert any(
+        event.get("kind") == "delivery_requested" and event.get("status") == "pending"
+        for event in store.outbox
+    )
+
+    service._downstream_registry = original_registry
+    replayed = service.process_next_delivery()
+    assert replayed["status"] == "received"
+
+
+def test_registration_loss_after_claim_restores_pending_outbox(tmp_path: Path) -> None:
+    adapter = InMemoryDownstreamAdapter()
+    service, _, _ = _service_with_adapter(tmp_path, adapter)
+    app_id = _admit_and_complete(service)
+    original_resolve = service._s13_downstream_resolve
+    calls = 0
+
+    def resolve_once_then_block(*, scope: str, obligation: Any | None = None) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return original_resolve(scope=scope, obligation=obligation)
+        raise S13CompletionBlocked("S13_DELIVERY_TARGET_DISABLED")
+
+    service._s13_downstream_resolve = resolve_once_then_block  # type: ignore[method-assign]
+    result = service.process_next_delivery()
+    assert result["status"] == "blocked"
+    store = SQLiteTargetStore(tmp_path / "target.sqlite3")
+    assert any(
+        event.get("kind") == "delivery_requested"
+        and event.get("obligation_id") == result["obligation_id"]
+        and event.get("status") == "pending"
+        for event in store.outbox
+    )
+    assert service.delivery_view(application_id=app_id)["delivery_status"] == "blocked"
 
 
 def test_attempt_fence_and_lease_are_monotonic_and_visible(tmp_path: Path) -> None:

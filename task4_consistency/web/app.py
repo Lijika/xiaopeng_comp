@@ -43,6 +43,10 @@ from task4_consistency.controlled.s01 import (
 )
 from task4_consistency.controlled.s08 import PolicyGovernanceService
 from task4_consistency.controlled.s12 import EvaluationService
+from task4_consistency.controlled.s13 import (
+    DownstreamRecipientRegistration,
+    build_c_demo_registry,
+)
 from task4_consistency.controlled.s02 import (
     ControlledObject,
     RegisteredSource,
@@ -313,6 +317,7 @@ S01_OPERATOR_CREDENTIAL = os.environ.get("TASK4_S01_OPERATOR_CREDENTIAL", "").st
 S01_OPERATOR_SUBJECT = os.environ.get("TASK4_S01_OPERATOR_SUBJECT", "").strip()
 S13_OPERATOR_CREDENTIAL = os.environ.get("TASK4_S13_OPERATOR_CREDENTIAL", "").strip()
 S13_OPERATOR_SUBJECT = os.environ.get("TASK4_S13_OPERATOR_SUBJECT", "").strip()
+S13_OPERATOR_SCOPE = os.environ.get("TASK4_S13_OPERATOR_SCOPE", "C-DEMO").strip()
 S02_CREDENTIAL = os.environ.get("TASK4_S02_CREDENTIAL", "").strip()
 S02_SUBJECT = os.environ.get("TASK4_S02_SUBJECT", "").strip()
 # S12 isolated evaluation plane: gated on a separately configured evaluation
@@ -5908,6 +5913,19 @@ def create_s02_test_app() -> FastAPI:
             registered_sources=S02_REGISTERED_SOURCES,
             controlled_objects=S02_CONTROLLED_OBJECTS,
             scenario_id=scenario_value or "app_r53_bad_engine.json",
+            downstream_registry=build_c_demo_registry(
+                extra_registrations=(
+                    [
+                        DownstreamRecipientRegistration(
+                            scope=f"R-OBSERVED/{S02_TENANT_ID}",
+                            recipient_registration_id="c-demo-downstream-review-default",
+                            recipient_id="downstream-review-desk",
+                        )
+                    ]
+                    if S02_TENANT_ID
+                    else []
+                )
+            ),
         )
         S01_TEST_DRIVER = None
     except Exception:

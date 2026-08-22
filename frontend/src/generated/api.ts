@@ -2089,6 +2089,83 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/controlled/s13/api/commands/compensate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** S13 Compensate */
+        post: operations["s13_compensate_controlled_s13_api_commands_compensate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s13/api/commands/process_next_delivery": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * S13 Process Next Delivery
+         * @description Operator-triggered sender claim — the periodic worker seam.
+         *
+         *     Returns one claim+send outcome; a distributed scheduler would call this
+         *     under its own lease/observability.  The outbox remains at-least-once:
+         *     a second call after a confirmed send returns idle with one business
+         *     effect, and a blind resend of an unknown outcome is rejected until
+         *     same-operation reconciliation proves not_executed.
+         */
+        post: operations["s13_process_next_delivery_controlled_s13_api_commands_process_next_delivery_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s13/api/commands/reconcile": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** S13 Reconcile */
+        post: operations["s13_reconcile_controlled_s13_api_commands_reconcile_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s13/delivery/{application_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** S13 Delivery Query */
+        get: operations["s13_delivery_query_controlled_s13_delivery__application_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/demo/react": {
         parameters: {
             query?: never;
@@ -7714,6 +7791,111 @@ export interface components {
         S12ViewStatistics: {
             "R-E2E": components["schemas"]["S12StatisticsBlock"];
             "R-T4-conditional": components["schemas"]["S12StatisticsBlock"];
+        };
+        /** S13CompensateCommand */
+        S13CompensateCommand: {
+            /** Obligation Id */
+            obligation_id: string;
+        };
+        /** S13CompensateResponse */
+        S13CompensateResponse: {
+            /** Obligation Id */
+            obligation_id: string;
+            /** Operation Id */
+            operation_id?: string | null;
+            /** Reason Code */
+            reason_code?: string | null;
+            /** Status */
+            status: string;
+        };
+        /** S13ObligationSummary */
+        S13ObligationSummary: {
+            /** Adapter Id */
+            adapter_id: string;
+            /** Adapter Version */
+            adapter_version: string;
+            /** Application Id */
+            application_id: string;
+            /** Attribution Kind */
+            attribution_kind: string;
+            /** Cycle */
+            cycle: number;
+            /** Obligation Id */
+            obligation_id: string;
+            /** Operation Id */
+            operation_id: string;
+            /** Payload Digest */
+            payload_digest: string;
+            /** Payload Ref */
+            payload_ref: string;
+            /** Payload Schema */
+            payload_schema: string;
+            /** Recipient Id */
+            recipient_id: string;
+            /** Route */
+            route: string;
+            /** Status */
+            status: string;
+        };
+        /** S13ProcessNextDeliveryResponse */
+        S13ProcessNextDeliveryResponse: {
+            /** Obligation Id */
+            obligation_id?: string | null;
+            /** Operation Id */
+            operation_id?: string | null;
+            /** Reason Code */
+            reason_code?: string | null;
+            /** Remote Message Id */
+            remote_message_id?: string | null;
+            /** Status */
+            status: string;
+        };
+        /** S13QueryResponse */
+        S13QueryResponse: {
+            /** Application Id */
+            application_id: string;
+            /** Attempt Count */
+            attempt_count: number;
+            /** Cycle */
+            cycle: number;
+            /** Delivery Status */
+            delivery_status: string;
+            /** Lifecycle Revision */
+            lifecycle_revision: number;
+            obligation: components["schemas"]["S13ObligationSummary"] | null;
+            /** Phase */
+            phase: string;
+            /** Projection Watermark */
+            projection_watermark: number;
+            /** Route */
+            route: string;
+            /**
+             * Schema Version
+             * @constant
+             */
+            schema_version: "s13-delivery-view/1";
+            /** Store Revision */
+            store_revision: number;
+            /** Verification Completed */
+            verification_completed: boolean;
+        };
+        /** S13ReconcileCommand */
+        S13ReconcileCommand: {
+            /** Obligation Id */
+            obligation_id: string;
+        };
+        /** S13ReconcileResponse */
+        S13ReconcileResponse: {
+            /** Delivery Status */
+            delivery_status: string;
+            /** Obligation Id */
+            obligation_id: string;
+            /** Operation Id */
+            operation_id?: string | null;
+            /** Reason Code */
+            reason_code?: string | null;
+            /** Status */
+            status: string;
         };
         /** T05BusinessExceptionOperationsResult */
         T05BusinessExceptionOperationsResult: {
@@ -13679,6 +13861,208 @@ export interface operations {
                 content: {
                     "text/html": string;
                 };
+            };
+        };
+    };
+    s13_compensate_controlled_s13_api_commands_compensate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["S13CompensateCommand"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S13CompensateResponse"];
+                };
+            };
+            /** @description Registered S13 operator identity required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Application or obligation is unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description S13 command does not match the registered contract */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description S13 delivery plane is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    s13_process_next_delivery_controlled_s13_api_commands_process_next_delivery_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S13ProcessNextDeliveryResponse"];
+                };
+            };
+            /** @description Registered S13 operator identity required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Application or obligation is unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description S13 command does not match the registered contract */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description S13 delivery plane is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    s13_reconcile_controlled_s13_api_commands_reconcile_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["S13ReconcileCommand"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S13ReconcileResponse"];
+                };
+            };
+            /** @description Registered S13 operator identity required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Application or obligation is unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description S13 command does not match the registered contract */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description S13 delivery plane is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    s13_delivery_query_controlled_s13_delivery__application_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                application_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S13QueryResponse"];
+                };
+            };
+            /** @description Registered S13 operator identity required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Application or obligation is unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description S13 command does not match the registered contract */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description S13 delivery plane is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

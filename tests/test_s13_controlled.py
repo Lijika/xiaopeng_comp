@@ -687,4 +687,3 @@ def test_human_completion_fails_closed_when_delivery_target_disabled(tmp_path: P
     assert blocked["reason_code"] == "S13_DELIVERY_TARGET_DISABLED"
     store = SQLiteTargetStore(tmp_path / "target.sqlite3")
     assert len([row for row in getattr(store, "delivery_obligations", []) if row.get("application_id") == admitted.application_id]) == 0
-

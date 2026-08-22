@@ -98,6 +98,22 @@ def test_s13_http_requires_operator_identity(monkeypatch: Any, tmp_path: Path) -
     )
 
 
+def test_s13_http_never_falls_back_to_s01_operator_identity(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    _install(monkeypatch, tmp_path)
+    monkeypatch.setattr(webapp, "S13_OPERATOR_CREDENTIAL", "")
+    monkeypatch.setattr(webapp, "S13_OPERATOR_SUBJECT", "")
+    monkeypatch.setattr(webapp, "S01_OPERATOR_CREDENTIAL", "s01-operator")
+    monkeypatch.setattr(webapp, "S01_OPERATOR_SUBJECT", "s01-subject")
+    client = TestClient(webapp.app)
+    response = client.get(
+        "/controlled/s13/delivery/app_unknown",
+        headers={"Authorization": "Bearer s01-operator"},
+    )
+    assert response.status_code == 403
+
+
 def test_s13_http_query_shows_verification_completed_pending_and_received_distinct(
     monkeypatch: Any, tmp_path: Path
 ) -> None:
@@ -125,6 +141,8 @@ def test_s13_http_query_shows_verification_completed_pending_and_received_distin
     assert body["phase"] == "Verification Completed"
     assert body["verification_completed"] is True
     assert body["obligation"] is not None
+    assert "payload" not in body["obligation"]
+    assert "route_basis" not in body["obligation"]
     assert body["delivery_status"] == "pending"
 
     # Drive the delivery through the HTTP sender; then query shows received.
@@ -242,6 +260,14 @@ def test_s13_http_compensate_and_compensation_failure_with_recovery(
     after = client.get(f"/controlled/s13/delivery/{admitted.application_id}", headers=_auth()).json()
     assert after["delivery_status"] == "compensation_failed"
     assert after["obligation"] is not None
+    adapter.compensation_behavior = "succeed"
+    retry = client.post(
+        "/controlled/s13/api/commands/compensate",
+        json={"obligation_id": oid},
+        headers=_auth(),
+    )
+    assert retry.status_code == 200, retry.text
+    assert retry.json()["status"] == "compensated"
 
 
 def test_s13_http_openapi_contains_closed_s13_schema(monkeypatch: Any) -> None:
@@ -253,6 +279,8 @@ def test_s13_http_openapi_contains_closed_s13_schema(monkeypatch: Any) -> None:
     assert "/controlled/s13/api/commands/reconcile" in paths
     assert "/controlled/s13/api/commands/compensate" in paths
     assert "/controlled/s13/api/commands/process_next_delivery" in paths
+    schema = openapi.json()["components"]["schemas"]["S13ObligationSummary"]
+    assert schema["additionalProperties"] is False
 
 
 def test_s13_http_register_router_conflicting_module_rejected(monkeypatch: Any) -> None:

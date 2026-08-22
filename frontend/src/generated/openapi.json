@@ -16385,6 +16385,83 @@
         "title": "S13CompensateResponse",
         "type": "object"
       },
+      "S13ObligationSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "adapter_id": {
+            "title": "Adapter Id",
+            "type": "string"
+          },
+          "adapter_version": {
+            "title": "Adapter Version",
+            "type": "string"
+          },
+          "application_id": {
+            "title": "Application Id",
+            "type": "string"
+          },
+          "attribution_kind": {
+            "title": "Attribution Kind",
+            "type": "string"
+          },
+          "cycle": {
+            "minimum": 1.0,
+            "title": "Cycle",
+            "type": "integer"
+          },
+          "obligation_id": {
+            "title": "Obligation Id",
+            "type": "string"
+          },
+          "operation_id": {
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "payload_digest": {
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "Payload Digest",
+            "type": "string"
+          },
+          "payload_ref": {
+            "title": "Payload Ref",
+            "type": "string"
+          },
+          "payload_schema": {
+            "title": "Payload Schema",
+            "type": "string"
+          },
+          "recipient_id": {
+            "title": "Recipient Id",
+            "type": "string"
+          },
+          "route": {
+            "title": "Route",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "obligation_id",
+          "application_id",
+          "cycle",
+          "route",
+          "attribution_kind",
+          "operation_id",
+          "recipient_id",
+          "adapter_id",
+          "adapter_version",
+          "payload_ref",
+          "payload_digest",
+          "payload_schema",
+          "status"
+        ],
+        "title": "S13ObligationSummary",
+        "type": "object"
+      },
       "S13ProcessNextDeliveryResponse": {
         "additionalProperties": false,
         "properties": {
@@ -16474,14 +16551,12 @@
           "obligation": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/S13ObligationSummary"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Obligation"
+            ]
           },
           "phase": {
             "title": "Phase",

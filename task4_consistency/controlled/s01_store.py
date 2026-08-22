@@ -1114,7 +1114,20 @@ class SQLiteTargetStore:
                 raise _integrity_error("outbox", item_id, "immutable event body changed")
             if existing_status == status:
                 continue
-            if existing_status != "pending" or status != "published":
+            is_s13_delivery = False
+            try:
+                is_s13_delivery = (
+                    json.loads(existing_payload).get("kind") == "delivery_requested"
+                )
+            except (TypeError, ValueError):
+                is_s13_delivery = False
+            if (
+                existing_status != "pending" or status != "published"
+            ) and not (
+                is_s13_delivery
+                and existing_status == "published"
+                and status == "pending"
+            ):
                 raise _integrity_error("outbox", item_id, "delivery status regression")
             next_revision = delivery_revision + 1
             connection.execute(

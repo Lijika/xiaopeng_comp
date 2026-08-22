@@ -14921,6 +14921,7 @@ class ControlledScenarioService:
         *,
         principal: S01CommandPrincipal,
         application_id: str,
+        include_s13: bool = False,
     ) -> dict[str, Any]:
         """Return an authorized, minimized timeline from immutable audit facts."""
         if (
@@ -14996,6 +14997,11 @@ class ControlledScenarioService:
             seen_keys: set[str] = set()
             records: list[dict[str, Any]] = []
             for event in self._store.audit_events:
+                if not include_s13 and str(event.get("action") or "").startswith("s13_"):
+                    # Preserve the predecessor audit projection contract. S13
+                    # facts remain durable in the audit ledger and are exposed
+                    # by the S13 delivery authority when that view is added.
+                    continue
                 event_time = event.get("event_time")
                 event_sequence = event.get("event_sequence")
                 event_time_key = event.get("event_time_key")
@@ -16447,6 +16453,44 @@ class ControlledScenarioService:
     def _s13_scope_for_application(self, application_id: str) -> str:
         return self._application_visibility_scope(application_id)
 
+    def _s13_principal_scope_visible(
+        self, principal: S01CommandPrincipal | None, scope: str
+    ) -> bool:
+        """Apply the S13 operator/resource boundary before a delivery action."""
+        if principal is None:
+            return True
+        if (
+            not isinstance(principal.subject, str)
+            or not principal.subject
+            or principal.subject.strip() != principal.subject
+            or principal.role != "operator"
+            or not isinstance(principal.source_id, str)
+            or not principal.source_id
+            or principal.source_id.strip() != principal.source_id
+            or not self.is_controlled_scope(principal.scope)
+            or (
+                principal.expires_at is not None
+                and (
+                    isinstance(principal.expires_at, bool)
+                    or not isinstance(principal.expires_at, (int, float))
+                    or float(principal.expires_at) <= float(self._clock())
+                )
+            )
+        ):
+            return False
+        return principal.scope == scope or (
+            principal.scope == "C-DEMO" and self.is_c_demo_scope(scope)
+        )
+
+    def _s13_require_principal_scope(
+        self,
+        principal: S01CommandPrincipal | None,
+        scope: str,
+        target_id: str,
+    ) -> None:
+        if not self._s13_principal_scope_visible(principal, scope):
+            raise QueryNotFound(target_id)
+
     def _s13_completion_gate(
         self,
         *,
@@ -16481,9 +16525,19 @@ class ControlledScenarioService:
         return None
 
     def _s13_downstream_resolve(
-        self, *, scope: str
+        self,
+        *,
+        scope: str,
+        obligation: dict[str, Any] | None = None,
     ) -> Any:
-        return self._downstream_registry.resolve(scope=scope)
+        try:
+            if obligation is not None:
+                return self._downstream_registry.lookup_by_obligation(
+                    obligation=obligation
+                )
+            return self._downstream_registry.resolve(scope=scope)
+        except LookupError as error:
+            raise _s13.S13CompletionBlocked(str(error)) from error
 
     def _s13_seal_verification_completion_with_obligation(
         self,
@@ -16637,12 +16691,13 @@ class ControlledScenarioService:
             "route_basis_digest": route_basis_digest,
             "recipient_registration_id": resolved.registration.recipient_registration_id,
             "recipient_id": resolved.registration.recipient_id,
+            "route_type": resolved.registration.route_type,
             "adapter_id": resolved.registration.adapter_id,
             "adapter_version": resolved.registration.adapter_version,
             "adapter_registration_digest": resolved.registration_digest,
             "payload_ref": payload_ref,
             "payload_digest": payload_digest,
-            "payload_schema": _s13.S13_PAYLOAD_SCHEMA,
+            "payload_schema": resolved.registration.payload_schema_version,
             "payload": dict(payload),
             "operation_id": operation_id,
             "compensation_policy_id": resolved.registration.compensation_policy_id,
@@ -16725,7 +16780,7 @@ class ControlledScenarioService:
 
     def _s13_delivery_status(self, obligation_id: str) -> str:
         """Derived delivery status — obligation rows are immutable."""
-        for comp in self._store.delivery_compensations:
+        for comp in reversed(self._store.delivery_compensations):
             if str(comp.get("obligation_id") or "") == str(obligation_id):
                 # compensation_failed is not terminal — obligation remains
                 # unresolved; compensated is terminal.
@@ -16733,6 +16788,42 @@ class ControlledScenarioService:
                     return "compensated"
                 if comp.get("outcome") == "failed":
                     return "compensation_failed"
+        attempts = self._s13_attempts_for_obligation(obligation_id)
+        if attempts:
+            latest = max(attempts, key=lambda item: int(item.get("attempt_no") or 0))
+            latest_attempt_id = str(latest.get("attempt_id") or "")
+            for rec in reversed(self._store.delivery_reconciliations):
+                if (
+                    str(rec.get("obligation_id") or "") != str(obligation_id)
+                    or str(rec.get("attempt_id") or "") != latest_attempt_id
+                ):
+                    continue
+                outcome = str(rec.get("outcome") or "")
+                if outcome == "confirmed":
+                    return "received"
+                if outcome == "not_executed":
+                    return "retry_scheduled"
+                if outcome in {"unknown", "indeterminate"}:
+                    return "unknown"
+                if outcome == "blocked":
+                    return "blocked"
+            outcome = str(latest.get("outcome") or "claimed")
+            if outcome == "claimed":
+                lease_until = latest.get("lease_until")
+                if (
+                    isinstance(lease_until, (int, float))
+                    and not isinstance(lease_until, bool)
+                    and float(lease_until) <= float(self._clock())
+                ):
+                    return "unknown"
+                return "sent"
+            if outcome == "unknown":
+                return "unknown"
+            if outcome == "blocked":
+                return "blocked"
+            if outcome == "confirmed":
+                return "received"
+            return "pending"
         for rec in reversed(self._store.delivery_reconciliations):
             if str(rec.get("obligation_id") or "") != str(obligation_id):
                 continue
@@ -16741,21 +16832,10 @@ class ControlledScenarioService:
                 return "received"
             if outcome == "not_executed":
                 return "retry_scheduled"
-            if outcome == "unknown":
-                return "unknown"
-            if outcome == "indeterminate":
+            if outcome in {"unknown", "indeterminate"}:
                 return "unknown"
             if outcome == "blocked":
                 return "blocked"
-        attempts = self._s13_attempts_for_obligation(obligation_id)
-        if not attempts:
-            # No attempt yet — check inbox for direct confirmed (sender hasn't
-            # run but might on restart after confirmed remote effect).
-            inbox_hit = any(
-                str(entry.get("operation_id") or "") == str(self._s13_obligation(obligation_id) or {}).get("operation_id", "")
-                for entry in self._store.delivery_reconciliations
-            )
-            _ = inbox_hit
         # Inbox-confirmed is the receipt (one business effect).
         obligation = self._s13_obligation(obligation_id)
         if obligation is not None:
@@ -16767,18 +16847,101 @@ class ControlledScenarioService:
                 if str(entry.get("kind") or "") == "s13_delivery_receipt"
             ):
                 return "received"
-        if attempts:
-            last = sorted(attempts, key=lambda item: int(item.get("attempt_no") or 0))[-1]
-            outcome = str(last.get("outcome") or "claimed")
-            if outcome == "claimed":
-                return "sent"
-            if outcome == "unknown":
-                return "unknown"
-            if outcome == "blocked":
-                return "blocked"
-            if outcome == "confirmed":
-                return "received"
         return "pending"
+
+    def _s13_expire_claims(self, *, now: int) -> bool:
+        """Record lease expiry before a worker takes over an old claim."""
+        expired = [
+            attempt
+            for attempt in self._store.delivery_attempts
+            if str(attempt.get("outcome") or "") == "claimed"
+            and isinstance(attempt.get("lease_until"), (int, float))
+            and not isinstance(attempt.get("lease_until"), bool)
+            and float(attempt["lease_until"]) <= now
+            and not any(
+                str(reconciliation.get("attempt_id") or "")
+                == str(attempt.get("attempt_id") or "")
+                for reconciliation in self._store.delivery_reconciliations
+            )
+        ]
+        if not expired:
+            return True
+        staged = copy.deepcopy(self._store)
+        for attempt in expired:
+            attempt_id = str(attempt.get("attempt_id") or "")
+            obligation_id = str(attempt.get("obligation_id") or "")
+            operation_id = str(attempt.get("operation_id") or "")
+            scope = str(
+                next(
+                    (
+                        item.get("scope")
+                        for item in staged.delivery_obligations
+                        if str(item.get("obligation_id") or "") == obligation_id
+                    ),
+                    "",
+                )
+            )
+            staged.delivery_reconciliations.append(
+                {
+                    "reconciliation_id": self._stable_id(
+                        "delivery_recon", f"{obligation_id}:lease_expired:{attempt_id}"
+                    ),
+                    "obligation_id": obligation_id,
+                    "operation_id": operation_id,
+                    "attempt_id": attempt_id,
+                    "outcome": "unknown",
+                    "reason_code": "S13_CLAIM_LEASE_EXPIRED",
+                    "recorded_at": now,
+                }
+            )
+            staged.audit_events.append(
+                {
+                    "event_id": self._stable_id(
+                        "audit", f"s13_lease_expired:{attempt_id}"
+                    ),
+                    "action": "s13_delivery_lease_expired",
+                    "subject": str(attempt.get("worker_id") or "s13-delivery-worker"),
+                    "role": "worker",
+                    "scope": scope,
+                    "source_id": "s13-delivery-recovery",
+                    "obligation_id": obligation_id,
+                    "operation_id": operation_id,
+                    "attempt_id": attempt_id,
+                    "result": "unknown",
+                    "reason_code": "S13_CLAIM_LEASE_EXPIRED",
+                    **self._audit_time_fields(staged, now=now),
+                }
+            )
+        try:
+            staged.persist()
+        except StaleStoreRevision:
+            self._store.reload()
+            return False
+        self._store = staged
+        return True
+
+    @staticmethod
+    def _s13_block_replayable(reason_code: object) -> bool:
+        return str(reason_code or "") in {
+            _s13.REASON_DELIVERY_TARGET_UNREGISTERED,
+            _s13.REASON_DELIVERY_TARGET_DISABLED,
+            _s13.REASON_DELIVERY_REGISTRATION_MISMATCH,
+        }
+
+    def _s13_last_block_reason(self, obligation_id: str) -> str:
+        for reconciliation in reversed(self._s13_reconciliations_for_obligation(obligation_id)):
+            if reconciliation.get("outcome") == "blocked":
+                return str(reconciliation.get("reason_code") or "")
+        return ""
+
+    def _s13_reconciliations_for_obligation(
+        self, obligation_id: str
+    ) -> list[dict[str, Any]]:
+        return [
+            item
+            for item in self._store.delivery_reconciliations
+            if str(item.get("obligation_id") or "") == str(obligation_id)
+        ]
 
     def delivery_view(
         self,
@@ -16803,6 +16966,10 @@ class ControlledScenarioService:
                     break
             if app is None:
                 raise QueryNotFound(application_id)
+            application_scope = self._s13_scope_for_application(application_id)
+            self._s13_require_principal_scope(
+                principal, application_scope, application_id
+            )
             obligations = [
                 item
                 for item in self._store.delivery_obligations
@@ -16839,6 +17006,7 @@ class ControlledScenarioService:
         *,
         worker_id: str = "s13-delivery-worker",
         now: int | None = None,
+        principal: S01CommandPrincipal | None = None,
     ) -> dict[str, Any]:
         """At-least-once outbox claim: durable attempt before external I/O.
 
@@ -16853,6 +17021,8 @@ class ControlledScenarioService:
             return {"status": "rejected", "reason_code": "INVALID_WORKER"}
         with self._lock:
             self._reload_store()
+            if not self._s13_expire_claims(now=claim_now):
+                return {"status": "unavailable", "reason_code": "STORAGE_UNAVAILABLE"}
             pending = [
                 event
                 for event in self._store.outbox
@@ -16868,8 +17038,15 @@ class ControlledScenarioService:
                 obligation = self._s13_obligation(oid)
                 if obligation is None:
                     continue
+                if not self._s13_principal_scope_visible(
+                    principal, str(obligation.get("scope") or "")
+                ):
+                    continue
                 status = self._s13_delivery_status(oid)
-                if status not in {"pending", "retry_scheduled"}:
+                if status not in {"pending", "retry_scheduled"} and not (
+                    status == "blocked"
+                    and self._s13_block_replayable(self._s13_last_block_reason(oid))
+                ):
                     continue
                 eligible = event
                 break
@@ -16885,7 +17062,17 @@ class ControlledScenarioService:
                 # retry_scheduled.  Sender remains at-least-once.
                 for cand in sorted(self._store.delivery_obligations, key=lambda item: str(item.get("obligation_id") or "")):
                     cand_id = str(cand.get("obligation_id") or "")
-                    if self._s13_delivery_status(cand_id) == "retry_scheduled":
+                    if not self._s13_principal_scope_visible(
+                        principal, str(cand.get("scope") or "")
+                    ):
+                        continue
+                    cand_status = self._s13_delivery_status(cand_id)
+                    if cand_status == "retry_scheduled" or (
+                        cand_status == "blocked"
+                        and self._s13_block_replayable(
+                            self._s13_last_block_reason(cand_id)
+                        )
+                    ):
                         oid = cand_id
                         obligation = cand
                         retry_without_outbox = True
@@ -16900,16 +17087,13 @@ class ControlledScenarioService:
             scope = str(obligation.get("scope") or "")
             # Validate registration is still known at send time (fail closed).
             try:
-                resolved = self._s13_downstream_resolve(scope=scope)
+                resolved = self._s13_downstream_resolve(
+                    scope=scope, obligation=obligation
+                )
             except _s13.S13CompletionBlocked as blocked:
-                # Record a blocked fact atomically and mark outbox published so
-                # the sender stops spinning on a permanently blocked item.
+                # Record a blocked fact atomically while leaving the request
+                # pending so registration recovery can claim the same operation.
                 staged = copy.deepcopy(self._store)
-                if not retry_without_outbox:
-                    for event in staged.outbox:
-                        if str(event.get("event_id") or "") == str(eligible.get("event_id") or ""):  # type: ignore[union-attr]
-                            event["status"] = "published"
-                            break
                 attempt_no = 1 + len([item for item in staged.delivery_attempts if str(item.get("obligation_id") or "") == oid])
                 attempt_id = self._stable_id("delivery_attempt", f"{oid}:{attempt_no}:{claim_now}")
                 try:
@@ -17084,12 +17268,14 @@ class ControlledScenarioService:
         # Resolve the adapter at call time so the request carries the pinned
         # registration digest (fail closed on mismatch).
         try:
-            resolved = self._s13_downstream_resolve(scope=scope)
-        except _s13.S13CompletionBlocked:
+            resolved = self._s13_downstream_resolve(
+                scope=scope, obligation=obligation
+            )
+        except _s13.S13CompletionBlocked as blocked:
             # Treat as blocked after claim: record blocked outcome in a
             # second transaction without holding the claim transaction open.
             send_result_outcome = "transport_error"
-            send_result_reason = _s13.REASON_DELIVERY_TARGET_UNREGISTERED
+            send_result_reason = blocked.reason_code
             send_result_remote = None
             send_result_digest = None
         else:
@@ -17119,7 +17305,11 @@ class ControlledScenarioService:
                 try:
                     adapter_result = resolved.adapter.send(send_request)
                 except Exception:
-                    adapter_result = _s13.DeliverySendResult(outcome="transport_error", reason_code="transport.exception")
+                    # A transport exception has no definitive remote outcome;
+                    # reconciliation must use the original operation id.
+                    adapter_result = _s13.DeliverySendResult(
+                        outcome="timeout", reason_code="transport.exception"
+                    )
                 if adapter_result.outcome == "confirmed":
                     send_result_outcome = "confirmed"
                     send_result_reason = None
@@ -17148,6 +17338,82 @@ class ControlledScenarioService:
             if len(matching_attempts) != 1:
                 return {"status": "unavailable", "reason_code": "STORAGE_UNAVAILABLE"}
             attempt_row = matching_attempts[0]
+            attempt_rows = [
+                item
+                for item in staged.delivery_attempts
+                if str(item.get("obligation_id") or "") == oid
+            ]
+            latest_attempt_no = max(
+                (int(item.get("attempt_no") or 0) for item in attempt_rows),
+                default=0,
+            )
+            lease_until = attempt_row.get("lease_until")
+            outcome_now = int(self._clock())
+            claim_is_current = (
+                int(attempt_row.get("attempt_no") or 0) == latest_attempt_no
+                and isinstance(lease_until, (int, float))
+                and not isinstance(lease_until, bool)
+                and float(lease_until) > outcome_now
+            )
+            if not claim_is_current:
+                # A delayed worker cannot publish after lease expiry or a
+                # newer fence.  An expired current claim remains unknown and
+                # is reconciled by the original operation identity.
+                if int(attempt_row.get("attempt_no") or 0) == latest_attempt_no:
+                    already_recorded = any(
+                        str(item.get("attempt_id") or "") == attempt_id
+                        for item in staged.delivery_reconciliations
+                    )
+                    if not already_recorded:
+                        staged.delivery_reconciliations.append(
+                            {
+                                "reconciliation_id": self._stable_id(
+                                    "delivery_recon",
+                                    f"{oid}:stale_fence:{attempt_id}",
+                                ),
+                                "obligation_id": oid,
+                                "operation_id": operation_id,
+                                "attempt_id": attempt_id,
+                                "outcome": "unknown",
+                                "reason_code": "S13_STALE_DELIVERY_FENCE",
+                                "recorded_at": outcome_now,
+                            }
+                        )
+                        staged.audit_events.append(
+                            {
+                                "event_id": self._stable_id(
+                                    "audit", f"s13_stale_delivery_fence:{attempt_id}"
+                                ),
+                                "action": "s13_delivery_fenced",
+                                "subject": worker_id,
+                                "role": "worker",
+                                "scope": scope,
+                                "source_id": "s13-delivery-worker",
+                                "application_id": str(
+                                    obligation.get("application_id") or ""
+                                ),
+                                "obligation_id": oid,
+                                "operation_id": operation_id,
+                                "attempt_id": attempt_id,
+                                "result": "unknown",
+                                "reason_code": "S13_STALE_DELIVERY_FENCE",
+                                **self._audit_time_fields(staged, now=outcome_now),
+                            }
+                        )
+                        try:
+                            staged.persist()
+                        except StaleStoreRevision:
+                            return {
+                                "status": "unavailable",
+                                "reason_code": "STORAGE_UNAVAILABLE",
+                            }
+                        self._store = staged
+                return {
+                    "status": "stale",
+                    "obligation_id": oid,
+                    "operation_id": operation_id,
+                    "reason_code": "S13_STALE_DELIVERY_FENCE",
+                }
             # Mutating an immutable claim is prohibited — replace by appending
             # an outcome fact (recon) and draining inbox on confirm.  The
             # claim row remains as the lease/fence witness; the outcome is
@@ -17258,6 +17524,14 @@ class ControlledScenarioService:
                         "recorded_at": claim_now,
                     }
                 )
+                if self._s13_block_replayable(send_result_reason):
+                    for event in staged.outbox:
+                        if (
+                            str(event.get("kind") or "") == "delivery_requested"
+                            and str(event.get("obligation_id") or "") == oid
+                        ):
+                            event["status"] = "pending"
+                            break
                 staged.audit_events.append(
                     {
                         "event_id": self._stable_id("audit", f"s13_delivery_blocked:{attempt_id}"),
@@ -17292,22 +17566,28 @@ class ControlledScenarioService:
         obligation_id: str,
         worker_id: str = "s13-reconciler",
         now: int | None = None,
+        principal: S01CommandPrincipal | None = None,
     ) -> dict[str, Any]:
         """Same-operation reconciliation: lookup the original operation id."""
         claim_now = int(self._clock() if now is None else now)
         with self._lock:
             self._reload_store()
+            if not self._s13_expire_claims(now=claim_now):
+                return {"status": "unavailable", "reason_code": "STORAGE_UNAVAILABLE"}
             obligation = self._s13_obligation(obligation_id)
             if obligation is None:
                 raise QueryNotFound(obligation_id)
+            scope = str(obligation.get("scope") or "")
+            self._s13_require_principal_scope(principal, scope, obligation_id)
             status = self._s13_delivery_status(obligation_id)
             if status != "unknown":
                 return {"status": "stale", "reason_code": "S13_NOT_RECONCILABLE", "delivery_status": status}
-            scope = str(obligation.get("scope") or "")
             operation_id = str(obligation.get("operation_id") or "")
             recipient_id = str(obligation.get("recipient_id") or "")
             try:
-                resolved = self._s13_downstream_resolve(scope=scope)
+                resolved = self._s13_downstream_resolve(
+                    scope=scope, obligation=obligation
+                )
             except _s13.S13CompletionBlocked as blocked:
                 return {"status": "blocked", "reason_code": str(blocked.reason_code)}
         # Lookup outside the lock / transaction.
@@ -17324,9 +17604,29 @@ class ControlledScenarioService:
             )
             if obligation is None:
                 raise QueryNotFound(obligation_id)
+            self._s13_require_principal_scope(
+                principal, str(obligation.get("scope") or ""), obligation_id
+            )
             latest_status = self._s13_delivery_status(obligation_id)
             if latest_status != "unknown":
                 return {"status": "stale", "reason_code": "S13_NOT_RECONCILABLE", "delivery_status": latest_status}
+            latest_attempt_id = str(
+                max(
+                    (
+                        item
+                        for item in staged.delivery_attempts
+                        if str(item.get("obligation_id") or "") == str(obligation_id)
+                    ),
+                    key=lambda item: int(item.get("attempt_no") or 0),
+                    default={},
+                ).get("attempt_id")
+                or ""
+            )
+            reconciliation_attempt = 1 + sum(
+                1
+                for item in staged.delivery_reconciliations
+                if str(item.get("obligation_id") or "") == str(obligation_id)
+            )
             if lookup_result.outcome == "confirmed":
                 # Derive inbox dedupe — one business effect per operation.
                 inbox_hit = next(
@@ -17360,9 +17660,13 @@ class ControlledScenarioService:
                     )
                 staged.delivery_reconciliations.append(
                     {
-                        "reconciliation_id": self._stable_id("delivery_recon", f"{obligation_id}:reconcile_confirmed:{claim_now}"),
+                        "reconciliation_id": self._stable_id(
+                            "delivery_recon",
+                            f"{obligation_id}:reconcile_confirmed:{reconciliation_attempt}",
+                        ),
                         "obligation_id": obligation_id,
                         "operation_id": operation_id,
+                        "attempt_id": latest_attempt_id,
                         "outcome": "confirmed",
                         "remote_message_id": lookup_result.remote_message_id,
                         "response_digest": lookup_result.response_digest,
@@ -17372,7 +17676,10 @@ class ControlledScenarioService:
                 )
                 staged.audit_events.append(
                     {
-                        "event_id": self._stable_id("audit", f"s13_reconciled_confirmed:{obligation_id}:{claim_now}"),
+                        "event_id": self._stable_id(
+                            "audit",
+                            f"s13_reconciled_confirmed:{obligation_id}:{reconciliation_attempt}",
+                        ),
                         "action": "s13_reconciled",
                         "subject": worker_id,
                         "role": "operator",
@@ -17390,9 +17697,13 @@ class ControlledScenarioService:
             elif lookup_result.outcome == "not_executed":
                 staged.delivery_reconciliations.append(
                     {
-                        "reconciliation_id": self._stable_id("delivery_recon", f"{obligation_id}:reconcile_not_executed:{claim_now}"),
+                        "reconciliation_id": self._stable_id(
+                            "delivery_recon",
+                            f"{obligation_id}:reconcile_not_executed:{reconciliation_attempt}",
+                        ),
                         "obligation_id": obligation_id,
                         "operation_id": operation_id,
+                        "attempt_id": latest_attempt_id,
                         "outcome": "not_executed",
                         "evidence_digest": lookup_result.evidence_digest,
                         "recorded_at": claim_now,
@@ -17400,7 +17711,10 @@ class ControlledScenarioService:
                 )
                 staged.audit_events.append(
                     {
-                        "event_id": self._stable_id("audit", f"s13_reconciled_not_exec:{obligation_id}:{claim_now}"),
+                        "event_id": self._stable_id(
+                            "audit",
+                            f"s13_reconciled_not_exec:{obligation_id}:{reconciliation_attempt}",
+                        ),
                         "action": "s13_reconciled",
                         "subject": worker_id,
                         "role": "operator",
@@ -17418,16 +17732,23 @@ class ControlledScenarioService:
             else:
                 staged.delivery_reconciliations.append(
                     {
-                        "reconciliation_id": self._stable_id("delivery_recon", f"{obligation_id}:reconcile_indeterminate:{claim_now}"),
+                        "reconciliation_id": self._stable_id(
+                            "delivery_recon",
+                            f"{obligation_id}:reconcile_indeterminate:{reconciliation_attempt}",
+                        ),
                         "obligation_id": obligation_id,
                         "operation_id": operation_id,
+                        "attempt_id": latest_attempt_id,
                         "outcome": "indeterminate",
                         "recorded_at": claim_now,
                     }
                 )
                 staged.audit_events.append(
                     {
-                        "event_id": self._stable_id("audit", f"s13_indeterminate:{obligation_id}:{claim_now}"),
+                        "event_id": self._stable_id(
+                            "audit",
+                            f"s13_indeterminate:{obligation_id}:{reconciliation_attempt}",
+                        ),
                         "action": "s13_reconciled",
                         "subject": worker_id,
                         "role": "operator",
@@ -17459,6 +17780,7 @@ class ControlledScenarioService:
         obligation_id: str,
         worker_id: str = "s13-compensator",
         now: int | None = None,
+        principal: S01CommandPrincipal | None = None,
     ) -> dict[str, Any]:
         """Forward compensation — never deletes the original obligation."""
         claim_now = int(self._clock() if now is None else now)
@@ -17467,19 +17789,33 @@ class ControlledScenarioService:
             obligation = self._s13_obligation(obligation_id)
             if obligation is None:
                 raise QueryNotFound(obligation_id)
-            status = self._s13_delivery_status(obligation_id)
-            if status not in {"received", "unknown", "blocked", "retry_scheduled"}:
-                return {"status": "stale", "reason_code": "S13_NOT_COMPENSATABLE", "delivery_status": status}
             scope = str(obligation.get("scope") or "")
+            self._s13_require_principal_scope(principal, scope, obligation_id)
+            status = self._s13_delivery_status(obligation_id)
+            if status not in {
+                "received",
+                "unknown",
+                "blocked",
+                "retry_scheduled",
+                "compensation_failed",
+            }:
+                return {"status": "stale", "reason_code": "S13_NOT_COMPENSATABLE", "delivery_status": status}
             operation_id = str(obligation.get("operation_id") or "")
             recipient_id = str(obligation.get("recipient_id") or "")
             policy_id = str(obligation.get("compensation_policy_id") or "")
             policy_version = str(obligation.get("compensation_policy_version") or "")
             try:
-                resolved = self._s13_downstream_resolve(scope=scope)
+                resolved = self._s13_downstream_resolve(
+                    scope=scope, obligation=obligation
+                )
             except _s13.S13CompletionBlocked as blocked:
                 return {"status": "blocked", "reason_code": str(blocked.reason_code)}
-            if policy_id != resolved.registration.compensation_policy_id:
+            if (
+                policy_id != resolved.registration.compensation_policy_id
+                or policy_version != resolved.registration.compensation_policy_version
+                or str(obligation.get("compensation_policy_digest") or "")
+                != resolved.compensation_policy_digest
+            ):
                 return {"status": "blocked", "reason_code": _s13.REASON_COMPENSATION_UNAVAILABLE}
         compensation_request = _s13.DeliveryCompensationRequest(
             operation_id=operation_id,
@@ -17500,7 +17836,18 @@ class ControlledScenarioService:
             )
             if obligation is None:
                 raise QueryNotFound(obligation_id)
-            comp_id = self._stable_id("compensation", f"{obligation_id}:{claim_now}:{worker_id}")
+            self._s13_require_principal_scope(
+                principal, str(obligation.get("scope") or ""), obligation_id
+            )
+            compensation_attempt = sum(
+                1
+                for item in staged.delivery_compensations
+                if str(item.get("obligation_id") or "") == str(obligation_id)
+            ) + 1
+            comp_id = self._stable_id(
+                "compensation",
+                f"{obligation_id}:{compensation_attempt}:{claim_now}:{worker_id}",
+            )
             staged.delivery_compensations.append(
                 {
                     "compensation_id": comp_id,
@@ -17519,10 +17866,15 @@ class ControlledScenarioService:
             if comp_result.outcome == "failed":
                 staged.recovery_events.append(
                     {
-                        "event_id": self._stable_id("recovery_event", f"s13_comp_fail:{obligation_id}:{claim_now}"),
+                        "event_id": self._stable_id(
+                            "recovery_event",
+                            f"s13_comp_fail:{obligation_id}:{compensation_attempt}",
+                        ),
                         "kind": "opened",
                         "schema_version": "recovery-work/1",
-                        "recovery_work_id": self._stable_id("recovery_work", f"s13_comp:{obligation_id}:{claim_now}"),
+                        "recovery_work_id": self._stable_id(
+                            "recovery_work", f"s13_comp:{obligation_id}:{compensation_attempt}"
+                        ),
                         "application_id": str(obligation.get("application_id") or ""),
                         "visibility_scope": scope,
                         "cycle": int(obligation.get("cycle") or 0),

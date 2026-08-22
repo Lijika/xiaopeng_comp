@@ -17,9 +17,6 @@ s13_router = APIRouter()
 
 _S13_APP_MODULE_STATE_KEY = "_s13_application_module"
 
-_HEX64 = r"^[0-9a-f]{64}$"
-
-
 def _s13_app_module(request: Request) -> Any:
     module = getattr(request.app.state, _S13_APP_MODULE_STATE_KEY, None)
     if module is None:
@@ -72,17 +69,12 @@ def _s13_service(request: Request) -> Any:
     return service
 
 
-def _s13_require_operator(request: Request) -> None:
+def _s13_require_operator(request: Request) -> Any:
     module = _s13_app_module(request)
-    # S13 operator credential follows the S08/S12 pattern: distinct bearer
-    # credential bound to one module attribute.
+    # S13 owns a distinct bearer identity. Missing S13 configuration closes
+    # this boundary even when an S01 operator is configured.
     credential = getattr(module, "S13_OPERATOR_CREDENTIAL", "")
     subject = getattr(module, "S13_OPERATOR_SUBJECT", "")
-    # Also accept S01 operator as a fallback for demo operator convenience
-    # (only when S13-specific vars are absent).
-    if not subject or not credential:
-        credential = getattr(module, "S01_OPERATOR_CREDENTIAL", "")
-        subject = getattr(module, "S01_OPERATOR_SUBJECT", "")
     if not subject or not module._s01_has_credential(request, credential):  # type: ignore[attr-defined]
         raise HTTPException(
             403,
@@ -91,6 +83,23 @@ def _s13_require_operator(request: Request) -> None:
                 "message": "Registered S13 operator identity required",
             },
         )
+    scope = getattr(module, "S13_OPERATOR_SCOPE", "C-DEMO")
+    principal_type = getattr(module, "S01CommandPrincipal", None)
+    if not isinstance(scope, str) or not scope or principal_type is None:
+        raise HTTPException(
+            503,
+            detail={
+                "error": "S13_UNAVAILABLE",
+                "message": "Controlled S13 operator identity is unavailable",
+            },
+        )
+    return principal_type(
+        subject=subject,
+        role="operator",
+        scope=scope,
+        source_id="s13-delivery-console",
+        expires_at=float("inf"),
+    )
 
 
 # ------------------------------------------------------------------ DTOs
@@ -103,6 +112,23 @@ _S13_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
 }
 
 
+class S13ObligationSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    obligation_id: str
+    application_id: str
+    cycle: int = Field(ge=1)
+    route: str
+    attribution_kind: str
+    operation_id: str
+    recipient_id: str
+    adapter_id: str
+    adapter_version: str
+    payload_ref: str
+    payload_digest: str = Field(min_length=64, max_length=64)
+    payload_schema: str
+    status: str
+
+
 class S13QueryResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     schema_version: Literal["s13-delivery-view/1"]
@@ -112,7 +138,7 @@ class S13QueryResponse(BaseModel):
     cycle: int = Field(ge=1)
     lifecycle_revision: int = Field(ge=0)
     verification_completed: bool
-    obligation: dict[str, Any] | None
+    obligation: S13ObligationSummary | None
     delivery_status: str
     attempt_count: int = Field(ge=0)
     projection_watermark: int = Field(ge=0)
@@ -157,6 +183,29 @@ class S13ProcessNextDeliveryResponse(BaseModel):
 
 # ------------------------------------------------------------------ Routes
 
+
+def _s13_obligation_summary(obligation: dict[str, Any] | None) -> dict[str, Any] | None:
+    if obligation is None:
+        return None
+    return {
+        key: obligation.get(key)
+        for key in (
+            "obligation_id",
+            "application_id",
+            "cycle",
+            "route",
+            "attribution_kind",
+            "operation_id",
+            "recipient_id",
+            "adapter_id",
+            "adapter_version",
+            "payload_ref",
+            "payload_digest",
+            "payload_schema",
+            "status",
+        )
+    }
+
 @s13_router.get(
     "/controlled/s13/delivery/{application_id}",
     response_model=S13QueryResponse,
@@ -166,10 +215,14 @@ def s13_delivery_query(
     application_id: str,
     request: Request,
 ) -> dict[str, Any]:
-    _s13_require_operator(request)
+    principal = _s13_require_operator(request)
     service = _s13_service(request)
     try:
-        return service.delivery_view(application_id=application_id)
+        result = service.delivery_view(
+            principal=principal, application_id=application_id
+        )
+        result["obligation"] = _s13_obligation_summary(result.get("obligation"))
+        return result
     except Exception as error:
         # Existence-hiding: unknown application/tenant maps to 404.
         if error.__class__.__name__ in {"QueryNotFound", "LookupError"}:
@@ -192,10 +245,14 @@ def s13_reconcile(
     body: S13ReconcileCommand,
     request: Request,
 ) -> dict[str, Any]:
-    _s13_require_operator(request)
+    principal = _s13_require_operator(request)
     service = _s13_service(request)
     try:
-        result = service.reconcile_delivery(obligation_id=body.obligation_id)
+        result = service.reconcile_delivery(
+            principal=principal,
+            worker_id=principal.subject,
+            obligation_id=body.obligation_id,
+        )
     except Exception as error:
         if error.__class__.__name__ == "QueryNotFound":
             raise HTTPException(
@@ -224,10 +281,14 @@ def s13_compensate(
     body: S13CompensateCommand,
     request: Request,
 ) -> dict[str, Any]:
-    _s13_require_operator(request)
+    principal = _s13_require_operator(request)
     service = _s13_service(request)
     try:
-        result = service.compensate_delivery(obligation_id=body.obligation_id)
+        result = service.compensate_delivery(
+            principal=principal,
+            worker_id=principal.subject,
+            obligation_id=body.obligation_id,
+        )
     except Exception as error:
         if error.__class__.__name__ == "QueryNotFound":
             raise HTTPException(
@@ -262,9 +323,12 @@ def s13_process_next_delivery(
     effect, and a blind resend of an unknown outcome is rejected until
     same-operation reconciliation proves not_executed.
     """
-    _s13_require_operator(request)
+    principal = _s13_require_operator(request)
     service = _s13_service(request)
-    result = service.process_next_delivery()
+    result = service.process_next_delivery(
+        principal=principal,
+        worker_id=principal.subject,
+    )
     return {
         "status": result.get("status") or "idle",
         "obligation_id": result.get("obligation_id"),

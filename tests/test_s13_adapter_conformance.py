@@ -215,6 +215,24 @@ def test_adapter_registration_version_mismatch_fails_closed(tmp_path: Path) -> N
     assert "S13_DELIVERY_REGISTRATION_MISMATCH" in str(exc.value) or "S13_DELIVERY_TARGET_UNREGISTERED" in str(exc.value)
 
 
+def test_adapter_missing_identity_fails_closed() -> None:
+    adapter = InMemoryDownstreamAdapter()
+    adapter_id = adapter.adapter_id
+    delattr(adapter, "adapter_id")
+    registration = DownstreamRecipientRegistration(
+        scope="C-DEMO",
+        recipient_registration_id="c-demo-downstream-review-default",
+        recipient_id="downstream-review-desk",
+        adapter_id=adapter_id,
+        adapter_version="1",
+    )
+    registry = RegisteredDownstreamRegistry([registration], {adapter_id: adapter})
+
+    with pytest.raises(Exception) as exc:
+        registry.resolve(scope="C-DEMO")
+    assert "S13_DELIVERY_REGISTRATION_MISMATCH" in str(exc.value)
+
+
 def test_payload_digest_mismatch_is_fail_closed_before_send(tmp_path: Path) -> None:
     """A stored payload digest that does not recompute from the route basis
     fails closed before any adapter I/O (stale context)."""
