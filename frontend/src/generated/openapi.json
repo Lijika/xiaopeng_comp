@@ -16328,6 +16328,268 @@
         "title": "S12ViewStatistics",
         "type": "object"
       },
+      "S13CompensateCommand": {
+        "additionalProperties": false,
+        "properties": {
+          "obligation_id": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Obligation Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "obligation_id"
+        ],
+        "title": "S13CompensateCommand",
+        "type": "object"
+      },
+      "S13CompensateResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "obligation_id": {
+            "title": "Obligation Id",
+            "type": "string"
+          },
+          "operation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operation Id"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Code"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "obligation_id",
+          "status"
+        ],
+        "title": "S13CompensateResponse",
+        "type": "object"
+      },
+      "S13ProcessNextDeliveryResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "obligation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Obligation Id"
+          },
+          "operation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operation Id"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Code"
+          },
+          "remote_message_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remote Message Id"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "S13ProcessNextDeliveryResponse",
+        "type": "object"
+      },
+      "S13QueryResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "application_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Application Id",
+            "type": "string"
+          },
+          "attempt_count": {
+            "minimum": 0.0,
+            "title": "Attempt Count",
+            "type": "integer"
+          },
+          "cycle": {
+            "minimum": 1.0,
+            "title": "Cycle",
+            "type": "integer"
+          },
+          "delivery_status": {
+            "title": "Delivery Status",
+            "type": "string"
+          },
+          "lifecycle_revision": {
+            "minimum": 0.0,
+            "title": "Lifecycle Revision",
+            "type": "integer"
+          },
+          "obligation": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Obligation"
+          },
+          "phase": {
+            "title": "Phase",
+            "type": "string"
+          },
+          "projection_watermark": {
+            "minimum": 0.0,
+            "title": "Projection Watermark",
+            "type": "integer"
+          },
+          "route": {
+            "title": "Route",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": "s13-delivery-view/1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "store_revision": {
+            "minimum": 0.0,
+            "title": "Store Revision",
+            "type": "integer"
+          },
+          "verification_completed": {
+            "title": "Verification Completed",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "schema_version",
+          "application_id",
+          "phase",
+          "route",
+          "cycle",
+          "lifecycle_revision",
+          "verification_completed",
+          "obligation",
+          "delivery_status",
+          "attempt_count",
+          "projection_watermark",
+          "store_revision"
+        ],
+        "title": "S13QueryResponse",
+        "type": "object"
+      },
+      "S13ReconcileCommand": {
+        "additionalProperties": false,
+        "properties": {
+          "obligation_id": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Obligation Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "obligation_id"
+        ],
+        "title": "S13ReconcileCommand",
+        "type": "object"
+      },
+      "S13ReconcileResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "delivery_status": {
+            "title": "Delivery Status",
+            "type": "string"
+          },
+          "obligation_id": {
+            "title": "Obligation Id",
+            "type": "string"
+          },
+          "operation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operation Id"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Code"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "obligation_id",
+          "delivery_status",
+          "status"
+        ],
+        "title": "S13ReconcileResponse",
+        "type": "object"
+      },
       "T05BusinessExceptionOperationsResult": {
         "additionalProperties": false,
         "properties": {
@@ -24595,6 +24857,158 @@
           }
         },
         "summary": "Controlled S12 React Page"
+      }
+    },
+    "/controlled/s13/api/commands/compensate": {
+      "post": {
+        "operationId": "s13_compensate_controlled_s13_api_commands_compensate_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S13CompensateCommand"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S13CompensateResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "description": "Registered S13 operator identity required"
+          },
+          "404": {
+            "description": "Application or obligation is unavailable"
+          },
+          "422": {
+            "description": "S13 command does not match the registered contract"
+          },
+          "503": {
+            "description": "S13 delivery plane is unavailable"
+          }
+        },
+        "summary": "S13 Compensate"
+      }
+    },
+    "/controlled/s13/api/commands/process_next_delivery": {
+      "post": {
+        "description": "Operator-triggered sender claim — the periodic worker seam.\n\nReturns one claim+send outcome; a distributed scheduler would call this\nunder its own lease/observability.  The outbox remains at-least-once:\na second call after a confirmed send returns idle with one business\neffect, and a blind resend of an unknown outcome is rejected until\nsame-operation reconciliation proves not_executed.",
+        "operationId": "s13_process_next_delivery_controlled_s13_api_commands_process_next_delivery_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S13ProcessNextDeliveryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "description": "Registered S13 operator identity required"
+          },
+          "404": {
+            "description": "Application or obligation is unavailable"
+          },
+          "422": {
+            "description": "S13 command does not match the registered contract"
+          },
+          "503": {
+            "description": "S13 delivery plane is unavailable"
+          }
+        },
+        "summary": "S13 Process Next Delivery"
+      }
+    },
+    "/controlled/s13/api/commands/reconcile": {
+      "post": {
+        "operationId": "s13_reconcile_controlled_s13_api_commands_reconcile_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S13ReconcileCommand"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S13ReconcileResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "description": "Registered S13 operator identity required"
+          },
+          "404": {
+            "description": "Application or obligation is unavailable"
+          },
+          "422": {
+            "description": "S13 command does not match the registered contract"
+          },
+          "503": {
+            "description": "S13 delivery plane is unavailable"
+          }
+        },
+        "summary": "S13 Reconcile"
+      }
+    },
+    "/controlled/s13/delivery/{application_id}": {
+      "get": {
+        "operationId": "s13_delivery_query_controlled_s13_delivery__application_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "application_id",
+            "required": true,
+            "schema": {
+              "title": "Application Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S13QueryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "description": "Registered S13 operator identity required"
+          },
+          "404": {
+            "description": "Application or obligation is unavailable"
+          },
+          "422": {
+            "description": "S13 command does not match the registered contract"
+          },
+          "503": {
+            "description": "S13 delivery plane is unavailable"
+          }
+        },
+        "summary": "S13 Delivery Query"
       }
     },
     "/demo/react": {

@@ -311,6 +311,8 @@ S01_DEMO_CREDENTIAL = os.environ.get("TASK4_S01_DEMO_CREDENTIAL", "").strip()
 S01_DEMO_SUBJECT = os.environ.get("TASK4_S01_DEMO_SUBJECT", "").strip()
 S01_OPERATOR_CREDENTIAL = os.environ.get("TASK4_S01_OPERATOR_CREDENTIAL", "").strip()
 S01_OPERATOR_SUBJECT = os.environ.get("TASK4_S01_OPERATOR_SUBJECT", "").strip()
+S13_OPERATOR_CREDENTIAL = os.environ.get("TASK4_S13_OPERATOR_CREDENTIAL", "").strip()
+S13_OPERATOR_SUBJECT = os.environ.get("TASK4_S13_OPERATOR_SUBJECT", "").strip()
 S02_CREDENTIAL = os.environ.get("TASK4_S02_CREDENTIAL", "").strip()
 S02_SUBJECT = os.environ.get("TASK4_S02_SUBJECT", "").strip()
 # S12 isolated evaluation plane: gated on a separately configured evaluation
@@ -3143,6 +3145,7 @@ def _s03_command_result(result: dict[str, Any]) -> dict[str, Any]:
         "conflict": (409, "S03_CONFLICT"),
         "completed": (409, "S03_COMPLETED"),
         "rejected": (409, "S03_REJECTED"),
+        "blocked": (409, "S03_BLOCKED"),
         "stopped": (503, "S03_STOPPED"),
         "unavailable": (503, "S03_UNAVAILABLE"),
     }
@@ -5718,6 +5721,13 @@ from task4_consistency.web.s12_http import (
 )
 
 register_s12_router(app, sys.modules[__name__])
+
+# --- S13 downstream-delivery HTTP adapter --------------------------------
+# Verification Completed is a lifecycle fact; delivery receipt is a separate
+# delivery fact.  The adapter registers after S12 so route order stays stable.
+from task4_consistency.web.s13_http import register_router as register_s13_router
+
+register_s13_router(app, sys.modules[__name__])
 
 
 def _s12_react_shell() -> Response:

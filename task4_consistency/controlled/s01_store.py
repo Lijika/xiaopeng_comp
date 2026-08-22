@@ -47,6 +47,10 @@ _TABLES = (
     "policy_jobs",
     "policy_active_projections",
     "policy_schedule_reservations",
+    "delivery_obligations",
+    "delivery_attempts",
+    "delivery_reconciliations",
+    "delivery_compensations",
 )
 
 _INTEGRITY_SCHEMA = "s01-immutable-row/v1"
@@ -68,6 +72,10 @@ _IMMUTABLE_LIST_IDS = {
     "policy_manifests": "manifest_id",
     "policy_governance_events": "event_id",
     "policy_attempts": "attempt_id",
+    "delivery_obligations": "obligation_id",
+    "delivery_attempts": "attempt_id",
+    "delivery_reconciliations": "reconciliation_id",
+    "delivery_compensations": "compensation_id",
 }
 _IMMUTABLE_TABLES = frozenset(
     {*_IMMUTABLE_MAP_TABLES, *_IMMUTABLE_LIST_IDS, "idempotency", "outbox"}
@@ -204,6 +212,10 @@ class SQLiteTargetStore:
         self.policy_jobs: list[dict[str, Any]] = []
         self.policy_active_projections: dict[str, dict[str, Any]] = {}
         self.policy_schedule_reservations: dict[str, dict[str, Any]] = {}
+        self.delivery_obligations: list[dict[str, Any]] = []
+        self.delivery_attempts: list[dict[str, Any]] = []
+        self.delivery_reconciliations: list[dict[str, Any]] = []
+        self.delivery_compensations: list[dict[str, Any]] = []
         self.projection_watermark = 0
         self.cohort_stop: dict[str, Any] | None = None
         self._store_revision = 0
@@ -255,6 +267,10 @@ class SQLiteTargetStore:
             "policy_jobs",
             "policy_active_projections",
             "policy_schedule_reservations",
+            "delivery_obligations",
+            "delivery_attempts",
+            "delivery_reconciliations",
+            "delivery_compensations",
             "cohort_stop",
         ):
             setattr(cloned, name, copy.deepcopy(getattr(self, name)))
@@ -591,6 +607,14 @@ class SQLiteTargetStore:
                     self.policy_schedule_reservations = {
                         key: json.loads(payload) for key, payload in values
                     }
+                elif table == "delivery_obligations":
+                    self.delivery_obligations = [payload for _, payload in values]
+                elif table == "delivery_attempts":
+                    self.delivery_attempts = [payload for _, payload in values]
+                elif table == "delivery_reconciliations":
+                    self.delivery_reconciliations = [payload for _, payload in values]
+                elif table == "delivery_compensations":
+                    self.delivery_compensations = [payload for _, payload in values]
 
     def persist(self) -> None:
         """Append facts and publish mutable owners in one transaction."""
@@ -720,6 +744,30 @@ class SQLiteTargetStore:
                     self.policy_active_projections,
                 )
                 self._sync_policy_schedule_reservations(connection)
+                self._sync_immutable_list(
+                    connection,
+                    "delivery_obligations",
+                    self.delivery_obligations,
+                    self._integrity_cache,
+                )
+                self._sync_immutable_list(
+                    connection,
+                    "delivery_attempts",
+                    self.delivery_attempts,
+                    self._integrity_cache,
+                )
+                self._sync_immutable_list(
+                    connection,
+                    "delivery_reconciliations",
+                    self.delivery_reconciliations,
+                    self._integrity_cache,
+                )
+                self._sync_immutable_list(
+                    connection,
+                    "delivery_compensations",
+                    self.delivery_compensations,
+                    self._integrity_cache,
+                )
                 connection.commit()
                 self._store_revision = next_revision
             except Exception:
