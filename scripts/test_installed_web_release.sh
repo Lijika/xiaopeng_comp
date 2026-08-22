@@ -473,6 +473,9 @@ echo "namespace_tz=$(date +%Z)" >>"$LOG"
 
 HEALTH_PY() { "$PY" -c "import json,urllib.request; print(json.load(urllib.request.urlopen('http://127.0.0.1:$1/api/health', timeout=2)))"; }
 
+START_SERVER_PID=""
+START_SERVER_PORT=""
+
 start_server() {
   # $1 = site root, $2 = extra env (obs vars or empty), $3 = state path,
   # $4 = uvicorn app target (default task4_consistency.web.app:app),
@@ -502,6 +505,7 @@ start_server() {
     "$PY" -P -m uvicorn "$app_target" \
     --host 127.0.0.1 --port "$port" --log-level warning >>"$LOG" 2>&1 &
   pid=$!
+  echo "$pid" >> "$TMP/t54-window-pids"
   local ok=0
   for _ in $(seq 1 60); do
     if ! kill -0 "$pid" 2>/dev/null; then
@@ -522,21 +526,21 @@ print(json.dumps(d, ensure_ascii=False))" >>"$LOG" 2>&1; then
     return 1
   fi
   echo "server_ready site=$site port=$port pid=$pid" >>"$LOG"
-  echo "$pid" >> "$TMP/t54-window-pids"
-  echo "$pid $port"
+  START_SERVER_PID="$pid"
+  START_SERVER_PORT="$port"
 }
 
 stop_server() {
   local pid="$1"
   kill "$pid" 2>/dev/null || true
-  # The server was started inside a command-substitution subshell, so it is
-  # not this shell's child; poll for real exit instead of waiting.  The
-  # observation "end" lifecycle record is written before uvicorn exits, so
-  # process exit implies the record is durable.
+  # The server is a child of the namespace window shell.  Wait for its
+  # lifecycle end record after the termination request, with polling retained
+  # for already-reaped or externally terminated processes.
   for _ in $(seq 1 100); do
     if ! kill -0 "$pid" 2>/dev/null; then break; fi
     sleep 0.2
   done
+  wait "$pid" 2>/dev/null || true
   echo "stopped server pid=$pid" >>"$LOG"
 }
 
@@ -651,9 +655,9 @@ FACTS
 
 # --- Prechecks (capture-free server; no window records yet) -----------------
 echo "== prechecks ==" >>"$LOG"
-PRE_RESULT="$(start_server "$TMP/site" "" "$STATE_PATH")"
-PRE_PID="${PRE_RESULT%% *}"
-PRE_PORT="${PRE_RESULT##* }"
+start_server "$TMP/site" "" "$STATE_PATH"
+PRE_PID="$START_SERVER_PID"
+PRE_PORT="$START_SERVER_PORT"
 for _ in $(seq 1 10); do
   OUT="$(get_shell "$PRE_PORT" "/" "")"
   case "$OUT" in
@@ -689,11 +693,11 @@ CATPY
 # Telemetry continuity self-check on a throwaway log (discarded).
 THROWAWAY_DIR="$TMP/t54-obs-throwaway"
 mkdir -p "$THROWAWAY_DIR"
-TC_RESULT="$(start_server "$TMP/site" \
+start_server "$TMP/site" \
   "TASK4_OBS_LOG_DIR=$THROWAWAY_DIR TASK4_OBS_WINDOW_ID=$WINDOW_ID TASK4_OBS_ARTIFACT_SHA256=$CURRENT_SHA TASK4_OBS_ARTIFACT_STAGE=current TASK4_OBS_PROCESS_CLASS=release TASK4_OBS_PROCESS_ID=t54-telemetry-selfcheck" \
-  "$STATE_PATH")"
-TC_PID="${TC_RESULT%% *}"
-TC_PORT="${TC_RESULT##* }"
+  "$STATE_PATH"
+TC_PID="$START_SERVER_PID"
+TC_PORT="$START_SERVER_PORT"
 get_shell "$TC_PORT" "/" "" >/dev/null
 stop_server "$TC_PID"
 "$PY" - "$THROWAWAY_DIR" <<'TELPY' >>"$LOG" 2>&1
@@ -717,11 +721,11 @@ printf '%s\n' "$WINDOW_TZ" > "$TMP/window-timezone.txt"
 echo "window_start_utc=$WINDOW_START_UTC tz=$WINDOW_TZ" >>"$LOG"
 
 # Dedicated release server (traffic class release; /api/health -> health).
-REL_RESULT="$(start_server "$TMP/site" \
+start_server "$TMP/site" \
   "TASK4_OBS_LOG_DIR=$OBS_DIR TASK4_OBS_WINDOW_ID=$WINDOW_ID TASK4_OBS_ARTIFACT_SHA256=$CURRENT_SHA TASK4_OBS_ARTIFACT_STAGE=current TASK4_OBS_PROCESS_CLASS=release TASK4_OBS_PROCESS_ID=t54-release" \
-  "$STATE_PATH")"
-REL_PID="${REL_RESULT%% *}"
-REL_PORT="${REL_RESULT##* }"
+  "$STATE_PATH"
+REL_PID="$START_SERVER_PID"
+REL_PORT="$START_SERVER_PORT"
 
 # Frozen Playwright collection gate + full matrix (operator-simulated cohort;
 # every spec child inherits the observation environment).
@@ -753,11 +757,11 @@ env PYTHONSAFEPATH=1 PYTHONPATH="$TMP/site:$ROOT" TASK4_T10_INSTALLED_ROOT="$TMP
 # Playwright-probe population: one dedicated current-artifact process with
 # explicit canonical-shell probes under playwright-probe.
 step "9/10 window: playwright-probe population"
-PROBE_RESULT="$(start_server "$TMP/site" \
+start_server "$TMP/site" \
   "TASK4_OBS_LOG_DIR=$OBS_DIR TASK4_OBS_WINDOW_ID=$WINDOW_ID TASK4_OBS_ARTIFACT_SHA256=$CURRENT_SHA TASK4_OBS_ARTIFACT_STAGE=current TASK4_OBS_PROCESS_CLASS=playwright-probe TASK4_OBS_PROCESS_ID=t54-playwright-probe" \
-  "$STATE_PATH")"
-PROBE_PID="${PROBE_RESULT%% *}"
-PROBE_PORT="${PROBE_RESULT##* }"
+  "$STATE_PATH"
+PROBE_PID="$START_SERVER_PID"
+PROBE_PORT="$START_SERVER_PORT"
 get_shell "$PROBE_PORT" "/" "" >/dev/null
 get_shell "$PROBE_PORT" "/controlled/s01" "Bearer s01-registered-demo-test-credential" >/dev/null
 get_shell "$PROBE_PORT" "/api/health" "" >/dev/null
@@ -776,11 +780,11 @@ stop_server "$REL_PID"
 
 # --- Prior-artifact rollback probe (rollback-probe) --------------------------
 step "9/10 window: prior-artifact rollback probe (rollback-probe)"
-PRIOR_RESULT="$(start_server "$TMP/prior-site" \
+start_server "$TMP/prior-site" \
   "TASK4_OBS_LOG_DIR=$OBS_DIR TASK4_OBS_WINDOW_ID=$WINDOW_ID TASK4_OBS_ARTIFACT_SHA256=$PRIOR_SHA TASK4_OBS_ARTIFACT_STAGE=prior TASK4_OBS_PROCESS_CLASS=rollback-probe TASK4_OBS_PROCESS_ID=t54-rollback-prior" \
-  "$STATE_PATH" "prior_wrapper_app:app" "$TMP")"
-PRIOR_PID="${PRIOR_RESULT%% *}"
-PRIOR_PORT="${PRIOR_RESULT##* }"
+  "$STATE_PATH" "prior_wrapper_app:app" "$TMP"
+PRIOR_PID="$START_SERVER_PID"
+PRIOR_PORT="$START_SERVER_PORT"
 # Prior artifact: package identity from the prior site (byte-identical wheel).
 env PYTHONSAFEPATH=1 PYTHONPATH="$TMP/prior-site:$ROOT" PRIOR_SITE="$TMP/prior-site" \
   "$PY" -P - <<'PRIORPY' >>"$LOG"
@@ -820,11 +824,11 @@ stop_server "$PRIOR_PID"
 
 # --- Current-artifact restoration (release; stage three of the rehearsal) ----
 step "9/10 window: current artifact restoration (release)"
-RESTORE_RESULT="$(start_server "$TMP/site" \
+start_server "$TMP/site" \
   "TASK4_OBS_LOG_DIR=$OBS_DIR TASK4_OBS_WINDOW_ID=$WINDOW_ID TASK4_OBS_ARTIFACT_SHA256=$CURRENT_SHA TASK4_OBS_ARTIFACT_STAGE=current TASK4_OBS_PROCESS_CLASS=release TASK4_OBS_PROCESS_ID=t54-restore" \
-  "$STATE_PATH")"
-RESTORE_PID="${RESTORE_RESULT%% *}"
-RESTORE_PORT="${RESTORE_RESULT##* }"
+  "$STATE_PATH"
+RESTORE_PID="$START_SERVER_PID"
+RESTORE_PORT="$START_SERVER_PORT"
 RESTORE_ROOT_PROBE="$(get_shell "$RESTORE_PORT" "/" "")"
 echo "restore_root_probe: $RESTORE_ROOT_PROBE" >>"$LOG"
 [[ "$RESTORE_ROOT_PROBE" == "200 react" ]] || { echo "ERROR: restored root must serve React" >>"$LOG"; exit 1; }
