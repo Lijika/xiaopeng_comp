@@ -899,6 +899,10 @@ class ControlledScenarioService:
                 partition = "compliance_deleted"
             elif phase == "Verification Completed":
                 partition = "verification_completed"
+            elif phase == "Terminating":
+                # A terminating cycle is no longer an open re-evaluation
+                # target: future snapshots classify it out of open_cycle.
+                partition = "terminating"
             elif phase == "Terminated":
                 partition = "terminated"
             else:
@@ -1226,6 +1230,27 @@ class ControlledScenarioService:
                 )
                 continue
             if partition == "open_cycle":
+                # S14 fix R1: a member snapshot captured before cancellation
+                # may arrive after the cycle entered Terminating/Terminated
+                # or crossed cycles.  The consumer records one idempotent
+                # stale receipt and never attempts the illegal
+                # ``Terminating -> Assembly`` transition; Lifecycle stays the
+                # sole phase owner.
+                member_phase = str(app.get("phase") or "")
+                if (
+                    member_phase in {"Terminating", "Terminated"}
+                    or int(app.get("cycle") or 0) != cycle
+                ):
+                    self._record_impact_disposition(
+                        staged,
+                        app=app,
+                        member=member,
+                        final_impact_digest=final_impact_digest,
+                        disposition="stale_terminated_cycle",
+                        job_id=None,
+                        now=now,
+                    )
+                    continue
                 current_run_generation = self._current_run_generation(
                     staged, app
                 )
@@ -1294,6 +1319,19 @@ class ControlledScenarioService:
             ):
                 return
         phase = str(app.get("phase") or "")
+        # Defensive: a Terminating/Terminated cycle can never re-enter
+        # Assembly through impact consumption.
+        if phase in {"Terminating", "Terminated"}:
+            self._record_impact_disposition(
+                staged,
+                app=app,
+                member=member,
+                final_impact_digest=final_impact_digest,
+                disposition="stale_terminated_cycle",
+                job_id=None,
+                now=now,
+            )
+            return
         old_run_id = app.get("current_run_id")
         # Stale the current run and route: the old generation can never be
         # current again after the boundary changed.
@@ -4468,6 +4506,14 @@ class ControlledScenarioService:
     _S14_TERMINAL_JOB_STATUSES = frozenset(
         {"complete", "diagnostic", "fenced_cancelled"}
     )
+    # S14 fix R1: an unknown outcome or failed compensation is an open
+    # recovery obligation, not a settled effect.  Cancellation fences its
+    # execution but must preserve the status (and its recovery facts) so
+    # settlement keeps the cycle Terminating until reconciliation or a
+    # verified compensation proves a terminal result.
+    _S14_UNRESOLVED_JOB_STATUSES = frozenset(
+        {"outcome_unknown", "compensation_failed"}
+    )
     _S14_CANCELLED_JOB_STATUS = "fenced_cancelled"
     _S14_CANCELLED_ROUTE = "cancelled"
     _S14_REVIEW_FENCE_REASON = "LIFECYCLE_CANCEL_FENCED"
@@ -4524,7 +4570,12 @@ class ControlledScenarioService:
         return hashlib.sha256(encoded).hexdigest()
 
     @classmethod
-    def _s14_valid_operator(cls, principal: S01CommandPrincipal | None) -> bool:
+    def _s14_valid_operator(
+        cls,
+        principal: S01CommandPrincipal | None,
+        *,
+        now: float = 0.0,
+    ) -> bool:
         return (
             principal is not None
             and principal.role == "operator"
@@ -4533,7 +4584,22 @@ class ControlledScenarioService:
             and principal.subject.strip() == principal.subject
             and bool(principal.source_id)
             and principal.source_id.strip() == principal.source_id
+            and (
+                principal.expires_at is None
+                or float(principal.expires_at) > float(now)
+            )
         )
+
+    @staticmethod
+    def _s14_live_principal(
+        principal: S01CommandPrincipal | None, *, now: float
+    ) -> bool:
+        """C01: an identity past its expiry is not an authorized actor."""
+        if principal is None:
+            return False
+        return principal.expires_at is None or float(
+            principal.expires_at
+        ) > float(now)
 
     def _s14_application_or_not_found(
         self, application_id: str
@@ -4545,9 +4611,15 @@ class ControlledScenarioService:
         return app
 
     def _s14_cancel_authorized(
-        self, principal: S01CommandPrincipal, application_id: str
+        self,
+        principal: S01CommandPrincipal,
+        application_id: str,
+        *,
+        now: float,
     ) -> bool:
         """Only the admission-bound upstream actor may cancel its cycle."""
+        if not self._s14_live_principal(principal, now=now):
+            return False
         if principal.role != "integrator" or not self.is_controlled_scope(
             principal.scope
         ):
@@ -4560,6 +4632,16 @@ class ControlledScenarioService:
         if len(authorities) != 1:
             return False
         authority = authorities[0]
+        # Source binding: a service-direct caller must present the exact
+        # admitted source identity; the HTTP session adapter is attested by
+        # its fixed relay source and binds the session subject instead.
+        admission_source = str(authority.get("source_id") or "")
+        if (
+            admission_source
+            and principal.source_id != admission_source
+            and principal.source_id != "c-demo-web-session"
+        ):
+            return False
         visible_scopes = {principal.scope}
         if principal.scope.startswith(self._SESSION_SCOPE_PREFIX):
             visible_scopes.add("C-DEMO")
@@ -4701,12 +4783,51 @@ class ControlledScenarioService:
                 continue
             obligation_id = str(obligation.get("obligation_id") or "")
             status = self._s13_delivery_status(obligation_id)
+            cancelled_before_send = any(
+                event.get("action") == "s14_delivery_cancelled"
+                and event.get("obligation_id") == obligation_id
+                for event in self._store.audit_events
+            )
+            if status == "pending" and cancelled_before_send:
+                effects.append(
+                    {
+                        "kind": "delivery_obligation",
+                        "id": obligation_id,
+                        "detail": "cancelled_before_send",
+                        "settled": True,
+                    }
+                )
+                continue
             effects.append(
                 {
                     "kind": "delivery_obligation",
                     "id": obligation_id,
                     "detail": status,
                     "settled": status in self._S14_TERMINAL_DELIVERY_STATUSES,
+                }
+            )
+        # S14 fix R1: the termination notification is itself an effect with
+        # a durable pending -> delivered lifecycle.  Terminated requires its
+        # verified terminal (inbox receipt) result.
+        for event in self._store.outbox:
+            if (
+                event.get("kind") != "termination_notification_requested"
+                or event.get("application_id") != application_id
+                or int(event.get("cycle") or 0) != cycle
+            ):
+                continue
+            operation_id = str(event.get("operation_id") or "")
+            delivered = any(
+                entry.get("operation_id") == operation_id
+                and entry.get("kind") == "s14_termination_notification_receipt"
+                for entry in self._store.inbox
+            )
+            effects.append(
+                {
+                    "kind": "termination_notification",
+                    "id": str(event.get("event_id") or ""),
+                    "detail": "delivered" if delivered else "pending",
+                    "settled": delivered,
                 }
             )
         return effects
@@ -4787,7 +4908,9 @@ class ControlledScenarioService:
                     }
                 return rejected("IDEMPOTENCY_CONFLICT")
             app = self._s14_application_or_not_found(application_id)
-            if not self._s14_cancel_authorized(principal, application_id):
+            if not self._s14_cancel_authorized(
+                principal, application_id, now=float(event_time)
+            ):
                 return rejected("lifecycle.cancel_forbidden")
             current_phase = str(app.get("phase") or "")
             if current_phase in {"Terminating", "Terminated"}:
@@ -4828,13 +4951,72 @@ class ControlledScenarioService:
             for job in staged.jobs:
                 if job.get("application_id") != application_id:
                     continue
-                if str(job.get("status") or "") in {"complete", "diagnostic"}:
+                job_status = str(job.get("status") or "")
+                if job_status in {"complete", "diagnostic"}:
+                    continue
+                if job_status in self._S14_UNRESOLVED_JOB_STATUSES:
+                    # Keep the unresolved outcome visible; only raise the
+                    # execution fence so no worker can resume it.
+                    job["fence"] = int(job.get("fence", 0)) + 1
+                    for key in ("worker_id", "lease_until"):
+                        job.pop(key, None)
+                    fenced_jobs += 1
                     continue
                 job["status"] = self._S14_CANCELLED_JOB_STATUS
                 job["fence"] = int(job.get("fence", 0)) + 1
                 for key in ("worker_id", "lease_until", "retry_not_before"):
                     job.pop(key, None)
                 fenced_jobs += 1
+
+            # S14 fix R1: a durable delivery fence.  A never-attempted
+            # pending obligation of the cancelled cycle receives one
+            # idempotent forward cancellation fact; the sender refuses new
+            # sends for fenced cycles and late outcomes commit as unknown
+            # routed through reconciliation/compensation.
+            cancelled_deliveries = 0
+            for obligation in staged.delivery_obligations:
+                if (
+                    obligation.get("application_id") != application_id
+                    or int(obligation.get("cycle") or 0) != cycle
+                ):
+                    continue
+                obligation_id = str(obligation.get("obligation_id") or "")
+                attempts_count = sum(
+                    1
+                    for item in staged.delivery_attempts
+                    if str(item.get("obligation_id") or "") == obligation_id
+                )
+                already_cancelled = any(
+                    event.get("action") == "s14_delivery_cancelled"
+                    and event.get("obligation_id") == obligation_id
+                    for event in staged.audit_events
+                )
+                if attempts_count == 0 and not already_cancelled:
+                    self._before_write("s14.cancel.delivery")
+                    staged.audit_events.append(
+                        {
+                            "event_id": self._stable_id(
+                                "audit",
+                                f"s14_delivery_cancelled:{obligation_id}:{next_revision}",
+                            ),
+                            "action": "s14_delivery_cancelled",
+                            "subject": principal.subject,
+                            "role": principal.role,
+                            "scope": principal.scope,
+                            "source_id": principal.source_id,
+                            "application_id": application_id,
+                            "obligation_id": obligation_id,
+                            "operation_id": str(
+                                obligation.get("operation_id") or ""
+                            ),
+                            "cycle": cycle,
+                            "lifecycle_revision": next_revision,
+                            "result": "cancelled_before_send",
+                            "reason_code": self._S14_CANCEL_FENCE_REASON,
+                            **self._audit_time_fields(staged, now=event_time),
+                        }
+                    )
+                    cancelled_deliveries += 1
 
             fenced_items = 0
             for work_item in staged.work_items:
@@ -4955,6 +5137,7 @@ class ControlledScenarioService:
                 "review_work_items": fenced_items,
                 "supplement_requests": len(open_supplements),
                 "exception_requests": len(open_exceptions),
+                "deliveries_cancelled_before_send": cancelled_deliveries,
             }
             self._before_write("s14.cancel.audit")
             staged.audit_events.append(
@@ -5026,7 +5209,7 @@ class ControlledScenarioService:
             or not self._valid_idempotency_key(idempotency_key)
         ):
             raise ValueError("settlement command is invalid")
-        if not self._s14_valid_operator(principal):
+        if not self._s14_valid_operator(principal, now=event_time):
             return {
                 "status": "rejected",
                 "replayed": False,
@@ -5093,7 +5276,66 @@ class ControlledScenarioService:
                 application_id=application_id, cycle=cycle
             )
             unresolved = [item for item in effects if not item["settled"]]
-            if unresolved:
+            notification_event = next(
+                (
+                    event
+                    for event in self._store.outbox
+                    if event.get("kind") == "termination_notification_requested"
+                    and event.get("application_id") == application_id
+                    and int(event.get("cycle") or 0) == cycle
+                ),
+                None,
+            )
+            if notification_event is None:
+                # First settlement call arms the durable notification.  The
+                # cycle stays Terminating until its verified terminal result
+                # exists; no lifecycle transition happens here.
+                staged = copy.deepcopy(self._store)
+                operation_id = self._stable_id(
+                    "outbox",
+                    f"termination_notification_requested:{application_id}:{cycle}",
+                )
+                self._before_write("s14.settle.outbox")
+                staged.outbox.append(
+                    {
+                        "event_id": operation_id,
+                        "kind": "termination_notification_requested",
+                        "status": "pending",
+                        "application_id": application_id,
+                        "cycle": cycle,
+                        "operation_id": operation_id,
+                    }
+                )
+                self._before_write("s14.settle.audit")
+                staged.audit_events.append(
+                    {
+                        "event_id": self._stable_id(
+                            "audit",
+                            f"s14_notification_requested:{application_id}:{cycle}",
+                        ),
+                        "action": "s14_notification_requested",
+                        "subject": principal.subject,
+                        "role": principal.role,
+                        "scope": principal.scope,
+                        "source_id": principal.source_id,
+                        "application_id": application_id,
+                        "cycle": cycle,
+                        "lifecycle_revision": observed_revision,
+                        "result": "pending",
+                        **self._audit_time_fields(staged, now=event_time),
+                    }
+                )
+                try:
+                    staged.persist()
+                except StaleStoreRevision:
+                    self._reload_store()
+                    return {
+                        "status": "unavailable",
+                        "replayed": False,
+                        "application_id": application_id,
+                        "reason_code": "STALE_STORE_REVISION",
+                    }
+                self._store = staged
                 return {
                     "status": "outstanding",
                     "replayed": False,
@@ -5101,7 +5343,43 @@ class ControlledScenarioService:
                     "phase": "Terminating",
                     "cycle": cycle,
                     "lifecycle_revision": observed_revision,
-                    "unresolved_effects": unresolved,
+                    "unresolved_effects": [
+                        *copy.deepcopy(unresolved),
+                        {
+                            "kind": "termination_notification",
+                            "id": operation_id,
+                            "detail": "pending",
+                            "settled": False,
+                        }
+                    ],
+                }
+            notification_operation = str(
+                notification_event.get("operation_id") or ""
+            )
+            notification_delivered = any(
+                entry.get("operation_id") == notification_operation
+                and entry.get("kind") == "s14_termination_notification_receipt"
+                for entry in self._store.inbox
+            )
+            blocking = list(unresolved)
+            if not notification_delivered:
+                blocking.append(
+                    {
+                        "kind": "termination_notification",
+                        "id": str(notification_event.get("event_id") or ""),
+                        "detail": "pending",
+                        "settled": False,
+                    }
+                )
+            if blocking:
+                return {
+                    "status": "outstanding",
+                    "replayed": False,
+                    "application_id": application_id,
+                    "phase": "Terminating",
+                    "cycle": cycle,
+                    "lifecycle_revision": observed_revision,
+                    "unresolved_effects": blocking,
                 }
             settled_effects = [
                 {
@@ -5128,21 +5406,6 @@ class ControlledScenarioService:
                     "settled_effects": copy.deepcopy(settled_effects),
                 }
             )
-            notification_event_id = self._stable_id(
-                "outbox",
-                f"termination_notification_requested:{application_id}:{next_revision}",
-            )
-            self._before_write("s14.settle.outbox")
-            staged.outbox.append(
-                {
-                    "event_id": notification_event_id,
-                    "kind": "termination_notification_requested",
-                    "status": "pending",
-                    "application_id": application_id,
-                    "cycle": cycle,
-                    "operation_id": notification_event_id,
-                }
-            )
             self._before_write("s14.settle.audit")
             staged.audit_events.append(
                 {
@@ -5159,7 +5422,7 @@ class ControlledScenarioService:
                     "cycle": cycle,
                     "lifecycle_revision": next_revision,
                     "result": "accepted",
-                    "notification_event_id": notification_event_id,
+                    "notification_operation_id": notification_operation,
                     "settled_effects": settled_effects,
                     **self._audit_time_fields(staged, now=event_time),
                 }
@@ -5190,6 +5453,324 @@ class ControlledScenarioService:
                 }
             self._store = staged
             return {"status": "terminated", **terminated}
+
+    def process_termination_notification(
+        self,
+        *,
+        worker_id: str = "s14-notification-worker",
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Deliver one pending termination notification (deterministic demo
+        transport).  The inbox receipt is the verified terminal result that
+        gates ``Terminated``; duplicates stay idempotent per operation."""
+        event_time = int(self._clock() if now is None else now)
+        with self._lock:
+            self._reload_store()
+            pending = next(
+                (
+                    event
+                    for event in sorted(
+                        self._store.outbox,
+                        key=lambda item: str(item.get("event_id") or ""),
+                    )
+                    if event.get("kind") == "termination_notification_requested"
+                    and event.get("status") == "pending"
+                ),
+                None,
+            )
+            if pending is None:
+                return {"status": "idle", "reason_code": "NO_PENDING_NOTIFICATION"}
+            application_id = str(pending.get("application_id") or "")
+            app = self._store.applications.get(application_id)
+            if str((app or {}).get("phase") or "") != "Terminating":
+                return {
+                    "status": "blocked",
+                    "reason_code": "S14_NOTIFICATION_CYCLE_NOT_TERMINATING",
+                    "application_id": application_id,
+                }
+            operation_id = str(pending.get("operation_id") or "")
+            already = any(
+                entry.get("operation_id") == operation_id
+                and entry.get("kind") == "s14_termination_notification_receipt"
+                for entry in self._store.inbox
+            )
+            staged = copy.deepcopy(self._store)
+            if not already:
+                self._before_write("s14.notification.inbox")
+                staged.inbox.append(
+                    {
+                        "message_id": self._stable_id(
+                            "notification_inbox", operation_id
+                        ),
+                        "kind": "s14_termination_notification_receipt",
+                        "operation_id": operation_id,
+                        "obligation_id": None,
+                        "application_id": application_id,
+                        "cycle": int(pending.get("cycle") or 0),
+                        "worker_id": worker_id,
+                        "received_at": event_time,
+                    }
+                )
+            for event in staged.outbox:
+                if (
+                    event.get("kind") == "termination_notification_requested"
+                    and event.get("status") == "pending"
+                    and str(event.get("operation_id") or "") == operation_id
+                ):
+                    event["status"] = "published"
+            self._before_write("s14.notification.audit")
+            staged.audit_events.append(
+                {
+                    "event_id": self._stable_id(
+                        "audit", f"s14_notification_delivered:{operation_id}"
+                    ),
+                    "action": "s14_notification_delivered",
+                    "subject": worker_id,
+                    "role": "worker",
+                    "scope": "C-DEMO",
+                    "source_id": "s14-notification-worker",
+                    "application_id": application_id,
+                    "cycle": int(pending.get("cycle") or 0),
+                    "operation_id": operation_id,
+                    "result": "delivered",
+                    **self._audit_time_fields(staged, now=event_time),
+                }
+            )
+            try:
+                staged.persist()
+            except StaleStoreRevision:
+                return {"status": "unavailable", "reason_code": "STORAGE_UNAVAILABLE"}
+            self._store = staged
+            return {
+                "status": "delivered",
+                "application_id": application_id,
+                "cycle": int(pending.get("cycle") or 0),
+                "operation_id": operation_id,
+                "duplicate": already,
+            }
+
+    def grant_reopen_permission(
+        self,
+        *,
+        application_id: str,
+        principal: S01CommandPrincipal,
+        approver_subject: str,
+        permission_id: str,
+        idempotency_key: str,
+        ttl_seconds: int = 3600,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Record one governed, resource-exact reopen permission fact."""
+        event_time = int(self._clock() if now is None else now)
+        if not isinstance(application_id, str) or not application_id:
+            raise ValueError("permission identity is invalid")
+        if (
+            not self._valid_idempotency_key(idempotency_key)
+            or not isinstance(permission_id, str)
+            or not 1 <= len(permission_id) <= 200
+            or permission_id.strip() != permission_id
+            or not isinstance(approver_subject, str)
+            or not 1 <= len(approver_subject) <= 200
+            or approver_subject.strip() != approver_subject
+            or isinstance(ttl_seconds, bool)
+            or not isinstance(ttl_seconds, int)
+            or not 1 <= ttl_seconds <= 24 * 60 * 60
+        ):
+            raise ValueError("grant reopen permission command is invalid")
+        if not self._s14_valid_operator(principal, now=event_time):
+            return {
+                "status": "rejected",
+                "replayed": False,
+                "application_id": application_id,
+                "reason_code": "FORBIDDEN",
+            }
+        if approver_subject == principal.subject:
+            return {
+                "status": "rejected",
+                "replayed": False,
+                "application_id": application_id,
+                "reason_code": "lifecycle.reopen_authority_not_distinct",
+            }
+        if not self.audit_available or not self.storage_available:
+            return {
+                "status": "rejected",
+                "replayed": False,
+                "application_id": application_id,
+                "reason_code": (
+                    "AUDIT_UNAVAILABLE"
+                    if not self.audit_available
+                    else "STORAGE_UNAVAILABLE"
+                ),
+            }
+        binding_key = self._s14_binding_key(
+            principal,
+            action="grant_reopen_permission",
+            application_id=application_id,
+            idempotency_key=idempotency_key,
+        )
+        command_fingerprint = self._s14_command_fingerprint(
+            {
+                "application_id": application_id,
+                "approver_subject": approver_subject,
+                "permission_id": permission_id,
+                "ttl_seconds": ttl_seconds,
+            }
+        )
+        with self._lock:
+            self._reload_store()
+            previous = self._store.idempotency.get(binding_key)
+            if previous is not None:
+                previous_fingerprint, previous_result = previous
+                if previous_fingerprint == command_fingerprint:
+                    return {
+                        **copy.deepcopy(previous_result),
+                        "status": "replayed",
+                        "replayed": True,
+                    }
+                return {
+                    "status": "rejected",
+                    "replayed": False,
+                    "application_id": application_id,
+                    "reason_code": "IDEMPOTENCY_CONFLICT",
+                }
+            app = self._s14_application_or_not_found(application_id)
+            if str(app.get("phase") or "") != "Terminated":
+                return {
+                    "status": "rejected",
+                    "replayed": False,
+                    "application_id": application_id,
+                    "reason_code": "lifecycle.permission_requires_terminated",
+                }
+            duplicate = [
+                record
+                for record in self._store.review_records
+                if record.get("record_type") == "s14_reopen_permission"
+                and record.get("application_id") == application_id
+                and record.get("permission_id") == permission_id
+            ]
+            if duplicate:
+                return {
+                    "status": "rejected",
+                    "replayed": False,
+                    "application_id": application_id,
+                    "reason_code": "lifecycle.reopen_permission_exists",
+                }
+            authorities = [
+                event
+                for event in self._accepted_admission_authorities()
+                if event["application_id"] == application_id
+            ]
+            admission_source = (
+                str(authorities[0].get("source_id") or "")
+                if len(authorities) == 1
+                else ""
+            )
+            cancel_authorities = {
+                str(event.get("subject") or "")
+                for event in self._store.audit_events
+                if event.get("action") == "s14_application_cancelled"
+                and event.get("application_id") == application_id
+            }
+            if approver_subject in cancel_authorities:
+                return {
+                    "status": "rejected",
+                    "replayed": False,
+                    "application_id": application_id,
+                    "reason_code": "lifecycle.reopen_authority_not_distinct",
+                }
+            latest_run = max(
+                (
+                    run
+                    for run in self._store.runs
+                    if run.get("application_id") == application_id
+                    and run.get("status") == "complete"
+                    and isinstance(run.get("spec"), dict)
+                ),
+                key=lambda run: int(run["spec"].get("lifecycle_revision") or 0),
+                default=None,
+            )
+            spec = (latest_run or {}).get("spec") or {}
+            manifest = app.get("artifact_manifest")
+            artifact_digest = (
+                str(manifest.get("digest") or "")
+                if isinstance(manifest, dict)
+                else ""
+            )
+            cycle = int(app.get("cycle") or 0)
+            permission = {
+                "record_id": self._stable_id(
+                    "s14_permission",
+                    f"{application_id}:{permission_id}",
+                ),
+                "record_type": "s14_reopen_permission",
+                "schema_version": "s14-reopen-permission/1",
+                "permission_id": permission_id,
+                "application_id": application_id,
+                "resource_application_id": application_id,
+                "cycle": cycle,
+                "scope": self._application_visibility_scope(application_id),
+                "policy_release_id": str(spec.get("release_id") or ""),
+                "policy_release_digest": str(spec.get("release_digest") or ""),
+                "checker_build": str(spec.get("checker_build") or ""),
+                "artifact_release_digest": artifact_digest,
+                "source_binding": admission_source,
+                "approved_by": approver_subject,
+                "granted_by": principal.subject,
+                "expires_at": event_time + ttl_seconds,
+                "granted_at": event_time,
+            }
+            staged = copy.deepcopy(self._store)
+            self._before_write("s14.grant.record")
+            staged.review_records.append(permission)
+            self._before_write("s14.grant.audit")
+            staged.audit_events.append(
+                {
+                    "event_id": self._stable_id(
+                        "audit",
+                        f"s14_permission_granted:{application_id}:{permission_id}",
+                    ),
+                    "action": "s14_reopen_permission_granted",
+                    "subject": principal.subject,
+                    "role": principal.role,
+                    "scope": principal.scope,
+                    "source_id": principal.source_id,
+                    "application_id": application_id,
+                    "cycle": cycle,
+                    "result": "accepted",
+                    "permission_id": permission_id,
+                    "approved_by": approver_subject,
+                    "expires_at": permission["expires_at"],
+                    **self._audit_time_fields(staged, now=event_time),
+                }
+            )
+            accepted_result: dict[str, Any] = {
+                "replayed": False,
+                "track": "C-DEMO",
+                "application_id": application_id,
+                "permission_id": permission_id,
+                "approved_by": approver_subject,
+                "scope": permission["scope"],
+                "policy_release_id": permission["policy_release_id"],
+                "policy_release_digest": permission["policy_release_digest"],
+                "source_binding": admission_source,
+                "expires_at": permission["expires_at"],
+            }
+            staged.idempotency[binding_key] = (
+                command_fingerprint,
+                copy.deepcopy(accepted_result),
+            )
+            try:
+                staged.persist()
+            except StaleStoreRevision:
+                self._reload_store()
+                return {
+                    "status": "stale",
+                    "replayed": False,
+                    "application_id": application_id,
+                    "reason_code": "STALE_STORE_REVISION",
+                }
+            self._store = staged
+            return {"status": "accepted", **accepted_result}
 
     def reopen_application(
         self,
@@ -5225,7 +5806,7 @@ class ControlledScenarioService:
             or len(release_digest) != 64
         ):
             raise ValueError("reopen policy permission is invalid")
-        if not self._s14_valid_operator(principal):
+        if not self._s14_valid_operator(principal, now=event_time):
             return {
                 "status": "rejected",
                 "replayed": False,
@@ -5293,16 +5874,58 @@ class ControlledScenarioService:
                     "application_id": application_id,
                     "reason_code": "lifecycle.reopen_stale_revision",
                 }
-            cancellations = [
-                event
+            # S14 fix R1: actor separation from the cancellation authority
+            # is evaluated before permission resolution so a colluding
+            # upstream canceller can never probe permission state.
+            cancel_authorities = {
+                str(event.get("subject") or "")
                 for event in self._store.audit_events
                 if event.get("action") == "s14_application_cancelled"
                 and event.get("application_id") == application_id
-            ]
-            cancel_authorities = {
-                str(event.get("subject") or "") for event in cancellations
             }
             if principal.subject in cancel_authorities:
+                return reopen_rejected("lifecycle.reopen_authority_not_distinct")
+            # Resolve the exact governed permission fact and validate every
+            # binding — resource, scope, source, policy release identity,
+            # approval separation and expiry.
+            permissions = [
+                record
+                for record in self._store.review_records
+                if record.get("record_type") == "s14_reopen_permission"
+                and record.get("permission_id") == permission_id
+                and record.get("application_id") == application_id
+            ]
+            if len(permissions) != 1:
+                return reopen_rejected("lifecycle.reopen_permission_unknown")
+            grant = permissions[0]
+            if float(event_time) > float(grant.get("expires_at") or 0):
+                return reopen_rejected("lifecycle.reopen_permission_expired")
+            expected_scope = self._application_visibility_scope(application_id)
+            if str(grant.get("scope") or "") != expected_scope:
+                return reopen_rejected(
+                    "lifecycle.reopen_permission_scope_mismatch"
+                )
+            authorities = [
+                event
+                for event in self._accepted_admission_authorities()
+                if event["application_id"] == application_id
+            ]
+            admission_source = (
+                str(authorities[0].get("source_id") or "")
+                if len(authorities) == 1
+                else ""
+            )
+            if (
+                not admission_source
+                or str(grant.get("source_binding") or "") != admission_source
+            ):
+                return reopen_rejected(
+                    "lifecycle.reopen_permission_source_mismatch"
+                )
+            if str(grant.get("approved_by") or "") in {
+                *cancel_authorities,
+                principal.subject,
+            }:
                 return reopen_rejected("lifecycle.reopen_authority_not_distinct")
             manifest = app.get("artifact_manifest")
             pinned_digest = (
@@ -5310,7 +5933,28 @@ class ControlledScenarioService:
                 if isinstance(manifest, dict)
                 else ""
             )
-            if not pinned_digest or release_digest != pinned_digest:
+            latest_run = max(
+                (
+                    run
+                    for run in self._store.runs
+                    if run.get("application_id") == application_id
+                    and run.get("status") == "complete"
+                    and isinstance(run.get("spec"), dict)
+                ),
+                key=lambda run: int(run["spec"].get("lifecycle_revision") or 0),
+                default=None,
+            )
+            spec = (latest_run or {}).get("spec") or {}
+            release_matches = (
+                bool(pinned_digest)
+                and release_digest == pinned_digest
+                and str(grant.get("artifact_release_digest") or "") == pinned_digest
+                and str(grant.get("policy_release_digest") or "")
+                == str(spec.get("release_digest") or pinned_digest)
+                and str(grant.get("policy_release_id") or "")
+                == str(spec.get("release_id") or "")
+            )
+            if not release_matches:
                 return reopen_rejected("lifecycle.reopen_policy_forbidden")
 
             staged = copy.deepcopy(self._store)
@@ -18227,6 +18871,24 @@ class ControlledScenarioService:
                         break
             if oid is None or obligation is None:
                 return {"status": "idle", "reason_code": "NO_PENDING_DELIVERY"}
+            # S14 fix R1: a cancelled cycle receives no new business send.
+            # The durable fence is the application phase itself plus the
+            # s14_delivery_cancelled fact recorded at cancel time; a fenced
+            # obligation is reported as a stable disposition without wire
+            # I/O and settles through reconciliation/compensation only.
+            fenced_app = self._store.applications.get(
+                str(obligation.get("application_id") or "")
+            )
+            if str((fenced_app or {}).get("phase") or "") in {
+                "Terminating",
+                "Terminated",
+            }:
+                return {
+                    "status": "fenced",
+                    "obligation_id": oid,
+                    "operation_id": str(obligation.get("operation_id") or ""),
+                    "reason_code": "S14_DELIVERY_FENCED",
+                }
             # Allocate or reuse the stable operation and recipient identities
             # before any external I/O.
             operation_id = str(obligation.get("operation_id") or "")
@@ -18497,6 +19159,66 @@ class ControlledScenarioService:
             )
             lease_until = attempt_row.get("lease_until")
             outcome_now = int(self._clock())
+            # S14 fix R1: the outcome commit rechecks the lifecycle fence.
+            # A result racing cancellation cannot become received; it is
+            # retained as unknown with the stable fence reason and routed
+            # through same-operation reconciliation/compensation.
+            fenced_app = staged.applications.get(
+                str(obligation.get("application_id") or "")
+            )
+            if str((fenced_app or {}).get("phase") or "") in {
+                "Terminating",
+                "Terminated",
+            }:
+                staged.delivery_reconciliations.append(
+                    {
+                        "reconciliation_id": self._stable_id(
+                            "delivery_recon",
+                            f"{oid}:cancel_fenced:{attempt_id}",
+                        ),
+                        "obligation_id": oid,
+                        "operation_id": operation_id,
+                        "attempt_id": attempt_id,
+                        "outcome": "unknown",
+                        "reason_code": "S14_CANCEL_FENCED",
+                        "recorded_at": outcome_now,
+                    }
+                )
+                staged.audit_events.append(
+                    {
+                        "event_id": self._stable_id(
+                            "audit", f"s14_delivery_fenced:{attempt_id}"
+                        ),
+                        "action": "s14_delivery_fenced",
+                        "subject": worker_id,
+                        "role": "worker",
+                        "scope": scope,
+                        "source_id": "s13-delivery-worker",
+                        "application_id": str(
+                            obligation.get("application_id") or ""
+                        ),
+                        "obligation_id": oid,
+                        "operation_id": operation_id,
+                        "attempt_id": attempt_id,
+                        "result": "unknown",
+                        "reason_code": "S14_CANCEL_FENCED",
+                        **self._audit_time_fields(staged, now=outcome_now),
+                    }
+                )
+                try:
+                    staged.persist()
+                except StaleStoreRevision:
+                    return {
+                        "status": "unavailable",
+                        "reason_code": "STORAGE_UNAVAILABLE",
+                    }
+                self._store = staged
+                return {
+                    "status": "stale",
+                    "obligation_id": oid,
+                    "operation_id": operation_id,
+                    "reason_code": "S14_CANCEL_FENCED",
+                }
             claim_is_current = (
                 int(attempt_row.get("attempt_no") or 0) == latest_attempt_no
                 and isinstance(lease_until, (int, float))
@@ -24654,3 +25376,23 @@ class ControlledScenarioTestDriver:
             duplicate=duplicate,
             operation_fault=operation_fault,
         )
+
+    def stage_impact_activation(self, *, final_impact_digest: str) -> None:
+        """Stage one pending ``s09_impact_activated`` outbox fact for
+        consumer-race tests without standing up the full S08 ledger."""
+        with self._service._lock:
+            self._service._reload_store()
+            staged = copy.deepcopy(self._service._store)
+            staged.outbox.append(
+                {
+                    "event_id": self._service._stable_id(
+                        "outbox",
+                        f"s09_impact_activated:{final_impact_digest}",
+                    ),
+                    "kind": "s09_impact_activated",
+                    "status": "pending",
+                    "final_impact_digest": final_impact_digest,
+                }
+            )
+            staged.persist()
+            self._service._store = staged

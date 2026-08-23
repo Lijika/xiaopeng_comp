@@ -42,6 +42,13 @@ OPERATOR = S01CommandPrincipal(
     source_id="s14-control-plane",
 )
 
+APPROVER = S01CommandPrincipal(
+    subject="registered-approver-operator",
+    role="operator",
+    scope="C-DEMO",
+    source_id="s14-approval-desk",
+)
+
 S13_CREDENTIAL = "s13-test-operator-credential"
 S13_SUBJECT = "s13-test-operator"
 
@@ -243,16 +250,8 @@ def test_s13_query_keeps_prior_cycle_receipt_out_of_current_projection(
         principal=REVIEWER,
         application_id=str(admitted.application_id),
     )
-    cancel = service.cancel_application(
-        application_id=str(admitted.application_id),
-        principal=INTEGRATOR,
-        expected_lifecycle_revision=int(upstream["lifecycle_revision"]),
-        idempotency_key="s13-http-cycle-two-cancel",
-        reason_code="UPSTREAM_WITHDRAWN",
-    )
-    assert cancel["status"] == "accepted"
-    # The cycle-one obligation settles through the S13 sender seam: the
-    # receipt becomes immutable prior-cycle history for the successor.
+    # The cycle-one obligation settles through the S13 sender seam BEFORE
+    # the upstream cancels: the receipt is a verified terminal result.
     sent = service.process_next_delivery(
         principal=S01CommandPrincipal(
             subject=S13_SUBJECT,
@@ -262,13 +261,51 @@ def test_s13_query_keeps_prior_cycle_receipt_out_of_current_projection(
         )
     )
     assert sent["status"] == "received"
+    cancel = service.cancel_application(
+        application_id=str(admitted.application_id),
+        principal=INTEGRATOR,
+        expected_lifecycle_revision=int(upstream["lifecycle_revision"]),
+        idempotency_key="s13-http-cycle-two-cancel",
+        reason_code="UPSTREAM_WITHDRAWN",
+    )
+    assert cancel["status"] == "accepted"
+    # S14 R1: after cancellation no new business send may occur for this
+    # cycle; the receipt above was produced BEFORE the cancel and stays
+    # immutable prior-cycle history for the successor.
+    after_cancel = service.process_next_delivery(
+        principal=S01CommandPrincipal(
+            subject=S13_SUBJECT,
+            role="operator",
+            scope="C-DEMO",
+            source_id="s13-delivery-console",
+        )
+    )
+    assert after_cancel["status"] == "idle"
+    assert after_cancel["reason_code"] == "NO_PENDING_DELIVERY"
+    armed = service.settle_termination(
+        application_id=str(admitted.application_id),
+        principal=OPERATOR,
+        expected_lifecycle_revision=int(cancel["lifecycle_revision"]),
+        idempotency_key="s13-http-cycle-two-settle-arm",
+    )
+    assert armed["status"] == "outstanding"
+    delivered = service.process_termination_notification()
+    assert delivered["status"] == "delivered"
     settled = service.settle_termination(
         application_id=str(admitted.application_id),
         principal=OPERATOR,
         expected_lifecycle_revision=int(cancel["lifecycle_revision"]),
-        idempotency_key="s13-http-cycle-two-settle",
+        idempotency_key="s13-http-cycle-two-settle-seal",
     )
     assert settled["status"] == "terminated"
+    granted = service.grant_reopen_permission(
+        application_id=str(admitted.application_id),
+        principal=OPERATOR,
+        approver_subject=APPROVER.subject,
+        permission_id="institutional-reopen-permission/1",
+        idempotency_key="s13-http-cycle-two-grant",
+    )
+    assert granted["status"] == "accepted"
     reopened = service.reopen_application(
         application_id=str(admitted.application_id),
         principal=OPERATOR,

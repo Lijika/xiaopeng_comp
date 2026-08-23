@@ -445,6 +445,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/controlled/s01/api/commands/applications/{application_id}/grant-reopen-permission": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Controlled S14 Grant Permission
+         * @description Record one governed, resource-exact reopen permission fact.
+         */
+        post: operations["controlled_s14_grant_permission_controlled_s01_api_commands_applications__application_id__grant_reopen_permission_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/controlled/s01/api/commands/applications/{application_id}/reopen": {
         parameters: {
             query?: never;
@@ -598,6 +618,26 @@ export interface paths {
         put?: never;
         /** Controlled S05 Claim Exception Work Item */
         post: operations["controlled_s05_claim_exception_work_item_controlled_s01_api_commands_exception_work_items__work_item_id__claim_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s01/api/commands/process-termination-notification": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Controlled S14 Process Notification
+         * @description Deliver one pending termination notification (verified terminal gate).
+         */
+        post: operations["controlled_s14_process_notification_controlled_s01_api_commands_process_termination_notification_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -8091,6 +8131,95 @@ export interface components {
             /** Reason Code */
             reason_code: string;
         };
+        /**
+         * S14CommandResult
+         * @description Typed S14 command contract: every domain outcome — accepted,
+         *     replayed, terminated, outstanding, stale, rejected, unavailable — is a
+         *     serializable body with stable reason codes (ADR-0008 command
+         *     interfaces).
+         */
+        S14CommandResult: {
+            /** Application Id */
+            application_id?: string | null;
+            /** Approved By */
+            approved_by?: string | null;
+            /** Cancel Reason Code */
+            cancel_reason_code?: string | null;
+            /** Cancelled By */
+            cancelled_by?: string | null;
+            /** Cycle */
+            cycle?: number | null;
+            /** Duplicate */
+            duplicate?: boolean | null;
+            /** Expires At */
+            expires_at?: number | null;
+            /** Fenced Effects */
+            fenced_effects?: {
+                [key: string]: number;
+            } | null;
+            /** Lifecycle Revision */
+            lifecycle_revision?: number | null;
+            /** Operation Id */
+            operation_id?: string | null;
+            /** Permission Id */
+            permission_id?: string | null;
+            /** Phase */
+            phase?: string | null;
+            /** Policy Release Digest */
+            policy_release_digest?: string | null;
+            /** Policy Release Id */
+            policy_release_id?: string | null;
+            /** Predecessor Cycle */
+            predecessor_cycle?: number | null;
+            /** Reason Code */
+            reason_code?: string | null;
+            /**
+             * Replayed
+             * @default false
+             */
+            replayed: boolean;
+            /** Scope */
+            scope?: string | null;
+            /** Settled Effects */
+            settled_effects?: components["schemas"]["S14EffectItem"][] | null;
+            /** Source Binding */
+            source_binding?: string | null;
+            /** Status */
+            status: string;
+            /** Target Phase */
+            target_phase?: string | null;
+            /** Track */
+            track?: string | null;
+            /** Unresolved Effects */
+            unresolved_effects?: components["schemas"]["S14EffectItem"][] | null;
+        };
+        /** S14EffectItem */
+        S14EffectItem: {
+            /** Detail */
+            detail?: string | null;
+            /** Id */
+            id: string;
+            /** Kind */
+            kind: string;
+            /** Result */
+            result?: string | null;
+            /** Settled */
+            settled?: boolean | null;
+        };
+        /** S14GrantPermissionBody */
+        S14GrantPermissionBody: {
+            /** Approver Subject */
+            approver_subject: string;
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Permission Id */
+            permission_id: string;
+            /**
+             * Ttl Seconds
+             * @default 3600
+             */
+            ttl_seconds: number;
+        };
         /** S14ReopenBody */
         S14ReopenBody: {
             /** Expected Lifecycle Revision */
@@ -9133,18 +9262,141 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["S14CommandResult"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S14CommandResult"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S14CommandResult"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S14CommandResult"];
+                };
+            };
+            /** @description Unprocessable Entity */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S14CommandResult"];
+                };
+            };
+        };
+    };
+    controlled_s14_grant_permission_controlled_s01_api_commands_applications__application_id__grant_reopen_permission_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                application_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["S14GrantPermissionBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S14CommandResult"];
+                };
+            };
+            /** @description Accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S14CommandResult"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S14CommandResult"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S14CommandResult"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S14CommandResult"];
                 };
             };
         };
@@ -9170,18 +9422,61 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["S14CommandResult"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S14CommandResult"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S14CommandResult"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S14CommandResult"];
+                };
+            };
+            /** @description Unprocessable Entity */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S14CommandResult"];
                 };
             };
         };
@@ -9207,18 +9502,61 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["S14CommandResult"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S14CommandResult"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S14CommandResult"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S14CommandResult"];
+                };
+            };
+            /** @description Unprocessable Entity */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S14CommandResult"];
                 };
             };
         };
@@ -9841,6 +10179,44 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["T05ErrorResponse"];
+                };
+            };
+        };
+    };
+    controlled_s14_process_notification_controlled_s01_api_commands_process_termination_notification_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S14CommandResult"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S14CommandResult"];
                 };
             };
         };

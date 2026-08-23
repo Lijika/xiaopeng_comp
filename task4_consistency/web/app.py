@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 
 import yaml
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -958,42 +959,6 @@ class S01RecoveryBody(BaseModel):
     expected_failure_reason_code: str
 
 
-class S14CancelBody(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    expected_lifecycle_revision: int = Field(ge=1, strict=True)
-    idempotency_key: str = Field(min_length=1, max_length=200, strict=True)
-    reason_code: str = Field(min_length=1, max_length=200, strict=True)
-
-
-class S14SettleBody(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    expected_lifecycle_revision: int = Field(ge=1, strict=True)
-    idempotency_key: str = Field(min_length=1, max_length=200, strict=True)
-
-
-class S14ReopenPolicyBody(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    permission_id: str = Field(min_length=1, max_length=200, strict=True)
-    release_digest: str = Field(
-        min_length=64,
-        max_length=64,
-        pattern=r"^[0-9a-f]{64}$",
-        strict=True,
-    )
-
-
-class S14ReopenBody(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    expected_lifecycle_revision: int = Field(ge=1, strict=True)
-    idempotency_key: str = Field(min_length=1, max_length=200, strict=True)
-    target_phase: str = Field(pattern=r"^(Intake|Assembly)$", strict=True)
-    reopen_policy: S14ReopenPolicyBody
-
-
 class S07VerifyRecoveryBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1145,6 +1110,142 @@ class S01ErrorDetail(BaseModel):
 
 class S01ErrorResponse(BaseModel):
     detail: S01ErrorDetail
+
+
+class S14CancelBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_lifecycle_revision: int = Field(ge=1, strict=True)
+    idempotency_key: str = Field(min_length=1, max_length=200, strict=True)
+    reason_code: str = Field(min_length=1, max_length=200, strict=True)
+
+
+class S14SettleBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_lifecycle_revision: int = Field(ge=1, strict=True)
+    idempotency_key: str = Field(min_length=1, max_length=200, strict=True)
+
+
+class S14ReopenPolicyBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    permission_id: str = Field(
+        min_length=1, max_length=200, pattern=r"^\S+$", strict=True
+    )
+    release_digest: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+        strict=True,
+    )
+
+
+class S14ReopenBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_lifecycle_revision: int = Field(ge=1, strict=True)
+    idempotency_key: str = Field(min_length=1, max_length=200, strict=True)
+    target_phase: str = Field(pattern=r"^(Intake|Assembly)$", strict=True)
+    reopen_policy: S14ReopenPolicyBody
+
+
+class S14GrantPermissionBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    approver_subject: str = Field(
+        min_length=1, max_length=200, pattern=r"^\S+$", strict=True
+    )
+    permission_id: str = Field(
+        min_length=1, max_length=200, pattern=r"^\S+$", strict=True
+    )
+    idempotency_key: str = Field(min_length=1, max_length=200, strict=True)
+    ttl_seconds: int = Field(default=3600, ge=1, le=86400, strict=True)
+
+
+S14_EFFECT_ITEM = {
+    "kind": str,
+    "id": str,
+}
+
+
+class S14EffectItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: str
+    id: str
+    detail: str | None = None
+    result: str | None = None
+    settled: bool | None = None
+
+
+class S14CommandResult(BaseModel):
+    """Typed S14 command contract: every domain outcome — accepted,
+    replayed, terminated, outstanding, stale, rejected, unavailable — is a
+    serializable body with stable reason codes (ADR-0008 command
+    interfaces)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: str
+    replayed: bool = False
+    track: str | None = None
+    application_id: str | None = None
+    reason_code: str | None = None
+    cycle: int | None = None
+    phase: str | None = None
+    lifecycle_revision: int | None = None
+    predecessor_cycle: int | None = None
+    target_phase: str | None = None
+    cancel_reason_code: str | None = None
+    cancelled_by: str | None = None
+    fenced_effects: dict[str, int] | None = None
+    settled_effects: list[S14EffectItem] | None = None
+    unresolved_effects: list[S14EffectItem] | None = None
+    permission_id: str | None = None
+    approved_by: str | None = None
+    scope: str | None = None
+    policy_release_id: str | None = None
+    policy_release_digest: str | None = None
+    source_binding: str | None = None
+    expires_at: int | None = None
+    operation_id: str | None = None
+    duplicate: bool | None = None
+
+
+def _s14_command_response(result: dict[str, Any]) -> Response:
+    """Map the domain outcome vocabulary to stable HTTP codes."""
+    validated = S14CommandResult.model_validate(result)
+    status = validated.status
+    code = 200
+    if status == "outstanding":
+        code = 202
+    elif status == "stale":
+        code = 409
+    elif status == "unavailable":
+        code = 503
+    elif status == "rejected":
+        reason = str(validated.reason_code or "")
+        code = (
+            403
+            if reason.startswith("lifecycle.reopen_")
+            or reason == "lifecycle.cancel_forbidden"
+            or reason == "FORBIDDEN"
+            else 409
+        )
+    return JSONResponse(status_code=code, content=jsonable_encoder(validated))
+
+
+S14_COMMAND_RESPONSES = {
+    202: {"model": S14CommandResult},
+    403: {"model": S14CommandResult},
+    404: {"model": S01ErrorResponse},
+    409: {"model": S14CommandResult},
+    422: {"model": S01ErrorResponse},
+    503: {"model": S14CommandResult},
+}
+
+
 
 
 class T05ErrorDetail(BaseModel):
@@ -4182,24 +4283,36 @@ def controlled_s01_recover_runtime(
     )
 
 
-@app.post("/controlled/s01/api/commands/applications/{application_id}/cancel")
+def _s14_invalid(error: ValueError) -> HTTPException:
+    return HTTPException(
+        422,
+        detail={"error": "S14_COMMAND_INVALID", "message": str(error)},
+    )
+
+
+@app.post(
+    "/controlled/s01/api/commands/applications/{application_id}/cancel",
+    response_model=S14CommandResult,
+    responses=S14_COMMAND_RESPONSES,
+)
 def controlled_s14_cancel(
     application_id: str,
     body: S14CancelBody,
     request: Request,
     response: Response,
-) -> dict[str, Any]:
+) -> Response:
     """S14 upstream cancellation: enter Terminating and fence all effects."""
     principal = _s01_require_role(request, "integrator")
     _s01_disable_cache(response)
     try:
-        return _s01_service().cancel_application(
+        result = _s01_service().cancel_application(
             application_id=application_id,
             principal=S01CommandPrincipal(
                 subject=principal.subject,
                 role="integrator",
                 scope=principal.scope,
                 source_id="c-demo-web-session",
+                expires_at=principal.expires_at,
             ),
             expected_lifecycle_revision=body.expected_lifecycle_revision,
             idempotency_key=body.idempotency_key,
@@ -4207,54 +4320,104 @@ def controlled_s14_cancel(
         )
     except QueryNotFound as error:
         raise HTTPException(404, detail={"error": "S01_NOT_FOUND"}) from error
+    except ValueError as error:
+        raise _s14_invalid(error) from error
+    return _s14_command_response(result)
 
 
 @app.post(
-    "/controlled/s01/api/commands/applications/{application_id}/settle-termination"
+    "/controlled/s01/api/commands/applications/{application_id}/settle-termination",
+    response_model=S14CommandResult,
+    responses=S14_COMMAND_RESPONSES,
 )
 def controlled_s14_settle(
     application_id: str,
     body: S14SettleBody,
     request: Request,
     response: Response,
-) -> dict[str, Any]:
+) -> Response:
     """S14 operator settlement: seal Terminated only when effects are terminal."""
     principal = _s01_require_operator(request)
     _s01_disable_cache(response)
     try:
-        return _s01_service().settle_termination(
+        result = _s01_service().settle_termination(
             application_id=application_id,
             principal=S01CommandPrincipal(
                 subject=principal.subject,
                 role="operator",
                 scope=principal.scope,
                 source_id="c-demo-operator-control-plane",
+                expires_at=principal.expires_at,
             ),
             expected_lifecycle_revision=body.expected_lifecycle_revision,
             idempotency_key=body.idempotency_key,
         )
     except QueryNotFound as error:
         raise HTTPException(404, detail={"error": "S01_NOT_FOUND"}) from error
+    except ValueError as error:
+        raise _s14_invalid(error) from error
+    return _s14_command_response(result)
 
 
-@app.post("/controlled/s01/api/commands/applications/{application_id}/reopen")
-def controlled_s14_reopen(
+@app.post(
+    "/controlled/s01/api/commands/applications/{application_id}/grant-reopen-permission",
+    response_model=S14CommandResult,
+    responses=S14_COMMAND_RESPONSES,
+)
+def controlled_s14_grant_permission(
     application_id: str,
-    body: S14ReopenBody,
+    body: S14GrantPermissionBody,
     request: Request,
     response: Response,
-) -> dict[str, Any]:
-    """S14 authorized reopen: successor cycle from a Terminated application."""
+) -> Response:
+    """Record one governed, resource-exact reopen permission fact."""
     principal = _s01_require_operator(request)
     _s01_disable_cache(response)
     try:
-        return _s01_service().reopen_application(
+        result = _s01_service().grant_reopen_permission(
             application_id=application_id,
             principal=S01CommandPrincipal(
                 subject=principal.subject,
                 role="operator",
                 scope=principal.scope,
                 source_id="c-demo-operator-control-plane",
+                expires_at=principal.expires_at,
+            ),
+            approver_subject=body.approver_subject,
+            permission_id=body.permission_id,
+            idempotency_key=body.idempotency_key,
+            ttl_seconds=body.ttl_seconds,
+        )
+    except QueryNotFound as error:
+        raise HTTPException(404, detail={"error": "S01_NOT_FOUND"}) from error
+    except ValueError as error:
+        raise _s14_invalid(error) from error
+    return _s14_command_response(result)
+
+
+@app.post(
+    "/controlled/s01/api/commands/applications/{application_id}/reopen",
+    response_model=S14CommandResult,
+    responses=S14_COMMAND_RESPONSES,
+)
+def controlled_s14_reopen(
+    application_id: str,
+    body: S14ReopenBody,
+    request: Request,
+    response: Response,
+) -> Response:
+    """S14 authorized reopen: successor cycle from a Terminated application."""
+    principal = _s01_require_operator(request)
+    _s01_disable_cache(response)
+    try:
+        result = _s01_service().reopen_application(
+            application_id=application_id,
+            principal=S01CommandPrincipal(
+                subject=principal.subject,
+                role="operator",
+                scope=principal.scope,
+                source_id="c-demo-operator-control-plane",
+                expires_at=principal.expires_at,
             ),
             expected_lifecycle_revision=body.expected_lifecycle_revision,
             idempotency_key=body.idempotency_key,
@@ -4266,6 +4429,24 @@ def controlled_s14_reopen(
         )
     except QueryNotFound as error:
         raise HTTPException(404, detail={"error": "S01_NOT_FOUND"}) from error
+    except ValueError as error:
+        raise _s14_invalid(error) from error
+    return _s14_command_response(result)
+
+
+@app.post(
+    "/controlled/s01/api/commands/process-termination-notification",
+    response_model=S14CommandResult,
+    responses={403: {"model": S01ErrorResponse}, 503: {"model": S14CommandResult}},
+)
+def controlled_s14_process_notification(
+    request: Request, response: Response
+) -> Response:
+    """Deliver one pending termination notification (verified terminal gate)."""
+    _s01_require_operator(request)
+    _s01_disable_cache(response)
+    result = _s01_service().process_termination_notification()
+    return _s14_command_response(result)
 
 
 @app.post("/controlled/s01/api/_test/commands/project")

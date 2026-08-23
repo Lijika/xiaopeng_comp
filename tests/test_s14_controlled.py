@@ -67,6 +67,13 @@ SECOND_OPERATOR = S01CommandPrincipal(
     source_id="s14-second-control-plane",
 )
 
+APPROVER = S01CommandPrincipal(
+    subject="registered-approver-operator",
+    role="operator",
+    scope="C-DEMO",
+    source_id="s14-approval-desk",
+)
+
 
 def make_service(
     *,
@@ -388,7 +395,7 @@ def _delivery_harness(
     registry = RegisteredDownstreamRegistry([reg], {adapter.adapter_id: adapter})
     service = make_service(downstream_registry=registry)
     _auto_complete(service)
-    return service
+    return service, adapter
 
 
 def _completed_with_obligation(service: ControlledScenarioService) -> str:
@@ -409,9 +416,10 @@ def _completed_with_obligation(service: ControlledScenarioService) -> str:
     return str(admitted.application_id)
 
 
-def test_settlement_requires_delivery_terminal_result_before_terminated() -> None:
-    service = _delivery_harness()
+def test_cancelled_cycle_receives_no_new_send_and_settles_via_fence() -> None:
+    service, adapter = _delivery_harness()
     application_id = _completed_with_obligation(service)
+    sends_before = dict(adapter.executed_operations)
     route = service.current_route_view(
         principal=REVIEWER, application_id=application_id
     )
@@ -424,35 +432,32 @@ def test_settlement_requires_delivery_terminal_result_before_terminated() -> Non
         reason_code="UPSTREAM_WITHDRAWN",
     )
     assert cancel["status"] == "accepted"
+    assert cancel["fenced_effects"]["deliveries_cancelled_before_send"] == 1
 
-    outstanding = service.settle_termination(
-        application_id=application_id,
-        principal=OPERATOR,
-        expected_lifecycle_revision=cancel["lifecycle_revision"],
-        idempotency_key="s14-settle-pending",
+    # The sender refuses new business sends for the fenced cycle.
+    fenced = service.process_next_delivery(principal=OPERATOR)
+    assert fenced == {**fenced, "status": "fenced", "reason_code": "S14_DELIVERY_FENCED"}
+    assert adapter.executed_operations == sends_before
+
+    cancelled_fact = [
+        event
+        for event in service._store.audit_events
+        if event.get("action") == "s14_delivery_cancelled"
+        and event.get("application_id") == application_id
+    ]
+    assert len(cancelled_fact) == 1
+
+    settled = _settle_to_terminated(
+        service, application_id, cancel["lifecycle_revision"]
     )
-    assert outstanding["status"] == "outstanding"
-    assert outstanding["phase"] == "Terminating"
-    kinds = {item["kind"] for item in outstanding["unresolved_effects"]}
-    assert "delivery_obligation" in kinds
-
-    sent = service.process_next_delivery(principal=OPERATOR)
-    assert sent["status"] == "received"
-
-    settled = service.settle_termination(
-        application_id=application_id,
-        principal=OPERATOR,
-        expected_lifecycle_revision=cancel["lifecycle_revision"],
-        idempotency_key="s14-settle-final",
-    )
-    assert settled["status"] == "terminated"
-    assert settled["phase"] == "Terminated"
-
-    current = service.current_route_view(
-        principal=REVIEWER, application_id=application_id
-    )
-    assert current["phase"] == "Terminated"
-    assert current["route"] == "cancelled"
+    delivery_effects = [
+        item
+        for item in settled["settled_effects"]
+        if item["kind"] == "delivery_obligation"
+    ]
+    assert delivery_effects == [
+        {"kind": "delivery_obligation", "id": delivery_effects[0]["id"], "result": "cancelled_before_send"}
+    ]
 
     audits = [
         event
@@ -461,18 +466,14 @@ def test_settlement_requires_delivery_terminal_result_before_terminated() -> Non
         and event.get("application_id") == application_id
     ]
     assert len(audits) == 1
-    notifications = [
-        event
-        for event in service._store.outbox
-        if event.get("kind") == "termination_notification_requested"
-        and event.get("application_id") == application_id
-    ]
-    assert len(notifications) == 1
 
 
 def test_unknown_outcome_keeps_terminating_until_verified_terminal() -> None:
-    service = _delivery_harness(behavior="timeout_after_execute")
+    service, _adapter = _delivery_harness(behavior="timeout_after_execute")
     application_id = _completed_with_obligation(service)
+    # The send races BEFORE cancellation: the outcome is unknown.
+    sent = service.process_next_delivery(principal=OPERATOR)
+    assert sent["status"] == "unknown"
     route = service.current_route_view(
         principal=REVIEWER, application_id=application_id
     )
@@ -485,9 +486,6 @@ def test_unknown_outcome_keeps_terminating_until_verified_terminal() -> None:
     )
     assert cancel["status"] == "accepted"
 
-    sent = service.process_next_delivery(principal=OPERATOR)
-    assert sent["status"] == "unknown"
-
     obligation_id = service.delivery_view(
         principal=OPERATOR, application_id=application_id
     )["obligation"]["obligation_id"]
@@ -499,17 +497,14 @@ def test_unknown_outcome_keeps_terminating_until_verified_terminal() -> None:
         idempotency_key="s14-settle-unknown",
     )
     assert outstanding["status"] == "outstanding"
-    assert outstanding["phase"] == "Terminating"
     kinds = {item["kind"] for item in outstanding["unresolved_effects"]}
-    assert "delivery_obligation" in kinds
+    assert "termination_notification" in kinds
 
-    # Time alone must never promote Terminating to Terminated: settlement is
-    # re-run against an aged clock and the cycle stays Terminating.
+    # Time alone must never promote Terminating to Terminated.
     aged_clock = service._clock() + 10**9
-    service_with_aged_clock = service
-    original_clock = service_with_aged_clock._clock
+    original_clock = service._clock
     try:
-        service_with_aged_clock._clock = lambda: aged_clock  # type: ignore[method-assign]
+        service._clock = lambda: aged_clock  # type: ignore[method-assign]
         aged = service.settle_termination(
             application_id=application_id,
             principal=OPERATOR,
@@ -517,7 +512,7 @@ def test_unknown_outcome_keeps_terminating_until_verified_terminal() -> None:
             idempotency_key="s14-settle-aged",
         )
     finally:
-        service_with_aged_clock._clock = original_clock  # type: ignore[method-assign]
+        service._clock = original_clock  # type: ignore[method-assign]
     assert aged["status"] == "outstanding"
     current = service.current_route_view(
         principal=REVIEWER, application_id=application_id
@@ -530,13 +525,11 @@ def test_unknown_outcome_keeps_terminating_until_verified_terminal() -> None:
     )
     assert reconciled["status"] == "received"
 
-    settled = service.settle_termination(
-        application_id=application_id,
-        principal=OPERATOR,
-        expected_lifecycle_revision=cancel["lifecycle_revision"],
-        idempotency_key="s14-settle-compensated",
+    settled = _settle_to_terminated(
+        service, application_id, cancel["lifecycle_revision"]
     )
-    assert settled["status"] == "terminated"
+    effects = {item["kind"]: item["result"] for item in settled["settled_effects"]}
+    assert effects["delivery_obligation"] == "received"
 
     delivery = service.delivery_view(
         principal=OPERATOR, application_id=application_id
@@ -545,8 +538,10 @@ def test_unknown_outcome_keeps_terminating_until_verified_terminal() -> None:
 
 
 def test_forward_compensation_settles_cancelled_cycle() -> None:
-    service = _delivery_harness(behavior="timeout_without_execute")
+    service, _adapter = _delivery_harness(behavior="timeout_without_execute")
     application_id = _completed_with_obligation(service)
+    sent = service.process_next_delivery(principal=OPERATOR)
+    assert sent["status"] == "unknown"
     route = service.current_route_view(
         principal=REVIEWER, application_id=application_id
     )
@@ -558,9 +553,6 @@ def test_forward_compensation_settles_cancelled_cycle() -> None:
         reason_code="UPSTREAM_WITHDRAWN",
     )
     assert cancel["status"] == "accepted"
-
-    sent = service.process_next_delivery(principal=OPERATOR)
-    assert sent["status"] == "unknown"
 
     obligation_id = service.delivery_view(
         principal=OPERATOR, application_id=application_id
@@ -577,22 +569,20 @@ def test_forward_compensation_settles_cancelled_cycle() -> None:
     )
     assert compensated["status"] == "compensated"
 
-    settled = service.settle_termination(
-        application_id=application_id,
-        principal=OPERATOR,
-        expected_lifecycle_revision=cancel["lifecycle_revision"],
-        idempotency_key="s14-settle-forward-compensation",
+    settled = _settle_to_terminated(
+        service, application_id, cancel["lifecycle_revision"]
     )
-    assert settled["status"] == "terminated"
     effects = {item["kind"]: item["result"] for item in settled["settled_effects"]}
     assert effects["delivery_obligation"] == "compensated"
 
 
 def test_failed_compensation_stays_terminating() -> None:
-    service = _delivery_harness(
+    service, _adapter = _delivery_harness(
         behavior="timeout_after_execute", compensation_behavior="fail"
     )
     application_id = _completed_with_obligation(service)
+    sent = service.process_next_delivery(principal=OPERATOR)
+    assert sent["status"] == "unknown"
     route = service.current_route_view(
         principal=REVIEWER, application_id=application_id
     )
@@ -604,9 +594,6 @@ def test_failed_compensation_stays_terminating() -> None:
         reason_code="UPSTREAM_WITHDRAWN",
     )
     assert cancel["status"] == "accepted"
-
-    sent = service.process_next_delivery(principal=OPERATOR)
-    assert sent["status"] == "unknown"
 
     obligation_id = service.delivery_view(
         principal=OPERATOR, application_id=application_id
@@ -624,7 +611,6 @@ def test_failed_compensation_stays_terminating() -> None:
         idempotency_key="s14-settle-comp-failed",
     )
     assert outstanding["status"] == "outstanding"
-    assert outstanding["phase"] == "Terminating"
     details = {
         item["kind"]: item["detail"]
         for item in outstanding["unresolved_effects"]
@@ -657,6 +643,50 @@ def test_settlement_rejects_when_not_terminating() -> None:
 # --------------------------------------------------------------------------
 
 
+def _settle_to_terminated(service, application_id, revision) -> dict:
+    """Full settlement: effects gate -> notification delivery -> Terminated."""
+    first = service.settle_termination(
+        application_id=application_id,
+        principal=OPERATOR,
+        expected_lifecycle_revision=revision,
+        idempotency_key=f"s14-settle-arm-{application_id}",
+    )
+    assert first["status"] == "outstanding", first
+    kinds = {item["kind"] for item in first["unresolved_effects"]}
+    assert "termination_notification" in kinds
+    delivered = service.process_termination_notification()
+    assert delivered["status"] == "delivered", delivered
+    final = service.settle_termination(
+        application_id=application_id,
+        principal=OPERATOR,
+        expected_lifecycle_revision=revision,
+        idempotency_key=f"s14-settle-seal-{application_id}",
+    )
+    assert final["status"] == "terminated", final
+    return final
+
+
+def _grant_exact_permission(
+    service: ControlledScenarioService,
+    application_id: str,
+    *,
+    permission_id: str = "institutional-reopen-permission/1",
+    ttl_seconds: int = 3600,
+    now: float | None = None,
+) -> dict:
+    grant = service.grant_reopen_permission(
+        application_id=application_id,
+        principal=OPERATOR,
+        approver_subject=APPROVER.subject,
+        permission_id=permission_id,
+        idempotency_key=f"s14-grant-{permission_id}-{application_id}",
+        ttl_seconds=ttl_seconds,
+        now=now,
+    )
+    assert grant["status"] == "accepted", grant
+    return grant
+
+
 def _terminate_manual_review(service: ControlledScenarioService):
     application_id, work_item_id, review, route = _manual_review_state(service)
     cancel = service.cancel_application(
@@ -667,13 +697,9 @@ def _terminate_manual_review(service: ControlledScenarioService):
         reason_code="UPSTREAM_WITHDRAWN",
     )
     assert cancel["status"] == "accepted"
-    settled = service.settle_termination(
-        application_id=application_id,
-        principal=OPERATOR,
-        expected_lifecycle_revision=cancel["lifecycle_revision"],
-        idempotency_key="s14-settle-reopen-path",
+    settled = _settle_to_terminated(
+        service, application_id, cancel["lifecycle_revision"]
     )
-    assert settled["status"] == "terminated"
     return application_id, cancel, settled
 
 
@@ -685,22 +711,6 @@ def _reopen_policy(service: ControlledScenarioService) -> dict[str, Any]:
 
 
 def test_reopen_requires_distinct_authority_and_policy_permission() -> None:
-    service = make_service()
-    application_id, cancel, settled = _terminate_manual_review(service)
-
-    while_terminating_probe = service.reopen_application(
-        application_id=application_id,
-        principal=SECOND_OPERATOR,
-        expected_lifecycle_revision=settled["lifecycle_revision"],
-        idempotency_key="s14-reopen-probe",
-        target_phase="Intake",
-        reopen_policy=_reopen_policy(service),
-    )
-    assert while_terminating_probe["status"] in {"accepted", "rejected"}
-    assert while_terminating_probe.get("phase") != "Intake" or (
-        while_terminating_probe["status"] == "accepted"
-    )
-
     fresh = make_service()
     application_id, cancel, settled = _terminate_manual_review(fresh)
 
@@ -731,6 +741,11 @@ def test_reopen_requires_distinct_authority_and_policy_permission() -> None:
     assert same_authority["status"] == "rejected"
     assert same_authority["reason_code"] == "lifecycle.reopen_authority_not_distinct"
 
+    # With an exact grant in place a wrong release digest is a policy
+    # rejection, not an unknown permission.
+    _grant_exact_permission(
+        fresh, application_id, permission_id="institutional-reopen-permission/1", now=900
+    )
     bad_policy = fresh.reopen_application(
         application_id=application_id,
         principal=OPERATOR,
@@ -741,6 +756,7 @@ def test_reopen_requires_distinct_authority_and_policy_permission() -> None:
             "permission_id": "institutional-reopen-permission/1",
             "release_digest": "0" * 64,
         },
+        now=1000,
     )
     assert bad_policy["status"] == "rejected"
     assert bad_policy["reason_code"] == "lifecycle.reopen_policy_forbidden"
@@ -751,7 +767,11 @@ def test_reopen_requires_distinct_authority_and_policy_permission() -> None:
         expected_lifecycle_revision=cancel["lifecycle_revision"] - 1,
         idempotency_key="s14-reopen-stale",
         target_phase="Intake",
-        reopen_policy=_reopen_policy(fresh),
+        reopen_policy={
+            "permission_id": "institutional-reopen-permission/1",
+            "release_digest": _reopen_policy(fresh)["release_digest"],
+        },
+        now=1000,
     )
     assert stale["status"] == "stale"
     assert stale["reason_code"] == "lifecycle.reopen_stale_revision"
@@ -791,6 +811,7 @@ def test_authorized_reopen_creates_successor_cycle_without_inherited_state() -> 
     for target_phase in ("Intake", "Assembly"):
         service = make_service()
         application_id, cancel, settled = _terminate_manual_review(service)
+        _grant_exact_permission(service, application_id)
 
         reopened = service.reopen_application(
             application_id=application_id,
@@ -849,6 +870,7 @@ def test_authorized_reopen_creates_successor_cycle_without_inherited_state() -> 
 def test_reopened_cycle_keeps_old_history_but_no_inherited_currentness() -> None:
     service = make_service()
     application_id, cancel, settled = _terminate_manual_review(service)
+    _grant_exact_permission(service, application_id)
     reopened = service.reopen_application(
         application_id=application_id,
         principal=OPERATOR,
@@ -1148,13 +1170,9 @@ def test_late_attachment_for_sealed_cycle_requires_reopen(tmp_path: Path) -> Non
         reason_code="UPSTREAM_WITHDRAWN",
     )
     assert cancel["status"] == "accepted"
-    settled = service.settle_termination(
-        application_id=application_id,
-        principal=OPERATOR,
-        expected_lifecycle_revision=cancel["lifecycle_revision"],
-        idempotency_key="s14-settle-sealed",
+    _settle_to_terminated(
+        service, application_id, cancel["lifecycle_revision"]
     )
-    assert settled["status"] == "terminated"
 
     evidence_events_before = len(service._store.evidence_events)
     submission = _attachment_submission(request, source, closed=False)
@@ -1197,13 +1215,9 @@ def test_history_rebuilds_cancel_termination_reopen_and_late_receipt(
         idempotency_key="s14-cancel-history",
         reason_code="UPSTREAM_WITHDRAWN",
     )
-    settled = service.settle_termination(
-        application_id=application_id,
-        principal=OPERATOR,
-        expected_lifecycle_revision=cancel["lifecycle_revision"],
-        idempotency_key="s14-settle-history",
+    settled = _settle_to_terminated(
+        service, application_id, cancel["lifecycle_revision"]
     )
-    assert settled["status"] == "terminated"
     submission = _attachment_submission(request, source, closed=False)
     late = service.submit_attachment_version(
         submission=submission,
@@ -1212,6 +1226,7 @@ def test_history_rebuilds_cancel_termination_reopen_and_late_receipt(
         now=600,
     )
     assert late.reason_code == "evidence.late_input_requires_reopen"
+    _grant_exact_permission(service, application_id)
     reopened = service.reopen_application(
         application_id=application_id,
         principal=OPERATOR,
@@ -1262,3 +1277,438 @@ def test_history_rebuilds_cancel_termination_reopen_and_late_receipt(
         for record in history.get("attachment_versions", [])
     ]
     assert isinstance(supplements, list)
+
+
+# --------------------------------------------------------------------------
+# R1 fixes: notification gate, unresolved outcomes, governed permission,
+# live principals, policy-impact race
+# --------------------------------------------------------------------------
+
+
+def test_terminated_is_impossible_while_notification_is_pending() -> None:
+    service = make_service()
+    application_id, _work_item_id, _review, route = _manual_review_state(service)
+    cancel = service.cancel_application(
+        application_id=application_id,
+        principal=INTEGRATOR,
+        expected_lifecycle_revision=int(route["lifecycle_revision"]),
+        idempotency_key="s14-cancel-notif-gate",
+        reason_code="UPSTREAM_WITHDRAWN",
+    )
+    assert cancel["status"] == "accepted"
+
+    armed = service.settle_termination(
+        application_id=application_id,
+        principal=OPERATOR,
+        expected_lifecycle_revision=cancel["lifecycle_revision"],
+        idempotency_key="s14-settle-arm-notif",
+    )
+    assert armed["status"] == "outstanding"
+    assert armed["phase"] == "Terminating"
+    notifications = [
+        event
+        for event in service._store.outbox
+        if event.get("kind") == "termination_notification_requested"
+    ]
+    assert len(notifications) == 1 and notifications[0]["status"] == "pending"
+
+    # No lifecycle transition happened: still Terminating at the same rev.
+    current = service.current_route_view(
+        principal=REVIEWER, application_id=application_id
+    )
+    assert current["phase"] == "Terminating"
+    assert current["lifecycle_revision"] == cancel["lifecycle_revision"]
+
+    # Aged time alone cannot deliver or seal.
+    aged_clock = service._clock() + 10**9
+    original_clock = service._clock
+    try:
+        service._clock = lambda: aged_clock  # type: ignore[method-assign]
+        aged = service.settle_termination(
+            application_id=application_id,
+            principal=OPERATOR,
+            expected_lifecycle_revision=cancel["lifecycle_revision"],
+            idempotency_key="s14-settle-aged-notif",
+        )
+    finally:
+        service._clock = original_clock  # type: ignore[method-assign]
+    assert aged["status"] == "outstanding"
+
+    first_delivery = service.process_termination_notification()
+    assert first_delivery["status"] == "delivered"
+    duplicate = service.process_termination_notification()
+    assert duplicate["status"] in {"delivered", "idle"}
+    receipts = [
+        entry
+        for entry in service._store.inbox
+        if entry.get("kind") == "s14_termination_notification_receipt"
+    ]
+    assert len(receipts) == 1
+
+    settled = service.settle_termination(
+        application_id=application_id,
+        principal=OPERATOR,
+        expected_lifecycle_revision=cancel["lifecycle_revision"],
+        idempotency_key="s14-settle-seal-notif",
+    )
+    assert settled["status"] == "terminated"
+
+
+
+
+def test_reopen_permission_matrix_rejects_every_non_exact_grant() -> None:
+    service = make_service()
+    application_id, _cancel, settled = _terminate_manual_review(service)
+
+    # Arbitrary / unapproved permission identifiers never resolve.
+    unknown = service.reopen_application(
+        application_id=application_id,
+        principal=OPERATOR,
+        expected_lifecycle_revision=settled["lifecycle_revision"],
+        idempotency_key="s14-reopen-unknown-perm",
+        target_phase="Intake",
+        reopen_policy={
+            "permission_id": "made-up-permission",
+            "release_digest": _release_digest(service),
+        },
+    )
+    assert unknown["status"] == "rejected"
+    assert unknown["reason_code"] == "lifecycle.reopen_permission_unknown"
+
+    # Permission cannot be granted while Terminating.
+    terminating_service = make_service()
+    app2, _, _, route2 = _manual_review_state(terminating_service)
+    cancelling = terminating_service.cancel_application(
+        application_id=app2,
+        principal=INTEGRATOR,
+        expected_lifecycle_revision=int(route2["lifecycle_revision"]),
+        idempotency_key="s14-cancel-perm-early",
+        reason_code="UPSTREAM_WITHDRAWN",
+    )
+    early = terminating_service.grant_reopen_permission(
+        application_id=app2,
+        principal=SECOND_OPERATOR,
+        approver_subject=APPROVER.subject,
+        permission_id="perm-terminating",
+        idempotency_key="s14-grant-early",
+    )
+    assert early["status"] == "rejected"
+    assert early["reason_code"] == "lifecycle.permission_requires_terminated"
+
+    # Approver must be distinct from the canceller.
+    colluding = terminating_service.settle_termination  # noqa: F841
+    fresh = make_service()
+    app3, cancel3, settled3 = _terminate_manual_review(fresh)
+    as_canceller = fresh.grant_reopen_permission(
+        application_id=app3,
+        principal=SECOND_OPERATOR,
+        approver_subject=INTEGRATOR.subject,
+        permission_id="perm-canceller",
+        idempotency_key="s14-grant-canceller",
+    )
+    assert as_canceller["status"] == "rejected"
+    assert as_canceller["reason_code"] == "lifecycle.reopen_authority_not_distinct"
+
+    # Self-approval is rejected.
+    self_approved = fresh.grant_reopen_permission(
+        application_id=app3,
+        principal=SECOND_OPERATOR,
+        approver_subject=SECOND_OPERATOR.subject,
+        permission_id="perm-self",
+        idempotency_key="s14-grant-self",
+    )
+    assert self_approved["status"] == "rejected"
+    assert self_approved["reason_code"] == "lifecycle.reopen_authority_not_distinct"
+
+    granted = fresh.grant_reopen_permission(
+        application_id=app3,
+        principal=OPERATOR,
+        approver_subject=APPROVER.subject,
+        permission_id="institutional-reopen-permission/1",
+        idempotency_key="s14-grant-ok",
+        ttl_seconds=3600,
+        now=1000,
+    )
+    assert granted["status"] == "accepted", granted
+
+    duplicate_grant = fresh.grant_reopen_permission(
+        application_id=app3,
+        principal=OPERATOR,
+        approver_subject=APPROVER.subject,
+        permission_id="institutional-reopen-permission/1",
+        idempotency_key="s14-grant-ok-2",
+        now=1001,
+    )
+    assert duplicate_grant["status"] == "rejected"
+    assert duplicate_grant["reason_code"] == "lifecycle.reopen_permission_exists"
+
+    # Wrong release digest in the reopen request is rejected.
+    wrong_release = fresh.reopen_application(
+        application_id=app3,
+        principal=OPERATOR,
+        expected_lifecycle_revision=settled3["lifecycle_revision"],
+        idempotency_key="s14-reopen-wrong-release",
+        target_phase="Intake",
+        reopen_policy={
+            "permission_id": "institutional-reopen-permission/1",
+            "release_digest": "f" * 64,
+        },
+        now=1100,
+    )
+    assert wrong_release["status"] == "rejected"
+    assert wrong_release["reason_code"] == "lifecycle.reopen_policy_forbidden"
+
+    # Expired permission is rejected.
+    expired_grant = make_service()
+    app4, _c4, settled4 = _terminate_manual_review(expired_grant)
+    short = expired_grant.grant_reopen_permission(
+        application_id=app4,
+        principal=OPERATOR,
+        approver_subject=APPROVER.subject,
+        permission_id="short-lived-permission",
+        idempotency_key="s14-grant-short",
+        ttl_seconds=10,
+        now=5000,
+    )
+    assert short["status"] == "accepted"
+    expired = expired_grant.reopen_application(
+        application_id=app4,
+        principal=OPERATOR,
+        expected_lifecycle_revision=settled4["lifecycle_revision"],
+        idempotency_key="s14-reopen-expired-perm",
+        target_phase="Intake",
+        reopen_policy={
+            "permission_id": "short-lived-permission",
+            "release_digest": _release_digest(expired_grant),
+        },
+        now=6000,
+    )
+    assert expired["status"] == "rejected"
+    assert expired["reason_code"] == "lifecycle.reopen_permission_expired"
+
+    # The approved exact permission opens exactly one successor cycle.
+    reopened = fresh.reopen_application(
+        application_id=app3,
+        principal=OPERATOR,
+        expected_lifecycle_revision=settled3["lifecycle_revision"],
+        idempotency_key="s14-reopen-exact-perm",
+        target_phase="Intake",
+        reopen_policy={
+            "permission_id": "institutional-reopen-permission/1",
+            "release_digest": _release_digest(fresh),
+        },
+        now=1200,
+    )
+    assert reopened["status"] == "accepted"
+    assert reopened["cycle"] == 2
+
+
+def test_expired_and_source_mismatched_principals_are_rejected() -> None:
+    service = make_service()
+    application_id, _work_item_id, _review, route = _manual_review_state(service)
+    revision = int(route["lifecycle_revision"])
+
+    expired_integrator = S01CommandPrincipal(
+        subject=INTEGRATOR.subject,
+        role="integrator",
+        scope="C-DEMO",
+        source_id=INTEGRATOR.source_id,
+        expires_at=1.0,
+    )
+    expired_cancel = service.cancel_application(
+        application_id=application_id,
+        principal=expired_integrator,
+        expected_lifecycle_revision=revision,
+        idempotency_key="s14-cancel-expired-principal",
+        reason_code="UPSTREAM_WITHDRAWN",
+    )
+    assert expired_cancel["status"] == "rejected"
+    assert expired_cancel["reason_code"] == "lifecycle.cancel_forbidden"
+
+    rogue_source = S01CommandPrincipal(
+        subject=INTEGRATOR.subject,
+        role="integrator",
+        scope="C-DEMO",
+        source_id="rogue-unregistered-source",
+    )
+    mismatched = service.cancel_application(
+        application_id=application_id,
+        principal=rogue_source,
+        expected_lifecycle_revision=revision,
+        idempotency_key="s14-cancel-rogue-source",
+        reason_code="UPSTREAM_WITHDRAWN",
+    )
+    assert mismatched["status"] == "rejected"
+    assert mismatched["reason_code"] == "lifecycle.cancel_forbidden"
+
+    accepted_cancel = service.cancel_application(
+        application_id=application_id,
+        principal=INTEGRATOR,
+        expected_lifecycle_revision=revision,
+        idempotency_key="s14-cancel-live-principal",
+        reason_code="UPSTREAM_WITHDRAWN",
+    )
+    assert accepted_cancel["status"] == "accepted"
+
+    expired_operator = S01CommandPrincipal(
+        subject=OPERATOR.subject,
+        role="operator",
+        scope="C-DEMO",
+        source_id=OPERATOR.source_id,
+        expires_at=1.0,
+    )
+    expired_settle = service.settle_termination(
+        application_id=application_id,
+        principal=expired_operator,
+        expected_lifecycle_revision=accepted_cancel["lifecycle_revision"],
+        idempotency_key="s14-settle-expired-operator",
+    )
+    assert expired_settle["status"] == "rejected"
+    assert expired_settle["reason_code"] == "FORBIDDEN"
+
+    live_settle = service.settle_termination(
+        application_id=application_id,
+        principal=OPERATOR,
+        expected_lifecycle_revision=accepted_cancel["lifecycle_revision"],
+        idempotency_key="s14-settle-live-operator",
+    )
+    assert live_settle["status"] == "outstanding"
+
+
+class _StubGovernance:
+    """Minimal final-impact manifest loader for consumer-race tests."""
+
+    def __init__(self, manifest: dict[str, object]) -> None:
+        self._manifest = manifest
+
+    def load_final_impact(self, digest: str, store: object = None):
+        return self._manifest
+
+    def has_governed_activation(self, scope: str) -> bool:
+        return True
+
+
+def test_policy_impact_race_records_stale_receipt_without_transition() -> None:
+    from task4_consistency.controlled.s01 import ControlledScenarioTestDriver
+
+    digest = "b" * 64
+    service = ControlledScenarioService(
+        fixture_root=ROOT / "fixtures" / "applications",
+        rules_path=RULES,
+        state_path=Path(tempfile.mkdtemp(prefix="xiaopeng-s14-impact-"))
+        / "target.sqlite3",
+    )
+
+    admitted = service.submit_demo(
+        scenario_id="app_r53_bad_engine.json",
+        idempotency_key="s14-impact-intake",
+        principal=INTEGRATOR,
+    )
+    assert admitted.application_id is not None
+    application_id = str(admitted.application_id)
+    driver = ControlledScenarioTestDriver(service)
+    assert driver.process_next_job().status == "complete"
+    service.refresh_projection()
+    # Attach the stub manifest loader only for consumption: the check run
+    # above used the normal pinned release path without any governance.
+    service._policy_governance = _StubGovernance(
+        {
+            "members": [
+                {
+                    "application_id": application_id,
+                    "cycle": 1,
+                    "partition": "open_cycle",
+                    "target_generation": 2,
+                    "hit_reasons": ["rules_change"],
+                    "required_disposition": "operational_reevaluation",
+                }
+            ]
+        }
+    )
+
+    # Stage the impact activation BEFORE cancellation (snapshot captured).
+    driver.stage_impact_activation(final_impact_digest=digest)
+
+    route = service.current_route_view(
+        principal=REVIEWER, application_id=application_id
+    )
+    cancel = service.cancel_application(
+        application_id=application_id,
+        principal=INTEGRATOR,
+        expected_lifecycle_revision=int(route["lifecycle_revision"]),
+        idempotency_key="s14-cancel-impact-race",
+        reason_code="UPSTREAM_WITHDRAWN",
+    )
+    assert cancel["status"] == "accepted"
+    phases_before = list(service._store.applications[application_id]["phase_history"])
+
+    consumed = service.process_next_policy_impact()
+    assert consumed == 1
+
+    app_state = service._store.applications[application_id]
+    assert app_state["phase"] == "Terminating"
+    assert app_state["phase_history"] == phases_before
+
+    receipts = [
+        message
+        for message in service._store.inbox
+        if message.get("kind") == "s09_impact_disposition"
+        and message.get("application_id") == application_id
+    ]
+    assert len(receipts) == 1
+    assert receipts[0]["disposition"] == "stale_terminated_cycle"
+
+
+def test_cancel_preserves_unresolved_check_outcomes() -> None:
+    service = make_service()
+    admitted = service.submit_demo(
+        scenario_id="app_r53_bad_engine.json",
+        idempotency_key="s14-intake-unresolved",
+        principal=INTEGRATOR,
+    )
+    assert admitted.application_id is not None
+    application_id = str(admitted.application_id)
+    driver = ControlledScenarioTestDriver(service)
+    first = driver.process_next_job(operation_fault="checker_outcome_unknown")
+    assert first.status == "blocked", (first.status, first.reason_code)
+    job = next(
+        (
+            item
+            for item in service._store.jobs
+            if item.get("application_id") == application_id
+        ),
+        None,
+    )
+    assert job is not None and job.get("status") == "outcome_unknown", job
+
+    route = service.current_route_view(
+        principal=REVIEWER, application_id=application_id
+    )
+    cancel = service.cancel_application(
+        application_id=application_id,
+        principal=INTEGRATOR,
+        expected_lifecycle_revision=int(route["lifecycle_revision"]),
+        idempotency_key="s14-cancel-unresolved",
+        reason_code="UPSTREAM_WITHDRAWN",
+    )
+    assert cancel["status"] == "accepted"
+
+    job_after = next(
+        item
+        for item in service._store.jobs
+        if item.get("application_id") == application_id
+    )
+    assert job_after["status"] == "outcome_unknown"
+
+    outstanding = service.settle_termination(
+        application_id=application_id,
+        principal=OPERATOR,
+        expected_lifecycle_revision=cancel["lifecycle_revision"],
+        idempotency_key="s14-settle-unresolved",
+    )
+    assert outstanding["status"] == "outstanding"
+    details = {
+        item["kind"]: item["detail"]
+        for item in outstanding["unresolved_effects"]
+    }
+    assert details.get("check_job") == "outcome_unknown"
