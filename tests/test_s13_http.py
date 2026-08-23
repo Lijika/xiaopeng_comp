@@ -378,6 +378,10 @@ def test_s13_http_openapi_contains_closed_s13_schema(monkeypatch: Any) -> None:
     for shell_path in ("/controlled/s13", "/controlled/s13/react"):
         assert shell_path in paths
         assert set(paths[shell_path]["get"]["responses"]) == {"200", "403", "503"}
+        for status in ("403", "503"):
+            assert set(paths[shell_path]["get"]["responses"][status]["content"]) == {
+                "application/json"
+            }
     schema = openapi.json()["components"]["schemas"]["S13ObligationSummary"]
     assert schema["additionalProperties"] is False
     query_schema = openapi.json()["components"]["schemas"]["S13QueryResponse"]

@@ -5731,12 +5731,26 @@ register_s12_router(app, sys.modules[__name__])
 # --- S13 downstream-delivery HTTP adapter --------------------------------
 # Verification Completed is a lifecycle fact; delivery receipt is a separate
 # delivery fact.  The adapter registers after S12 so route order stays stable.
-from task4_consistency.web.s13_http import (
-    S13ErrorResponse,
-    register_router as register_s13_router,
-)
+from task4_consistency.web.s13_http import register_router as register_s13_router
 
 register_s13_router(app, sys.modules[__name__])
+
+_S13_SHELL_ERROR_RESPONSES = {
+    403: {
+        "content": {
+            "application/json": {
+                "schema": {"$ref": "#/components/schemas/S13ErrorResponse"}
+            }
+        },
+    },
+    503: {
+        "content": {
+            "application/json": {
+                "schema": {"$ref": "#/components/schemas/S13ErrorResponse"}
+            }
+        },
+    },
+}
 
 
 def _s12_react_shell() -> Response:
@@ -5806,10 +5820,7 @@ def controlled_s12_react_page(request: Request) -> Response:
 @app.get(
     "/controlled/s13",
     response_class=HTMLResponse,
-    responses={
-        403: {"model": S13ErrorResponse},
-        503: {"model": S13ErrorResponse},
-    },
+    responses=_S13_SHELL_ERROR_RESPONSES,
 )
 def controlled_s13_page(request: Request) -> Response:
     """Canonical S13 delivery console React shell (Ticket #49/T15): the
@@ -5827,10 +5838,7 @@ def controlled_s13_page(request: Request) -> Response:
 @app.get(
     "/controlled/s13/react",
     response_class=HTMLResponse,
-    responses={
-        403: {"model": S13ErrorResponse},
-        503: {"model": S13ErrorResponse},
-    },
+    responses=_S13_SHELL_ERROR_RESPONSES,
 )
 def controlled_s13_react_page(request: Request) -> Response:
     """The S13 /react alias: the same closed shell contract as the canonical

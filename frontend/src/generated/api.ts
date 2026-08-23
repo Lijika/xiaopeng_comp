@@ -14013,7 +14013,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "text/html": components["schemas"]["S13ErrorResponse"];
+                    "application/json": components["schemas"]["S13ErrorResponse"];
                 };
             };
             /** @description Service Unavailable */
@@ -14022,7 +14022,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "text/html": components["schemas"]["S13ErrorResponse"];
+                    "application/json": components["schemas"]["S13ErrorResponse"];
                 };
             };
         };
@@ -14285,7 +14285,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "text/html": components["schemas"]["S13ErrorResponse"];
+                    "application/json": components["schemas"]["S13ErrorResponse"];
                 };
             };
             /** @description Service Unavailable */
@@ -14294,7 +14294,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "text/html": components["schemas"]["S13ErrorResponse"];
+                    "application/json": components["schemas"]["S13ErrorResponse"];
                 };
             };
         };

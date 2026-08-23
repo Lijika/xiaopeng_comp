@@ -25220,7 +25220,7 @@
           },
           "403": {
             "content": {
-              "text/html": {
+              "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/S13ErrorResponse"
                 }
@@ -25230,7 +25230,7 @@
           },
           "503": {
             "content": {
-              "text/html": {
+              "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/S13ErrorResponse"
                 }
@@ -25523,7 +25523,7 @@
           },
           "403": {
             "content": {
-              "text/html": {
+              "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/S13ErrorResponse"
                 }
@@ -25533,7 +25533,7 @@
           },
           "503": {
             "content": {
-              "text/html": {
+              "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/S13ErrorResponse"
                 }
