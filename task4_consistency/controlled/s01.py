@@ -241,14 +241,22 @@ class ControlledScenarioService:
         }
     )
     _ALLOWED_PHASE_SUCCESSORS = {
-        "Intake": frozenset({"Assembly"}),
-        "Assembly": frozenset({"Awaiting Evidence", "Evidence Ready", "Unprocessable"}),
-        "Evidence Ready": frozenset({"Checking"}),
+        "Intake": frozenset({"Assembly", "Terminating"}),
+        "Assembly": frozenset(
+            {"Awaiting Evidence", "Evidence Ready", "Unprocessable", "Terminating"}
+        ),
+        "Awaiting Evidence": frozenset({"Assembly", "Unprocessable", "Terminating"}),
+        "Evidence Ready": frozenset({"Checking", "Terminating"}),
         "Checking": frozenset(
-            {"Routing Determination", "Assembly", "Unprocessable"}
+            {"Routing Determination", "Assembly", "Unprocessable", "Terminating"}
         ),
         "Routing Determination": frozenset(
-            {"Manual Review", "Verification Completed", "Unprocessable"}
+            {
+                "Manual Review",
+                "Verification Completed",
+                "Unprocessable",
+                "Terminating",
+            }
         ),
         "Manual Review": frozenset(
             {
@@ -257,16 +265,28 @@ class ControlledScenarioService:
                 "Assembly",
                 "Pending Exception Approval",
                 "Supplement",
+                "Terminating",
             }
         ),
-        "Supplement": frozenset({"Assembly", "Unprocessable"}),
-        "Awaiting Evidence": frozenset({"Assembly", "Unprocessable"}),
+        "Supplement": frozenset({"Assembly", "Unprocessable", "Terminating"}),
         "Unprocessable": frozenset(
-            {"Assembly", "Evidence Ready", "Routing Determination"}
+            {"Assembly", "Evidence Ready", "Routing Determination", "Terminating"}
         ),
         "Pending Exception Approval": frozenset(
-            {"Routing Determination", "Manual Review", "Assembly"}
+            {
+                "Routing Determination",
+                "Manual Review",
+                "Assembly",
+                "Terminating",
+            }
         ),
+        "Verification Completed": frozenset({"Terminating"}),
+        # S14: only the settlement command may seal Terminating, and only
+        # reopen crosses cycles from Terminated.  Cross-cycle reopen targets
+        # ("Intake"/"Assembly") are validated cycle-aware by the application
+        # state authority instead of this intra-cycle successor map.
+        "Terminating": frozenset({"Terminated"}),
+        "Terminated": frozenset(),
     }
     _CAS_CONTEXT_FIELDS = (
         "cycle",
@@ -2102,6 +2122,16 @@ class ControlledScenarioService:
                         request_id=request_id,
                     )
 
+                # S14: a Terminating/Terminated cycle is sealed.  Any late
+                # attachment content keeps its provenance receipt but can
+                # never enter the old cycle or silently import into a
+                # successor cycle; the stable disposition demands reopen.
+                if str(app.get("phase") or "") in {"Terminating", "Terminated"}:
+                    return reject(
+                        "evidence.late_input_requires_reopen",
+                        responsible_party="lifecycle_owner",
+                        recovery_action=self._S14_REOPEN_RECOVERY_ACTION,
+                    )
                 terminal = [
                     record
                     for record in self._store.review_records
@@ -4426,6 +4456,957 @@ class ControlledScenarioService:
             stop_event["failure_reason_code"] = failure_reason_code
         store.audit_events.append(stop_event)
 
+    # ------------------------------------------------- S14 in-flight cancel
+    # Ticket #30: authorized upstream cancellation of a nonterminal cycle,
+    # fenced settlement of every known effect, and policy-permitted reopen.
+    # Lifecycle stays the single phase/cycle owner; delivery facts stay
+    # owned by S13; every fact below is appended inside one staged store
+    # snapshot published through the same compare-and-set as all other
+    # commands.  Cancellation is a lifecycle fact, never a rejection or a
+    # deletion, and Terminating never auto-times-out to Terminated.
+
+    _S14_TERMINAL_JOB_STATUSES = frozenset(
+        {"complete", "diagnostic", "fenced_cancelled"}
+    )
+    _S14_CANCELLED_JOB_STATUS = "fenced_cancelled"
+    _S14_CANCELLED_ROUTE = "cancelled"
+    _S14_REVIEW_FENCE_REASON = "LIFECYCLE_CANCEL_FENCED"
+    _S14_CANCEL_FENCE_REASON = "lifecycle.cancel_fenced"
+    _S14_REOPEN_RECOVERY_ACTION = "use_the_later_reopen_contract"
+    _S14_TERMINAL_DELIVERY_STATUSES = frozenset({"received", "compensated"})
+    _S14_SUPPLEMENT_TERMINAL_RECORDS = frozenset(
+        {
+            "supplement_request_fulfilled",
+            "supplement_request_expired",
+            "supplement_request_invalidated",
+        }
+    )
+    _S14_EXCEPTION_CLOSED_RECORDS = frozenset(
+        {
+            "business_exception_expired",
+            "business_exception_invalidated",
+            "business_exception_cancel_fenced",
+        }
+    )
+
+    @classmethod
+    def _s14_binding_key(
+        cls,
+        principal: S01CommandPrincipal,
+        *,
+        action: str,
+        application_id: str,
+        idempotency_key: str,
+    ) -> str:
+        encoded = json.dumps(
+            {
+                "action": f"s14_{action}",
+                "application_id": application_id,
+                "key": idempotency_key,
+                "role": principal.role,
+                "scope": principal.scope,
+                "source_id": principal.source_id,
+                "subject": principal.subject,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return f"s01_idempotency_{hashlib.sha256(encoded).hexdigest()}"
+
+    @staticmethod
+    def _s14_command_fingerprint(payload: dict[str, Any]) -> str:
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    @classmethod
+    def _s14_valid_operator(cls, principal: S01CommandPrincipal | None) -> bool:
+        return (
+            principal is not None
+            and principal.role == "operator"
+            and cls.is_c_demo_scope(principal.scope)
+            and bool(principal.subject)
+            and principal.subject.strip() == principal.subject
+            and bool(principal.source_id)
+            and principal.source_id.strip() == principal.source_id
+        )
+
+    def _s14_application_or_not_found(
+        self, application_id: str
+    ) -> dict[str, Any]:
+        app = self._store.applications.get(application_id)
+        if app is None:
+            raise QueryNotFound(application_id)
+        self._require_application_state_authority(app)
+        return app
+
+    def _s14_cancel_authorized(
+        self, principal: S01CommandPrincipal, application_id: str
+    ) -> bool:
+        """Only the admission-bound upstream actor may cancel its cycle."""
+        if principal.role != "integrator" or not self.is_controlled_scope(
+            principal.scope
+        ):
+            return False
+        authorities = [
+            event
+            for event in self._accepted_admission_authorities()
+            if event["application_id"] == application_id
+        ]
+        if len(authorities) != 1:
+            return False
+        authority = authorities[0]
+        visible_scopes = {principal.scope}
+        if principal.scope.startswith(self._SESSION_SCOPE_PREFIX):
+            visible_scopes.add("C-DEMO")
+        return (
+            principal.subject == str(authority.get("subject") or "")
+            and str(authority.get("scope") or "") in visible_scopes
+        )
+
+    @classmethod
+    def _s14_work_item_status(
+        cls, records: list[dict[str, Any]], work_item: dict[str, Any]
+    ) -> str:
+        """Fold one work item's records into its settlement status."""
+        facts = sorted(
+            (
+                record
+                for record in records
+                if record.get("work_item_id") == work_item["work_item_id"]
+                and record.get("record_type")
+                in {
+                    "work_item_claimed",
+                    "work_item_renewed",
+                    "work_item_released",
+                    "work_item_completed",
+                    "work_item_invalidated",
+                    "work_item_cancelled",
+                }
+            ),
+            key=lambda record: int(record["sequence"]),
+        )
+        if [fact.get("sequence") for fact in facts] != list(
+            range(1, len(facts) + 1)
+        ):
+            raise RuntimeError("review work-item settlement fold is not contiguous")
+        status = "unclaimed"
+        for fact in facts:
+            kind = fact["record_type"]
+            if kind == "work_item_claimed":
+                status = "claimed"
+            elif kind == "work_item_renewed":
+                pass
+            elif kind == "work_item_released":
+                status = "released"
+            elif kind == "work_item_completed":
+                status = "completed"
+            elif kind == "work_item_invalidated":
+                status = "invalidated"
+            else:
+                status = "cancelled"
+        return status
+
+    def _s14_termination_effects(
+        self, *, application_id: str, cycle: int
+    ) -> list[dict[str, Any]]:
+        """Enumerate every known effect of one cycle and its terminality."""
+        effects: list[dict[str, Any]] = []
+        for job in self._store.jobs:
+            if job.get("application_id") != application_id:
+                continue
+            status = str(job.get("status") or "")
+            effects.append(
+                {
+                    "kind": "check_job",
+                    "id": str(job.get("job_id") or ""),
+                    "detail": status,
+                    "settled": status in self._S14_TERMINAL_JOB_STATUSES,
+                }
+            )
+        for work_item in self._store.work_items:
+            if (
+                work_item.get("application_id") != application_id
+                or work_item.get("kind") != "manual_review"
+            ):
+                continue
+            status = self._s14_work_item_status(
+                list(self._store.review_records), work_item
+            )
+            effects.append(
+                {
+                    "kind": "review_work_item",
+                    "id": str(work_item.get("work_item_id") or ""),
+                    "detail": status,
+                    "settled": status
+                    in {"completed", "invalidated", "cancelled"},
+                }
+            )
+        request_ids: set[str] = set()
+        for record in self._store.review_records:
+            if (
+                record.get("application_id") != application_id
+                or int(record.get("cycle") or 0) != cycle
+            ):
+                continue
+            record_type = str(record.get("record_type") or "")
+            if record_type == "supplement_request":
+                request_ids.add(str(record.get("request_id") or ""))
+        for request_id in sorted(request_ids):
+            closed = any(
+                record.get("request_id") == request_id
+                and record.get("record_type")
+                in self._S14_SUPPLEMENT_TERMINAL_RECORDS
+                for record in self._store.review_records
+            )
+            effects.append(
+                {
+                    "kind": "supplement_request",
+                    "id": request_id,
+                    "detail": "closed" if closed else "open",
+                    "settled": closed,
+                }
+            )
+        exception_ids: set[str] = set()
+        for record in self._store.review_records:
+            if (
+                record.get("application_id") != application_id
+                or record.get("record_type") != "business_exception_request"
+            ):
+                continue
+            exception_ids.add(str(record.get("request_id") or ""))
+        for exception_id in sorted(exception_ids):
+            closed = any(
+                record.get("request_id") == exception_id
+                and record.get("record_type") in self._S14_EXCEPTION_CLOSED_RECORDS
+                for record in self._store.review_records
+            )
+            effects.append(
+                {
+                    "kind": "exception_request",
+                    "id": exception_id,
+                    "detail": "closed" if closed else "open",
+                    "settled": closed,
+                }
+            )
+        for obligation in self._store.delivery_obligations:
+            if (
+                obligation.get("application_id") != application_id
+                or int(obligation.get("cycle") or 0) != cycle
+            ):
+                continue
+            obligation_id = str(obligation.get("obligation_id") or "")
+            status = self._s13_delivery_status(obligation_id)
+            effects.append(
+                {
+                    "kind": "delivery_obligation",
+                    "id": obligation_id,
+                    "detail": status,
+                    "settled": status in self._S14_TERMINAL_DELIVERY_STATUSES,
+                }
+            )
+        return effects
+
+    def cancel_application(
+        self,
+        *,
+        application_id: str,
+        principal: S01CommandPrincipal,
+        expected_lifecycle_revision: int,
+        idempotency_key: str,
+        reason_code: str,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Cancel one nonterminal cycle: enter Terminating and fence effects."""
+        event_time = int(self._clock() if now is None else now)
+        if not isinstance(application_id, str) or not application_id:
+            raise ValueError("cancel command identity is invalid")
+        if (
+            isinstance(expected_lifecycle_revision, bool)
+            or not isinstance(expected_lifecycle_revision, int)
+            or expected_lifecycle_revision < 1
+            or not isinstance(reason_code, str)
+            or not 1 <= len(reason_code) <= 200
+            or reason_code.strip() != reason_code
+            or not self._valid_idempotency_key(idempotency_key)
+        ):
+            raise ValueError("cancel command is invalid")
+        binding_key = self._s14_binding_key(
+            principal,
+            action="cancel",
+            application_id=application_id,
+            idempotency_key=idempotency_key,
+        )
+        command_fingerprint = self._s14_command_fingerprint(
+            {
+                "application_id": application_id,
+                "expected_lifecycle_revision": expected_lifecycle_revision,
+                "reason_code": reason_code,
+            }
+        )
+        if not self.audit_available or not self.storage_available:
+            return {
+                "status": "rejected",
+                "replayed": False,
+                "application_id": application_id,
+                "reason_code": (
+                    "AUDIT_UNAVAILABLE" if not self.audit_available else "STORAGE_UNAVAILABLE"
+                ),
+            }
+
+        def rejected(failure_reason: str) -> dict[str, Any]:
+            return {
+                "status": "rejected",
+                "replayed": False,
+                "application_id": application_id,
+                "reason_code": failure_reason,
+            }
+
+        def stale_result(failure_reason: str) -> dict[str, Any]:
+            return {
+                "status": "stale",
+                "replayed": False,
+                "application_id": application_id,
+                "reason_code": failure_reason,
+            }
+
+        with self._lock:
+            self._reload_store()
+            previous = self._store.idempotency.get(binding_key)
+            if previous is not None:
+                previous_fingerprint, previous_result = previous
+                if previous_fingerprint == command_fingerprint:
+                    return {
+                        **copy.deepcopy(previous_result),
+                        "status": "replayed",
+                        "replayed": True,
+                    }
+                return rejected("IDEMPOTENCY_CONFLICT")
+            app = self._s14_application_or_not_found(application_id)
+            if not self._s14_cancel_authorized(principal, application_id):
+                return rejected("lifecycle.cancel_forbidden")
+            current_phase = str(app.get("phase") or "")
+            if current_phase in {"Terminating", "Terminated"}:
+                return rejected("lifecycle.cycle_not_cancellable")
+            observed_revision = int(app.get("lifecycle_revision") or 0)
+            if observed_revision != expected_lifecycle_revision:
+                return stale_result("lifecycle.cancel_stale_revision")
+
+            staged = copy.deepcopy(self._store)
+            staged_app = staged.applications[application_id]
+            next_revision = observed_revision + 1
+            cycle = int(staged_app.get("cycle") or 0)
+            run_id = staged_app.get("current_run_id")
+            self._before_write("s14.cancel.lifecycle")
+            staged.lifecycle_events.append(
+                {
+                    "event_id": self._stable_id(
+                        "lifecycle",
+                        f"{application_id}:{cycle}:{next_revision}",
+                    ),
+                    "application_id": application_id,
+                    "revision": next_revision,
+                    "phase": "Terminating",
+                    "cycle": cycle,
+                    "reason_code": reason_code,
+                    "run_id": run_id,
+                    "cancelled_by": principal.subject,
+                    "cancelled_by_role": principal.role,
+                }
+            )
+            staged_app["phase"] = "Terminating"
+            staged_app["phase_history"].append("Terminating")
+            staged_app["lifecycle_revision"] = next_revision
+            staged_app["route"] = self._S14_CANCELLED_ROUTE
+            staged_app["evidence_ready"] = False
+
+            fenced_jobs = 0
+            for job in staged.jobs:
+                if job.get("application_id") != application_id:
+                    continue
+                if str(job.get("status") or "") in {"complete", "diagnostic"}:
+                    continue
+                job["status"] = self._S14_CANCELLED_JOB_STATUS
+                job["fence"] = int(job.get("fence", 0)) + 1
+                for key in ("worker_id", "lease_until", "retry_not_before"):
+                    job.pop(key, None)
+                fenced_jobs += 1
+
+            fenced_items = 0
+            for work_item in staged.work_items:
+                if (
+                    work_item.get("application_id") != application_id
+                    or work_item.get("kind") != "manual_review"
+                ):
+                    continue
+                status = self._s14_work_item_status(
+                    list(staged.review_records), work_item
+                )
+                if status in {"completed", "invalidated", "cancelled"}:
+                    continue
+                sequence = 1 + sum(
+                    record.get("work_item_id") == work_item["work_item_id"]
+                    and str(record.get("record_type", "")).startswith("work_item_")
+                    for record in staged.review_records
+                )
+                self._before_write("s14.cancel.work_item")
+                staged.review_records.append(
+                    {
+                        "record_id": self._stable_id(
+                            "review_record",
+                            f"{work_item['work_item_id']}:cancelled:{sequence}",
+                        ),
+                        "record_type": "work_item_cancelled",
+                        "sequence": sequence,
+                        "work_item_id": work_item["work_item_id"],
+                        "application_id": application_id,
+                        "run_id": work_item.get("run_id"),
+                        "cycle": cycle,
+                        "reason_code": self._S14_CANCEL_FENCE_REASON,
+                        "cancelled_by": principal.subject,
+                        "cancelled_at": event_time,
+                        "lifecycle_revision": next_revision,
+                    }
+                )
+                fenced_items += 1
+
+            open_supplements = [
+                record
+                for record in staged.review_records
+                if record.get("application_id") == application_id
+                and record.get("cycle") == cycle
+                and record.get("record_type") == "supplement_request"
+                and not any(
+                    other.get("request_id") == record.get("request_id")
+                    and other.get("record_type")
+                    in self._S14_SUPPLEMENT_TERMINAL_RECORDS
+                    for other in staged.review_records
+                )
+            ]
+            for request in open_supplements:
+                self._before_write("s14.cancel.supplement")
+                staged.review_records.append(
+                    {
+                        "record_id": self._stable_id(
+                            "supplement_invalidation",
+                            f"{request['request_id']}:cancel_fenced:{event_time}",
+                        ),
+                        "record_type": "supplement_request_invalidated",
+                        "schema_version": "supplement-request-invalidation/1",
+                        "request_id": request["request_id"],
+                        "work_item_id": request.get("work_item_id"),
+                        "application_id": application_id,
+                        "cycle": cycle,
+                        "status": "invalidated",
+                        "reason_code": self._S14_CANCEL_FENCE_REASON,
+                        "responsible_party": "lifecycle_owner",
+                        "recovery_action": self._S14_REOPEN_RECOVERY_ACTION,
+                        "recovery_target": {
+                            "kind": "reopen_new_cycle",
+                            "application_id": application_id,
+                            "predecessor_cycle": cycle,
+                        },
+                        "invalidated_at": event_time,
+                        "lifecycle_revision": next_revision,
+                    }
+                )
+
+            open_exceptions = [
+                record
+                for record in staged.review_records
+                if record.get("application_id") == application_id
+                and record.get("record_type") == "business_exception_request"
+                and not any(
+                    other.get("request_id") == record.get("request_id")
+                    and other.get("record_type")
+                    in self._S14_EXCEPTION_CLOSED_RECORDS
+                    for other in staged.review_records
+                )
+            ]
+            for request in open_exceptions:
+                self._before_write("s14.cancel.exception")
+                staged.review_records.append(
+                    {
+                        "record_id": self._stable_id(
+                            "exception_cancel",
+                            f"{request['request_id']}:cancel_fenced:{event_time}",
+                        ),
+                        "record_type": "business_exception_cancel_fenced",
+                        "schema_version": "business-exception-deactivation/1",
+                        "request_id": request["request_id"],
+                        "exception_id": request["request_id"],
+                        "work_item_id": request.get("work_item_id"),
+                        "application_id": application_id,
+                        "run_id": request.get("run_id"),
+                        "finding_id": request.get("finding_id"),
+                        "status": "invalidated",
+                        "reason_code": self._S14_CANCEL_FENCE_REASON,
+                        "invalidated_at": event_time,
+                        "lifecycle_revision": next_revision,
+                    }
+                )
+
+            effects_summary = {
+                "jobs": fenced_jobs,
+                "review_work_items": fenced_items,
+                "supplement_requests": len(open_supplements),
+                "exception_requests": len(open_exceptions),
+            }
+            self._before_write("s14.cancel.audit")
+            staged.audit_events.append(
+                {
+                    "event_id": self._stable_id(
+                        "audit",
+                        f"s14_cancelled:{application_id}:{next_revision}",
+                    ),
+                    "action": "s14_application_cancelled",
+                    "subject": principal.subject,
+                    "role": principal.role,
+                    "scope": principal.scope,
+                    "source_id": principal.source_id,
+                    "application_id": application_id,
+                    "cycle": cycle,
+                    "lifecycle_revision": next_revision,
+                    "result": "accepted",
+                    "reason_code": reason_code,
+                    "fenced_effects": copy.deepcopy(effects_summary),
+                    **self._audit_time_fields(staged, now=event_time),
+                }
+            )
+            accepted: dict[str, Any] = {
+                "status": "accepted",
+                "replayed": False,
+                "track": "C-DEMO",
+                "application_id": application_id,
+                "cycle": cycle,
+                "phase": "Terminating",
+                "lifecycle_revision": next_revision,
+                "cancel_reason_code": reason_code,
+                "cancelled_by": principal.subject,
+                "fenced_effects": effects_summary,
+            }
+            staged.idempotency[binding_key] = (
+                command_fingerprint,
+                copy.deepcopy(accepted),
+            )
+            try:
+                staged.persist()
+            except StaleStoreRevision:
+                self._reload_store()
+                return {
+                    "status": "stale",
+                    "replayed": False,
+                    "application_id": application_id,
+                    "reason_code": "STALE_STORE_REVISION",
+                }
+            self._store = staged
+            return accepted
+
+    def settle_termination(
+        self,
+        *,
+        application_id: str,
+        principal: S01CommandPrincipal,
+        expected_lifecycle_revision: int,
+        idempotency_key: str,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Seal ``Terminated`` only when every known effect is terminal."""
+        event_time = int(self._clock() if now is None else now)
+        if not isinstance(application_id, str) or not application_id:
+            raise ValueError("settlement identity is invalid")
+        if (
+            isinstance(expected_lifecycle_revision, bool)
+            or not isinstance(expected_lifecycle_revision, int)
+            or expected_lifecycle_revision < 1
+            or not self._valid_idempotency_key(idempotency_key)
+        ):
+            raise ValueError("settlement command is invalid")
+        if not self._s14_valid_operator(principal):
+            return {
+                "status": "rejected",
+                "replayed": False,
+                "application_id": application_id,
+                "reason_code": "FORBIDDEN",
+            }
+        if not self.audit_available or not self.storage_available:
+            return {
+                "status": "rejected",
+                "replayed": False,
+                "application_id": application_id,
+                "reason_code": (
+                    "AUDIT_UNAVAILABLE" if not self.audit_available else "STORAGE_UNAVAILABLE"
+                ),
+            }
+        binding_key = self._s14_binding_key(
+            principal,
+            action="settle",
+            application_id=application_id,
+            idempotency_key=idempotency_key,
+        )
+        command_fingerprint = self._s14_command_fingerprint(
+            {
+                "application_id": application_id,
+                "expected_lifecycle_revision": expected_lifecycle_revision,
+            }
+        )
+        with self._lock:
+            self._reload_store()
+            previous = self._store.idempotency.get(binding_key)
+            if previous is not None:
+                previous_fingerprint, previous_result = previous
+                if previous_fingerprint == command_fingerprint:
+                    return {
+                        **copy.deepcopy(previous_result),
+                        "status": "terminated",
+                        "replayed": True,
+                    }
+                return {
+                    "status": "rejected",
+                    "replayed": False,
+                    "application_id": application_id,
+                    "reason_code": "IDEMPOTENCY_CONFLICT",
+                }
+            app = self._s14_application_or_not_found(application_id)
+            current_phase = str(app.get("phase") or "")
+            if current_phase != "Terminating":
+                return {
+                    "status": "rejected",
+                    "replayed": False,
+                    "application_id": application_id,
+                    "reason_code": "lifecycle.not_terminating",
+                }
+            observed_revision = int(app.get("lifecycle_revision") or 0)
+            if observed_revision != expected_lifecycle_revision:
+                return {
+                    "status": "stale",
+                    "replayed": False,
+                    "application_id": application_id,
+                    "reason_code": "lifecycle.settle_stale_revision",
+                }
+            cycle = int(app.get("cycle") or 0)
+            effects = self._s14_termination_effects(
+                application_id=application_id, cycle=cycle
+            )
+            unresolved = [item for item in effects if not item["settled"]]
+            if unresolved:
+                return {
+                    "status": "outstanding",
+                    "replayed": False,
+                    "application_id": application_id,
+                    "phase": "Terminating",
+                    "cycle": cycle,
+                    "lifecycle_revision": observed_revision,
+                    "unresolved_effects": unresolved,
+                }
+            settled_effects = [
+                {
+                    "kind": item["kind"],
+                    "id": item["id"],
+                    "result": item["detail"],
+                }
+                for item in effects
+            ]
+            staged = copy.deepcopy(self._store)
+            staged_app = staged.applications[application_id]
+            next_revision = observed_revision + 1
+            self._before_write("s14.settle.lifecycle")
+            self._transition_lifecycle(
+                staged_app,
+                "Terminated",
+                "S14_CYCLE_TERMINATED",
+                store=staged,
+            )
+            staged.lifecycle_events[-1].update(
+                {
+                    "run_id": staged_app.get("current_run_id"),
+                    "terminated_by": principal.subject,
+                    "settled_effects": copy.deepcopy(settled_effects),
+                }
+            )
+            notification_event_id = self._stable_id(
+                "outbox",
+                f"termination_notification_requested:{application_id}:{next_revision}",
+            )
+            self._before_write("s14.settle.outbox")
+            staged.outbox.append(
+                {
+                    "event_id": notification_event_id,
+                    "kind": "termination_notification_requested",
+                    "status": "pending",
+                    "application_id": application_id,
+                    "cycle": cycle,
+                    "operation_id": notification_event_id,
+                }
+            )
+            self._before_write("s14.settle.audit")
+            staged.audit_events.append(
+                {
+                    "event_id": self._stable_id(
+                        "audit",
+                        f"s14_terminated:{application_id}:{next_revision}",
+                    ),
+                    "action": "s14_cycle_terminated",
+                    "subject": principal.subject,
+                    "role": principal.role,
+                    "scope": principal.scope,
+                    "source_id": principal.source_id,
+                    "application_id": application_id,
+                    "cycle": cycle,
+                    "lifecycle_revision": next_revision,
+                    "result": "accepted",
+                    "notification_event_id": notification_event_id,
+                    "settled_effects": settled_effects,
+                    **self._audit_time_fields(staged, now=event_time),
+                }
+            )
+            terminated: dict[str, Any] = {
+                "replayed": False,
+                "track": "C-DEMO",
+                "application_id": application_id,
+                "cycle": cycle,
+                "phase": "Terminated",
+                "lifecycle_revision": next_revision,
+                "settled_effects": settled_effects,
+                "unresolved_effects": [],
+            }
+            staged.idempotency[binding_key] = (
+                command_fingerprint,
+                copy.deepcopy(terminated),
+            )
+            try:
+                staged.persist()
+            except StaleStoreRevision:
+                self._reload_store()
+                return {
+                    "status": "unavailable",
+                    "replayed": False,
+                    "application_id": application_id,
+                    "reason_code": "STALE_STORE_REVISION",
+                }
+            self._store = staged
+            return {"status": "terminated", **terminated}
+
+    def reopen_application(
+        self,
+        *,
+        application_id: str,
+        principal: S01CommandPrincipal,
+        expected_lifecycle_revision: int,
+        idempotency_key: str,
+        target_phase: str,
+        reopen_policy: dict[str, Any],
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Open a successor processing cycle from a terminated application."""
+        event_time = int(self._clock() if now is None else now)
+        if not isinstance(application_id, str) or not application_id:
+            raise ValueError("reopen identity is invalid")
+        if (
+            isinstance(expected_lifecycle_revision, bool)
+            or not isinstance(expected_lifecycle_revision, int)
+            or expected_lifecycle_revision < 1
+            or target_phase not in {"Intake", "Assembly"}
+            or not isinstance(reopen_policy, dict)
+            or not self._valid_idempotency_key(idempotency_key)
+        ):
+            raise ValueError("reopen command is invalid")
+        permission_id = reopen_policy.get("permission_id")
+        release_digest = reopen_policy.get("release_digest")
+        if (
+            not isinstance(permission_id, str)
+            or not 1 <= len(permission_id) <= 200
+            or permission_id.strip() != permission_id
+            or not isinstance(release_digest, str)
+            or len(release_digest) != 64
+        ):
+            raise ValueError("reopen policy permission is invalid")
+        if not self._s14_valid_operator(principal):
+            return {
+                "status": "rejected",
+                "replayed": False,
+                "application_id": application_id,
+                "reason_code": "lifecycle.reopen_forbidden",
+            }
+        if not self.audit_available or not self.storage_available:
+            return {
+                "status": "rejected",
+                "replayed": False,
+                "application_id": application_id,
+                "reason_code": (
+                    "AUDIT_UNAVAILABLE" if not self.audit_available else "STORAGE_UNAVAILABLE"
+                ),
+            }
+        binding_key = self._s14_binding_key(
+            principal,
+            action="reopen",
+            application_id=application_id,
+            idempotency_key=idempotency_key,
+        )
+        command_fingerprint = self._s14_command_fingerprint(
+            {
+                "application_id": application_id,
+                "expected_lifecycle_revision": expected_lifecycle_revision,
+                "target_phase": target_phase,
+                "reopen_policy": {
+                    "permission_id": permission_id,
+                    "release_digest": release_digest,
+                },
+            }
+        )
+
+        def reopen_rejected(failure_reason: str) -> dict[str, Any]:
+            return {
+                "status": "rejected",
+                "replayed": False,
+                "application_id": application_id,
+                "reason_code": failure_reason,
+            }
+
+        with self._lock:
+            self._reload_store()
+            previous = self._store.idempotency.get(binding_key)
+            if previous is not None:
+                previous_fingerprint, previous_result = previous
+                if previous_fingerprint == command_fingerprint:
+                    return {
+                        **copy.deepcopy(previous_result),
+                        "status": "replayed",
+                        "replayed": True,
+                    }
+                return reopen_rejected("IDEMPOTENCY_CONFLICT")
+            app = self._s14_application_or_not_found(application_id)
+            current_phase = str(app.get("phase") or "")
+            if current_phase == "Terminating":
+                return reopen_rejected("lifecycle.reopen_blocked_while_terminating")
+            if current_phase != "Terminated":
+                return reopen_rejected("lifecycle.not_reopenable")
+            observed_revision = int(app.get("lifecycle_revision") or 0)
+            if observed_revision != expected_lifecycle_revision:
+                return {
+                    "status": "stale",
+                    "replayed": False,
+                    "application_id": application_id,
+                    "reason_code": "lifecycle.reopen_stale_revision",
+                }
+            cancellations = [
+                event
+                for event in self._store.audit_events
+                if event.get("action") == "s14_application_cancelled"
+                and event.get("application_id") == application_id
+            ]
+            cancel_authorities = {
+                str(event.get("subject") or "") for event in cancellations
+            }
+            if principal.subject in cancel_authorities:
+                return reopen_rejected("lifecycle.reopen_authority_not_distinct")
+            manifest = app.get("artifact_manifest")
+            pinned_digest = (
+                str(manifest.get("digest") or "")
+                if isinstance(manifest, dict)
+                else ""
+            )
+            if not pinned_digest or release_digest != pinned_digest:
+                return reopen_rejected("lifecycle.reopen_policy_forbidden")
+
+            staged = copy.deepcopy(self._store)
+            staged_app = staged.applications[application_id]
+            predecessor_cycle = int(staged_app.get("cycle") or 0)
+            new_cycle = predecessor_cycle + 1
+            next_revision = observed_revision + 1
+            predecessor_event = max(
+                (
+                    event
+                    for event in staged.lifecycle_events
+                    if event.get("application_id") == application_id
+                    and event.get("revision") == observed_revision
+                ),
+                key=lambda event: str(event.get("event_id") or ""),
+            )
+            self._before_write("s14.reopen.lifecycle")
+            staged.lifecycle_events.append(
+                {
+                    "event_id": self._stable_id(
+                        "lifecycle",
+                        f"{application_id}:{new_cycle}:{next_revision}",
+                    ),
+                    "application_id": application_id,
+                    "revision": next_revision,
+                    "phase": target_phase,
+                    "cycle": new_cycle,
+                    "reason_code": "S14_CYCLE_REOPENED",
+                    "run_id": None,
+                    "predecessor_cycle": predecessor_cycle,
+                    "predecessor_terminal_event_id": str(
+                        predecessor_event.get("event_id") or ""
+                    ),
+                    "reopened_by": principal.subject,
+                    "reopen_permission_id": permission_id,
+                }
+            )
+            staged_app["cycle"] = new_cycle
+            staged_app["phase"] = target_phase
+            staged_app["phase_history"].append(target_phase)
+            staged_app["lifecycle_revision"] = next_revision
+            staged_app["route"] = "pending_check"
+            staged_app["evidence_ready"] = False
+            staged_app["current_run_id"] = None
+            staged_app["current_evidence_snapshot_id"] = None
+            staged_app["current_evidence_snapshot_digest"] = None
+            staged_app["projection_visible"] = False
+            staged_app["projection_pending"] = False
+            self._before_write("s14.reopen.audit")
+            staged.audit_events.append(
+                {
+                    "event_id": self._stable_id(
+                        "audit",
+                        f"s14_reopened:{application_id}:{next_revision}",
+                    ),
+                    "action": "s14_cycle_reopened",
+                    "subject": principal.subject,
+                    "role": principal.role,
+                    "scope": principal.scope,
+                    "source_id": principal.source_id,
+                    "application_id": application_id,
+                    "cycle": new_cycle,
+                    "lifecycle_revision": next_revision,
+                    "result": "accepted",
+                    "predecessor_cycle": predecessor_cycle,
+                    "target_phase": target_phase,
+                    "reopen_permission_id": permission_id,
+                    **self._audit_time_fields(staged, now=event_time),
+                }
+            )
+            reopened: dict[str, Any] = {
+                "replayed": False,
+                "track": "C-DEMO",
+                "application_id": application_id,
+                "cycle": new_cycle,
+                "phase": target_phase,
+                "lifecycle_revision": next_revision,
+                "predecessor_cycle": predecessor_cycle,
+            }
+            staged.idempotency[binding_key] = (
+                command_fingerprint,
+                copy.deepcopy(reopened),
+            )
+            try:
+                staged.persist()
+            except StaleStoreRevision:
+                self._reload_store()
+                return {
+                    "status": "stale",
+                    "replayed": False,
+                    "application_id": application_id,
+                    "reason_code": "STALE_STORE_REVISION",
+                }
+            self._store = staged
+            return {"status": "accepted", **reopened}
+
     def _audit_time_fields(
         self,
         store: _TargetStore,
@@ -6622,6 +7603,7 @@ class ControlledScenarioService:
                     "work_item_renewed",
                     "work_item_released",
                     "work_item_completed",
+                    "work_item_cancelled",
                     "work_item_finding_completed",
                     "work_item_finding_exception_requested",
                     "work_item_invalidated",
@@ -6669,6 +7651,14 @@ class ControlledScenarioService:
                         "status": "invalidated",
                         "claim_subject": None,
                         "claim_expires_at": fact["invalidated_at"],
+                    }
+                )
+            elif fact["record_type"] == "work_item_cancelled":
+                state.update(
+                    {
+                        "status": "cancelled",
+                        "claim_subject": None,
+                        "claim_expires_at": fact["cancelled_at"],
                     }
                 )
             elif fact["record_type"] == "work_item_finding_exception_requested":
@@ -6866,6 +7856,11 @@ class ControlledScenarioService:
             return "unavailable", "AUDIT_UNAVAILABLE"
         if not self.storage_available:
             return "unavailable", "STORAGE_UNAVAILABLE"
+        # S14: after cancellation no review/supplement/exception write may
+        # attach business effects to the fenced cycle; late facts stay
+        # stale with a stable reason instead of mutating current state.
+        if str(app.get("phase") or "") in {"Terminating", "Terminated"}:
+            return "stale", self._S14_REVIEW_FENCE_REASON
         cohort_stop = self._local_cohort_stop or self._store.cohort_stop
         if (
             cohort_stop is not None
@@ -6929,6 +7924,13 @@ class ControlledScenarioService:
                         "application_id": work_item["application_id"],
                         "work_item_id": work_item_id,
                         "reason_code": "WORK_ITEM_COMPLETED",
+                    }
+                if state["status"] == "cancelled":
+                    return {
+                        "status": "cancelled",
+                        "application_id": work_item["application_id"],
+                        "work_item_id": work_item_id,
+                        "reason_code": "WORK_ITEM_CANCELLED",
                     }
                 has_live_successor_claim = (
                     state["status"] == "claimed"
@@ -14812,6 +15814,8 @@ class ControlledScenarioService:
                     continue
                 if review_state["status"] == "completed":
                     continue
+                if review_state["status"] == "cancelled":
+                    continue
                 if (
                     review_state["status"] == "claimed"
                     and float(review_state["claim_expires_at"]) > query_time
@@ -15161,6 +16165,8 @@ class ControlledScenarioService:
                 ("Checking", "pending_check"),
                 ("Awaiting Evidence", "awaiting_evidence"),
                 ("Unprocessable", "unprocessable"),
+                ("Terminating", "cancelled"),
+                ("Terminated", "cancelled"),
             }:
                 return None
             raise _ApplicationStateAuthorityUnavailable(self._APPLICATION_STATE_FAILURE)
@@ -15238,6 +16244,7 @@ class ControlledScenarioService:
                 "cycle": app["cycle"],
                 "lifecycle_revision": app["lifecycle_revision"],
                 "evidence_revision": app["evidence_revision"],
+                "evidence_ready": bool(app.get("evidence_ready")),
                 "evidence_snapshot_id": app.get("current_evidence_snapshot_id"),
                 "evidence_snapshot_digest": app.get(
                     "current_evidence_snapshot_digest"
@@ -15814,6 +16821,86 @@ class ControlledScenarioService:
                         },
                     }
                 )
+
+            # S14: cancellation, termination settlement, reopen links and
+            # late-input receipts are rebuilt from immutable audit events and
+            # admission receipts so the full journey survives any projection
+            # loss.  Cancellation is retained history, never a rejection.
+            cancellations = []
+            terminations = []
+            reopens = []
+            for event in self._store.audit_events:
+                if event.get("application_id") != application_id:
+                    continue
+                action = event.get("action")
+                if action == "s14_application_cancelled":
+                    cancellations.append(
+                        {
+                            "event_id": event.get("event_id"),
+                            "cycle": int(event.get("cycle") or 0),
+                            "lifecycle_revision": int(
+                                event.get("lifecycle_revision") or 0
+                            ),
+                            "reason_code": event.get("reason_code"),
+                            "authority_subject": event.get("subject"),
+                            "authority_role": event.get("role"),
+                            "fenced_effects": copy.deepcopy(
+                                event.get("fenced_effects", {})
+                            ),
+                            "cancelled_at": event.get("event_time"),
+                        }
+                    )
+                elif action == "s14_cycle_terminated":
+                    terminations.append(
+                        {
+                            "event_id": event.get("event_id"),
+                            "cycle": int(event.get("cycle") or 0),
+                            "lifecycle_revision": int(
+                                event.get("lifecycle_revision") or 0
+                            ),
+                            "notification_event_id": event.get(
+                                "notification_event_id"
+                            ),
+                            "settled_effects": copy.deepcopy(
+                                event.get("settled_effects", [])
+                            ),
+                            "terminated_at": event.get("event_time"),
+                        }
+                    )
+                elif action == "s14_cycle_reopened":
+                    reopens.append(
+                        {
+                            "event_id": event.get("event_id"),
+                            "predecessor_cycle": int(
+                                event.get("predecessor_cycle") or 0
+                            ),
+                            "cycle": int(event.get("cycle") or 0),
+                            "lifecycle_revision": int(
+                                event.get("lifecycle_revision") or 0
+                            ),
+                            "target_phase": event.get("target_phase"),
+                            "reopened_by": event.get("subject"),
+                            "reopen_permission_id": event.get(
+                                "reopen_permission_id"
+                            ),
+                            "reopened_at": event.get("event_time"),
+                        }
+                    )
+            late_input_receipts = []
+            for receipt in self._store.receipts.values():
+                if (
+                    isinstance(receipt, AdmissionResult)
+                    and receipt.application_id == application_id
+                    and receipt.reason_code == "evidence.late_input_requires_reopen"
+                ):
+                    late_input_receipts.append(
+                        {
+                            "receipt_id": receipt.receipt_id,
+                            "reason_code": receipt.reason_code,
+                            "request_id": receipt.request_id,
+                            "occurred_at": receipt.occurred_at,
+                        }
+                    )
             return {
                 "schema_version": "s04-application-history/1",
                 "application_id": application_id,
@@ -15828,6 +16915,10 @@ class ControlledScenarioService:
                 "membership_history": membership_history,
                 "entity_links": entity_links,
                 "entity_link_history": entity_link_history,
+                "cancellations": cancellations,
+                "terminations": terminations,
+                "reopens": reopens,
+                "late_input_receipts": late_input_receipts,
             }
 
     def _reviewer_application_authority(
@@ -20213,9 +21304,16 @@ class ControlledScenarioService:
                     "recovery_route",
                 }:
                     continue
+                job_app = staged.applications.get(str(job.get("application_id")))
+                if str((job_app or {}).get("phase") or "") in {
+                    "Terminating",
+                    "Terminated",
+                }:
+                    continue
                 if job["status"] in {
                     "complete",
                     "diagnostic",
+                    "fenced_cancelled",
                     "blocked",
                     "exhausted",
                     "dead_lettered",
@@ -20422,19 +21520,38 @@ class ControlledScenarioService:
                 raise ValueError("lifecycle authority is not contiguous")
             if canonical_events[0] != (1, 1, "Intake"):
                 raise ValueError("lifecycle admission event is invalid")
-            for previous, current in zip(canonical_events, canonical_events[1:]):
-                if current[1] != 1 or current[2] not in self._ALLOWED_PHASE_SUCCESSORS.get(
-                    previous[2], frozenset()
+            # S14: cycles are validated as a chain of intra-cycle successor
+            # walks; only a Terminated cycle may be succeeded by exactly one
+            # reopen event that starts a new cycle at Intake or Assembly.
+            previous_event = canonical_events[0]
+            for current in canonical_events[1:]:
+                previous_revision, previous_cycle, previous_phase = previous_event
+                revision, cycle, phase = current
+                if cycle == previous_cycle:
+                    if phase not in self._ALLOWED_PHASE_SUCCESSORS.get(
+                        previous_phase, frozenset()
+                    ):
+                        raise ValueError("lifecycle transition history is invalid")
+                elif (
+                    cycle == previous_cycle + 1
+                    and previous_phase == "Terminated"
+                    and phase in {"Intake", "Assembly"}
                 ):
+                    pass
+                else:
                     raise ValueError("lifecycle transition history is invalid")
+                previous_event = current
 
             phases = [event[2] for event in canonical_events]
             current_phase = phases[-1]
+            current_cycle = canonical_events[-1][1]
             expected_evidence_ready = current_phase not in {
                 "Intake",
                 "Assembly",
                 "Awaiting Evidence",
                 "Unprocessable",
+                "Terminating",
+                "Terminated",
             }
             current_lifecycle_event = max(
                 transition_events, key=lambda event: int(event["revision"])
@@ -20446,6 +21563,8 @@ class ControlledScenarioService:
                 "Awaiting Evidence": "awaiting_evidence",
                 "Unprocessable": "unprocessable",
                 "Routing Determination": "routing_determination",
+                "Terminating": "cancelled",
+                "Terminated": "cancelled",
                 "Verification Completed": (
                     "human_complete"
                     if current_lifecycle_event.get("reason_code")
@@ -20458,7 +21577,7 @@ class ControlledScenarioService:
             if (
                 isinstance(observed_cycle, bool)
                 or not isinstance(observed_cycle, int)
-                or observed_cycle != 1
+                or observed_cycle != current_cycle
                 or isinstance(observed_revision, bool)
                 or not isinstance(observed_revision, int)
                 or observed_revision != revisions[-1]

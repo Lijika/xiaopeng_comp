@@ -28,6 +28,20 @@ INTEGRATOR = S01CommandPrincipal(
     source_id="s01-test-client",
 )
 
+REVIEWER = S01CommandPrincipal(
+    subject="registered-test-integrator",
+    role="reviewer",
+    scope="C-DEMO",
+    source_id="s14-review-console",
+)
+
+OPERATOR = S01CommandPrincipal(
+    subject="registered-test-operator",
+    role="operator",
+    scope="C-DEMO",
+    source_id="s14-control-plane",
+)
+
 S13_CREDENTIAL = "s13-test-operator-credential"
 S13_SUBJECT = "s13-test-operator"
 
@@ -223,23 +237,52 @@ def test_s13_query_keeps_prior_cycle_receipt_out_of_current_projection(
     assert first["cycle"] == 1
     assert first["delivery_status"] == "pending"
 
-    # Reopen is an application-Lifecycle owner operation.  This test mutates
-    # only the copied authority state to exercise the read projection seam;
-    # no browser command or second business authority is introduced.
-    service._store.applications[str(admitted.application_id)].update(  # type: ignore[index]
-        {
-            "cycle": 2,
-            "phase": "Assembly",
-            "route": "pending_check",
-            "lifecycle_revision": int(
-                service._store.applications[str(admitted.application_id)][  # type: ignore[index]
-                    "lifecycle_revision"
-                ]
-            )
-            + 1,
-        }
+    # S14: the successor cycle is produced by the real Lifecycle cancel ->
+    # settle -> reopen command chain, not by mutating application state.
+    upstream = service.current_route_view(
+        principal=REVIEWER,
+        application_id=str(admitted.application_id),
     )
-    service._store.persist()
+    cancel = service.cancel_application(
+        application_id=str(admitted.application_id),
+        principal=INTEGRATOR,
+        expected_lifecycle_revision=int(upstream["lifecycle_revision"]),
+        idempotency_key="s13-http-cycle-two-cancel",
+        reason_code="UPSTREAM_WITHDRAWN",
+    )
+    assert cancel["status"] == "accepted"
+    # The cycle-one obligation settles through the S13 sender seam: the
+    # receipt becomes immutable prior-cycle history for the successor.
+    sent = service.process_next_delivery(
+        principal=S01CommandPrincipal(
+            subject=S13_SUBJECT,
+            role="operator",
+            scope="C-DEMO",
+            source_id="s13-delivery-console",
+        )
+    )
+    assert sent["status"] == "received"
+    settled = service.settle_termination(
+        application_id=str(admitted.application_id),
+        principal=OPERATOR,
+        expected_lifecycle_revision=int(cancel["lifecycle_revision"]),
+        idempotency_key="s13-http-cycle-two-settle",
+    )
+    assert settled["status"] == "terminated"
+    reopened = service.reopen_application(
+        application_id=str(admitted.application_id),
+        principal=OPERATOR,
+        expected_lifecycle_revision=int(settled["lifecycle_revision"]),
+        idempotency_key="s13-http-cycle-two-reopen",
+        target_phase="Assembly",
+        reopen_policy={
+            "permission_id": "institutional-reopen-permission/1",
+            "release_digest": service._manifest.digest,
+        },
+    )
+    assert reopened["status"] == "accepted"
+    assert reopened["cycle"] == 2
+    assert reopened["phase"] == "Assembly"
     current = service.delivery_view(
         principal=S01CommandPrincipal(
             subject=S13_SUBJECT,

@@ -425,6 +425,66 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/controlled/s01/api/commands/applications/{application_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Controlled S14 Cancel
+         * @description S14 upstream cancellation: enter Terminating and fence all effects.
+         */
+        post: operations["controlled_s14_cancel_controlled_s01_api_commands_applications__application_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s01/api/commands/applications/{application_id}/reopen": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Controlled S14 Reopen
+         * @description S14 authorized reopen: successor cycle from a Terminated application.
+         */
+        post: operations["controlled_s14_reopen_controlled_s01_api_commands_applications__application_id__reopen_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s01/api/commands/applications/{application_id}/settle-termination": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Controlled S14 Settle
+         * @description S14 operator settlement: seal Terminated only when effects are terminal.
+         */
+        post: operations["controlled_s14_settle_controlled_s01_api_commands_applications__application_id__settle_termination_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/controlled/s01/api/commands/business-exception-operations/close": {
         parameters: {
             query?: never;
@@ -8022,6 +8082,39 @@ export interface components {
             /** Detail */
             detail: components["schemas"]["S13ValidationErrorItem"][];
         };
+        /** S14CancelBody */
+        S14CancelBody: {
+            /** Expected Lifecycle Revision */
+            expected_lifecycle_revision: number;
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Reason Code */
+            reason_code: string;
+        };
+        /** S14ReopenBody */
+        S14ReopenBody: {
+            /** Expected Lifecycle Revision */
+            expected_lifecycle_revision: number;
+            /** Idempotency Key */
+            idempotency_key: string;
+            reopen_policy: components["schemas"]["S14ReopenPolicyBody"];
+            /** Target Phase */
+            target_phase: string;
+        };
+        /** S14ReopenPolicyBody */
+        S14ReopenPolicyBody: {
+            /** Permission Id */
+            permission_id: string;
+            /** Release Digest */
+            release_digest: string;
+        };
+        /** S14SettleBody */
+        S14SettleBody: {
+            /** Expected Lifecycle Revision */
+            expected_lifecycle_revision: number;
+            /** Idempotency Key */
+            idempotency_key: string;
+        };
         /** T05BusinessExceptionOperationsResult */
         T05BusinessExceptionOperationsResult: {
             /** Changed At */
@@ -9015,6 +9108,117 @@ export interface operations {
                     "application/json": {
                         [key: string]: number;
                     };
+                };
+            };
+        };
+    };
+    controlled_s14_cancel_controlled_s01_api_commands_applications__application_id__cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                application_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["S14CancelBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    controlled_s14_reopen_controlled_s01_api_commands_applications__application_id__reopen_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                application_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["S14ReopenBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    controlled_s14_settle_controlled_s01_api_commands_applications__application_id__settle_termination_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                application_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["S14SettleBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

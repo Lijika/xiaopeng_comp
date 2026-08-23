@@ -16934,6 +16934,113 @@
         "title": "S13ValidationErrorResponse",
         "type": "object"
       },
+      "S14CancelBody": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_lifecycle_revision": {
+            "minimum": 1.0,
+            "title": "Expected Lifecycle Revision",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "reason_code": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Reason Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "expected_lifecycle_revision",
+          "idempotency_key",
+          "reason_code"
+        ],
+        "title": "S14CancelBody",
+        "type": "object"
+      },
+      "S14ReopenBody": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_lifecycle_revision": {
+            "minimum": 1.0,
+            "title": "Expected Lifecycle Revision",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "reopen_policy": {
+            "$ref": "#/components/schemas/S14ReopenPolicyBody"
+          },
+          "target_phase": {
+            "pattern": "^(Intake|Assembly)$",
+            "title": "Target Phase",
+            "type": "string"
+          }
+        },
+        "required": [
+          "expected_lifecycle_revision",
+          "idempotency_key",
+          "target_phase",
+          "reopen_policy"
+        ],
+        "title": "S14ReopenBody",
+        "type": "object"
+      },
+      "S14ReopenPolicyBody": {
+        "additionalProperties": false,
+        "properties": {
+          "permission_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Permission Id",
+            "type": "string"
+          },
+          "release_digest": {
+            "maxLength": 64,
+            "minLength": 64,
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Release Digest",
+            "type": "string"
+          }
+        },
+        "required": [
+          "permission_id",
+          "release_digest"
+        ],
+        "title": "S14ReopenPolicyBody",
+        "type": "object"
+      },
+      "S14SettleBody": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_lifecycle_revision": {
+            "minimum": 1.0,
+            "title": "Expected Lifecycle Revision",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "expected_lifecycle_revision",
+          "idempotency_key"
+        ],
+        "title": "S14SettleBody",
+        "type": "object"
+      },
       "T05BusinessExceptionOperationsResult": {
         "additionalProperties": false,
         "properties": {
@@ -18594,6 +18701,162 @@
           }
         },
         "summary": "Controlled S01 Test Project"
+      }
+    },
+    "/controlled/s01/api/commands/applications/{application_id}/cancel": {
+      "post": {
+        "description": "S14 upstream cancellation: enter Terminating and fence all effects.",
+        "operationId": "controlled_s14_cancel_controlled_s01_api_commands_applications__application_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "application_id",
+            "required": true,
+            "schema": {
+              "title": "Application Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S14CancelBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S14 Cancel Controlled S01 Api Commands Applications  Application Id  Cancel Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S14 Cancel"
+      }
+    },
+    "/controlled/s01/api/commands/applications/{application_id}/reopen": {
+      "post": {
+        "description": "S14 authorized reopen: successor cycle from a Terminated application.",
+        "operationId": "controlled_s14_reopen_controlled_s01_api_commands_applications__application_id__reopen_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "application_id",
+            "required": true,
+            "schema": {
+              "title": "Application Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S14ReopenBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S14 Reopen Controlled S01 Api Commands Applications  Application Id  Reopen Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S14 Reopen"
+      }
+    },
+    "/controlled/s01/api/commands/applications/{application_id}/settle-termination": {
+      "post": {
+        "description": "S14 operator settlement: seal Terminated only when effects are terminal.",
+        "operationId": "controlled_s14_settle_controlled_s01_api_commands_applications__application_id__settle_termination_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "application_id",
+            "required": true,
+            "schema": {
+              "title": "Application Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S14SettleBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Controlled S14 Settle Controlled S01 Api Commands Applications  Application Id  Settle Termination Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S14 Settle"
       }
     },
     "/controlled/s01/api/commands/business-exception-operations/close": {

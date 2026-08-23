@@ -958,6 +958,42 @@ class S01RecoveryBody(BaseModel):
     expected_failure_reason_code: str
 
 
+class S14CancelBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_lifecycle_revision: int = Field(ge=1, strict=True)
+    idempotency_key: str = Field(min_length=1, max_length=200, strict=True)
+    reason_code: str = Field(min_length=1, max_length=200, strict=True)
+
+
+class S14SettleBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_lifecycle_revision: int = Field(ge=1, strict=True)
+    idempotency_key: str = Field(min_length=1, max_length=200, strict=True)
+
+
+class S14ReopenPolicyBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    permission_id: str = Field(min_length=1, max_length=200, strict=True)
+    release_digest: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+        strict=True,
+    )
+
+
+class S14ReopenBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_lifecycle_revision: int = Field(ge=1, strict=True)
+    idempotency_key: str = Field(min_length=1, max_length=200, strict=True)
+    target_phase: str = Field(pattern=r"^(Intake|Assembly)$", strict=True)
+    reopen_policy: S14ReopenPolicyBody
+
+
 class S07VerifyRecoveryBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -4144,6 +4180,92 @@ def controlled_s01_recover_runtime(
             source_id="c-demo-operator-control-plane",
         ),
     )
+
+
+@app.post("/controlled/s01/api/commands/applications/{application_id}/cancel")
+def controlled_s14_cancel(
+    application_id: str,
+    body: S14CancelBody,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    """S14 upstream cancellation: enter Terminating and fence all effects."""
+    principal = _s01_require_role(request, "integrator")
+    _s01_disable_cache(response)
+    try:
+        return _s01_service().cancel_application(
+            application_id=application_id,
+            principal=S01CommandPrincipal(
+                subject=principal.subject,
+                role="integrator",
+                scope=principal.scope,
+                source_id="c-demo-web-session",
+            ),
+            expected_lifecycle_revision=body.expected_lifecycle_revision,
+            idempotency_key=body.idempotency_key,
+            reason_code=body.reason_code,
+        )
+    except QueryNotFound as error:
+        raise HTTPException(404, detail={"error": "S01_NOT_FOUND"}) from error
+
+
+@app.post(
+    "/controlled/s01/api/commands/applications/{application_id}/settle-termination"
+)
+def controlled_s14_settle(
+    application_id: str,
+    body: S14SettleBody,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    """S14 operator settlement: seal Terminated only when effects are terminal."""
+    principal = _s01_require_operator(request)
+    _s01_disable_cache(response)
+    try:
+        return _s01_service().settle_termination(
+            application_id=application_id,
+            principal=S01CommandPrincipal(
+                subject=principal.subject,
+                role="operator",
+                scope=principal.scope,
+                source_id="c-demo-operator-control-plane",
+            ),
+            expected_lifecycle_revision=body.expected_lifecycle_revision,
+            idempotency_key=body.idempotency_key,
+        )
+    except QueryNotFound as error:
+        raise HTTPException(404, detail={"error": "S01_NOT_FOUND"}) from error
+
+
+@app.post("/controlled/s01/api/commands/applications/{application_id}/reopen")
+def controlled_s14_reopen(
+    application_id: str,
+    body: S14ReopenBody,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    """S14 authorized reopen: successor cycle from a Terminated application."""
+    principal = _s01_require_operator(request)
+    _s01_disable_cache(response)
+    try:
+        return _s01_service().reopen_application(
+            application_id=application_id,
+            principal=S01CommandPrincipal(
+                subject=principal.subject,
+                role="operator",
+                scope=principal.scope,
+                source_id="c-demo-operator-control-plane",
+            ),
+            expected_lifecycle_revision=body.expected_lifecycle_revision,
+            idempotency_key=body.idempotency_key,
+            target_phase=body.target_phase,
+            reopen_policy={
+                "permission_id": body.reopen_policy.permission_id,
+                "release_digest": body.reopen_policy.release_digest,
+            },
+        )
+    except QueryNotFound as error:
+        raise HTTPException(404, detail={"error": "S01_NOT_FOUND"}) from error
 
 
 @app.post("/controlled/s01/api/_test/commands/project")

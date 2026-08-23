@@ -2357,10 +2357,27 @@ def test_late_input_after_terminal_request_requires_reopen_without_business_effe
         request_id=request["request_id"],  # type: ignore[arg-type]
         now=202,
     ) == request_before
-    assert service.application_history_view(
+    # S14 exposes late-input rejections as an additive receipt trail; the
+    # closed supplement terminal and application evidence facts must stay
+    # unchanged while that overlay grows (no business effect leaks).
+    late_history = service.application_history_view(
         principal=REVIEWER,
         application_id=application_id,
-    ) == history_before
+    )
+    if set(late_history) != set(history_before):
+        assert late_history == history_before, "application history key set changed"
+    expected = {key: late_history[key] for key in late_history if key != "late_input_receipts"}
+    assert expected == {key: history_before[key] for key in history_before if key != "late_input_receipts"}
+    if len(late_history.get("late_input_receipts", [])) != len(
+        history_before.get("late_input_receipts", [])
+    ):
+        # Exactly the rejected late submission receipt is now visible.
+        delta = [
+            item
+            for item in late_history["late_input_receipts"]
+            if item not in history_before.get("late_input_receipts", [])
+        ]
+        assert len(delta) == 1 and delta[0]["reason_code"] == "evidence.late_input_requires_reopen"
 
 
 def test_supplement_successor_fences_an_old_in_flight_run_result(
