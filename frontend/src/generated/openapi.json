@@ -17058,6 +17058,17 @@
             ],
             "title": "Fenced Effects"
           },
+          "granted_via_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Granted Via Source"
+          },
           "lifecycle_revision": {
             "anyOf": [
               {
@@ -17135,6 +17146,17 @@
             ],
             "title": "Predecessor Cycle"
           },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
           "reason_code": {
             "anyOf": [
               {
@@ -17150,6 +17172,17 @@
             "default": false,
             "title": "Replayed",
             "type": "boolean"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
           },
           "scope": {
             "anyOf": [
@@ -17296,6 +17329,11 @@
             "title": "Approver Subject",
             "type": "string"
           },
+          "expected_lifecycle_revision": {
+            "minimum": 1.0,
+            "title": "Expected Lifecycle Revision",
+            "type": "integer"
+          },
           "idempotency_key": {
             "maxLength": 200,
             "minLength": 1,
@@ -17318,6 +17356,7 @@
           }
         },
         "required": [
+          "expected_lifecycle_revision",
           "approver_subject",
           "permission_id",
           "idempotency_key"

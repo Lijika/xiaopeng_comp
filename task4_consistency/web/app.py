@@ -782,6 +782,48 @@ class S01ResponsePolicy(BaseHTTPMiddleware):
         return response
 
 
+@app.exception_handler(RequestValidationError)
+async def _s14_or_default_validation_handler(
+    request: Request, exc: RequestValidationError
+) -> Response:
+    path = request.url.path
+    if path.startswith(
+        (
+            "/controlled/s01/api/commands/applications/",
+            "/controlled/s01/api/commands/process-termination-notification",
+        )
+    ):
+        message = "S14 command failed validation"
+        first = exc.errors()[0] if exc.errors() else {}
+        loc = first.get("loc") or []
+        if loc:
+            message = f"{message}: {'.'.join(str(part) for part in loc)}"
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": {
+                    "error": "S14_COMMAND_INVALID",
+                    "message": message,
+                }
+            },
+        )
+    # Legacy controlled-slice contract: the validation body carries only
+    # loc/msg/type per item.
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": [
+                {
+                    "loc": item.get("loc"),
+                    "msg": item.get("msg"),
+                    "type": item.get("type"),
+                }
+                for item in exc.errors()
+            ]
+        },
+    )
+
+
 app.add_middleware(S01ResponsePolicy)
 
 
@@ -1153,6 +1195,7 @@ class S14ReopenBody(BaseModel):
 class S14GrantPermissionBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    expected_lifecycle_revision: int = Field(ge=1, strict=True)
     approver_subject: str = Field(
         min_length=1, max_length=200, pattern=r"^\S+$", strict=True
     )
@@ -1208,9 +1251,12 @@ class S14CommandResult(BaseModel):
     policy_release_id: str | None = None
     policy_release_digest: str | None = None
     source_binding: str | None = None
+    granted_via_source: str | None = None
     expires_at: int | None = None
     operation_id: str | None = None
     duplicate: bool | None = None
+    result: str | None = None
+    reason: str | None = None
 
 
 def _s14_command_response(result: dict[str, Any]) -> Response:
@@ -1226,13 +1272,18 @@ def _s14_command_response(result: dict[str, Any]) -> Response:
         code = 503
     elif status == "rejected":
         reason = str(validated.reason_code or "")
-        code = (
-            403
-            if reason.startswith("lifecycle.reopen_")
+        if (
+            reason.startswith("lifecycle.reopen_")
             or reason == "lifecycle.cancel_forbidden"
             or reason == "FORBIDDEN"
-            else 409
-        )
+        ):
+            # Authorization refusals use the shared controlled-envelope body
+            # so the declared 403 schema has one runtime serialization.
+            raise HTTPException(
+                403,
+                detail={"error": "S14_FORBIDDEN", "message": reason},
+            )
+        code = 409
     return JSONResponse(status_code=code, content=jsonable_encoder(validated))
 
 
@@ -4385,6 +4436,7 @@ def controlled_s14_grant_permission(
             ),
             approver_subject=body.approver_subject,
             permission_id=body.permission_id,
+            expected_lifecycle_revision=body.expected_lifecycle_revision,
             idempotency_key=body.idempotency_key,
             ttl_seconds=body.ttl_seconds,
         )

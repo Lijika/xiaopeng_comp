@@ -8,6 +8,7 @@ reconstruction is asserted on the same installed service instance.
 
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -219,6 +220,7 @@ def test_s14_http_full_cancel_settle_reopen_path(
     granted = client.post(
         f"/controlled/s01/api/commands/applications/{application_id}/grant-reopen-permission",
         json={
+            "expected_lifecycle_revision": terminated_revision,
             "approver_subject": "registered-approver-operator",
             "permission_id": "institutional-reopen-permission/1",
             "idempotency_key": "s14-http-grant-1",
@@ -382,3 +384,192 @@ def test_s14_http_command_routes_registered(path: str) -> None:
         f"/controlled/s01/api/commands/applications/{{application_id}}/{path}"
         in paths
     )
+
+
+# --------------------------------------------------------------------------
+# R2: typed outage/403/422 contracts and generated-schema agreement
+# --------------------------------------------------------------------------
+
+
+def test_s14_audit_or_storage_outage_returns_503(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    service = _install(monkeypatch, tmp_path)
+    client = TestClient(webapp.app)
+    _login(client)
+    application_id = _admitted_manual_review(service)
+    revision = int(
+        client.get(
+            f"/controlled/s01/api/queries/applications/{application_id}/current-route"
+        ).json()["lifecycle_revision"]
+    )
+
+    service.audit_available = False
+    outage = client.post(
+        f"/controlled/s01/api/commands/applications/{application_id}/cancel",
+        json={
+            "expected_lifecycle_revision": revision,
+            "idempotency_key": "s14-http-cancel-outage",
+            "reason_code": "UPSTREAM_WITHDRAWN",
+        },
+    )
+    assert outage.status_code == 503
+    body = outage.json()
+    assert body["status"] == "unavailable"
+    assert body["reason_code"] == "AUDIT_UNAVAILABLE"
+
+    service.audit_available = True
+    service.storage_available = False
+    storage_outage = client.post(
+        f"/controlled/s01/api/commands/applications/{application_id}/settle-termination",
+        json={"expected_lifecycle_revision": revision, "idempotency_key": "s14-http-settle-outage"},
+        headers=_operator_auth(),
+    )
+    assert storage_outage.status_code == 503
+    assert storage_outage.json()["reason_code"] == "STORAGE_UNAVAILABLE"
+
+
+def test_s14_forbidden_body_matches_openapi(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    _install(monkeypatch, tmp_path)
+    client = TestClient(webapp.app)
+    # No session: authentication refusal uses the shared envelope body.
+    forbidden = client.post(
+        "/controlled/s01/api/commands/applications/app_x/cancel",
+        json={
+            "expected_lifecycle_revision": 1,
+            "idempotency_key": "k",
+            "reason_code": "UPSTREAM_WITHDRAWN",
+        },
+    )
+    assert forbidden.status_code == 403
+    detail = forbidden.json()["detail"]
+    assert set(detail) == {"error", "message"}
+
+    generated = json.loads(
+        (ROOT / "frontend" / "src" / "generated" / "openapi.json").read_text()
+    )
+    responses = generated["paths"][
+        "/controlled/s01/api/commands/applications/{application_id}/cancel"
+    ]["post"]["responses"]
+    assert "403" in responses
+
+
+def test_s14_validation_body_matches_openapi(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    service = _install(monkeypatch, tmp_path)
+    client = TestClient(webapp.app)
+    _login(client)
+    application_id = _admitted_manual_review(service)
+
+    # Schema-level violation (missing required field).
+    missing = client.post(
+        f"/controlled/s01/api/commands/applications/{application_id}/cancel",
+        json={"idempotency_key": "k", "reason_code": "UPSTREAM_WITHDRAWN"},
+    )
+    assert missing.status_code == 422
+    assert missing.json()["detail"]["error"] == "S14_COMMAND_INVALID"
+
+    # Domain predicate violation (whitespace idempotency key).
+    whitespace = client.post(
+        f"/controlled/s01/api/commands/applications/{application_id}/cancel",
+        json={
+            "expected_lifecycle_revision": 1,
+            "idempotency_key": " ",
+            "reason_code": "UPSTREAM_WITHDRAWN",
+        },
+    )
+    assert whitespace.status_code == 422
+    assert (
+        whitespace.json()["detail"]["error"] == "S14_COMMAND_INVALID"
+    )
+
+
+def test_s14_result_status_matrix_has_typed_bodies(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    service = _install(monkeypatch, tmp_path)
+    client = TestClient(webapp.app)
+    _login(client)
+    application_id = _admitted_manual_review(service)
+    revision = int(
+        client.get(
+            f"/controlled/s01/api/queries/applications/{application_id}/current-route"
+        ).json()["lifecycle_revision"]
+    )
+
+    stale = client.post(
+        f"/controlled/s01/api/commands/applications/{application_id}/cancel",
+        json={
+            "expected_lifecycle_revision": revision - 1,
+            "idempotency_key": "s14-matrix-stale",
+            "reason_code": "UPSTREAM_WITHDRAWN",
+        },
+    )
+    assert stale.status_code == 409
+    assert {"status", "replayed", "application_id", "reason_code"} <= set(
+        stale.json()
+    )
+
+    accepted = client.post(
+        f"/controlled/s01/api/commands/applications/{application_id}/cancel",
+        json={
+            "expected_lifecycle_revision": revision,
+            "idempotency_key": "s14-matrix-accepted",
+            "reason_code": "UPSTREAM_WITHDRAWN",
+        },
+    )
+    assert accepted.status_code == 200
+    assert accepted.json()["status"] == "accepted"
+
+    outstanding = client.post(
+        f"/controlled/s01/api/commands/applications/{application_id}/settle-termination",
+        json={
+            "expected_lifecycle_revision": accepted.json()["lifecycle_revision"],
+            "idempotency_key": "s14-matrix-arm",
+        },
+        headers=_operator_auth(),
+    )
+    assert outstanding.status_code == 202
+    assert outstanding.json()["status"] == "outstanding"
+
+    conflict = client.post(
+        f"/controlled/s01/api/commands/applications/{application_id}/cancel",
+        json={
+            "expected_lifecycle_revision": revision + 5,
+            "idempotency_key": "s14-matrix-conflict",
+            "reason_code": "OTHER",
+        },
+    )
+    assert conflict.status_code == 409
+
+    missing = client.get(
+        "/controlled/s01/api/queries/applications/app_unknown/current-route"
+    )
+    assert missing.status_code in {404}
+
+
+def test_generated_s14_contract_matches_fastapi_schema() -> None:
+    import json as _json
+
+    generated = _json.loads(
+        (ROOT / "frontend" / "src" / "generated" / "openapi.json").read_text()
+    )
+    live = webapp.app.openapi()
+
+    s14_paths = [
+        path
+        for path in live["paths"]
+        if path.startswith("/controlled/s01/api/commands/applications/")
+        or path == "/controlled/s01/api/commands/process-termination-notification"
+    ]
+    assert s14_paths, "S14 paths missing from live schema"
+    for path in s14_paths:
+        assert path in generated["paths"], f"{path} missing from generated"
+        live_responses = live["paths"][path]["post"]["responses"]
+        gen_responses = generated["paths"][path]["post"]["responses"]
+        assert set(live_responses) == set(gen_responses), (
+            f"{path}: {sorted(live_responses)} != {sorted(gen_responses)}"
+        )

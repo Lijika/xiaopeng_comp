@@ -303,6 +303,7 @@ def test_s13_query_keeps_prior_cycle_receipt_out_of_current_projection(
         principal=OPERATOR,
         approver_subject=APPROVER.subject,
         permission_id="institutional-reopen-permission/1",
+        expected_lifecycle_revision=int(settled["lifecycle_revision"]),
         idempotency_key="s13-http-cycle-two-grant",
     )
     assert granted["status"] == "accepted"

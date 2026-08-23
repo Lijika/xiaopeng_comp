@@ -76,6 +76,7 @@ _REQUIRED_DISPOSITIONS = (
 _PARTITION_ORDER = (
     "open_cycle",
     "verification_completed",
+    "terminating",
     "terminated",
     "compliance_deleted",
 )

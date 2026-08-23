@@ -420,3 +420,24 @@ def test_manifest_digest_changes_when_member_order_is_reordered() -> None:
     )
     manifest = build_impact_manifest(_request(snapshot=snapshot))
     assert [m["application_id"] for m in manifest["members"]] == ["APP-1", "APP-2"]
+
+
+def test_terminating_snapshot_builds_and_validates_manifest() -> None:
+    """Ticket #30 R2: a Terminating member is a first-class partition that
+    flows through the canonical manifest builder and validator."""
+    terminating = {
+        "application_id": "TERM-1",
+        "cycle": 1,
+        "partition": "terminating",
+        "current_run_id": None,
+        "current_generation": None,
+        "expected_revisions": {"lifecycle_revision": 4, "evidence_revision": 1},
+    }
+    snapshot = _snapshot([_open_cycle("OPEN-1", generation=1), terminating])
+    manifest = build_impact_manifest(_request(snapshot=snapshot, candidate=dict(CANDIDATE)))
+    partitions = {member["partition"] for member in manifest["members"]}
+    assert "terminating" in partitions
+    assert manifest["partitions"]["terminating"]["count"] == 1
+    assert manifest["partitions"]["open_cycle"]["count"] == 1
+    # The digest binds the same vocabulary the builder used.
+    assert manifest["partitions"]["terminating"]["digest"]

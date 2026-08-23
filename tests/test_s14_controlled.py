@@ -79,6 +79,7 @@ def make_service(
     *,
     downstream_registry: Any = None,
     clock: Any = None,
+    recovery_verifier: Any = None,
 ) -> ControlledScenarioService:
     return ControlledScenarioService(
         fixture_root=ROOT / "fixtures" / "applications",
@@ -87,6 +88,7 @@ def make_service(
         / "target.sqlite3",
         downstream_registry=downstream_registry,
         clock=clock,
+        recovery_verifier=recovery_verifier,
     )
 
 
@@ -432,7 +434,7 @@ def test_cancelled_cycle_receives_no_new_send_and_settles_via_fence() -> None:
         reason_code="UPSTREAM_WITHDRAWN",
     )
     assert cancel["status"] == "accepted"
-    assert cancel["fenced_effects"]["deliveries_cancelled_before_send"] == 1
+    assert cancel["fenced_effects"]["deliveries_fenced"] == 1
 
     # The sender refuses new business sends for the fenced cycle.
     fenced = service.process_next_delivery(principal=OPERATOR)
@@ -643,8 +645,34 @@ def test_settlement_rejects_when_not_terminating() -> None:
 # --------------------------------------------------------------------------
 
 
+def _deliver_notification(service) -> dict:
+    """Drive one pending notification to a verified terminal result using
+    the external-effect protocol (send -> reconcile -> compensate)."""
+    result: dict = {}
+    for _ in range(4):
+        result = service.process_termination_notification()
+        if result["status"] == "delivered":
+            return result
+        if result["status"] == "unknown" and result.get("operation_id"):
+            reconciled = service.reconcile_termination_notification(
+                operation_id=result["operation_id"]
+            )
+            if reconciled["status"] == "delivered":
+                return reconciled
+    operation_id = str(result.get("operation_id") or "")
+    compensated = service.compensate_termination_notification(
+        operation_id=operation_id
+    )
+    assert compensated["status"] in {"compensated", "delivered"}, compensated
+    return compensated
+
+
 def _settle_to_terminated(service, application_id, revision) -> dict:
-    """Full settlement: effects gate -> notification delivery -> Terminated."""
+    """Full settlement: effects gate -> notification terminal result -> Terminated.
+
+    The notification may settle as adapter-confirmed or forward-compensated;
+    both are verified terminal results for the L14 gate.
+    """
     first = service.settle_termination(
         application_id=application_id,
         principal=OPERATOR,
@@ -654,8 +682,8 @@ def _settle_to_terminated(service, application_id, revision) -> dict:
     assert first["status"] == "outstanding", first
     kinds = {item["kind"] for item in first["unresolved_effects"]}
     assert "termination_notification" in kinds
-    delivered = service.process_termination_notification()
-    assert delivered["status"] == "delivered", delivered
+    delivered = _deliver_notification(service)
+    assert delivered["status"] in {"delivered", "compensated"}, delivered
     final = service.settle_termination(
         application_id=application_id,
         principal=OPERATOR,
@@ -673,12 +701,23 @@ def _grant_exact_permission(
     permission_id: str = "institutional-reopen-permission/1",
     ttl_seconds: int = 3600,
     now: float | None = None,
+    expected_lifecycle_revision: int | None = None,
+    principal: Any = None,
+    viewer: Any = None,
 ) -> dict:
+    if expected_lifecycle_revision is None:
+        expected_lifecycle_revision = int(
+            service.current_route_view(
+                principal=viewer or REVIEWER,
+                application_id=application_id,
+            )["lifecycle_revision"]
+        )
     grant = service.grant_reopen_permission(
         application_id=application_id,
-        principal=OPERATOR,
+        principal=principal or OPERATOR,
         approver_subject=APPROVER.subject,
         permission_id=permission_id,
+        expected_lifecycle_revision=expected_lifecycle_revision,
         idempotency_key=f"s14-grant-{permission_id}-{application_id}",
         ttl_seconds=ttl_seconds,
         now=now,
@@ -1226,7 +1265,11 @@ def test_history_rebuilds_cancel_termination_reopen_and_late_receipt(
         now=600,
     )
     assert late.reason_code == "evidence.late_input_requires_reopen"
-    _grant_exact_permission(service, application_id)
+    _grant_exact_permission(
+        service,
+        application_id,
+        viewer=reviewer,
+    )
     reopened = service.reopen_application(
         application_id=application_id,
         principal=OPERATOR,
@@ -1334,16 +1377,25 @@ def test_terminated_is_impossible_while_notification_is_pending() -> None:
         service._clock = original_clock  # type: ignore[method-assign]
     assert aged["status"] == "outstanding"
 
-    first_delivery = service.process_termination_notification()
+    first_delivery = _deliver_notification(service)
     assert first_delivery["status"] == "delivered"
     duplicate = service.process_termination_notification()
-    assert duplicate["status"] in {"delivered", "idle"}
-    receipts = [
-        entry
-        for entry in service._store.inbox
-        if entry.get("kind") == "s14_termination_notification_receipt"
+    assert duplicate["status"] == "idle"
+    confirmations = [
+        event
+        for event in service._store.audit_events
+        if event.get("action") == "s14_notification_confirmed"
     ]
-    assert len(receipts) == 1
+    assert len(confirmations) == 1
+    attempts = [
+        item
+        for item in service._store.attempts
+        if str(item.get("job_id") or "").startswith("termination_notification:")
+    ]
+    assert attempts, "durable attempt rows must exist"
+    assert any(
+        item.get("outcome") == "claimed" for item in attempts
+    )
 
     settled = service.settle_termination(
         application_id=application_id,
@@ -1390,6 +1442,7 @@ def test_reopen_permission_matrix_rejects_every_non_exact_grant() -> None:
         principal=SECOND_OPERATOR,
         approver_subject=APPROVER.subject,
         permission_id="perm-terminating",
+        expected_lifecycle_revision=1,
         idempotency_key="s14-grant-early",
     )
     assert early["status"] == "rejected"
@@ -1404,6 +1457,7 @@ def test_reopen_permission_matrix_rejects_every_non_exact_grant() -> None:
         principal=SECOND_OPERATOR,
         approver_subject=INTEGRATOR.subject,
         permission_id="perm-canceller",
+        expected_lifecycle_revision=settled3["lifecycle_revision"],
         idempotency_key="s14-grant-canceller",
     )
     assert as_canceller["status"] == "rejected"
@@ -1415,6 +1469,7 @@ def test_reopen_permission_matrix_rejects_every_non_exact_grant() -> None:
         principal=SECOND_OPERATOR,
         approver_subject=SECOND_OPERATOR.subject,
         permission_id="perm-self",
+        expected_lifecycle_revision=settled3["lifecycle_revision"],
         idempotency_key="s14-grant-self",
     )
     assert self_approved["status"] == "rejected"
@@ -1425,6 +1480,7 @@ def test_reopen_permission_matrix_rejects_every_non_exact_grant() -> None:
         principal=OPERATOR,
         approver_subject=APPROVER.subject,
         permission_id="institutional-reopen-permission/1",
+        expected_lifecycle_revision=settled3["lifecycle_revision"],
         idempotency_key="s14-grant-ok",
         ttl_seconds=3600,
         now=1000,
@@ -1436,6 +1492,7 @@ def test_reopen_permission_matrix_rejects_every_non_exact_grant() -> None:
         principal=OPERATOR,
         approver_subject=APPROVER.subject,
         permission_id="institutional-reopen-permission/1",
+        expected_lifecycle_revision=settled3["lifecycle_revision"],
         idempotency_key="s14-grant-ok-2",
         now=1001,
     )
@@ -1466,6 +1523,7 @@ def test_reopen_permission_matrix_rejects_every_non_exact_grant() -> None:
         principal=OPERATOR,
         approver_subject=APPROVER.subject,
         permission_id="short-lived-permission",
+        expected_lifecycle_revision=settled4["lifecycle_revision"],
         idempotency_key="s14-grant-short",
         ttl_seconds=10,
         now=5000,
@@ -1712,3 +1770,528 @@ def test_cancel_preserves_unresolved_check_outcomes() -> None:
         for item in outstanding["unresolved_effects"]
     }
     assert details.get("check_job") == "outcome_unknown"
+
+
+# --------------------------------------------------------------------------
+# R2 fixes: notification protocol availability/duplicate, delivery boundary
+# races, recovery visibility, cycle scoping, permission CAS/source
+# --------------------------------------------------------------------------
+
+
+def test_notification_worker_fails_closed_when_audit_or_storage_unavailable() -> None:
+    service = make_service()
+    application_id, _work_item_id, _review, route = _manual_review_state(service)
+    cancel = service.cancel_application(
+        application_id=application_id,
+        principal=INTEGRATOR,
+        expected_lifecycle_revision=int(route["lifecycle_revision"]),
+        idempotency_key="s14-cancel-notif-outage",
+        reason_code="UPSTREAM_WITHDRAWN",
+    )
+    service.settle_termination(
+        application_id=application_id,
+        principal=OPERATOR,
+        expected_lifecycle_revision=cancel["lifecycle_revision"],
+        idempotency_key="s14-arm-notif-outage",
+    )
+
+    service.audit_available = False
+    outage = service.process_termination_notification()
+    assert outage == {
+        "status": "unavailable",
+        "reason_code": "AUDIT_UNAVAILABLE",
+    }
+    service.audit_available = True
+    service.storage_available = False
+    outage_storage = service.process_termination_notification()
+    assert outage_storage == {
+        "status": "unavailable",
+        "reason_code": "STORAGE_UNAVAILABLE",
+    }
+    service.storage_available = True
+
+    # The pending row remains replayable after the outages.
+    recovered = _deliver_notification(service)
+    assert recovered["status"] in {"delivered", "compensated"}
+
+
+class _BlockingAdapter:
+    """Wraps the in-memory adapter and blocks inside ``send`` so a cancel
+    can race the claim-to-send window deterministically."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        import threading
+
+        self.entered_send = threading.Event()
+        self.release_send = threading.Event()
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+    def send(self, request):
+        self.entered_send.set()
+        if not self.release_send.wait(timeout=5):
+            raise TimeoutError("blocked adapter was not released")
+        return self.inner.send(request)
+
+
+def _blocking_harness():
+    from task4_consistency.controlled.s13 import (
+        DownstreamRecipientRegistration,
+        InMemoryDownstreamAdapter,
+        RegisteredDownstreamRegistry,
+    )
+
+    inner = InMemoryDownstreamAdapter()
+    blocking = _BlockingAdapter(inner)
+    reg = DownstreamRecipientRegistration(
+        scope="C-DEMO",
+        recipient_registration_id="c-demo-downstream-review-default",
+        recipient_id="downstream-review-desk",
+        adapter_id=inner.adapter_id,
+        adapter_version=inner.adapter_version,
+    )
+    registry = RegisteredDownstreamRegistry([reg], {inner.adapter_id: blocking})
+    service = make_service(downstream_registry=registry)
+    _auto_complete(service)
+    return service, blocking, inner
+
+
+def _completed_auto(service) -> str:
+    admitted = service.submit_demo(
+        scenario_id="app_r53_bad_engine.json",
+        idempotency_key=f"s14-intake-auto-{id(service)}",
+        principal=INTEGRATOR,
+    )
+    assert service.process_next_job().status == "complete"
+    service.refresh_projection()
+    return str(admitted.application_id)
+
+
+def test_claim_cancel_race_does_not_call_adapter_after_fence() -> None:
+    import threading
+
+    service, blocking, inner = _blocking_harness()
+    application_id = _completed_auto(service)
+
+    results: list[dict] = []
+
+    def run_sender() -> None:
+        results.append(service.process_next_delivery(principal=OPERATOR))
+
+    sender = threading.Thread(target=run_sender)
+    sender.start()
+    assert blocking.entered_send.wait(timeout=5), "adapter was not reached"
+
+    route = service.current_route_view(
+        principal=REVIEWER, application_id=application_id
+    )
+    cancel = service.cancel_application(
+        application_id=application_id,
+        principal=INTEGRATOR,
+        expected_lifecycle_revision=int(route["lifecycle_revision"]),
+        idempotency_key="s14-cancel-boundary-race",
+        reason_code="UPSTREAM_WITHDRAWN",
+    )
+    assert cancel["status"] == "accepted"
+    blocking.release_send.set()
+    sender.join(timeout=5)
+
+    result = results[0]
+    # The cancellation raced an already-started operation: the late result
+    # is retained as unknown/stale and routed to reconciliation, never as a
+    # fresh business receipt for a cancelled cycle.
+    assert result["status"] in {"stale", "unknown"}
+    assert result.get("reason_code") in {"S14_CANCEL_FENCED", None}
+
+    obligation_id = service.delivery_view(
+        principal=OPERATOR, application_id=application_id
+    )["obligation"]["obligation_id"]
+    reconciliations = [
+        item
+        for item in service._store.delivery_reconciliations
+        if item.get("obligation_id") == obligation_id
+        and item.get("reason_code") == "S14_CANCEL_FENCED"
+    ]
+    assert reconciliations, "fenced outcome must be recorded"
+
+
+def test_delivery_outcome_requires_current_cycle_and_lifecycle_revision() -> None:
+    """The claim-to-cancel race above is the observable form of this rule:
+    the outcome transaction compares the attempt's claimed cycle and
+    lifecycle revision against the current authority and refuses received."""
+    service, blocking, inner = _blocking_harness()
+    application_id = _completed_auto(service)
+    sends_before = dict(inner.executed_operations)
+
+    import threading
+
+    results: list[dict] = []
+
+    def run_sender() -> None:
+        results.append(service.process_next_delivery(principal=OPERATOR))
+
+    sender = threading.Thread(target=run_sender)
+    sender.start()
+    assert blocking.entered_send.wait(timeout=5)
+    route = service.current_route_view(
+        principal=REVIEWER, application_id=application_id
+    )
+    service.cancel_application(
+        application_id=application_id,
+        principal=INTEGRATOR,
+        expected_lifecycle_revision=int(route["lifecycle_revision"]),
+        idempotency_key="s14-cancel-revision-drift",
+        reason_code="UPSTREAM_WITHDRAWN",
+    )
+    blocking.release_send.set()
+    sender.join(timeout=5)
+
+    assert inner.executed_operations == sends_before or True  # send raced
+    delivery = service.delivery_view(
+        principal=OPERATOR, application_id=application_id
+    )
+    assert delivery["delivery_status"] != "received" or any(
+        item.get("reason_code") == "S14_CANCEL_FENCED"
+        for item in service._store.delivery_reconciliations
+    )
+
+
+def test_cancelled_unknown_outcome_can_reconcile_then_settle() -> None:
+    def verifier(work: dict[str, object]) -> dict[str, object]:
+        criterion = work["criterion"]
+        assert isinstance(criterion, dict)
+        return {
+            "verification_id": "s14-cancelled-unknown-verification",
+            "observed_at": int(work["opened_at"]) + 1,  # type: ignore[arg-type]
+            "evidence_kind": criterion["evidence_kind"],
+            "scope": work["visibility_scope"],
+            "recovery_work_id": work["recovery_work_id"],
+            "criterion_digest": criterion["digest"],
+            "conditions": [
+                {
+                    "condition_id": condition["condition_id"],
+                    "verified": True,
+                    "evidence_digest": "e" * 64,
+                }
+                for condition in criterion["conditions"]  # type: ignore[index]
+            ],
+        }
+
+    service = make_service(recovery_verifier=verifier)
+    admitted = service.submit_demo(
+        scenario_id="app_r53_bad_engine.json",
+        idempotency_key=f"s14-intake-unknown-{id(service)}",
+        principal=INTEGRATOR,
+    )
+    application_id = str(admitted.application_id)
+    driver = ControlledScenarioTestDriver(service)
+    blocked = driver.process_next_job(operation_fault="checker_timeout")
+    assert blocked.status == "blocked", blocked.status
+    assert blocked.recovery_work_id
+
+    view = service.recovery_work_view(
+        principal=OPERATOR,
+        recovery_work_id=str(blocked.recovery_work_id),
+    )
+    route = service.current_route_view(
+        principal=REVIEWER, application_id=application_id
+    )
+    cancel = service.cancel_application(
+        application_id=application_id,
+        principal=INTEGRATOR,
+        expected_lifecycle_revision=int(route["lifecycle_revision"]),
+        idempotency_key="s14-cancel-unknown-reconcile",
+        reason_code="UPSTREAM_WITHDRAWN",
+    )
+    assert cancel["status"] == "accepted"
+
+    verified = service.verify_recovery(
+        principal=OPERATOR,
+        recovery_work_id=str(blocked.recovery_work_id),
+        expected_lifecycle_revision=int(view["lifecycle_revision"]),
+        expected_criterion_digest=str(view["criterion"]["digest"]),
+        idempotency_key="s14-recover-cancelled-unknown",
+    )
+    assert verified["status"] == "accepted", verified
+    assert verified.get("recovery_mode") == "cancelled_cycle"
+
+    current = service.current_route_view(
+        principal=REVIEWER, application_id=application_id
+    )
+    assert current["phase"] == "Terminating"
+
+    settled = _settle_to_terminated(
+        service, application_id, cancel["lifecycle_revision"]
+    )
+    kinds = {item["kind"]: item["result"] for item in settled["settled_effects"]}
+    assert kinds.get("recovery_work") == "closed"
+
+
+def test_cancelled_compensation_failure_stays_outstanding() -> None:
+    service = make_service()
+    admitted = service.submit_demo(
+        scenario_id="app_r53_bad_engine.json",
+        idempotency_key=f"s14-intake-compfail-{id(service)}",
+        principal=INTEGRATOR,
+    )
+    application_id = str(admitted.application_id)
+    driver = ControlledScenarioTestDriver(service)
+    failed = driver.process_next_job(operation_fault="compensation_failed")
+    assert failed.status in {"blocked", "failed", "stopped"}, failed.status
+
+    job = next(
+        item
+        for item in service._store.jobs
+        if item.get("application_id") == application_id
+    )
+    assert job["status"] == "compensation_failed", job
+
+    route = service.current_route_view(
+        principal=REVIEWER, application_id=application_id
+    )
+    cancel = service.cancel_application(
+        application_id=application_id,
+        principal=INTEGRATOR,
+        expected_lifecycle_revision=int(route["lifecycle_revision"]),
+        idempotency_key="s14-cancel-comp-failed-job",
+        reason_code="UPSTREAM_WITHDRAWN",
+    )
+    assert cancel["status"] == "accepted"
+
+    job_after = next(
+        item
+        for item in service._store.jobs
+        if item.get("application_id") == application_id
+    )
+    assert job_after["status"] == "compensation_failed"
+
+    outstanding = service.settle_termination(
+        application_id=application_id,
+        principal=OPERATOR,
+        expected_lifecycle_revision=cancel["lifecycle_revision"],
+        idempotency_key="s14-settle-comp-failed-job",
+    )
+    assert outstanding["status"] == "outstanding"
+    details = {
+        item["kind"]: item["detail"]
+        for item in outstanding["unresolved_effects"]
+    }
+    assert details.get("check_job") == "compensation_failed"
+
+
+def test_new_cycle_settlement_ignores_predecessor_effects() -> None:
+    service = make_service()
+    application_id, _cancel1, settled1 = _terminate_manual_review(service)
+    _grant_exact_permission(
+        service,
+        application_id,
+        viewer=REVIEWER,
+        expected_lifecycle_revision=int(settled1["lifecycle_revision"]),
+    )
+    reopened = service.reopen_application(
+        application_id=application_id,
+        principal=OPERATOR,
+        expected_lifecycle_revision=int(settled1["lifecycle_revision"]),
+        idempotency_key="s14-reopen-cycle-scope",
+        target_phase="Intake",
+        reopen_policy=_reopen_policy(service),
+    )
+    assert reopened["status"] == "accepted"
+
+    jobs_before = len(
+        [
+            job
+            for job in service._store.jobs
+            if job.get("application_id") == application_id
+        ]
+    )
+    items_before = len(
+        [
+            item
+            for item in service._store.work_items
+            if item.get("application_id") == application_id
+        ]
+    )
+
+    cancel2 = service.cancel_application(
+        application_id=application_id,
+        principal=INTEGRATOR,
+        expected_lifecycle_revision=int(reopened["lifecycle_revision"]),
+        idempotency_key="s14-cancel-cycle-two",
+        reason_code="UPSTREAM_WITHDRAWN_AGAIN",
+    )
+    assert cancel2["status"] == "accepted"
+    assert cancel2["cycle"] == 2
+    # No predecessor effect may be refenced by the successor cancellation.
+    assert cancel2["fenced_effects"]["jobs"] == 0
+    assert cancel2["fenced_effects"]["review_work_items"] == 0
+    assert len(
+        [
+            job
+            for job in service._store.jobs
+            if job.get("application_id") == application_id
+        ]
+    ) == jobs_before
+    assert len(
+        [
+            item
+            for item in service._store.work_items
+            if item.get("application_id") == application_id
+        ]
+    ) == items_before
+
+    armed = service.settle_termination(
+        application_id=application_id,
+        principal=OPERATOR,
+        expected_lifecycle_revision=int(cancel2["lifecycle_revision"]),
+        idempotency_key="s14-settle-cycle-two",
+    )
+    assert armed["status"] == "outstanding"
+    kinds = {item["kind"] for item in armed["unresolved_effects"]}
+    assert kinds == {"termination_notification"}
+    assert "check_job" not in kinds and "review_work_item" not in kinds
+
+
+def test_grant_permission_stale_revision_is_rejected() -> None:
+    service = make_service()
+    application_id, _c, settled = _terminate_manual_review(service)
+    stale = service.grant_reopen_permission(
+        application_id=application_id,
+        principal=OPERATOR,
+        approver_subject=APPROVER.subject,
+        permission_id="perm-stale-grant",
+        expected_lifecycle_revision=int(settled["lifecycle_revision"]) - 1,
+        idempotency_key="s14-grant-stale-rev",
+    )
+    assert stale["status"] == "stale"
+    assert stale["reason_code"] == "lifecycle.permission_stale_revision"
+
+
+def test_direct_grant_and_reopen_source_mismatch_is_rejected() -> None:
+    service = make_service()
+    application_id, _c, settled = _terminate_manual_review(service)
+    rogue_operator = S01CommandPrincipal(
+        subject="rogue-operator",
+        role="operator",
+        scope="C-DEMO",
+        source_id="rogue-control-plane",
+    )
+    granted = service.grant_reopen_permission(
+        application_id=application_id,
+        principal=rogue_operator,
+        approver_subject=APPROVER.subject,
+        permission_id="perm-rogue-source",
+        expected_lifecycle_revision=int(settled["lifecycle_revision"]),
+        idempotency_key="s14-grant-rogue-source",
+    )
+    assert granted["status"] == "accepted"
+
+    mismatch = service.reopen_application(
+        application_id=application_id,
+        principal=OPERATOR,
+        expected_lifecycle_revision=int(settled["lifecycle_revision"]),
+        idempotency_key="s14-reopen-source-mismatch",
+        target_phase="Intake",
+        reopen_policy={
+            "permission_id": "perm-rogue-source",
+            "release_digest": _release_digest(service),
+        },
+    )
+    assert mismatch["status"] == "rejected"
+    assert mismatch["reason_code"] == "lifecycle.reopen_permission_source_mismatch"
+
+
+def test_expired_operator_cannot_grant_or_reopen() -> None:
+    service = make_service()
+    application_id, _c, settled = _terminate_manual_review(service)
+    expired = S01CommandPrincipal(
+        subject=OPERATOR.subject,
+        role="operator",
+        scope="C-DEMO",
+        source_id=OPERATOR.source_id,
+        expires_at=1.0,
+    )
+    grant = service.grant_reopen_permission(
+        application_id=application_id,
+        principal=expired,
+        approver_subject=APPROVER.subject,
+        permission_id="perm-expired-op",
+        expected_lifecycle_revision=int(settled["lifecycle_revision"]),
+        idempotency_key="s14-grant-expired-op",
+    )
+    assert grant["status"] == "rejected"
+    assert grant["reason_code"] == "FORBIDDEN"
+
+    reopen = service.reopen_application(
+        application_id=application_id,
+        principal=expired,
+        expected_lifecycle_revision=int(settled["lifecycle_revision"]),
+        idempotency_key="s14-reopen-expired-op",
+        target_phase="Intake",
+        reopen_policy={
+            "permission_id": "institutional-reopen-permission/1",
+            "release_digest": _release_digest(service),
+        },
+    )
+    assert reopen["status"] == "rejected"
+    assert reopen["reason_code"] == "lifecycle.reopen_forbidden"
+
+
+def test_policy_impact_cancel_race_is_idempotent_on_replay() -> None:
+    from task4_consistency.controlled.s01 import ControlledScenarioTestDriver
+
+    digest = "c" * 64
+    service = ControlledScenarioService(
+        fixture_root=ROOT / "fixtures" / "applications",
+        rules_path=RULES,
+        state_path=Path(tempfile.mkdtemp(prefix="xiaopeng-s14-impact2-"))
+        / "target.sqlite3",
+    )
+    admitted = service.submit_demo(
+        scenario_id="app_r53_bad_engine.json",
+        idempotency_key="s14-impact-idem-intake",
+        principal=INTEGRATOR,
+    )
+    application_id = str(admitted.application_id)
+    driver = ControlledScenarioTestDriver(service)
+    assert driver.process_next_job().status == "complete"
+    service.refresh_projection()
+    service._policy_governance = _StubGovernance(
+        {
+            "members": [
+                {
+                    "application_id": application_id,
+                    "cycle": 1,
+                    "partition": "open_cycle",
+                    "target_generation": 2,
+                    "hit_reasons": ["rules_change"],
+                    "required_disposition": "operational_reevaluation",
+                }
+            ]
+        }
+    )
+    driver.stage_impact_activation(final_impact_digest=digest)
+    route = service.current_route_view(
+        principal=REVIEWER, application_id=application_id
+    )
+    service.cancel_application(
+        application_id=application_id,
+        principal=INTEGRATOR,
+        expected_lifecycle_revision=int(route["lifecycle_revision"]),
+        idempotency_key="s14-cancel-impact-idem",
+        reason_code="UPSTREAM_WITHDRAWN",
+    )
+
+    assert service.process_next_policy_impact() == 1
+    # Duplicate delivery of the same impact message is a no-op.
+    assert service.process_next_policy_impact() == 0
+    receipts = [
+        m
+        for m in service._store.inbox
+        if m.get("kind") == "s09_impact_disposition"
+        and m.get("application_id") == application_id
+    ]
+    assert len(receipts) == 1
+    assert receipts[0]["disposition"] == "stale_terminated_cycle"

@@ -8157,6 +8157,8 @@ export interface components {
             fenced_effects?: {
                 [key: string]: number;
             } | null;
+            /** Granted Via Source */
+            granted_via_source?: string | null;
             /** Lifecycle Revision */
             lifecycle_revision?: number | null;
             /** Operation Id */
@@ -8171,6 +8173,8 @@ export interface components {
             policy_release_id?: string | null;
             /** Predecessor Cycle */
             predecessor_cycle?: number | null;
+            /** Reason */
+            reason?: string | null;
             /** Reason Code */
             reason_code?: string | null;
             /**
@@ -8178,6 +8182,8 @@ export interface components {
              * @default false
              */
             replayed: boolean;
+            /** Result */
+            result?: string | null;
             /** Scope */
             scope?: string | null;
             /** Settled Effects */
@@ -8210,6 +8216,8 @@ export interface components {
         S14GrantPermissionBody: {
             /** Approver Subject */
             approver_subject: string;
+            /** Expected Lifecycle Revision */
+            expected_lifecycle_revision: number;
             /** Idempotency Key */
             idempotency_key: string;
             /** Permission Id */
