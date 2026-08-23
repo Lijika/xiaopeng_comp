@@ -16385,6 +16385,66 @@
         "title": "S13CompensateResponse",
         "type": "object"
       },
+      "S13ErrorDetail": {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "title": "Error",
+            "type": "string"
+          },
+          "hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hint"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Code"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "title": "S13ErrorDetail",
+        "type": "object"
+      },
+      "S13ErrorResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/S13ErrorDetail"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "S13ErrorResponse",
+        "type": "object"
+      },
       "S13ObligationSummary": {
         "additionalProperties": false,
         "properties": {
@@ -16571,6 +16631,13 @@
             "title": "Route",
             "type": "string"
           },
+          "routing_history": {
+            "items": {
+              "$ref": "#/components/schemas/S13RoutingHistoryEntry"
+            },
+            "title": "Routing History",
+            "type": "array"
+          },
           "schema_version": {
             "const": "s13-delivery-view/1",
             "title": "Schema Version",
@@ -16595,6 +16662,7 @@
           "lifecycle_revision",
           "verification_completed",
           "obligation",
+          "routing_history",
           "delivery_status",
           "attempt_count",
           "projection_watermark",
@@ -16663,6 +16731,207 @@
           "status"
         ],
         "title": "S13ReconcileResponse",
+        "type": "object"
+      },
+      "S13RoutingAttribution": {
+        "additionalProperties": false,
+        "properties": {
+          "batch_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Batch Id"
+          },
+          "decision_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decision Id"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Id"
+          },
+          "work_item_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Work Item Id"
+          },
+          "work_item_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Work Item Ids",
+            "type": "array"
+          }
+        },
+        "title": "S13RoutingAttribution",
+        "type": "object"
+      },
+      "S13RoutingHistoryEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "attribution": {
+            "$ref": "#/components/schemas/S13RoutingAttribution"
+          },
+          "attribution_kind": {
+            "title": "Attribution Kind",
+            "type": "string"
+          },
+          "checker_build": {
+            "title": "Checker Build",
+            "type": "string"
+          },
+          "completion_event_id": {
+            "title": "Completion Event Id",
+            "type": "string"
+          },
+          "completion_lifecycle_revision": {
+            "minimum": 0.0,
+            "title": "Completion Lifecycle Revision",
+            "type": "integer"
+          },
+          "cycle": {
+            "minimum": 1.0,
+            "title": "Cycle",
+            "type": "integer"
+          },
+          "evidence_snapshot_digest": {
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "Evidence Snapshot Digest",
+            "type": "string"
+          },
+          "evidence_snapshot_id": {
+            "title": "Evidence Snapshot Id",
+            "type": "string"
+          },
+          "obligation_id": {
+            "title": "Obligation Id",
+            "type": "string"
+          },
+          "operation_id": {
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "release_digest": {
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "Release Digest",
+            "type": "string"
+          },
+          "release_id": {
+            "title": "Release Id",
+            "type": "string"
+          },
+          "route": {
+            "title": "Route",
+            "type": "string"
+          },
+          "route_basis_digest": {
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "Route Basis Digest",
+            "type": "string"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "cycle",
+          "route",
+          "attribution_kind",
+          "attribution",
+          "completion_event_id",
+          "completion_lifecycle_revision",
+          "run_id",
+          "evidence_snapshot_id",
+          "evidence_snapshot_digest",
+          "release_id",
+          "release_digest",
+          "checker_build",
+          "route_basis_digest",
+          "obligation_id",
+          "operation_id"
+        ],
+        "title": "S13RoutingHistoryEntry",
+        "type": "object"
+      },
+      "S13ValidationErrorItem": {
+        "additionalProperties": false,
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Loc",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Msg",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "S13ValidationErrorItem",
+        "type": "object"
+      },
+      "S13ValidationErrorResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/S13ValidationErrorItem"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "S13ValidationErrorResponse",
         "type": "object"
       },
       "T05BusinessExceptionOperationsResult": {
@@ -24948,6 +25217,26 @@
               }
             },
             "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "$ref": "#/components/schemas/S13ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "503": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "$ref": "#/components/schemas/S13ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "summary": "Controlled S13 Page"
@@ -24978,16 +25267,44 @@
             "description": "Successful Response"
           },
           "403": {
-            "description": "Registered S13 operator identity required"
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S13ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
           },
           "404": {
-            "description": "Application or obligation is unavailable"
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S13ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
           },
           "422": {
-            "description": "S13 command does not match the registered contract"
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S13ValidationErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
           },
           "503": {
-            "description": "S13 delivery plane is unavailable"
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S13ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "summary": "S13 Compensate"
@@ -25009,16 +25326,44 @@
             "description": "Successful Response"
           },
           "403": {
-            "description": "Registered S13 operator identity required"
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S13ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
           },
           "404": {
-            "description": "Application or obligation is unavailable"
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S13ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
           },
           "422": {
-            "description": "S13 command does not match the registered contract"
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S13ValidationErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
           },
           "503": {
-            "description": "S13 delivery plane is unavailable"
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S13ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "summary": "S13 Process Next Delivery"
@@ -25049,16 +25394,44 @@
             "description": "Successful Response"
           },
           "403": {
-            "description": "Registered S13 operator identity required"
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S13ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
           },
           "404": {
-            "description": "Application or obligation is unavailable"
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S13ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
           },
           "422": {
-            "description": "S13 command does not match the registered contract"
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S13ValidationErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
           },
           "503": {
-            "description": "S13 delivery plane is unavailable"
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S13ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "summary": "S13 Reconcile"
@@ -25090,16 +25463,44 @@
             "description": "Successful Response"
           },
           "403": {
-            "description": "Registered S13 operator identity required"
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S13ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
           },
           "404": {
-            "description": "Application or obligation is unavailable"
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S13ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
           },
           "422": {
-            "description": "S13 command does not match the registered contract"
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S13ValidationErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
           },
           "503": {
-            "description": "S13 delivery plane is unavailable"
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S13ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "summary": "S13 Delivery Query"
@@ -25119,6 +25520,26 @@
               }
             },
             "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "$ref": "#/components/schemas/S13ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "503": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "$ref": "#/components/schemas/S13ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "summary": "Controlled S13 React Page"

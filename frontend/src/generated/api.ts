@@ -7854,6 +7854,21 @@ export interface components {
             /** Status */
             status: string;
         };
+        /** S13ErrorDetail */
+        S13ErrorDetail: {
+            /** Error */
+            error: string;
+            /** Hint */
+            hint?: string | null;
+            /** Message */
+            message?: string | null;
+            /** Reason Code */
+            reason_code?: string | null;
+        };
+        /** S13ErrorResponse */
+        S13ErrorResponse: {
+            detail: components["schemas"]["S13ErrorDetail"];
+        };
         /** S13ObligationSummary */
         S13ObligationSummary: {
             /** Adapter Id */
@@ -7915,6 +7930,8 @@ export interface components {
             projection_watermark: number;
             /** Route */
             route: string;
+            /** Routing History */
+            routing_history: components["schemas"]["S13RoutingHistoryEntry"][];
             /**
              * Schema Version
              * @constant
@@ -7942,6 +7959,68 @@ export interface components {
             reason_code?: string | null;
             /** Status */
             status: string;
+        };
+        /** S13RoutingAttribution */
+        S13RoutingAttribution: {
+            /** Batch Id */
+            batch_id?: string | null;
+            /** Decision Id */
+            decision_id?: string | null;
+            /** Request Id */
+            request_id?: string | null;
+            /** Work Item Id */
+            work_item_id?: string | null;
+            /**
+             * Work Item Ids
+             * @default []
+             */
+            work_item_ids: string[];
+        };
+        /** S13RoutingHistoryEntry */
+        S13RoutingHistoryEntry: {
+            attribution: components["schemas"]["S13RoutingAttribution"];
+            /** Attribution Kind */
+            attribution_kind: string;
+            /** Checker Build */
+            checker_build: string;
+            /** Completion Event Id */
+            completion_event_id: string;
+            /** Completion Lifecycle Revision */
+            completion_lifecycle_revision: number;
+            /** Cycle */
+            cycle: number;
+            /** Evidence Snapshot Digest */
+            evidence_snapshot_digest: string;
+            /** Evidence Snapshot Id */
+            evidence_snapshot_id: string;
+            /** Obligation Id */
+            obligation_id: string;
+            /** Operation Id */
+            operation_id: string;
+            /** Release Digest */
+            release_digest: string;
+            /** Release Id */
+            release_id: string;
+            /** Route */
+            route: string;
+            /** Route Basis Digest */
+            route_basis_digest: string;
+            /** Run Id */
+            run_id: string;
+        };
+        /** S13ValidationErrorItem */
+        S13ValidationErrorItem: {
+            /** Loc */
+            loc: (string | number)[];
+            /** Msg */
+            msg: string;
+            /** Type */
+            type: string;
+        };
+        /** S13ValidationErrorResponse */
+        S13ValidationErrorResponse: {
+            /** Detail */
+            detail: components["schemas"]["S13ValidationErrorItem"][];
         };
         /** T05BusinessExceptionOperationsResult */
         T05BusinessExceptionOperationsResult: {
@@ -13928,6 +14007,24 @@ export interface operations {
                     "text/html": string;
                 };
             };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": components["schemas"]["S13ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": components["schemas"]["S13ErrorResponse"];
+                };
+            };
         };
     };
     s13_compensate_controlled_s13_api_commands_compensate_post: {
@@ -13952,33 +14049,41 @@ export interface operations {
                     "application/json": components["schemas"]["S13CompensateResponse"];
                 };
             };
-            /** @description Registered S13 operator identity required */
+            /** @description Forbidden */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["S13ErrorResponse"];
+                };
             };
-            /** @description Application or obligation is unavailable */
+            /** @description Not Found */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["S13ErrorResponse"];
+                };
             };
-            /** @description S13 command does not match the registered contract */
+            /** @description Unprocessable Entity */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["S13ValidationErrorResponse"];
+                };
             };
-            /** @description S13 delivery plane is unavailable */
+            /** @description Service Unavailable */
             503: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["S13ErrorResponse"];
+                };
             };
         };
     };
@@ -14000,33 +14105,41 @@ export interface operations {
                     "application/json": components["schemas"]["S13ProcessNextDeliveryResponse"];
                 };
             };
-            /** @description Registered S13 operator identity required */
+            /** @description Forbidden */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["S13ErrorResponse"];
+                };
             };
-            /** @description Application or obligation is unavailable */
+            /** @description Not Found */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["S13ErrorResponse"];
+                };
             };
-            /** @description S13 command does not match the registered contract */
+            /** @description Unprocessable Entity */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["S13ValidationErrorResponse"];
+                };
             };
-            /** @description S13 delivery plane is unavailable */
+            /** @description Service Unavailable */
             503: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["S13ErrorResponse"];
+                };
             };
         };
     };
@@ -14052,33 +14165,41 @@ export interface operations {
                     "application/json": components["schemas"]["S13ReconcileResponse"];
                 };
             };
-            /** @description Registered S13 operator identity required */
+            /** @description Forbidden */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["S13ErrorResponse"];
+                };
             };
-            /** @description Application or obligation is unavailable */
+            /** @description Not Found */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["S13ErrorResponse"];
+                };
             };
-            /** @description S13 command does not match the registered contract */
+            /** @description Unprocessable Entity */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["S13ValidationErrorResponse"];
+                };
             };
-            /** @description S13 delivery plane is unavailable */
+            /** @description Service Unavailable */
             503: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["S13ErrorResponse"];
+                };
             };
         };
     };
@@ -14102,33 +14223,41 @@ export interface operations {
                     "application/json": components["schemas"]["S13QueryResponse"];
                 };
             };
-            /** @description Registered S13 operator identity required */
+            /** @description Forbidden */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["S13ErrorResponse"];
+                };
             };
-            /** @description Application or obligation is unavailable */
+            /** @description Not Found */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["S13ErrorResponse"];
+                };
             };
-            /** @description S13 command does not match the registered contract */
+            /** @description Unprocessable Entity */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["S13ValidationErrorResponse"];
+                };
             };
-            /** @description S13 delivery plane is unavailable */
+            /** @description Service Unavailable */
             503: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["S13ErrorResponse"];
+                };
             };
         };
     };
@@ -14148,6 +14277,24 @@ export interface operations {
                 };
                 content: {
                     "text/html": string;
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": components["schemas"]["S13ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": components["schemas"]["S13ErrorResponse"];
                 };
             };
         };

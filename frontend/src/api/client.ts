@@ -77,15 +77,6 @@ export type S12JobResponse = components["schemas"]["S12JobResponse"];
 export type S12ProcessResponse = components["schemas"]["S12ProcessResponse"];
 export type S12BundleResponse = components["schemas"]["S12BundleResponse"];
 export type S12StartJobBody = components["schemas"]["S12StartJobBody"];
-export type S13QueryResponse = components["schemas"]["S13QueryResponse"];
-export type S13ObligationSummary =
-  components["schemas"]["S13ObligationSummary"];
-export type S13ReconcileResponse =
-  components["schemas"]["S13ReconcileResponse"];
-export type S13CompensateResponse =
-  components["schemas"]["S13CompensateResponse"];
-export type S13ProcessNextDeliveryResponse =
-  components["schemas"]["S13ProcessNextDeliveryResponse"];
 
 /** A structured server rejection; never invents identifiers or evidence. */
 export class HttpError extends Error {
@@ -284,42 +275,6 @@ export function isDefinitiveS12Rejection(
     );
   }
   return S12_DEFINITIVE_STATUSES.has(error.status);
-}
-
-/**
- * The S13 delivery command surface's definitive-rejection classifier.
- * The registered S13 envelopes are the evidence: a structured
- * ``S13_FORBIDDEN`` 403 or ``S13_UNAVAILABLE`` 503 is definitive (the
- * delivery plane failed closed before commit), as are the registered
- * 404/422 statuses.  A generic 403/503, an unreadable payload, or a
- * transport/lost response stays unknown and retains the stable
- * operation_id for same-operation reconciliation.
- */
-const S13_DEFINITIVE_STATUSES: ReadonlySet<number> = new Set([404, 422]);
-const S13_403_DEFINITIVE_ERROR_CODES: ReadonlySet<string> = new Set([
-  "S13_FORBIDDEN",
-]);
-const S13_503_DEFINITIVE_ERROR_CODES: ReadonlySet<string> = new Set([
-  "S13_UNAVAILABLE",
-]);
-
-export function isDefinitiveS13Rejection(
-  error: unknown,
-): error is HttpError {
-  if (!(error instanceof HttpError)) return false;
-  if (error.status === 403) {
-    return (
-      error.errorCode !== undefined &&
-      S13_403_DEFINITIVE_ERROR_CODES.has(error.errorCode)
-    );
-  }
-  if (error.status === 503) {
-    return (
-      error.errorCode !== undefined &&
-      S13_503_DEFINITIVE_ERROR_CODES.has(error.errorCode)
-    );
-  }
-  return S13_DEFINITIVE_STATUSES.has(error.status);
 }
 
 /**

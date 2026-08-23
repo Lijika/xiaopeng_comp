@@ -16970,18 +16970,74 @@ class ControlledScenarioService:
             self._s13_require_principal_scope(
                 principal, application_scope, application_id
             )
-            obligations = [
+            obligations = sorted(
+                (
+                    item
+                    for item in self._store.delivery_obligations
+                    if str(item.get("application_id") or "")
+                    == str(application_id)
+                ),
+                key=lambda item: (
+                    int(item.get("cycle") or 0),
+                    int(item.get("completion_lifecycle_revision") or 0),
+                ),
+            )
+            # Older cycles remain immutable history.  The active obligation
+            # belongs to the Lifecycle-owned application cycle; a prior
+            # receipt cannot be presented while a new cycle is in progress.
+            current_cycle = int(app.get("cycle") or 0)
+            current_obligations = [
                 item
-                for item in self._store.delivery_obligations
-                if str(item.get("application_id") or "") == str(application_id)
+                for item in obligations
+                if int(item.get("cycle") or 0) == current_cycle
             ]
-            # Only the current cycle's obligation is the active one; older
-            # cycles are preserved but not returned as current.
-            if obligations:
-                obligations = sorted(obligations, key=lambda item: int(item.get("cycle") or 0))
-                obligation = obligations[-1]
-            else:
-                obligation = None
+            obligation = current_obligations[-1] if current_obligations else None
+            routing_history = []
+            for item in obligations:
+                attribution = item.get("attribution_ref")
+                attribution = attribution if isinstance(attribution, dict) else {}
+                work_item_ids = attribution.get("work_item_ids")
+                routing_history.append(
+                    {
+                        "cycle": int(item.get("cycle") or 0),
+                        "route": str(item.get("route") or ""),
+                        "attribution_kind": str(
+                            item.get("attribution_kind") or ""
+                        ),
+                        "attribution": {
+                            "decision_id": attribution.get("decision_id"),
+                            "work_item_id": attribution.get("work_item_id"),
+                            "request_id": attribution.get("request_id"),
+                            "batch_id": attribution.get("batch"),
+                            "work_item_ids": (
+                                list(work_item_ids)
+                                if isinstance(work_item_ids, list)
+                                else []
+                            ),
+                        },
+                        "completion_event_id": str(
+                            item.get("completion_event_id") or ""
+                        ),
+                        "completion_lifecycle_revision": int(
+                            item.get("completion_lifecycle_revision") or 0
+                        ),
+                        "run_id": str(item.get("current_run_id") or ""),
+                        "evidence_snapshot_id": str(
+                            item.get("evidence_snapshot_id") or ""
+                        ),
+                        "evidence_snapshot_digest": str(
+                            item.get("evidence_snapshot_digest") or ""
+                        ),
+                        "release_id": str(item.get("release_id") or ""),
+                        "release_digest": str(item.get("release_digest") or ""),
+                        "checker_build": str(item.get("checker_build") or ""),
+                        "route_basis_digest": str(
+                            item.get("route_basis_digest") or ""
+                        ),
+                        "obligation_id": str(item.get("obligation_id") or ""),
+                        "operation_id": str(item.get("operation_id") or ""),
+                    }
+                )
             phase = str(app.get("phase") or "")
             route = str(app.get("route") or "")
             verification_completed = phase == "Verification Completed"
@@ -16995,6 +17051,7 @@ class ControlledScenarioService:
                 "lifecycle_revision": int(app.get("lifecycle_revision") or 0),
                 "verification_completed": verification_completed,
                 "obligation": copy.deepcopy(obligation) if obligation is not None else None,
+                "routing_history": routing_history,
                 "delivery_status": delivery_status,
                 "attempt_count": len(self._s13_attempts_for_obligation(str(obligation.get("obligation_id") or ""))) if obligation is not None else 0,
                 "projection_watermark": self._store.projection_watermark,

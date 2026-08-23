@@ -104,14 +104,6 @@ def _s13_require_operator(request: Request) -> Any:
 
 # ------------------------------------------------------------------ DTOs
 
-_S13_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
-    403: {"description": "Registered S13 operator identity required"},
-    404: {"description": "Application or obligation is unavailable"},
-    422: {"description": "S13 command does not match the registered contract"},
-    503: {"description": "S13 delivery plane is unavailable"},
-}
-
-
 class S13ObligationSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
     obligation_id: str
@@ -129,6 +121,71 @@ class S13ObligationSummary(BaseModel):
     status: str
 
 
+class S13ErrorDetail(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    error: str
+    reason_code: str | None = None
+    message: str | None = None
+    hint: str | None = None
+
+
+class S13ErrorResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    detail: S13ErrorDetail
+
+
+class S13ValidationErrorItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    loc: list[str | int]
+    msg: str
+    type: str
+
+
+class S13ValidationErrorResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    detail: list[S13ValidationErrorItem]
+
+
+_S13_ERROR_RESPONSES: dict[int, dict[str, Any]] = {
+    403: {"model": S13ErrorResponse},
+    404: {"model": S13ErrorResponse},
+    422: {"model": S13ValidationErrorResponse},
+    503: {"model": S13ErrorResponse},
+}
+
+
+class S13RoutingAttribution(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    decision_id: str | None = None
+    work_item_id: str | None = None
+    request_id: str | None = None
+    batch_id: str | None = None
+    work_item_ids: tuple[str, ...] = ()
+
+
+class S13RoutingHistoryEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    cycle: int = Field(ge=1)
+    route: str
+    attribution_kind: str
+    attribution: S13RoutingAttribution
+    completion_event_id: str
+    completion_lifecycle_revision: int = Field(ge=0)
+    run_id: str
+    evidence_snapshot_id: str
+    evidence_snapshot_digest: str = Field(min_length=64, max_length=64)
+    release_id: str
+    release_digest: str = Field(min_length=64, max_length=64)
+    checker_build: str
+    route_basis_digest: str = Field(min_length=64, max_length=64)
+    obligation_id: str
+    operation_id: str
+
+
 class S13QueryResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     schema_version: Literal["s13-delivery-view/1"]
@@ -139,6 +196,7 @@ class S13QueryResponse(BaseModel):
     lifecycle_revision: int = Field(ge=0)
     verification_completed: bool
     obligation: S13ObligationSummary | None
+    routing_history: tuple[S13RoutingHistoryEntry, ...]
     delivery_status: str
     attempt_count: int = Field(ge=0)
     projection_watermark: int = Field(ge=0)

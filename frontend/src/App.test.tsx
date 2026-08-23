@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
 import { fetchRouter, renderWithQuery } from "./test-utils";
+import { S13_APPLICATION_ID, s13QueryPayload } from "./test-fixtures/s13";
 
 // The canonical Reviewer workbench path is the baseline for tests that render
 // <App /> without choosing a shell pathname: the jsdom default URL ("/") now
@@ -1250,38 +1251,11 @@ describe("evaluation operator shell (T14)", () => {
 });
 
 describe("delivery console shell (T15)", () => {
-  const APP_ID = "app_s13_t15_00000001";
-  function deliveryPayload(overrides: Record<string, unknown> = {}) {
-    return {
-      schema_version: "s13-delivery-view/1",
-      application_id: APP_ID,
-      phase: "Verification Completed",
-      route: "human_complete",
-      cycle: 1,
-      lifecycle_revision: 7,
-      verification_completed: true,
-      obligation: {
-        obligation_id: "obl_s13_t15_00000001",
-        application_id: APP_ID,
-        cycle: 1,
-        route: "human_complete",
-        attribution_kind: "human_complete",
-        operation_id: "op_s13_t15_00000000000000000000000001",
-        recipient_id: "recipient_c_demo_1",
-        adapter_id: "c-demo-downstream",
-        adapter_version: "1",
-        payload_ref: "payload/s13/00000001",
-        payload_digest: "c".repeat(64),
-        payload_schema: "s13-route-payload/1",
-        status: "pending",
-      },
-      delivery_status: "pending",
-      attempt_count: 0,
-      projection_watermark: 10,
-      store_revision: 42,
-      ...overrides,
-    };
-  }
+  const APP_ID = S13_APPLICATION_ID;
+  const deliveryPayload = (
+    overrides: Parameters<typeof s13QueryPayload>[0] = {},
+  ) =>
+    s13QueryPayload(overrides);
 
   it("mounts the S13 shell on /controlled/s13 and reads only the delivery view", async () => {
     const router = fetchRouter({
@@ -1363,5 +1337,14 @@ describe("delivery console shell (T15)", () => {
     expect(screen.getByTestId("s13-error-code")).toHaveTextContent("S13_FORBIDDEN");
     expect(screen.queryByTestId("s13-obligation-id")).not.toBeInTheDocument();
     expect(router.calls.filter((call) => call.method === "POST")).toHaveLength(0);
+  });
+
+  it("treats an empty application query as unselected", () => {
+    const router = fetchRouter({});
+    window.history.pushState(null, "", "/controlled/s13?application=");
+    renderWithQuery(<App />);
+
+    expect(screen.getByTestId("s13-no-application")).toBeInTheDocument();
+    expect(router.calls).toHaveLength(0);
   });
 });

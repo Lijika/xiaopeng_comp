@@ -1245,32 +1245,15 @@ export function useS12Bundle(
 // ---------------------------------------------------------------------------
 
 export type S13QueryResponse = components["schemas"]["S13QueryResponse"];
-export type S13ObligationSummary =
-  components["schemas"]["S13ObligationSummary"];
-export type S13ReconcileResponse =
-  components["schemas"]["S13ReconcileResponse"];
-export type S13CompensateResponse =
-  components["schemas"]["S13CompensateResponse"];
-export type S13ProcessNextDeliveryResponse =
-  components["schemas"]["S13ProcessNextDeliveryResponse"];
 
 export const S13_DELIVERY_KEY = (applicationId: string) =>
   ["s13", "delivery", applicationId] as const;
 
 /**
- * The S13 reconcile command body is bound to the generated OpenAPI request
- * schema; a backend contract change fails strict typecheck here.
- */
-export type S13ReconcileCommand =
-  paths["/controlled/s13/api/commands/reconcile"]["post"]["requestBody"]["content"]["application/json"];
-export type S13CompensateCommand =
-  paths["/controlled/s13/api/commands/compensate"]["post"]["requestBody"]["content"]["application/json"];
-
-/**
  * The one authoritative S13 delivery query.  The server owns
  * Verification Completed, Verification Routing, obligation, and delivery
- * receipt; the browser performs GET reads only and invalidates on
- * authorized commands.  The query is enabled only when the application
+ * receipt; the browser performs GET reads only and refetches only from
+ * explicit presentation controls.  The query is enabled only when the application
  * identifier is present; operator authorization is server-owned and a
  * 403/404 closes with no fallback.
  */
@@ -1279,65 +1262,11 @@ export function useS13Delivery(
 ): UseQueryResult<S13QueryResponse> {
   return useQuery({
     queryKey: S13_DELIVERY_KEY(applicationId ?? ""),
-    enabled: applicationId !== null,
+    enabled: Boolean(applicationId),
     queryFn: () =>
       request<S13QueryResponse>(
         `/controlled/s13/delivery/${encodeURIComponent(applicationId ?? "")}`,
       ),
     retry: retryPolicy,
   });
-}
-
-/**
- * The S13 command hooks share the review-command shape: a retry:false POST
- * through the thin same-origin adapter whose acceptance invalidates the
- * server-owned S13 queries.  Unknown transport outcomes preserve the stable
- * operation_id; a blind retry is unavailable until same-operation
- * reconciliation proves not_executed.  No optimistic transition is ever
- * applied.
- */
-function useS13CommandMutation<TResult, TCommand>(
-  path: string,
-): UseMutationResult<TResult, Error, TCommand> {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (command: TCommand) =>
-      request<TResult>(path, {
-        method: "POST",
-        body: JSON.stringify(command),
-      }),
-    retry: false,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["s13"] }),
-  });
-}
-
-export function useS13Reconcile(): UseMutationResult<
-  S13ReconcileResponse,
-  Error,
-  S13ReconcileCommand
-> {
-  return useS13CommandMutation<S13ReconcileResponse, S13ReconcileCommand>(
-    "/controlled/s13/api/commands/reconcile",
-  );
-}
-
-export function useS13Compensate(): UseMutationResult<
-  S13CompensateResponse,
-  Error,
-  S13CompensateCommand
-> {
-  return useS13CommandMutation<S13CompensateResponse, S13CompensateCommand>(
-    "/controlled/s13/api/commands/compensate",
-  );
-}
-
-export function useS13ProcessNextDelivery(): UseMutationResult<
-  S13ProcessNextDeliveryResponse,
-  Error,
-  Record<string, never>
-> {
-  return useS13CommandMutation<
-    S13ProcessNextDeliveryResponse,
-    Record<string, never>
-  >("/controlled/s13/api/commands/process_next_delivery");
 }

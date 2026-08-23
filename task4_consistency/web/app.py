@@ -706,6 +706,7 @@ class OptionalTokenAuth(BaseHTTPMiddleware):
         "/controlled/s08",
         "/controlled/s09",
         "/controlled/s12",
+        "/controlled/s13",
     )
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
@@ -5730,7 +5731,10 @@ register_s12_router(app, sys.modules[__name__])
 # --- S13 downstream-delivery HTTP adapter --------------------------------
 # Verification Completed is a lifecycle fact; delivery receipt is a separate
 # delivery fact.  The adapter registers after S12 so route order stays stable.
-from task4_consistency.web.s13_http import register_router as register_s13_router
+from task4_consistency.web.s13_http import (
+    S13ErrorResponse,
+    register_router as register_s13_router,
+)
 
 register_s13_router(app, sys.modules[__name__])
 
@@ -5792,14 +5796,21 @@ def controlled_s12_page(request: Request) -> Response:
 
 
 @app.get("/controlled/s12/react", response_class=HTMLResponse)
-def controlled_s12_react_page(request: Request) -> HTMLResponse:
+def controlled_s12_react_page(request: Request) -> Response:
     """The S12 /react alias: the same closed shell contract as the canonical
     route."""
     _s12_require_operator(request)
     return _s12_react_shell()
 
 
-@app.get("/controlled/s13", response_class=HTMLResponse)
+@app.get(
+    "/controlled/s13",
+    response_class=HTMLResponse,
+    responses={
+        403: {"model": S13ErrorResponse},
+        503: {"model": S13ErrorResponse},
+    },
+)
 def controlled_s13_page(request: Request) -> Response:
     """Canonical S13 delivery console React shell (Ticket #49/T15): the
     same shared qualified React build as the other controlled shells, served
@@ -5813,7 +5824,14 @@ def controlled_s13_page(request: Request) -> Response:
     return _s13_react_shell()
 
 
-@app.get("/controlled/s13/react", response_class=HTMLResponse)
+@app.get(
+    "/controlled/s13/react",
+    response_class=HTMLResponse,
+    responses={
+        403: {"model": S13ErrorResponse},
+        503: {"model": S13ErrorResponse},
+    },
+)
 def controlled_s13_react_page(request: Request) -> Response:
     """The S13 /react alias: the same closed shell contract as the canonical
     route."""
