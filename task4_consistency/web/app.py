@@ -624,6 +624,26 @@ async def _sanitized_validation_handler(
                 }
             },
         )
+    if request.url.path.startswith(
+        (
+            "/controlled/s01/api/commands/applications/",
+            "/controlled/s01/api/commands/process-termination-notification",
+        )
+    ):
+        message = "S14 command failed validation"
+        first = exc.errors()[0] if exc.errors() else {}
+        loc = first.get("loc") or []
+        if loc:
+            message = f"{message}: {'.'.join(str(part) for part in loc)}"
+        return JSONResponse(
+            status_code=422,
+            content={
+                "status": "rejected",
+                "replayed": False,
+                "reason_code": "S14_COMMAND_INVALID",
+                "reason": message,
+            },
+        )
     if request.url.path.startswith("/controlled/s12"):
         if S12_SERVICE is None:
             return JSONResponse(
@@ -780,48 +800,6 @@ class S01ResponsePolicy(BaseHTTPMiddleware):
         response.headers["Cache-Control"] = "no-store"
         response.headers["Pragma"] = "no-cache"
         return response
-
-
-@app.exception_handler(RequestValidationError)
-async def _s14_or_default_validation_handler(
-    request: Request, exc: RequestValidationError
-) -> Response:
-    path = request.url.path
-    if path.startswith(
-        (
-            "/controlled/s01/api/commands/applications/",
-            "/controlled/s01/api/commands/process-termination-notification",
-        )
-    ):
-        message = "S14 command failed validation"
-        first = exc.errors()[0] if exc.errors() else {}
-        loc = first.get("loc") or []
-        if loc:
-            message = f"{message}: {'.'.join(str(part) for part in loc)}"
-        return JSONResponse(
-            status_code=422,
-            content={
-                "status": "rejected",
-                "replayed": False,
-                "reason_code": "S14_COMMAND_INVALID",
-                "reason": message,
-            },
-        )
-    # Legacy controlled-slice contract: the validation body carries only
-    # loc/msg/type per item.
-    return JSONResponse(
-        status_code=422,
-        content={
-            "detail": [
-                {
-                    "loc": item.get("loc"),
-                    "msg": item.get("msg"),
-                    "type": item.get("type"),
-                }
-                for item in exc.errors()
-            ]
-        },
-    )
 
 
 app.add_middleware(S01ResponsePolicy)

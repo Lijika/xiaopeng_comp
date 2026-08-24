@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 
 from fastapi import HTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
 
 from task4_consistency.models import Application
@@ -194,6 +195,15 @@ def test_demo_batch_check_empty_and_shape_rejected():
         for value in ("not-a-list", "application", FIXTURE_OK):
             if value in str(payload):
                 assert value not in r.text, (payload, r.text)
+
+
+def test_request_validation_handler_is_shared_with_s14():
+    """The app keeps one validation handler so route-specific contracts do
+    not get replaced by a later registration for another slice."""
+    assert (
+        webapp.app.exception_handlers[RequestValidationError]
+        is webapp._sanitized_validation_handler
+    )
 
 
 def test_demo_batch_check_unknown_id_closed_404():
