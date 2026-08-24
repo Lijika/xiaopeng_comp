@@ -80,6 +80,7 @@ def make_service(
     downstream_registry: Any = None,
     clock: Any = None,
     recovery_verifier: Any = None,
+    fault_injector: Any = None,
 ) -> ControlledScenarioService:
     return ControlledScenarioService(
         fixture_root=ROOT / "fixtures" / "applications",
@@ -89,6 +90,7 @@ def make_service(
         downstream_registry=downstream_registry,
         clock=clock,
         recovery_verifier=recovery_verifier,
+        fault_injector=fault_injector,
     )
 
 
@@ -743,9 +745,28 @@ def _terminate_manual_review(service: ControlledScenarioService):
 
 
 def _reopen_policy(service: ControlledScenarioService) -> dict[str, Any]:
+    permission = next(
+        (
+            item
+            for item in reversed(service._store.review_records)
+            if item.get("record_type") == "s14_reopen_permission"
+        ),
+        None,
+    )
+    release_digest = (permission or {}).get("policy_release_digest")
+    if not str((permission or {}).get("policy_release_id") or "").startswith(
+        "admission-bound:"
+    ):
+        release_digest = (permission or {}).get(
+            "artifact_release_digest", _release_digest(service)
+        )
     return {
-        "permission_id": "institutional-reopen-permission/1",
-        "release_digest": _release_digest(service),
+        "permission_id": str(
+            (permission or {}).get(
+                "permission_id", "institutional-reopen-permission/1"
+            )
+        ),
+        "release_digest": str(release_digest or _release_digest(service)),
     }
 
 
@@ -1815,6 +1836,482 @@ def test_notification_worker_fails_closed_when_audit_or_storage_unavailable() ->
     assert recovered["status"] in {"delivered", "compensated"}
 
 
+def test_notification_live_claim_is_unique_for_same_worker() -> None:
+    service = make_service(clock=lambda: 100)
+    application_id, _work_item_id, _review, route = _manual_review_state(service)
+    cancel = service.cancel_application(
+        application_id=application_id,
+        principal=INTEGRATOR,
+        expected_lifecycle_revision=int(route["lifecycle_revision"]),
+        idempotency_key="s14-cancel-unique-claim",
+        reason_code="UPSTREAM_WITHDRAWN",
+    )
+    armed = service.settle_termination(
+        application_id=application_id,
+        principal=OPERATOR,
+        expected_lifecycle_revision=cancel["lifecycle_revision"],
+        idempotency_key="s14-arm-unique-claim",
+    )
+    assert armed["status"] == "outstanding"
+    operation_id = next(
+        item["operation_id"]
+        for item in service._store.outbox
+        if item.get("kind") == "termination_notification_requested"
+    )
+    service._store.attempts.append(
+        {
+            "attempt_id": "s14-live-claim",
+            "job_id": f"termination_notification:{operation_id}",
+            "application_id": application_id,
+            "worker_id": "s14-notification-worker",
+            "fence": 1,
+            "attempt_no": 1,
+            "started_at": 100,
+            "status": "started",
+            "outcome": "claimed",
+            "lease_until": 130,
+            "claim_cycle": 1,
+            "claim_lifecycle_revision": int(cancel["lifecycle_revision"]),
+            "operation_id": operation_id,
+        }
+    )
+    service._store.persist()
+
+    result = service.process_termination_notification(worker_id="s14-notification-worker")
+
+    assert result["status"] == "claimed"
+    assert result["reason_code"] == "S14_NOTIFICATION_LEASE_ACTIVE"
+    assert service._store.outbox[0]["status"] == "pending"
+
+
+def test_notification_dependency_loss_after_send_keeps_obligation_pending() -> None:
+    from task4_consistency.controlled.s13 import (
+        DownstreamRecipientRegistration,
+        InMemoryDownstreamAdapter,
+        RegisteredDownstreamRegistry,
+    )
+
+    class AvailabilityFlipAdapter:
+        adapter_id = "s14-availability-flip"
+        adapter_version = "1"
+
+        def __init__(self, service):
+            self.service = service
+            self.inner = InMemoryDownstreamAdapter(
+                adapter_id=self.adapter_id, adapter_version=self.adapter_version
+            )
+
+        def send(self, request):
+            result = self.inner.send(request)
+            self.service.storage_available = False
+            return result
+
+        def lookup(self, *, operation_id, recipient_id):
+            return self.inner.lookup(operation_id=operation_id, recipient_id=recipient_id)
+
+        def compensate(self, request):
+            return self.inner.compensate(request)
+
+    holder: dict[str, Any] = {}
+    adapter = AvailabilityFlipAdapter(None)
+    registry = RegisteredDownstreamRegistry(
+        [
+            DownstreamRecipientRegistration(
+                scope="C-DEMO",
+                recipient_registration_id="c-demo-downstream-review-default",
+                recipient_id="downstream-review-desk",
+                adapter_id=adapter.adapter_id,
+                adapter_version=adapter.adapter_version,
+            )
+        ],
+        {adapter.adapter_id: adapter},
+    )
+    service = make_service(downstream_registry=registry)
+    adapter.service = service
+    application_id, _work_item_id, _review, route = _manual_review_state(service)
+    cancel = service.cancel_application(
+        application_id=application_id,
+        principal=INTEGRATOR,
+        expected_lifecycle_revision=int(route["lifecycle_revision"]),
+        idempotency_key="s14-cancel-send-outage",
+        reason_code="UPSTREAM_WITHDRAWN",
+    )
+    armed = service.settle_termination(
+        application_id=application_id,
+        principal=OPERATOR,
+        expected_lifecycle_revision=cancel["lifecycle_revision"],
+        idempotency_key="s14-arm-send-outage",
+    )
+    assert armed["status"] == "outstanding"
+
+    result = service.process_termination_notification()
+
+    assert result["status"] == "unavailable"
+    assert result["reason_code"] == "STORAGE_UNAVAILABLE"
+    assert next(
+        item for item in service._store.outbox
+        if item.get("kind") == "termination_notification_requested"
+    )["status"] == "pending"
+    assert not any(
+        event.get("action") == "s14_notification_confirmed"
+        for event in service._store.audit_events
+    )
+
+
+def test_notification_lease_expiry_after_send_records_unknown() -> None:
+    from task4_consistency.controlled.s13 import (
+        DownstreamRecipientRegistration,
+        InMemoryDownstreamAdapter,
+        RegisteredDownstreamRegistry,
+    )
+
+    clock = [100]
+
+    class LeaseExpiryAdapter(InMemoryDownstreamAdapter):
+        def send(self, request):
+            result = super().send(request)
+            clock[0] = 131
+            return result
+
+    adapter = LeaseExpiryAdapter(
+        adapter_id="s14-lease-expiry", adapter_version="1"
+    )
+    registry = RegisteredDownstreamRegistry(
+        [
+            DownstreamRecipientRegistration(
+                scope="C-DEMO",
+                recipient_registration_id="c-demo-downstream-review-default",
+                recipient_id="downstream-review-desk",
+                adapter_id=adapter.adapter_id,
+                adapter_version=adapter.adapter_version,
+            )
+        ],
+        {adapter.adapter_id: adapter},
+    )
+    service = make_service(downstream_registry=registry, clock=lambda: clock[0])
+    application_id, _work_item_id, _review, route = _manual_review_state(service)
+    cancel = service.cancel_application(
+        application_id=application_id,
+        principal=INTEGRATOR,
+        expected_lifecycle_revision=int(route["lifecycle_revision"]),
+        idempotency_key="s14-cancel-lease-expiry",
+        reason_code="UPSTREAM_WITHDRAWN",
+    )
+    service.settle_termination(
+        application_id=application_id,
+        principal=OPERATOR,
+        expected_lifecycle_revision=cancel["lifecycle_revision"],
+        idempotency_key="s14-arm-lease-expiry",
+    )
+
+    result = service.process_termination_notification()
+
+    assert result["status"] == "unknown"
+    assert result["reason_code"] == "S13_STALE_DELIVERY_FENCE"
+    assert next(
+        item
+        for item in service._store.outbox
+        if item.get("kind") == "termination_notification_requested"
+    )["status"] == "pending"
+    assert any(
+        event.get("action") == "s14_notification_unknown"
+        and event.get("reason_code") == "S13_STALE_DELIVERY_FENCE"
+        for event in service._store.audit_events
+    )
+
+
+def test_notification_new_fence_wins_after_lease_expiry() -> None:
+    import threading
+
+    from task4_consistency.controlled.s13 import (
+        DownstreamRecipientRegistration,
+        InMemoryDownstreamAdapter,
+        RegisteredDownstreamRegistry,
+    )
+
+    clock = [100]
+    first_send_entered = threading.Event()
+    release_first_send = threading.Event()
+
+    class LeaseRenewalAdapter(InMemoryDownstreamAdapter):
+        send_count = 0
+
+        def send(self, request):
+            type(self).send_count += 1
+            if type(self).send_count == 1:
+                first_send_entered.set()
+                assert release_first_send.wait(timeout=5)
+            return super().send(request)
+
+    adapter = LeaseRenewalAdapter(
+        adapter_id="s14-lease-renewal", adapter_version="1"
+    )
+    registry = RegisteredDownstreamRegistry(
+        [
+            DownstreamRecipientRegistration(
+                scope="C-DEMO",
+                recipient_registration_id="c-demo-downstream-review-default",
+                recipient_id="downstream-review-desk",
+                adapter_id=adapter.adapter_id,
+                adapter_version=adapter.adapter_version,
+            )
+        ],
+        {adapter.adapter_id: adapter},
+    )
+    service = make_service(downstream_registry=registry, clock=lambda: clock[0])
+    application_id, _work_item_id, _review, route = _manual_review_state(service)
+    cancel = service.cancel_application(
+        application_id=application_id,
+        principal=INTEGRATOR,
+        expected_lifecycle_revision=int(route["lifecycle_revision"]),
+        idempotency_key="s14-cancel-lease-renewal",
+        reason_code="UPSTREAM_WITHDRAWN",
+    )
+    armed = service.settle_termination(
+        application_id=application_id,
+        principal=OPERATOR,
+        expected_lifecycle_revision=cancel["lifecycle_revision"],
+        idempotency_key="s14-arm-lease-renewal",
+    )
+    operation_id = str(armed["unresolved_effects"][-1]["id"])
+    old_result: list[dict[str, Any]] = []
+
+    def old_sender() -> None:
+        old_result.append(service.process_termination_notification(worker_id="old"))
+
+    sender = threading.Thread(target=old_sender)
+    sender.start()
+    assert first_send_entered.wait(timeout=5)
+    clock[0] = 131
+
+    renewed = service.process_termination_notification(worker_id="new")
+    assert renewed["status"] == "delivered"
+    assert renewed["operation_id"] == operation_id
+
+    release_first_send.set()
+    sender.join(timeout=5)
+    assert old_result[0]["status"] in {"stale", "unknown"}
+    assert old_result[0].get("reason_code") in {
+        "S13_STALE_DELIVERY_FENCE",
+        "S14_CANCEL_FENCED",
+    }
+    assert adapter.send_count == 2
+    assert sum(
+        1
+        for event in service._store.audit_events
+        if event.get("action") == "s14_notification_confirmed"
+        and event.get("operation_id") == operation_id
+    ) == 1
+
+
+@pytest.mark.parametrize("effect", ["lookup", "compensate"])
+def test_notification_follow_up_dependency_loss_keeps_obligation_pending(
+    effect: str,
+) -> None:
+    from task4_consistency.controlled.s13 import (
+        DownstreamRecipientRegistration,
+        InMemoryDownstreamAdapter,
+        RegisteredDownstreamRegistry,
+    )
+
+    class DependencyFlipAdapter(InMemoryDownstreamAdapter):
+        service: ControlledScenarioService
+
+        def lookup(self, *, operation_id, recipient_id):
+            result = super().lookup(
+                operation_id=operation_id, recipient_id=recipient_id
+            )
+            if effect == "lookup":
+                self.service.storage_available = False
+            return result
+
+        def compensate(self, request):
+            result = super().compensate(request)
+            if effect == "compensate":
+                self.service.audit_available = False
+            return result
+
+    adapter = DependencyFlipAdapter(
+        adapter_id=f"s14-{effect}-outage",
+        adapter_version="1",
+        behavior=(
+            "timeout_after_execute"
+            if effect == "lookup"
+            else "timeout_without_execute"
+        ),
+    )
+    registry = RegisteredDownstreamRegistry(
+        [
+            DownstreamRecipientRegistration(
+                scope="C-DEMO",
+                recipient_registration_id="c-demo-downstream-review-default",
+                recipient_id="downstream-review-desk",
+                adapter_id=adapter.adapter_id,
+                adapter_version=adapter.adapter_version,
+            )
+        ],
+        {adapter.adapter_id: adapter},
+    )
+    service = make_service(downstream_registry=registry)
+    adapter.service = service
+    application_id, _work_item_id, _review, route = _manual_review_state(service)
+    cancel = service.cancel_application(
+        application_id=application_id,
+        principal=INTEGRATOR,
+        expected_lifecycle_revision=int(route["lifecycle_revision"]),
+        idempotency_key=f"s14-cancel-{effect}-outage",
+        reason_code="UPSTREAM_WITHDRAWN",
+    )
+    service.settle_termination(
+        application_id=application_id,
+        principal=OPERATOR,
+        expected_lifecycle_revision=cancel["lifecycle_revision"],
+        idempotency_key=f"s14-arm-{effect}-outage",
+    )
+    unknown = service.process_termination_notification()
+    assert unknown["status"] == "unknown"
+
+    if effect == "lookup":
+        result = service.reconcile_termination_notification(
+            operation_id=unknown["operation_id"]
+        )
+        expected_reason = "STORAGE_UNAVAILABLE"
+    else:
+        result = service.compensate_termination_notification(
+            operation_id=unknown["operation_id"]
+        )
+        expected_reason = "AUDIT_UNAVAILABLE"
+
+    assert result["status"] == "unavailable"
+    assert result["reason_code"] == expected_reason
+    assert next(
+        item
+        for item in service._store.outbox
+        if item.get("operation_id") == unknown["operation_id"]
+    )["status"] == "pending"
+    assert service._s14_notification_terminal_result(unknown["operation_id"]) is None
+
+
+def test_s14_store_write_failures_leave_staged_facts_unpublished() -> None:
+    def fail_at(point: str):
+        def fail(write_point: str) -> None:
+            if write_point == point:
+                raise OSError(point)
+
+        return fail
+
+    cancel_service = make_service()
+    application_id, _item, _review, route = _manual_review_state(cancel_service)
+    phase_before = cancel_service._store.applications[application_id]["phase"]
+    cancel_service._fault_injector = fail_at("s14.cancel.audit")
+    failed_cancel = cancel_service.cancel_application(
+        application_id=application_id,
+        principal=INTEGRATOR,
+        expected_lifecycle_revision=int(route["lifecycle_revision"]),
+        idempotency_key="s14-failed-cancel",
+        reason_code="UPSTREAM_WITHDRAWN",
+    )
+    assert failed_cancel["status"] == "unavailable"
+    assert failed_cancel["reason_code"] == "AUDIT_UNAVAILABLE"
+    assert cancel_service._store.applications[application_id]["phase"] == phase_before
+
+    settle_service = make_service()
+    application_id, _item, _review, route = _manual_review_state(settle_service)
+    cancel = settle_service.cancel_application(
+        application_id=application_id,
+        principal=INTEGRATOR,
+        expected_lifecycle_revision=int(route["lifecycle_revision"]),
+        idempotency_key="s14-cancel-before-failed-settle",
+        reason_code="UPSTREAM_WITHDRAWN",
+    )
+    settle_service._fault_injector = fail_at("s14.settle.outbox")
+    failed_settle = settle_service.settle_termination(
+        application_id=application_id,
+        principal=OPERATOR,
+        expected_lifecycle_revision=cancel["lifecycle_revision"],
+        idempotency_key="s14-failed-settle",
+    )
+    assert failed_settle["status"] == "unavailable"
+    assert failed_settle["reason_code"] == "STORAGE_UNAVAILABLE"
+    assert not any(
+        item.get("kind") == "termination_notification_requested"
+        for item in settle_service._store.outbox
+    )
+
+    reopen_service = make_service()
+    application_id, _cancel, settled = _terminate_manual_review(reopen_service)
+    reopen_service._fault_injector = fail_at("s14.grant.record")
+    failed_grant = reopen_service.grant_reopen_permission(
+        application_id=application_id,
+        principal=OPERATOR,
+        approver_subject=APPROVER.subject,
+        permission_id="s14-failed-grant",
+        expected_lifecycle_revision=settled["lifecycle_revision"],
+        idempotency_key="s14-failed-grant",
+    )
+    assert failed_grant["status"] == "unavailable"
+    assert not any(
+        item.get("permission_id") == "s14-failed-grant"
+        for item in reopen_service._store.review_records
+    )
+    reopen_service._fault_injector = None
+    _grant_exact_permission(
+        reopen_service,
+        application_id,
+        expected_lifecycle_revision=settled["lifecycle_revision"],
+    )
+    reopen_service._fault_injector = fail_at("s14.reopen.audit")
+    failed_reopen = reopen_service.reopen_application(
+        application_id=application_id,
+        principal=OPERATOR,
+        expected_lifecycle_revision=settled["lifecycle_revision"],
+        idempotency_key="s14-failed-reopen",
+        target_phase="Intake",
+        reopen_policy=_reopen_policy(reopen_service),
+    )
+    assert failed_reopen["status"] == "unavailable"
+    assert failed_reopen["reason_code"] == "AUDIT_UNAVAILABLE"
+    assert reopen_service._store.applications[application_id]["cycle"] == 1
+    assert reopen_service._store.applications[application_id]["phase"] == "Terminated"
+
+
+def test_pre_run_cancel_can_reopen_with_admission_bound_release() -> None:
+    service = make_service()
+    admitted = service.submit_demo(
+        scenario_id="app_r53_bad_engine.json",
+        idempotency_key="s14-pre-run-admission",
+        principal=INTEGRATOR,
+    )
+    application_id = str(admitted.application_id)
+    route = service.current_route_view(principal=REVIEWER, application_id=application_id)
+    cancel = service.cancel_application(
+        application_id=application_id,
+        principal=INTEGRATOR,
+        expected_lifecycle_revision=int(route["lifecycle_revision"]),
+        idempotency_key="s14-pre-run-cancel",
+        reason_code="UPSTREAM_WITHDRAWN",
+    )
+    assert cancel["status"] == "accepted"
+    settled = _settle_to_terminated(service, application_id, cancel["lifecycle_revision"])
+    grant = _grant_exact_permission(
+        service, application_id, expected_lifecycle_revision=settled["lifecycle_revision"]
+    )
+    assert grant["policy_release_digest"] != _release_digest(service)
+    assert str(grant["policy_release_id"]).startswith("admission-bound:")
+
+    reopened = service.reopen_application(
+        application_id=application_id,
+        principal=OPERATOR,
+        expected_lifecycle_revision=settled["lifecycle_revision"],
+        idempotency_key="s14-pre-run-reopen",
+        target_phase="Intake",
+        reopen_policy=_reopen_policy(service),
+    )
+
+    assert reopened["status"] == "accepted", reopened
+    assert reopened["cycle"] == 2
+
+
 class _BlockingAdapter:
     """Wraps the in-memory adapter and blocks inside ``send`` so a cancel
     can race the claim-to-send window deterministically."""
@@ -1921,9 +2418,8 @@ def test_delivery_outcome_requires_current_cycle_and_lifecycle_revision() -> Non
     """The claim-to-cancel race above is the observable form of this rule:
     the outcome transaction compares the attempt's claimed cycle and
     lifecycle revision against the current authority and refuses received."""
-    service, blocking, inner = _blocking_harness()
+    service, blocking, _inner = _blocking_harness()
     application_id = _completed_auto(service)
-    sends_before = dict(inner.executed_operations)
 
     import threading
 
@@ -1948,13 +2444,134 @@ def test_delivery_outcome_requires_current_cycle_and_lifecycle_revision() -> Non
     blocking.release_send.set()
     sender.join(timeout=5)
 
-    assert inner.executed_operations == sends_before or True  # send raced
     delivery = service.delivery_view(
         principal=OPERATOR, application_id=application_id
     )
-    assert delivery["delivery_status"] != "received" or any(
+    assert delivery["delivery_status"] != "received"
+    assert any(
         item.get("reason_code") == "S14_CANCEL_FENCED"
         for item in service._store.delivery_reconciliations
+    )
+
+
+def test_delivery_adapter_requests_carry_lifecycle_fence() -> None:
+    from task4_consistency.controlled.s13 import InMemoryDownstreamAdapter
+
+    service, adapter = _delivery_harness(behavior="timeout_after_execute")
+    application_id = _completed_with_obligation(service)
+    sent: list[Any] = []
+    compensated: list[Any] = []
+    original_send = adapter.send
+    original_compensate = adapter.compensate
+
+    def capture_send(request: Any) -> Any:
+        sent.append(request)
+        return original_send(request)
+
+    def capture_compensation(request: Any) -> Any:
+        compensated.append(request)
+        return original_compensate(request)
+
+    adapter.send = capture_send  # type: ignore[method-assign]
+    adapter.compensate = capture_compensation  # type: ignore[method-assign]
+    result = service.process_next_delivery(principal=OPERATOR)
+    assert result["status"] == "unknown"
+    obligation = service.delivery_view(
+        principal=OPERATOR, application_id=application_id
+    )["obligation"]
+    compensation = service.compensate_delivery(
+        obligation_id=obligation["obligation_id"], principal=OPERATOR
+    )
+    assert compensation["status"] == "compensated"
+
+    assert (
+        sent[0].application_id,
+        sent[0].cycle,
+        sent[0].lifecycle_revision,
+        sent[0].fence,
+    ) == (
+        application_id,
+        obligation["cycle"],
+        obligation["completion_lifecycle_revision"],
+        1,
+    )
+    assert (
+        compensated[0].application_id,
+        compensated[0].cycle,
+        compensated[0].lifecycle_revision,
+        compensated[0].fence,
+    ) == (
+        application_id,
+        obligation["cycle"],
+        obligation["completion_lifecycle_revision"],
+        1,
+    )
+
+
+def test_notification_reconcile_claim_fences_blocked_sender() -> None:
+    import threading
+
+    from task4_consistency.controlled.s13 import (
+        DownstreamRecipientRegistration,
+        InMemoryDownstreamAdapter,
+        RegisteredDownstreamRegistry,
+    )
+
+    inner = InMemoryDownstreamAdapter(
+        adapter_id="s14-reconcile-fence", behavior="timeout_without_execute"
+    )
+    blocking = _BlockingAdapter(inner)
+    registry = RegisteredDownstreamRegistry(
+        [
+            DownstreamRecipientRegistration(
+                scope="C-DEMO",
+                recipient_registration_id="c-demo-downstream-review-default",
+                recipient_id="downstream-review-desk",
+                adapter_id=inner.adapter_id,
+                adapter_version=inner.adapter_version,
+            )
+        ],
+        {inner.adapter_id: blocking},
+    )
+    service = make_service(downstream_registry=registry)
+    application_id, _item, _review, route = _manual_review_state(service)
+    cancel = service.cancel_application(
+        application_id=application_id,
+        principal=INTEGRATOR,
+        expected_lifecycle_revision=int(route["lifecycle_revision"]),
+        idempotency_key="s14-reconcile-fence-cancel",
+        reason_code="UPSTREAM_WITHDRAWN",
+    )
+    armed = service.settle_termination(
+        application_id=application_id,
+        principal=OPERATOR,
+        expected_lifecycle_revision=int(cancel["lifecycle_revision"]),
+        idempotency_key="s14-reconcile-fence-arm",
+    )
+    operation_id = str(armed["unresolved_effects"][-1]["id"])
+    results: list[dict[str, Any]] = []
+
+    def send() -> None:
+        results.append(service.process_termination_notification())
+
+    sender = threading.Thread(target=send)
+    sender.start()
+    assert blocking.entered_send.wait(timeout=5)
+    reconciled = service.reconcile_termination_notification(operation_id=operation_id)
+    assert reconciled["status"] == "claimed"
+    assert reconciled["reason_code"] == "S14_NOTIFICATION_LEASE_ACTIVE"
+    blocking.release_send.set()
+    sender.join(timeout=5)
+    assert results[0]["status"] in {"stale", "unknown"}
+    assert next(
+        item
+        for item in service._store.outbox
+        if item.get("operation_id") == operation_id
+    )["status"] == "pending"
+    assert not any(
+        event.get("action") == "s14_notification_confirmed"
+        and event.get("operation_id") == operation_id
+        for event in service._store.audit_events
     )
 
 

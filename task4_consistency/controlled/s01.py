@@ -16,6 +16,7 @@ import threading
 import time
 from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
+from functools import wraps
 from pathlib import Path
 from typing import Any, Callable
 
@@ -156,6 +157,38 @@ class EvaluationAuthorityUnavailable(RuntimeError):
 
 class _StoreWriteFailure(RuntimeError):
     """One staged in-memory store write failed before owner publication."""
+
+
+def _s14_write_guard(method: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
+    """Map staged S14 write faults before a snapshot becomes authoritative."""
+
+    @wraps(method)
+    def guarded(self: "ControlledScenarioService", *args: Any, **kwargs: Any) -> dict[str, Any]:
+        try:
+            return method(self, *args, **kwargs)
+        except _StoreWriteFailure as error:
+            self._reload_store()
+            point = str(error.args[0] if error.args else "")
+            return {
+                "status": "unavailable",
+                "replayed": False,
+                "application_id": kwargs.get("application_id"),
+                "operation_id": kwargs.get("operation_id"),
+                "reason_code": (
+                    "AUDIT_UNAVAILABLE" if ".audit" in point else "STORAGE_UNAVAILABLE"
+                ),
+            }
+        except OSError:
+            self._reload_store()
+            return {
+                "status": "unavailable",
+                "replayed": False,
+                "application_id": kwargs.get("application_id"),
+                "operation_id": kwargs.get("operation_id"),
+                "reason_code": "STORAGE_UNAVAILABLE",
+            }
+
+    return guarded
 
 
 class _InvalidRunResult(ValueError):
@@ -4962,6 +4995,7 @@ class ControlledScenarioService:
             )
         return effects
 
+    @_s14_write_guard
     def cancel_application(
         self,
         *,
@@ -5319,17 +5353,18 @@ class ControlledScenarioService:
             )
             try:
                 staged.persist()
-            except StaleStoreRevision:
+            except Exception:
                 self._reload_store()
                 return {
-                    "status": "stale",
+                    "status": "unavailable",
                     "replayed": False,
                     "application_id": application_id,
-                    "reason_code": "STALE_STORE_REVISION",
+                    "reason_code": "STORAGE_UNAVAILABLE",
                 }
             self._store = staged
             return accepted
 
+    @_s14_write_guard
     def settle_termination(
         self,
         *,
@@ -5444,6 +5479,7 @@ class ControlledScenarioService:
                         "status": "pending",
                         "application_id": application_id,
                         "cycle": cycle,
+                        "lifecycle_revision": observed_revision,
                         "operation_id": operation_id,
                     }
                 )
@@ -5468,13 +5504,13 @@ class ControlledScenarioService:
                 )
                 try:
                     staged.persist()
-                except StaleStoreRevision:
+                except Exception:
                     self._reload_store()
                     return {
                         "status": "unavailable",
                         "replayed": False,
                         "application_id": application_id,
-                        "reason_code": "STALE_STORE_REVISION",
+                        "reason_code": "STORAGE_UNAVAILABLE",
                     }
                 self._store = staged
                 return {
@@ -5586,13 +5622,13 @@ class ControlledScenarioService:
             )
             try:
                 staged.persist()
-            except StaleStoreRevision:
+            except Exception:
                 self._reload_store()
                 return {
                     "status": "unavailable",
                     "replayed": False,
                     "application_id": application_id,
-                    "reason_code": "STALE_STORE_REVISION",
+                    "reason_code": "STORAGE_UNAVAILABLE",
                 }
             self._store = staged
             return {"status": "terminated", **terminated}
@@ -5610,6 +5646,91 @@ class ControlledScenarioService:
             None,
         )
 
+    def _s14_notification_attempts(
+        self, operation_id: str, store: Any | None = None
+    ) -> list[dict[str, Any]]:
+        owner = self._store if store is None else store
+        job_id = f"termination_notification:{operation_id}"
+        return [
+            item
+            for item in owner.attempts
+            if str(item.get("job_id") or "") == job_id
+        ]
+
+    def _s14_live_notification_claim(
+        self, operation_id: str, store: Any | None = None
+    ) -> dict[str, Any] | None:
+        attempts = self._s14_notification_attempts(operation_id, store)
+        completed_fences = {
+            int(item.get("fence") or 0)
+            for item in attempts
+            if item.get("outcome") not in {None, "claimed"}
+        }
+        now = float(self._clock())
+        return next(
+            (
+                item
+                for item in reversed(attempts)
+                if item.get("status") == "started"
+                and item.get("outcome") == "claimed"
+                and int(item.get("fence") or 0) not in completed_fences
+                and isinstance(item.get("lease_until"), (int, float))
+                and not isinstance(item.get("lease_until"), bool)
+                and float(item["lease_until"]) > now
+            ),
+            None,
+        )
+
+    def _s14_claim_notification_attempt(
+        self,
+        *,
+        operation_id: str,
+        application_id: str,
+        cycle: int,
+        lifecycle_revision: int,
+        worker_id: str,
+        claim_kind: str,
+        now: int,
+    ) -> dict[str, Any] | None:
+        attempts = self._s14_notification_attempts(operation_id)
+        if self._s14_live_notification_claim(operation_id) is not None:
+            return None
+        fence = max((int(item.get("fence") or 0) for item in attempts), default=0) + 1
+        attempt_no = len(attempts) + 1
+        claim_time = int(self._clock())
+        attempt_id = self._stable_id(
+            "notification_attempt",
+            f"{operation_id}:{attempt_no}:{worker_id}:{claim_kind}",
+        )
+        staged = copy.deepcopy(self._store)
+        self._before_write(f"s14.notification.{claim_kind}.claim")
+        staged.attempts.append(
+            {
+                "attempt_id": attempt_id,
+                "job_id": f"termination_notification:{operation_id}",
+                "application_id": application_id,
+                "worker_id": worker_id,
+                "fence": fence,
+                "attempt_no": attempt_no,
+                "started_at": claim_time,
+                "status": "started",
+                "outcome": "claimed",
+                "lease_until": claim_time + 30,
+                "claim_cycle": cycle,
+                "claim_lifecycle_revision": lifecycle_revision,
+                "operation_id": operation_id,
+                "claim_kind": claim_kind,
+            }
+        )
+        dependency_failure = self._s14_publish_staged(
+            staged,
+            application_id=application_id,
+            operation_id=operation_id,
+        )
+        if dependency_failure is not None:
+            return {**dependency_failure, "attempt_id": attempt_id, "fence": fence}
+        return {"attempt_id": attempt_id, "fence": fence}
+
     def _s14_notification_terminal_result(
         self, operation_id: str
     ) -> str | None:
@@ -5624,6 +5745,112 @@ class ControlledScenarioService:
             if action == "s14_notification_compensated":
                 return "compensated"
         return None
+
+    def _s14_dependency_failure(
+        self,
+        *,
+        application_id: str | None = None,
+        operation_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        if self.audit_available and self.storage_available:
+            return None
+        result: dict[str, Any] = {
+            "status": "unavailable",
+            "reason_code": (
+                "AUDIT_UNAVAILABLE"
+                if not self.audit_available
+                else "STORAGE_UNAVAILABLE"
+            ),
+        }
+        if application_id:
+            result["application_id"] = application_id
+        if operation_id:
+            result["operation_id"] = operation_id
+        return result
+
+    def _s14_publish_staged(
+        self,
+        staged: Any,
+        *,
+        application_id: str | None = None,
+        operation_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        failure = self._s14_dependency_failure(
+            application_id=application_id, operation_id=operation_id
+        )
+        if failure is not None:
+            return failure
+        try:
+            staged.persist()
+        except Exception:
+            self._reload_store()
+            return {
+                "status": "unavailable",
+                "reason_code": "STORAGE_UNAVAILABLE",
+                **({"application_id": application_id} if application_id else {}),
+                **({"operation_id": operation_id} if operation_id else {}),
+            }
+        self._store = staged
+        return None
+
+    def _s14_notification_context_current(
+        self,
+        *,
+        operation_id: str,
+        application_id: str,
+        cycle: int,
+        lifecycle_revision: int,
+        require_pending: bool = False,
+        attempt_id: str | None = None,
+        worker_id: str | None = None,
+        fence: int | None = None,
+    ) -> bool:
+        row = self._s14_notification_row(operation_id)
+        app = self._store.applications.get(application_id) or {}
+        if (
+            row is None
+            or (require_pending and row.get("status") != "pending")
+            or int(row.get("cycle") or 0) != cycle
+            or int(row.get("lifecycle_revision") or 0) != lifecycle_revision
+            or str(app.get("phase") or "") != "Terminating"
+            or int(app.get("cycle") or 0) != cycle
+            or int(app.get("lifecycle_revision") or 0) != lifecycle_revision
+        ):
+            return False
+        if attempt_id is None:
+            return True
+        attempts = self._s14_notification_attempts(operation_id)
+        claims = [item for item in attempts if item.get("outcome") == "claimed"]
+        claim = next(
+            (
+                item
+                for item in reversed(claims)
+                if str(item.get("attempt_id") or "") == attempt_id
+            ),
+            None,
+        )
+        latest_fence = max((int(item.get("fence") or 0) for item in attempts), default=0)
+        completed_fences = {
+            int(item.get("fence") or 0)
+            for item in attempts
+            if item.get("outcome") not in {None, "claimed"}
+        }
+        lease_until = (claim or {}).get("lease_until")
+        return bool(
+            claim is not None
+            and str(claim.get("worker_id") or "") == worker_id
+            and str(claim.get("operation_id") or "") == operation_id
+            and str(claim.get("application_id") or "") == application_id
+            and int(claim.get("claim_cycle") or 0) == cycle
+            and int(claim.get("claim_lifecycle_revision") or 0)
+            == lifecycle_revision
+            and int(claim.get("fence") or 0) == fence
+            and latest_fence == fence
+            and fence not in completed_fences
+            and isinstance(lease_until, (int, float))
+            and not isinstance(lease_until, bool)
+            and float(lease_until) > float(self._clock())
+        )
 
     def _append_notification_audit(
         self,
@@ -5642,6 +5869,23 @@ class ControlledScenarioService:
         """Append exactly one uniquely identified notification audit fact;
         the global event sequence keeps replayed operations distinct."""
         time_fields = self._audit_time_fields(staged, now=now)
+        notification = next(
+            (
+                item
+                for item in staged.outbox
+                if str(item.get("operation_id") or "") == operation_id
+            ),
+            {},
+        )
+        notification_fence = max(
+            (
+                int(item.get("fence") or 0)
+                for item in staged.attempts
+                if str(item.get("job_id") or "")
+                == f"termination_notification:{operation_id}"
+            ),
+            default=0,
+        )
         record: dict[str, Any] = {
             "event_id": self._stable_id(
                 "audit",
@@ -5654,6 +5898,10 @@ class ControlledScenarioService:
             "source_id": worker_id,
             "application_id": application_id,
             "cycle": cycle,
+            "lifecycle_revision": int(
+                notification.get("lifecycle_revision") or 0
+            ),
+            "fence": notification_fence,
             "operation_id": operation_id,
             "result": result,
             **time_fields,
@@ -5661,6 +5909,7 @@ class ControlledScenarioService:
         record.update(extra)
         staged.audit_events.append(record)
 
+    @_s14_write_guard
     def process_termination_notification(
         self,
         *,
@@ -5677,17 +5926,14 @@ class ControlledScenarioService:
         by a verified terminal result — never by this worker's own claim.
         """
         event_time = int(self._clock() if now is None else now)
-        if not self.audit_available or not self.storage_available:
-            return {
-                "status": "unavailable",
-                "reason_code": (
-                    "AUDIT_UNAVAILABLE"
-                    if not self.audit_available
-                    else "STORAGE_UNAVAILABLE"
-                ),
-            }
+        dependency_failure = self._s14_dependency_failure()
+        if dependency_failure is not None:
+            return dependency_failure
         with self._lock:
             self._reload_store()
+            dependency_failure = self._s14_dependency_failure()
+            if dependency_failure is not None:
+                return dependency_failure
             pending = next(
                 (
                     event
@@ -5715,49 +5961,35 @@ class ControlledScenarioService:
                 }
             operation_id = str(pending.get("operation_id") or "")
             cycle = int(pending.get("cycle") or 0)
-            revision = int(app.get("lifecycle_revision") or 0)
+            revision = int(
+                pending.get("lifecycle_revision")
+                or app.get("lifecycle_revision")
+                or 0
+            )
+            claim_time = int(self._clock())
             # Lease/fence state lives on the durable attempt rows, never in
             # the immutable outbox body.  A live foreign claim is not
             # stealable until its lease expires.
-            prior_claims = [
-                item
-                for item in self._store.attempts
-                if str(item.get("job_id") or "")
-                == f"termination_notification:{operation_id}"
-                and item.get("outcome") == "claimed"
-            ]
-            live_claim = next(
-                (
-                    item
-                    for item in reversed(prior_claims)
-                    if isinstance(item.get("lease_until"), (int, float))
-                    and not isinstance(item.get("lease_until"), bool)
-                    and float(item["lease_until"]) > event_time
-                ),
-                None,
-            )
-            if (
-                live_claim is not None
-                and str(live_claim.get("worker_id") or "") != worker_id
-            ):
+            prior_attempts = self._s14_notification_attempts(operation_id)
+            live_claim = self._s14_live_notification_claim(operation_id)
+            if live_claim is not None:
                 return {
                     "status": "claimed",
                     "application_id": application_id,
                     "operation_id": operation_id,
                     "reason_code": "S14_NOTIFICATION_LEASE_ACTIVE",
                 }
-            claimed_fence = len(prior_claims) + 1
+            claimed_fence = max(
+                (int(item.get("fence") or 0) for item in prior_attempts),
+                default=0,
+            ) + 1
             staged = copy.deepcopy(self._store)
-            attempt_no = 1 + sum(
-                1
-                for item in staged.attempts
-                if str(item.get("job_id") or "")
-                == f"termination_notification:{operation_id}"
-            )
+            attempt_no = 1 + len(self._s14_notification_attempts(operation_id, staged))
             attempt_id = self._stable_id(
                 "notification_attempt",
                 f"{operation_id}:{attempt_no}:{worker_id}",
             )
+            self._before_write("s14.notification.claim")
             staged.attempts.append(
                 {
                     "attempt_id": attempt_id,
@@ -5766,23 +5998,22 @@ class ControlledScenarioService:
                     "worker_id": worker_id,
                     "fence": claimed_fence,
                     "attempt_no": attempt_no,
-                    "started_at": event_time,
+                    "started_at": claim_time,
                     "status": "started",
                     "outcome": "claimed",
-                    "lease_until": event_time + 30,
+                    "lease_until": claim_time + 30,
                     "claim_cycle": cycle,
                     "claim_lifecycle_revision": revision,
                     "operation_id": operation_id,
                 }
             )
-            try:
-                staged.persist()
-            except StaleStoreRevision:
-                return {
-                    "status": "unavailable",
-                    "reason_code": "STORAGE_UNAVAILABLE",
-                }
-            self._store = staged
+            dependency_failure = self._s14_publish_staged(
+                staged,
+                application_id=application_id,
+                operation_id=operation_id,
+            )
+            if dependency_failure is not None:
+                return dependency_failure
 
         # ----- External I/O outside any store transaction ---------------
         try:
@@ -5819,7 +6050,69 @@ class ControlledScenarioService:
                 route_basis_digest=payload_digest,
                 obligation_id=str(pending.get("event_id") or ""),
                 scope="C-DEMO",
+                application_id=application_id,
+                cycle=cycle,
+                lifecycle_revision=revision,
+                fence=claimed_fence,
             )
+            with self._lock:
+                self._reload_store()
+                dependency_failure = self._s14_dependency_failure(
+                    application_id=application_id, operation_id=operation_id
+                )
+                if dependency_failure is not None:
+                    return dependency_failure
+                context_current = self._s14_notification_context_current(
+                    operation_id=operation_id,
+                    application_id=application_id,
+                    cycle=cycle,
+                    lifecycle_revision=revision,
+                    require_pending=True,
+                )
+                claim_current = self._s14_notification_context_current(
+                    operation_id=operation_id,
+                    application_id=application_id,
+                    cycle=cycle,
+                    lifecycle_revision=revision,
+                    require_pending=True,
+                    attempt_id=attempt_id,
+                    worker_id=worker_id,
+                    fence=claimed_fence,
+                )
+                if not context_current or not claim_current:
+                    reason_code = (
+                        "S14_CANCEL_FENCED"
+                        if not context_current
+                        else "S13_STALE_DELIVERY_FENCE"
+                    )
+                    staged = copy.deepcopy(self._store)
+                    self._before_write("s14.notification.stale.audit")
+                    self._append_notification_audit(
+                        staged,
+                        action="s14_notification_unknown",
+                        operation_id=operation_id,
+                        application_id=application_id,
+                        cycle=cycle,
+                        worker_id=worker_id,
+                        role="worker",
+                        result="unknown",
+                        now=event_time,
+                        attempt_id=attempt_id,
+                        reason_code=reason_code,
+                    )
+                    dependency_failure = self._s14_publish_staged(
+                        staged,
+                        application_id=application_id,
+                        operation_id=operation_id,
+                    )
+                    if dependency_failure is not None:
+                        return dependency_failure
+                    return {
+                        "status": "stale" if not context_current else "unknown",
+                        "application_id": application_id,
+                        "operation_id": operation_id,
+                        "reason_code": reason_code,
+                    }
             try:
                 adapter_result = resolved.adapter.send(send_request)
             except Exception:
@@ -5844,6 +6137,12 @@ class ControlledScenarioService:
                 remote_message_id = None
                 response_digest = None
 
+        dependency_failure = self._s14_dependency_failure(
+            application_id=application_id, operation_id=operation_id
+        )
+        if dependency_failure is not None:
+            return dependency_failure
+
         # ----- Outcome transaction --------------------------------------
         with self._lock:
             self._reload_store()
@@ -5853,33 +6152,33 @@ class ControlledScenarioService:
                     "status": "unavailable",
                     "reason_code": "STORAGE_UNAVAILABLE",
                 }
-            my_claim = next(
-                (
-                    item
-                    for item in reversed(staged.attempts)
-                    if str(item.get("attempt_id") or "") == attempt_id
-                ),
-                None,
+            dependency_failure = self._s14_dependency_failure(
+                application_id=application_id, operation_id=operation_id
             )
-            app_now = self._store.applications.get(application_id)
-            ctx_ok = (
-                int((app_now or {}).get("cycle") or 0) == cycle
-                and int((app_now or {}).get("lifecycle_revision") or 0)
-                == revision
-                and str((app_now or {}).get("phase") or "") == "Terminating"
+            if dependency_failure is not None:
+                return dependency_failure
+            context_current = self._s14_notification_context_current(
+                operation_id=operation_id,
+                application_id=application_id,
+                cycle=cycle,
+                lifecycle_revision=revision,
+                require_pending=True,
             )
-            fence_ok = (
-                my_claim is not None
-                and int(my_claim.get("fence") or 0) == claimed_fence
-                and my_claim.get("outcome") == "claimed"
-                and isinstance(my_claim.get("lease_until"), (int, float))
-                and not isinstance(my_claim.get("lease_until"), bool)
-                and float(my_claim["lease_until"]) >= event_time
+            claim_current = self._s14_notification_context_current(
+                operation_id=operation_id,
+                application_id=application_id,
+                cycle=cycle,
+                lifecycle_revision=revision,
+                require_pending=True,
+                attempt_id=attempt_id,
+                worker_id=worker_id,
+                fence=claimed_fence,
             )
             staged = copy.deepcopy(self._store)
-            if not ctx_ok or not fence_ok:
+            if not context_current or not claim_current:
                 # A raced cancellation/successor cycle or a lost lease keeps
                 # the outcome unknown; reconciliation owns the truth.
+                self._before_write("s14.notification.stale.audit")
                 self._append_notification_audit(
                     staged,
                     action="s14_notification_unknown",
@@ -5892,28 +6191,30 @@ class ControlledScenarioService:
                     now=event_time,
                     attempt_id=attempt_id,
                     reason_code=(
-                        "S14_CANCEL_FENCED" if not ctx_ok else "S13_STALE_DELIVERY_FENCE"
+                        "S14_CANCEL_FENCED"
+                        if not context_current
+                        else "S13_STALE_DELIVERY_FENCE"
                     ),
                 )
-                try:
-                    staged.persist()
-                except StaleStoreRevision:
-                    return {
-                        "status": "unavailable",
-                        "reason_code": "STORAGE_UNAVAILABLE",
-                    }
-                self._store = staged
+                dependency_failure = self._s14_publish_staged(
+                    staged,
+                    application_id=application_id,
+                    operation_id=operation_id,
+                )
+                if dependency_failure is not None:
+                    return dependency_failure
                 return {
-                    "status": "stale" if not ctx_ok else "unknown",
+                    "status": "stale" if not context_current else "unknown",
                     "application_id": application_id,
                     "operation_id": operation_id,
                     "reason_code": (
                         "S14_CANCEL_FENCED"
-                        if not ctx_ok
+                        if not context_current
                         else "S13_STALE_DELIVERY_FENCE"
                     ),
                 }
             if send_outcome == "confirmed":
+                self._before_write("s14.notification.outbox")
                 for event in staged.outbox:
                     if (
                         event.get("kind")
@@ -5926,6 +6227,7 @@ class ControlledScenarioService:
                         # request row never changes.
                         event["status"] = "published"
                         break
+                self._before_write("s14.notification.outcome")
                 staged.attempts.append(
                     {
                         "attempt_id": self._stable_id(
@@ -5940,11 +6242,14 @@ class ControlledScenarioService:
                         "started_at": event_time,
                         "status": "complete",
                         "outcome": "confirmed",
+                        "claim_cycle": cycle,
+                        "claim_lifecycle_revision": revision,
                         "remote_message_id": remote_message_id,
                         "response_digest": response_digest,
                         "operation_id": operation_id,
                     }
                 )
+                self._before_write("s14.notification.audit")
                 self._append_notification_audit(
                     staged,
                     action="s14_notification_confirmed",
@@ -5958,14 +6263,13 @@ class ControlledScenarioService:
                     remote_message_id=remote_message_id,
                     response_digest=response_digest,
                 )
-                try:
-                    staged.persist()
-                except StaleStoreRevision:
-                    return {
-                        "status": "unavailable",
-                        "reason_code": "STORAGE_UNAVAILABLE",
-                    }
-                self._store = staged
+                dependency_failure = self._s14_publish_staged(
+                    staged,
+                    application_id=application_id,
+                    operation_id=operation_id,
+                )
+                if dependency_failure is not None:
+                    return dependency_failure
                 return {
                     "status": "delivered",
                     "application_id": application_id,
@@ -5974,6 +6278,7 @@ class ControlledScenarioService:
                     "result": "confirmed",
                 }
             # unknown / blocked: keep the row pending and record the fact.
+            self._before_write("s14.notification.outcome")
             staged.attempts.append(
                 {
                     "attempt_id": self._stable_id(
@@ -5988,10 +6293,13 @@ class ControlledScenarioService:
                     "started_at": event_time,
                     "status": "diagnostic",
                     "outcome": send_outcome,
+                    "claim_cycle": cycle,
+                    "claim_lifecycle_revision": revision,
                     "reason_code": send_reason,
                     "operation_id": operation_id,
                 }
             )
+            self._before_write("s14.notification.audit")
             self._append_notification_audit(
                 staged,
                 action=f"s14_notification_{send_outcome}",
@@ -6004,14 +6312,13 @@ class ControlledScenarioService:
                 now=event_time,
                 reason_code=send_reason,
             )
-            try:
-                staged.persist()
-            except StaleStoreRevision:
-                return {
-                    "status": "unavailable",
-                    "reason_code": "STORAGE_UNAVAILABLE",
-                }
-            self._store = staged
+            dependency_failure = self._s14_publish_staged(
+                staged,
+                application_id=application_id,
+                operation_id=operation_id,
+            )
+            if dependency_failure is not None:
+                return dependency_failure
             return {
                 "status": send_outcome,
                 "application_id": application_id,
@@ -6019,6 +6326,7 @@ class ControlledScenarioService:
                 "reason_code": send_reason,
             }
 
+    @_s14_write_guard
     def reconcile_termination_notification(
         self,
         *,
@@ -6028,15 +6336,9 @@ class ControlledScenarioService:
     ) -> dict[str, Any]:
         """Same-operation reconciliation for an unknown notification."""
         event_time = int(self._clock() if now is None else now)
-        if not self.audit_available or not self.storage_available:
-            return {
-                "status": "unavailable",
-                "reason_code": (
-                    "AUDIT_UNAVAILABLE"
-                    if not self.audit_available
-                    else "STORAGE_UNAVAILABLE"
-                ),
-            }
+        dependency_failure = self._s14_dependency_failure(operation_id=operation_id)
+        if dependency_failure is not None:
+            return dependency_failure
         with self._lock:
             self._reload_store()
             row = self._s14_notification_row(operation_id)
@@ -6044,6 +6346,7 @@ class ControlledScenarioService:
                 raise QueryNotFound(operation_id)
             application_id = str(row.get("application_id") or "")
             cycle = int(row.get("cycle") or 0)
+            revision = int(row.get("lifecycle_revision") or 0)
             terminal = self._s14_notification_terminal_result(operation_id)
             if terminal is not None:
                 return {
@@ -6052,28 +6355,182 @@ class ControlledScenarioService:
                     "operation_id": operation_id,
                     "result": terminal,
                 }
-            latest_claim = max(
-                (
-                    item.get("fence", 0)
-                    for item in self._store.attempts
-                    if str(item.get("job_id") or "")
-                    == f"termination_notification:{operation_id}"
-                    and isinstance(item.get("fence"), int)
-                ),
-                default=0,
+            if not self._s14_notification_context_current(
+                operation_id=operation_id,
+                application_id=application_id,
+                cycle=cycle,
+                lifecycle_revision=revision,
+                require_pending=True,
+            ):
+                staged = copy.deepcopy(self._store)
+                self._before_write("s14.notification.reconcile.audit")
+                self._append_notification_audit(
+                    staged,
+                    action="s14_notification_reconciled",
+                    operation_id=operation_id,
+                    application_id=application_id,
+                    cycle=cycle,
+                    worker_id=worker_id,
+                    role="operator",
+                    result="stale",
+                    now=event_time,
+                    reason_code="S14_CANCEL_FENCED",
+                )
+                dependency_failure = self._s14_publish_staged(
+                    staged,
+                    application_id=application_id,
+                    operation_id=operation_id,
+                )
+                if dependency_failure is not None:
+                    return dependency_failure
+                return {
+                    "status": "stale",
+                    "reason_code": "S14_CANCEL_FENCED",
+                    "operation_id": operation_id,
+                }
+            claim = self._s14_claim_notification_attempt(
+                operation_id=operation_id,
+                application_id=application_id,
+                cycle=cycle,
+                lifecycle_revision=revision,
+                worker_id=worker_id,
+                claim_kind="reconcile",
+                now=event_time,
             )
+            if claim is None:
+                return {
+                    "status": "claimed",
+                    "reason_code": "S14_NOTIFICATION_LEASE_ACTIVE",
+                    "operation_id": operation_id,
+                }
+            if claim.get("status") == "unavailable":
+                return claim
+            claim_attempt_id = str(claim["attempt_id"])
+            claim_fence = int(claim["fence"])
+            dependency_failure = self._s14_dependency_failure(
+                application_id=application_id, operation_id=operation_id
+            )
+            if dependency_failure is not None:
+                return dependency_failure
         try:
             resolved = self._s13_downstream_resolve(scope="C-DEMO")
+            with self._lock:
+                self._reload_store()
+                dependency_failure = self._s14_dependency_failure(
+                    application_id=application_id, operation_id=operation_id
+                )
+                if dependency_failure is not None:
+                    return dependency_failure
+                terminal = self._s14_notification_terminal_result(operation_id)
+                if terminal is not None:
+                    return {
+                        "status": "stale",
+                        "reason_code": "S14_NOTIFICATION_ALREADY_TERMINAL",
+                        "operation_id": operation_id,
+                        "result": terminal,
+                    }
+                if not self._s14_notification_context_current(
+                    operation_id=operation_id,
+                    application_id=application_id,
+                    cycle=cycle,
+                    lifecycle_revision=revision,
+                    require_pending=True,
+                    attempt_id=claim_attempt_id,
+                    worker_id=worker_id,
+                    fence=claim_fence,
+                ):
+                    staged = copy.deepcopy(self._store)
+                    self._before_write("s14.notification.reconcile.audit")
+                    self._append_notification_audit(
+                        staged,
+                        action="s14_notification_reconciled",
+                        operation_id=operation_id,
+                        application_id=application_id,
+                        cycle=cycle,
+                        worker_id=worker_id,
+                        role="operator",
+                        result="stale",
+                        now=event_time,
+                        reason_code="S13_STALE_DELIVERY_FENCE",
+                    )
+                    dependency_failure = self._s14_publish_staged(
+                        staged,
+                        application_id=application_id,
+                        operation_id=operation_id,
+                    )
+                    if dependency_failure is not None:
+                        return dependency_failure
+                    return {
+                        "status": "stale",
+                        "reason_code": "S13_STALE_DELIVERY_FENCE",
+                        "operation_id": operation_id,
+                    }
             lookup = resolved.adapter.lookup(
                 operation_id=operation_id,
                 recipient_id=resolved.registration.recipient_id,
             )
+        except _StoreWriteFailure:
+            raise
         except Exception:
             lookup = _s13.DeliveryLookupResult(outcome="indeterminate")
+        dependency_failure = self._s14_dependency_failure(
+            application_id=application_id, operation_id=operation_id
+        )
+        if dependency_failure is not None:
+            return dependency_failure
         with self._lock:
             self._reload_store()
+            dependency_failure = self._s14_dependency_failure(
+                application_id=application_id, operation_id=operation_id
+            )
+            if dependency_failure is not None:
+                return dependency_failure
+            terminal = self._s14_notification_terminal_result(operation_id)
+            if terminal is not None:
+                return {
+                    "status": "stale",
+                    "reason_code": "S14_NOTIFICATION_ALREADY_TERMINAL",
+                    "operation_id": operation_id,
+                    "result": terminal,
+                }
             staged = copy.deepcopy(self._store)
+            if not self._s14_notification_context_current(
+                operation_id=operation_id,
+                application_id=application_id,
+                cycle=cycle,
+                lifecycle_revision=revision,
+                require_pending=True,
+                attempt_id=claim_attempt_id,
+                worker_id=worker_id,
+                fence=claim_fence,
+            ):
+                self._before_write("s14.notification.reconcile.audit")
+                self._append_notification_audit(
+                    staged,
+                    action="s14_notification_reconciled",
+                    operation_id=operation_id,
+                    application_id=application_id,
+                    cycle=cycle,
+                    worker_id=worker_id,
+                    role="operator",
+                    result="stale",
+                    now=event_time,
+                    reason_code="S13_STALE_DELIVERY_FENCE",
+                )
+                dependency_failure = self._s14_publish_staged(
+                    staged,
+                    application_id=application_id,
+                    operation_id=operation_id,
+                )
+                if dependency_failure is not None:
+                    return dependency_failure
+                return {
+                    "status": "stale",
+                    "reason_code": "S13_STALE_DELIVERY_FENCE",
+                    "operation_id": operation_id,
+                }
             if lookup.outcome == "confirmed":
+                self._before_write("s14.notification.reconcile.outbox")
                 for event in staged.outbox:
                     if (
                         event.get("kind")
@@ -6085,6 +6542,7 @@ class ControlledScenarioService:
                         event.pop("lease_until", None)
                         event.pop("worker_id", None)
                         break
+                self._before_write("s14.notification.reconcile.audit")
                 self._append_notification_audit(
                     staged,
                     action="s14_notification_confirmed",
@@ -6098,14 +6556,13 @@ class ControlledScenarioService:
                     remote_message_id=lookup.remote_message_id,
                     reconciled=True,
                 )
-                try:
-                    staged.persist()
-                except StaleStoreRevision:
-                    return {
-                        "status": "unavailable",
-                        "reason_code": "STORAGE_UNAVAILABLE",
-                    }
-                self._store = staged
+                dependency_failure = self._s14_publish_staged(
+                    staged,
+                    application_id=application_id,
+                    operation_id=operation_id,
+                )
+                if dependency_failure is not None:
+                    return dependency_failure
                 return {
                     "status": "delivered",
                     "operation_id": operation_id,
@@ -6115,6 +6572,7 @@ class ControlledScenarioService:
                 # A proven non-execution appends a terminal not_executed
                 # fact: retry re-claims with a new fence against the same
                 # operation identity.
+                self._before_write("s14.notification.reconcile.outcome")
                 staged.attempts.append(
                     {
                         "attempt_id": self._stable_id(
@@ -6124,38 +6582,41 @@ class ControlledScenarioService:
                         "job_id": f"termination_notification:{operation_id}",
                         "application_id": application_id,
                         "worker_id": worker_id,
-                        "fence": int(latest_claim) + 1,
+                        "fence": claim_fence,
                         "attempt_no": 0,
                         "started_at": event_time,
                         "status": "diagnostic",
                         "outcome": "not_executed",
+                        "claim_cycle": cycle,
+                        "claim_lifecycle_revision": revision,
                         "operation_id": operation_id,
                     }
                 )
+                self._before_write("s14.notification.reconcile.audit")
                 self._append_notification_audit(
-                staged,
-                action="s14_notification_reconciled",
-                operation_id=operation_id,
-                application_id=application_id,
-                cycle=cycle,
-                worker_id=worker_id,
-                role="operator",
-                result="not_executed",
-                now=event_time,
-            )
-                try:
-                    staged.persist()
-                except StaleStoreRevision:
-                    return {
-                        "status": "unavailable",
-                        "reason_code": "STORAGE_UNAVAILABLE",
-                    }
-                self._store = staged
+                    staged,
+                    action="s14_notification_reconciled",
+                    operation_id=operation_id,
+                    application_id=application_id,
+                    cycle=cycle,
+                    worker_id=worker_id,
+                    role="operator",
+                    result="not_executed",
+                    now=event_time,
+                )
+                dependency_failure = self._s14_publish_staged(
+                    staged,
+                    application_id=application_id,
+                    operation_id=operation_id,
+                )
+                if dependency_failure is not None:
+                    return dependency_failure
                 return {
                     "status": "retry_scheduled",
                     "operation_id": operation_id,
                     "result": "not_executed",
                 }
+            self._before_write("s14.notification.reconcile.audit")
             self._append_notification_audit(
                 staged,
                 action="s14_notification_reconciled",
@@ -6167,20 +6628,20 @@ class ControlledScenarioService:
                 result="indeterminate",
                 now=event_time,
             )
-            try:
-                staged.persist()
-            except StaleStoreRevision:
-                return {
-                    "status": "unavailable",
-                    "reason_code": "STORAGE_UNAVAILABLE",
-                }
-            self._store = staged
+            dependency_failure = self._s14_publish_staged(
+                staged,
+                application_id=application_id,
+                operation_id=operation_id,
+            )
+            if dependency_failure is not None:
+                return dependency_failure
             return {
                 "status": "unknown",
                 "operation_id": operation_id,
                 "result": "indeterminate",
             }
 
+    @_s14_write_guard
     def compensate_termination_notification(
         self,
         *,
@@ -6190,15 +6651,9 @@ class ControlledScenarioService:
     ) -> dict[str, Any]:
         """Forward compensation for an unresolvable notification."""
         event_time = int(self._clock() if now is None else now)
-        if not self.audit_available or not self.storage_available:
-            return {
-                "status": "unavailable",
-                "reason_code": (
-                    "AUDIT_UNAVAILABLE"
-                    if not self.audit_available
-                    else "STORAGE_UNAVAILABLE"
-                ),
-            }
+        dependency_failure = self._s14_dependency_failure(operation_id=operation_id)
+        if dependency_failure is not None:
+            return dependency_failure
         with self._lock:
             self._reload_store()
             row = self._s14_notification_row(operation_id)
@@ -6206,6 +6661,7 @@ class ControlledScenarioService:
                 raise QueryNotFound(operation_id)
             application_id = str(row.get("application_id") or "")
             cycle = int(row.get("cycle") or 0)
+            revision = int(row.get("lifecycle_revision") or 0)
             terminal = self._s14_notification_terminal_result(operation_id)
             if terminal is not None:
                 return {
@@ -6213,6 +6669,39 @@ class ControlledScenarioService:
                     "reason_code": "S14_NOTIFICATION_ALREADY_TERMINAL",
                     "operation_id": operation_id,
                     "result": terminal,
+                }
+            if not self._s14_notification_context_current(
+                operation_id=operation_id,
+                application_id=application_id,
+                cycle=cycle,
+                lifecycle_revision=revision,
+                require_pending=True,
+            ):
+                staged = copy.deepcopy(self._store)
+                self._before_write("s14.notification.compensate.audit")
+                self._append_notification_audit(
+                    staged,
+                    action="s14_notification_reconciled",
+                    operation_id=operation_id,
+                    application_id=application_id,
+                    cycle=cycle,
+                    worker_id=worker_id,
+                    role="operator",
+                    result="stale",
+                    now=event_time,
+                    reason_code="S14_CANCEL_FENCED",
+                )
+                dependency_failure = self._s14_publish_staged(
+                    staged,
+                    application_id=application_id,
+                    operation_id=operation_id,
+                )
+                if dependency_failure is not None:
+                    return dependency_failure
+                return {
+                    "status": "stale",
+                    "reason_code": "S14_CANCEL_FENCED",
+                    "operation_id": operation_id,
                 }
             unknown_recorded = any(
                 event.get("operation_id") == operation_id
@@ -6226,8 +6715,78 @@ class ControlledScenarioService:
                     "reason_code": "S14_NOT_COMPENSATABLE",
                     "operation_id": operation_id,
                 }
+            claim = self._s14_claim_notification_attempt(
+                operation_id=operation_id,
+                application_id=application_id,
+                cycle=cycle,
+                lifecycle_revision=revision,
+                worker_id=worker_id,
+                claim_kind="compensate",
+                now=event_time,
+            )
+            if claim is None:
+                return {
+                    "status": "claimed",
+                    "reason_code": "S14_NOTIFICATION_LEASE_ACTIVE",
+                    "operation_id": operation_id,
+                }
+            if claim.get("status") == "unavailable":
+                return claim
+            claim_attempt_id = str(claim["attempt_id"])
+            claim_fence = int(claim["fence"])
         try:
             resolved = self._s13_downstream_resolve(scope="C-DEMO")
+            with self._lock:
+                self._reload_store()
+                dependency_failure = self._s14_dependency_failure(
+                    application_id=application_id, operation_id=operation_id
+                )
+                if dependency_failure is not None:
+                    return dependency_failure
+                terminal = self._s14_notification_terminal_result(operation_id)
+                if terminal is not None:
+                    return {
+                        "status": "stale",
+                        "reason_code": "S14_NOTIFICATION_ALREADY_TERMINAL",
+                        "operation_id": operation_id,
+                        "result": terminal,
+                    }
+                if not self._s14_notification_context_current(
+                    operation_id=operation_id,
+                    application_id=application_id,
+                    cycle=cycle,
+                    lifecycle_revision=revision,
+                    require_pending=True,
+                    attempt_id=claim_attempt_id,
+                    worker_id=worker_id,
+                    fence=claim_fence,
+                ):
+                    staged = copy.deepcopy(self._store)
+                    self._before_write("s14.notification.compensate.audit")
+                    self._append_notification_audit(
+                        staged,
+                        action="s14_notification_reconciled",
+                        operation_id=operation_id,
+                        application_id=application_id,
+                        cycle=cycle,
+                        worker_id=worker_id,
+                        role="operator",
+                        result="stale",
+                        now=event_time,
+                        reason_code="S14_CANCEL_FENCED",
+                    )
+                    dependency_failure = self._s14_publish_staged(
+                        staged,
+                        application_id=application_id,
+                        operation_id=operation_id,
+                    )
+                    if dependency_failure is not None:
+                        return dependency_failure
+                    return {
+                        "status": "stale",
+                        "reason_code": "S13_STALE_DELIVERY_FENCE",
+                        "operation_id": operation_id,
+                    }
             comp_result = resolved.adapter.compensate(
                 _s13.DeliveryCompensationRequest(
                     operation_id=operation_id,
@@ -6238,16 +6797,76 @@ class ControlledScenarioService:
                     compensation_policy_version=(
                         resolved.registration.compensation_policy_version
                     ),
+                    application_id=application_id,
+                    cycle=cycle,
+                    lifecycle_revision=revision,
+                    fence=claim_fence,
                 )
             )
+        except _StoreWriteFailure:
+            raise
         except Exception:
             comp_result = _s13.DeliveryCompensationResult(
                 outcome="failed", reason_code="operation.compensation_failed"
             )
+        dependency_failure = self._s14_dependency_failure(
+            application_id=application_id, operation_id=operation_id
+        )
+        if dependency_failure is not None:
+            return dependency_failure
         with self._lock:
             self._reload_store()
+            dependency_failure = self._s14_dependency_failure(
+                application_id=application_id, operation_id=operation_id
+            )
+            if dependency_failure is not None:
+                return dependency_failure
+            terminal = self._s14_notification_terminal_result(operation_id)
+            if terminal is not None:
+                return {
+                    "status": "stale",
+                    "reason_code": "S14_NOTIFICATION_ALREADY_TERMINAL",
+                    "operation_id": operation_id,
+                    "result": terminal,
+                }
             staged = copy.deepcopy(self._store)
+            if not self._s14_notification_context_current(
+                operation_id=operation_id,
+                application_id=application_id,
+                cycle=cycle,
+                lifecycle_revision=revision,
+                require_pending=True,
+                attempt_id=claim_attempt_id,
+                worker_id=worker_id,
+                fence=claim_fence,
+            ):
+                self._before_write("s14.notification.compensate.audit")
+                self._append_notification_audit(
+                    staged,
+                    action="s14_notification_reconciled",
+                    operation_id=operation_id,
+                    application_id=application_id,
+                    cycle=cycle,
+                    worker_id=worker_id,
+                    role="operator",
+                    result="stale",
+                    now=event_time,
+                    reason_code="S14_CANCEL_FENCED",
+                )
+                dependency_failure = self._s14_publish_staged(
+                    staged,
+                    application_id=application_id,
+                    operation_id=operation_id,
+                )
+                if dependency_failure is not None:
+                    return dependency_failure
+                return {
+                    "status": "stale",
+                    "reason_code": "S14_CANCEL_FENCED",
+                    "operation_id": operation_id,
+                }
             if comp_result.outcome == "compensated":
+                self._before_write("s14.notification.compensate.outbox")
                 for event in staged.outbox:
                     if (
                         event.get("kind")
@@ -6258,6 +6877,7 @@ class ControlledScenarioService:
                     ):
                         event["status"] = "published"
                         break
+            self._before_write("s14.notification.compensate.audit")
             self._append_notification_audit(
                 staged,
                 action=(
@@ -6274,19 +6894,19 @@ class ControlledScenarioService:
                 now=event_time,
                 reason_code=comp_result.reason_code,
             )
-            try:
-                staged.persist()
-            except StaleStoreRevision:
-                return {
-                    "status": "unavailable",
-                    "reason_code": "STORAGE_UNAVAILABLE",
-                }
-            self._store = staged
+            dependency_failure = self._s14_publish_staged(
+                staged,
+                application_id=application_id,
+                operation_id=operation_id,
+            )
+            if dependency_failure is not None:
+                return dependency_failure
             return {
                 "status": comp_result.outcome,
                 "operation_id": operation_id,
             }
 
+    @_s14_write_guard
     def grant_reopen_permission(
         self,
         *,
@@ -6442,6 +7062,7 @@ class ControlledScenarioService:
             # S14 R2: the caller's own control-plane source is bound into
             # the permission so only that authority can later reopen.
             granted_via_source = str(principal.source_id)
+            cycle = int(app.get("cycle") or 0)
             latest_run = max(
                 (
                     run
@@ -6449,6 +7070,7 @@ class ControlledScenarioService:
                     if run.get("application_id") == application_id
                     and run.get("status") == "complete"
                     and isinstance(run.get("spec"), dict)
+                    and int(run["spec"].get("cycle") or 0) == cycle
                 ),
                 key=lambda run: int(run["spec"].get("lifecycle_revision") or 0),
                 default=None,
@@ -6460,7 +7082,12 @@ class ControlledScenarioService:
                 if isinstance(manifest, dict)
                 else ""
             )
-            cycle = int(app.get("cycle") or 0)
+            admission_bound = latest_run is None and bool(artifact_digest)
+            admission_policy = (
+                self._s14_admission_policy_authority(application_id, app)
+                if admission_bound
+                else {}
+            )
             permission = {
                 "record_id": self._stable_id(
                     "s14_permission",
@@ -6473,9 +7100,21 @@ class ControlledScenarioService:
                 "resource_application_id": application_id,
                 "cycle": cycle,
                 "scope": self._application_visibility_scope(application_id),
-                "policy_release_id": str(spec.get("release_id") or ""),
-                "policy_release_digest": str(spec.get("release_digest") or ""),
-                "checker_build": str(spec.get("checker_build") or ""),
+                "policy_release_id": (
+                    admission_policy["policy_release_id"]
+                    if admission_bound
+                    else str(spec.get("release_id") or "")
+                ),
+                "policy_release_digest": (
+                    admission_policy["policy_release_digest"]
+                    if admission_bound
+                    else str(spec.get("release_digest") or "")
+                ),
+                "checker_build": (
+                    admission_policy["checker_build"]
+                    if admission_bound
+                    else str(spec.get("checker_build") or "")
+                ),
                 "artifact_release_digest": artifact_digest,
                 "source_binding": admission_source,
                 "granted_via_source": granted_via_source,
@@ -6527,17 +7166,18 @@ class ControlledScenarioService:
             )
             try:
                 staged.persist()
-            except StaleStoreRevision:
+            except Exception:
                 self._reload_store()
                 return {
-                    "status": "stale",
+                    "status": "unavailable",
                     "replayed": False,
                     "application_id": application_id,
-                    "reason_code": "STALE_STORE_REVISION",
+                    "reason_code": "STORAGE_UNAVAILABLE",
                 }
             self._store = staged
             return {"status": "accepted", **accepted_result}
 
+    @_s14_write_guard
     def reopen_application(
         self,
         *,
@@ -6664,6 +7304,15 @@ class ControlledScenarioService:
             if len(permissions) != 1:
                 return reopen_rejected("lifecycle.reopen_permission_unknown")
             grant = permissions[0]
+            if str(grant.get("resource_application_id") or "") != application_id:
+                return reopen_rejected(
+                    "lifecycle.reopen_permission_resource_mismatch"
+                )
+            current_cycle = int(app.get("cycle") or 0)
+            if int(grant.get("cycle") or 0) != current_cycle:
+                return reopen_rejected(
+                    "lifecycle.reopen_permission_cycle_mismatch"
+                )
             if float(event_time) > float(grant.get("expires_at") or 0):
                 return reopen_rejected("lifecycle.reopen_permission_expired")
             expected_scope = self._application_visibility_scope(application_id)
@@ -6714,19 +7363,39 @@ class ControlledScenarioService:
                     if run.get("application_id") == application_id
                     and run.get("status") == "complete"
                     and isinstance(run.get("spec"), dict)
+                    and int(run["spec"].get("cycle") or 0) == current_cycle
                 ),
                 key=lambda run: int(run["spec"].get("lifecycle_revision") or 0),
                 default=None,
             )
             spec = (latest_run or {}).get("spec") or {}
+            admission_policy = (
+                self._s14_admission_policy_authority(application_id, app)
+                if latest_run is None
+                else {}
+            )
             release_matches = (
                 bool(pinned_digest)
-                and release_digest == pinned_digest
                 and str(grant.get("artifact_release_digest") or "") == pinned_digest
-                and str(grant.get("policy_release_digest") or "")
-                == str(spec.get("release_digest") or pinned_digest)
-                and str(grant.get("policy_release_id") or "")
-                == str(spec.get("release_id") or "")
+                and (
+                    (
+                        latest_run is None
+                        and release_digest
+                        == admission_policy.get("policy_release_digest")
+                        and str(grant.get("policy_release_digest") or "")
+                        == admission_policy.get("policy_release_digest")
+                        and str(grant.get("policy_release_id") or "")
+                        == admission_policy.get("policy_release_id")
+                    )
+                    or (
+                        latest_run is not None
+                        and release_digest == pinned_digest
+                        and str(grant.get("policy_release_digest") or "")
+                        == str(spec.get("release_digest") or pinned_digest)
+                        and str(grant.get("policy_release_id") or "")
+                        == str(spec.get("release_id") or "")
+                    )
+                )
             )
             if not release_matches:
                 return reopen_rejected("lifecycle.reopen_policy_forbidden")
@@ -6814,13 +7483,13 @@ class ControlledScenarioService:
             )
             try:
                 staged.persist()
-            except StaleStoreRevision:
+            except Exception:
                 self._reload_store()
                 return {
-                    "status": "stale",
+                    "status": "unavailable",
                     "replayed": False,
                     "application_id": application_id,
-                    "reason_code": "STALE_STORE_REVISION",
+                    "reason_code": "STORAGE_UNAVAILABLE",
                 }
             self._store = staged
             return {"status": "accepted", **reopened}
@@ -19746,6 +20415,20 @@ class ControlledScenarioService:
             current_revision = int(
                 (fenced_app or {}).get("lifecycle_revision") or 0
             )
+            payload_digest = str(obligation.get("payload_digest") or "")
+            route_basis_for_digest = obligation.get("route_basis") or {}
+            computed_payload_digest = (
+                hashlib.sha256(
+                    json.dumps(
+                        route_basis_for_digest,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+                if isinstance(route_basis_for_digest, dict)
+                else ""
+            )
             if fenced_phase in {"Terminating", "Terminated"}:
                 return {
                     "status": "fenced",
@@ -19754,8 +20437,8 @@ class ControlledScenarioService:
                     "reason_code": "S14_DELIVERY_FENCED",
                 }
             if (
-                obligation_cycle != current_cycle
-                or obligation_revision != current_revision
+                (obligation_cycle != current_cycle or obligation_revision != current_revision)
+                and payload_digest == computed_payload_digest
             ):
                 # A predecessor obligation can never be sent by a successor
                 # cycle: it stays immutable history and the sender reports
@@ -19769,7 +20452,6 @@ class ControlledScenarioService:
             # before any external I/O.
             operation_id = str(obligation.get("operation_id") or "")
             recipient_id = str(obligation.get("recipient_id") or "")
-            payload_digest = str(obligation.get("payload_digest") or "")
             scope = str(obligation.get("scope") or "")
             # Validate registration is still known at send time (fail closed).
             try:
@@ -19842,12 +20524,6 @@ class ControlledScenarioService:
             # Recompute the expected payload digest from the immutable route
             # basis; a mismatched stored digest (e.g., stale context or
             # storage tamper) must fail closed before the adapter is called.
-            route_basis_for_digest = obligation.get("route_basis") or {}
-            computed_payload_digest = hashlib.sha256(
-                json.dumps(
-                    route_basis_for_digest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-                ).encode("utf-8")
-            ).hexdigest() if isinstance(route_basis_for_digest, dict) else ""
             if payload_digest != computed_payload_digest:
                 staged = copy.deepcopy(self._store)
                 if not retry_without_outbox:
@@ -20068,6 +20744,12 @@ class ControlledScenarioService:
                 route_basis_digest=str(obligation.get("route_basis_digest") or ""),
                 obligation_id=oid,
                 scope=scope,
+                application_id=str(obligation.get("application_id") or ""),
+                cycle=int(obligation.get("cycle") or 0),
+                lifecycle_revision=int(
+                    obligation.get("completion_lifecycle_revision") or 0
+                ),
+                fence=attempt_no,
             )
             # Stored digest must still match the pinned registration at send
             # time (version drift / digest mismatch -> fail closed without
@@ -20668,6 +21350,17 @@ class ControlledScenarioService:
             recipient_id=recipient_id,
             compensation_policy_id=policy_id,
             compensation_policy_version=policy_version,
+            application_id=str(obligation.get("application_id") or ""),
+            cycle=int(obligation.get("cycle") or 0),
+            lifecycle_revision=int(
+                obligation.get("completion_lifecycle_revision") or 0
+            ),
+            fence=1
+            + sum(
+                1
+                for item in self._store.delivery_compensations
+                if str(item.get("obligation_id") or "") == str(obligation_id)
+            ),
         )
         try:
             comp_result = resolved.adapter.compensate(compensation_request)
@@ -23130,6 +23823,45 @@ class ControlledScenarioService:
                 self._APPLICATION_STATE_FAILURE
             ) from error
         return authorities
+
+    def _s14_admission_policy_authority(
+        self, application_id: str, app: dict[str, Any]
+    ) -> dict[str, str]:
+        """Derive a governing proof for a cycle cancelled before its first run."""
+        authorities = [
+            event
+            for event in self._accepted_admission_authorities()
+            if event.get("application_id") == application_id
+        ]
+        manifest = app.get("artifact_manifest")
+        if len(authorities) != 1 or not isinstance(manifest, dict):
+            raise _ApplicationStateAuthorityUnavailable(
+                self._APPLICATION_STATE_FAILURE
+            )
+        authority = authorities[0]
+        material = {
+            "schema_version": "s14-admission-policy-authority/1",
+            "application_id": application_id,
+            "cycle": int(app.get("cycle") or 0),
+            "scope": str(authority.get("scope") or ""),
+            "source_id": str(authority.get("source_id") or ""),
+            "envelope_fingerprint": str(
+                authority.get("envelope_fingerprint") or ""
+            ),
+            "artifact_manifest_digest": str(manifest.get("digest") or ""),
+        }
+        if any(not value for value in material.values() if isinstance(value, str)):
+            raise _ApplicationStateAuthorityUnavailable(
+                self._APPLICATION_STATE_FAILURE
+            )
+        digest = hashlib.sha256(
+            json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return {
+            "policy_release_id": f"admission-bound:{digest}",
+            "policy_release_digest": digest,
+            "checker_build": "admission-bound/1",
+        }
 
     def _application_visibility_scope(self, application_id: str) -> str:
         authorities = [

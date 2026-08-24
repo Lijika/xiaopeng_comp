@@ -17221,6 +17221,23 @@
             "title": "Source Binding"
           },
           "status": {
+            "enum": [
+              "accepted",
+              "replayed",
+              "rejected",
+              "unavailable",
+              "stale",
+              "outstanding",
+              "terminated",
+              "idle",
+              "blocked",
+              "claimed",
+              "delivered",
+              "unknown",
+              "retry_scheduled",
+              "compensated",
+              "failed"
+            ],
             "title": "Status",
             "type": "string"
           },
@@ -19165,7 +19182,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/S01ErrorResponse"
+                  "$ref": "#/components/schemas/S14CommandResult"
                 }
               }
             },
@@ -19185,7 +19202,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/S01ErrorResponse"
+                  "$ref": "#/components/schemas/S14CommandResult"
                 }
               }
             },
@@ -19265,7 +19282,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/S01ErrorResponse"
+                  "$ref": "#/components/schemas/S14CommandResult"
                 }
               }
             },
@@ -19285,7 +19302,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/S01ErrorResponse"
+                  "$ref": "#/components/schemas/S14CommandResult"
                 }
               }
             },
@@ -19365,7 +19382,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/S01ErrorResponse"
+                  "$ref": "#/components/schemas/S14CommandResult"
                 }
               }
             },
@@ -19385,7 +19402,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/S01ErrorResponse"
+                  "$ref": "#/components/schemas/S14CommandResult"
                 }
               }
             },
@@ -19465,7 +19482,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/S01ErrorResponse"
+                  "$ref": "#/components/schemas/S14CommandResult"
                 }
               }
             },
@@ -19485,7 +19502,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/S01ErrorResponse"
+                  "$ref": "#/components/schemas/S14CommandResult"
                 }
               }
             },
@@ -20447,15 +20464,55 @@
             },
             "description": "Successful Response"
           },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S14CommandResult"
+                }
+              }
+            },
+            "description": "Accepted"
+          },
           "403": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/S01ErrorResponse"
+                  "$ref": "#/components/schemas/S14CommandResult"
                 }
               }
             },
             "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S14CommandResult"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S14CommandResult"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S14CommandResult"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
           },
           "503": {
             "content": {

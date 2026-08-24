@@ -323,6 +323,10 @@ class DeliverySendRequest:
     route_basis_digest: str
     obligation_id: str
     scope: str
+    application_id: str | None = None
+    cycle: int | None = None
+    lifecycle_revision: int | None = None
+    fence: int | None = None
 
 
 @dataclass(frozen=True)
@@ -348,6 +352,10 @@ class DeliveryCompensationRequest:
     recipient_id: str
     compensation_policy_id: str
     compensation_policy_version: str
+    application_id: str | None = None
+    cycle: int | None = None
+    lifecycle_revision: int | None = None
+    fence: int | None = None
 
 
 @dataclass(frozen=True)

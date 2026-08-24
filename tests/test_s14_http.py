@@ -334,7 +334,7 @@ def test_s14_http_stale_revision_is_a_stable_result(
         },
     )
     assert whitespace.status_code == 422
-    assert whitespace.json()["detail"]["error"] == "S14_COMMAND_INVALID"
+    assert whitespace.json()["reason_code"] == "S14_COMMAND_INVALID"
 
     # Settle/reopen without the operator credential is a 403 even with an
     # authenticated session cookie.
@@ -429,6 +429,90 @@ def test_s14_audit_or_storage_outage_returns_503(
     assert storage_outage.json()["reason_code"] == "STORAGE_UNAVAILABLE"
 
 
+def test_s14_store_write_failure_returns_typed_503(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    service = _install(monkeypatch, tmp_path)
+    client = TestClient(webapp.app)
+    _login(client)
+    application_id = _admitted_manual_review(service)
+    revision = int(
+        client.get(
+            f"/controlled/s01/api/queries/applications/{application_id}/current-route"
+        ).json()["lifecycle_revision"]
+    )
+
+    def fail(write_point: str) -> None:
+        if write_point == "s14.cancel.audit":
+            raise OSError(write_point)
+
+    service._fault_injector = fail
+    failed = client.post(
+        f"/controlled/s01/api/commands/applications/{application_id}/cancel",
+        json={
+            "expected_lifecycle_revision": revision,
+            "idempotency_key": "s14-http-write-failure",
+            "reason_code": "UPSTREAM_WITHDRAWN",
+        },
+        headers=_demo_auth(),
+    )
+
+    assert failed.status_code == 503
+    assert failed.json()["status"] == "unavailable"
+    assert failed.json()["reason_code"] == "AUDIT_UNAVAILABLE"
+    assert service._store.applications[application_id]["phase"] != "Terminating"
+
+
+def test_s14_direct_persist_oserror_returns_typed_503_without_publish(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    service = _install(monkeypatch, tmp_path)
+    client = TestClient(webapp.app)
+    _login(client)
+    application_id = _admitted_manual_review(service)
+    revision = int(
+        client.get(
+            f"/controlled/s01/api/queries/applications/{application_id}/current-route"
+        ).json()["lifecycle_revision"]
+    )
+    store_type = type(service._store)
+
+    def fail_persist(_store: Any) -> None:
+        raise OSError("sqlite write unavailable")
+
+    monkeypatch.setattr(store_type, "persist", fail_persist)
+    failed = client.post(
+        f"/controlled/s01/api/commands/applications/{application_id}/cancel",
+        json={
+            "expected_lifecycle_revision": revision,
+            "idempotency_key": "s14-http-direct-persist-failure",
+            "reason_code": "UPSTREAM_WITHDRAWN",
+        },
+        headers=_demo_auth(),
+    )
+    assert failed.status_code == 503
+    assert failed.json()["status"] == "unavailable"
+    assert failed.json()["reason_code"] == "STORAGE_UNAVAILABLE"
+    assert service._store.applications[application_id]["phase"] != "Terminating"
+
+
+def test_s14_service_missing_returns_unavailable_typed_503(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    _install(monkeypatch, tmp_path)
+    client = TestClient(webapp.app)
+    monkeypatch.setattr(webapp, "S01_SERVICE", None)
+
+    unavailable = client.post(
+        "/controlled/s01/api/commands/process-termination-notification",
+        headers=_operator_auth(),
+    )
+
+    assert unavailable.status_code == 503
+    assert unavailable.json()["status"] == "unavailable"
+    assert unavailable.json()["reason_code"] == "S01_UNAVAILABLE"
+
+
 def test_s14_forbidden_body_matches_openapi(
     monkeypatch: Any, tmp_path: Path
 ) -> None:
@@ -444,8 +528,9 @@ def test_s14_forbidden_body_matches_openapi(
         },
     )
     assert forbidden.status_code == 403
-    detail = forbidden.json()["detail"]
-    assert set(detail) == {"error", "message"}
+    body = forbidden.json()
+    assert body["status"] == "rejected"
+    assert body["reason_code"] == "S14_FORBIDDEN"
 
     generated = json.loads(
         (ROOT / "frontend" / "src" / "generated" / "openapi.json").read_text()
@@ -454,6 +539,23 @@ def test_s14_forbidden_body_matches_openapi(
         "/controlled/s01/api/commands/applications/{application_id}/cancel"
     ]["post"]["responses"]
     assert "403" in responses
+    assert responses["403"]["content"]["application/json"]["schema"]["$ref"].endswith(
+        "/S14CommandResult"
+    )
+
+    _login(client)
+    missing = client.post(
+        "/controlled/s01/api/commands/applications/missing/cancel",
+        json={
+            "expected_lifecycle_revision": 1,
+            "idempotency_key": "s14-http-missing",
+            "reason_code": "UPSTREAM_WITHDRAWN",
+        },
+        headers=_demo_auth(),
+    )
+    assert missing.status_code == 404
+    assert missing.json()["status"] == "rejected"
+    assert missing.json()["reason_code"] == "S01_NOT_FOUND"
 
 
 def test_s14_validation_body_matches_openapi(
@@ -470,7 +572,8 @@ def test_s14_validation_body_matches_openapi(
         json={"idempotency_key": "k", "reason_code": "UPSTREAM_WITHDRAWN"},
     )
     assert missing.status_code == 422
-    assert missing.json()["detail"]["error"] == "S14_COMMAND_INVALID"
+    assert missing.json()["status"] == "rejected"
+    assert missing.json()["reason_code"] == "S14_COMMAND_INVALID"
 
     # Domain predicate violation (whitespace idempotency key).
     whitespace = client.post(
@@ -482,9 +585,8 @@ def test_s14_validation_body_matches_openapi(
         },
     )
     assert whitespace.status_code == 422
-    assert (
-        whitespace.json()["detail"]["error"] == "S14_COMMAND_INVALID"
-    )
+    assert whitespace.json()["status"] == "rejected"
+    assert whitespace.json()["reason_code"] == "S14_COMMAND_INVALID"
 
 
 def test_s14_result_status_matrix_has_typed_bodies(
@@ -573,3 +675,26 @@ def test_generated_s14_contract_matches_fastapi_schema() -> None:
         assert set(live_responses) == set(gen_responses), (
             f"{path}: {sorted(live_responses)} != {sorted(gen_responses)}"
         )
+
+
+def test_s14_command_status_is_a_closed_runtime_vocabulary() -> None:
+    live = webapp.app.openapi()
+    schema = live["components"]["schemas"]["S14CommandResult"]
+    expected = {
+        "accepted",
+        "replayed",
+        "rejected",
+        "unavailable",
+        "stale",
+        "outstanding",
+        "terminated",
+        "idle",
+        "blocked",
+        "claimed",
+        "delivered",
+        "unknown",
+        "retry_scheduled",
+        "compensated",
+        "failed",
+    }
+    assert set(schema["properties"]["status"]["enum"]) == expected

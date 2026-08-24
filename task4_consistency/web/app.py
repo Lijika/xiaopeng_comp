@@ -801,10 +801,10 @@ async def _s14_or_default_validation_handler(
         return JSONResponse(
             status_code=422,
             content={
-                "detail": {
-                    "error": "S14_COMMAND_INVALID",
-                    "message": message,
-                }
+                "status": "rejected",
+                "replayed": False,
+                "reason_code": "S14_COMMAND_INVALID",
+                "reason": message,
             },
         )
     # Legacy controlled-slice contract: the validation body carries only
@@ -1206,12 +1206,6 @@ class S14GrantPermissionBody(BaseModel):
     ttl_seconds: int = Field(default=3600, ge=1, le=86400, strict=True)
 
 
-S14_EFFECT_ITEM = {
-    "kind": str,
-    "id": str,
-}
-
-
 class S14EffectItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1222,6 +1216,25 @@ class S14EffectItem(BaseModel):
     settled: bool | None = None
 
 
+S14Status = Literal[
+    "accepted",
+    "replayed",
+    "rejected",
+    "unavailable",
+    "stale",
+    "outstanding",
+    "terminated",
+    "idle",
+    "blocked",
+    "claimed",
+    "delivered",
+    "unknown",
+    "retry_scheduled",
+    "compensated",
+    "failed",
+]
+
+
 class S14CommandResult(BaseModel):
     """Typed S14 command contract: every domain outcome — accepted,
     replayed, terminated, outstanding, stale, rejected, unavailable — is a
@@ -1230,7 +1243,7 @@ class S14CommandResult(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    status: str
+    status: S14Status
     replayed: bool = False
     track: str | None = None
     application_id: str | None = None
@@ -1259,6 +1272,41 @@ class S14CommandResult(BaseModel):
     reason: str | None = None
 
 
+@app.exception_handler(HTTPException)
+async def _s14_http_exception_handler(
+    request: Request, exc: HTTPException
+) -> Response:
+    if request.url.path.startswith(
+        (
+            "/controlled/s01/api/commands/applications/",
+            "/controlled/s01/api/commands/process-termination-notification",
+        )
+    ):
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        error = str(detail.get("error") or "S14_COMMAND_INVALID")
+        message = detail.get("message")
+        body = S14CommandResult.model_validate(
+            {
+                "status": "unavailable" if exc.status_code == 503 else "rejected",
+                "replayed": False,
+                "reason_code": (
+                    "S14_FORBIDDEN" if exc.status_code == 403 else error
+                ),
+                "reason": str(message) if message is not None else None,
+            }
+        )
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=jsonable_encoder(body),
+            headers=exc.headers,
+        )
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+        headers=exc.headers,
+    )
+
+
 def _s14_command_response(result: dict[str, Any]) -> Response:
     """Map the domain outcome vocabulary to stable HTTP codes."""
     validated = S14CommandResult.model_validate(result)
@@ -1277,12 +1325,10 @@ def _s14_command_response(result: dict[str, Any]) -> Response:
             or reason == "lifecycle.cancel_forbidden"
             or reason == "FORBIDDEN"
         ):
-            # Authorization refusals use the shared controlled-envelope body
-            # so the declared 403 schema has one runtime serialization.
-            raise HTTPException(
-                403,
-                detail={"error": "S14_FORBIDDEN", "message": reason},
+            body = validated.model_copy(
+                update={"reason_code": "S14_FORBIDDEN", "reason": reason}
             )
+            return JSONResponse(status_code=403, content=jsonable_encoder(body))
         code = 409
     return JSONResponse(status_code=code, content=jsonable_encoder(validated))
 
@@ -1290,9 +1336,9 @@ def _s14_command_response(result: dict[str, Any]) -> Response:
 S14_COMMAND_RESPONSES = {
     202: {"model": S14CommandResult},
     403: {"model": S14CommandResult},
-    404: {"model": S01ErrorResponse},
+    404: {"model": S14CommandResult},
     409: {"model": S14CommandResult},
-    422: {"model": S01ErrorResponse},
+    422: {"model": S14CommandResult},
     503: {"model": S14CommandResult},
 }
 
@@ -4489,7 +4535,7 @@ def controlled_s14_reopen(
 @app.post(
     "/controlled/s01/api/commands/process-termination-notification",
     response_model=S14CommandResult,
-    responses={403: {"model": S01ErrorResponse}, 503: {"model": S14CommandResult}},
+    responses=S14_COMMAND_RESPONSES,
 )
 def controlled_s14_process_notification(
     request: Request, response: Response

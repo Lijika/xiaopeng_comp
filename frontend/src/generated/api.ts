@@ -8190,8 +8190,11 @@ export interface components {
             settled_effects?: components["schemas"]["S14EffectItem"][] | null;
             /** Source Binding */
             source_binding?: string | null;
-            /** Status */
-            status: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "accepted" | "replayed" | "rejected" | "unavailable" | "stale" | "outstanding" | "terminated" | "idle" | "blocked" | "claimed" | "delivered" | "unknown" | "retry_scheduled" | "compensated" | "failed";
             /** Target Phase */
             target_phase?: string | null;
             /** Track */
@@ -9297,7 +9300,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["S14CommandResult"];
                 };
             };
             /** @description Conflict */
@@ -9315,7 +9318,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["S14CommandResult"];
                 };
             };
             /** @description Service Unavailable */
@@ -9377,7 +9380,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["S14CommandResult"];
                 };
             };
             /** @description Conflict */
@@ -9395,7 +9398,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["S14CommandResult"];
                 };
             };
             /** @description Service Unavailable */
@@ -9457,7 +9460,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["S14CommandResult"];
                 };
             };
             /** @description Conflict */
@@ -9475,7 +9478,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["S14CommandResult"];
                 };
             };
             /** @description Service Unavailable */
@@ -9537,7 +9540,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["S14CommandResult"];
                 };
             };
             /** @description Conflict */
@@ -9555,7 +9558,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["S14CommandResult"];
                 };
             };
             /** @description Service Unavailable */
@@ -10209,13 +10212,49 @@ export interface operations {
                     "application/json": components["schemas"]["S14CommandResult"];
                 };
             };
+            /** @description Accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S14CommandResult"];
+                };
+            };
             /** @description Forbidden */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["S01ErrorResponse"];
+                    "application/json": components["schemas"]["S14CommandResult"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S14CommandResult"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S14CommandResult"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S14CommandResult"];
                 };
             };
             /** @description Service Unavailable */
