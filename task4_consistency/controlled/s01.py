@@ -5914,6 +5914,8 @@ class ControlledScenarioService:
         self,
         *,
         worker_id: str = "s14-notification-worker",
+        application_id: str | None = None,
+        cycle: int | None = None,
         now: float | None = None,
     ) -> dict[str, Any]:
         """Claim, send and confirm one termination notification through the
@@ -5934,7 +5936,7 @@ class ControlledScenarioService:
             dependency_failure = self._s14_dependency_failure()
             if dependency_failure is not None:
                 return dependency_failure
-            pending = next(
+            candidates = (
                 (
                     event
                     for event in sorted(
@@ -5943,13 +5945,29 @@ class ControlledScenarioService:
                     )
                     if event.get("kind") == "termination_notification_requested"
                     and event.get("status") == "pending"
-                ),
-                None,
+                )
             )
+            if application_id is not None:
+                # Explicit target binding: only this application's pending
+                # event is eligible, so an operator viewing one application
+                # can never process another application's effect.
+                candidates = (
+                    event for event in candidates if event.get("application_id") == application_id
+                )
+            if cycle is not None:
+                candidates = (
+                    event for event in candidates if int(event.get("cycle") or 0) == cycle
+                )
+            pending = next(candidates, None)
             if pending is None:
                 return {
                     "status": "idle",
                     "reason_code": "NO_PENDING_NOTIFICATION",
+                    **(
+                        {"application_id": application_id}
+                        if application_id is not None
+                        else {}
+                    ),
                 }
             application_id = str(pending.get("application_id") or "")
             app = self._store.applications.get(application_id)

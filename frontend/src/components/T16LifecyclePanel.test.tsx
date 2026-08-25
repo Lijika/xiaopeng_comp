@@ -34,7 +34,15 @@ function jsonRoute(payload: unknown): () => Response {
     });
 }
 
-function historyPayload(runs: Array<{ cycle: number; run_id: string; current?: boolean }>) {
+function historyPayload(
+  runs: Array<{ cycle: number; run_id: string; current?: boolean }>,
+  extras: {
+    cancellations?: Array<Record<string, unknown>>;
+    terminations?: Array<Record<string, unknown>>;
+    reopens?: Array<Record<string, unknown>>;
+    late_input_receipts?: Array<Record<string, unknown>>;
+  } = {},
+) {
   return {
     schema_version: "s04-application-history/1",
     application_id: S14_APPLICATION_ID,
@@ -72,6 +80,10 @@ function historyPayload(runs: Array<{ cycle: number; run_id: string; current?: b
     membership_history: [],
     entity_links: [],
     entity_link_history: [],
+    cancellations: extras.cancellations ?? [],
+    terminations: extras.terminations ?? [],
+    reopens: extras.reopens ?? [],
+    late_input_receipts: extras.late_input_receipts ?? [],
   };
 }
 
@@ -106,6 +118,114 @@ describe("T16LifecyclePanel (integrator cancellation)", () => {
     await waitFor(() =>
       expect(screen.getByTestId("t16-error-not-found")).toBeInTheDocument(),
     );
+  });
+
+  it("renders an explicit sanitized history error instead of empty history and hides cycle actions", async () => {
+    fetchRouter({
+      [`GET ${ROUTE_PATH}`]: jsonRoute(s14CurrentRoute()),
+      [`GET ${HISTORY_PATH}`]: () =>
+        new Response(
+          JSON.stringify({ detail: { error: "S03_NOT_FOUND" } }),
+          { status: 404, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    renderWithQuery(<T16LifecyclePanel applicationId={S14_APPLICATION_ID} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("t16-error-not-found")).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId("t16-history-empty")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("t16-history-run-cycle")).not.toBeInTheDocument();
+  });
+
+  it("shows the authoritative selected-cycle facts with lifecycle events and late receipts", async () => {
+    const onCycleSelected = vi.fn();
+    fetchRouter({
+      [`GET ${ROUTE_PATH}`]: jsonRoute(
+        s14CurrentRoute({
+          phase: "Intake",
+          cycle: 2,
+          lifecycle_revision: 8,
+          current_run_id: null,
+          currentness_reason: "NO_CURRENT_RUN",
+        }),
+      ),
+      [`GET ${HISTORY_PATH}`]: jsonRoute(
+        historyPayload(
+          [
+            { cycle: 1, run_id: "run_cycle1" },
+            { cycle: 2, run_id: "run_cycle2" },
+          ],
+          {
+            cancellations: [
+              {
+                event_id: "canc_1",
+                cycle: 1,
+                lifecycle_revision: 6,
+                reason_code: "UPSTREAM_WITHDRAWN",
+                authority_subject: "t16-registered-integrator",
+                fenced_effects: { review_work_items: 1 },
+                cancelled_at: 100,
+              },
+            ],
+            terminations: [
+              {
+                event_id: "term_1",
+                cycle: 1,
+                lifecycle_revision: 7,
+                settled_effects: [],
+                terminated_at: 200,
+              },
+            ],
+            reopens: [
+              {
+                event_id: "reopen_1",
+                predecessor_cycle: 1,
+                cycle: 2,
+                lifecycle_revision: 8,
+                target_phase: "Intake",
+                reopened_by: "t16-operator",
+                reopened_at: 300,
+              },
+            ],
+            late_input_receipts: [
+              {
+                receipt_id: "late_1",
+                reason_code: "evidence.late_input_requires_reopen",
+                request_id: "req_1",
+                occurred_at: 250,
+              },
+            ],
+          },
+        ),
+      ),
+    });
+    renderWithQuery(
+      <T16LifecyclePanel
+        applicationId={S14_APPLICATION_ID}
+        selectedCycle={1}
+        onCycleSelected={onCycleSelected}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("t16-cycle-view")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("t16-cycle-banner")).toHaveTextContent(
+      "Cycle 1",
+    );
+    expect(screen.getByTestId("t16-cycle-run")).toHaveTextContent(
+      "run_cycle1",
+    );
+    expect(screen.getByTestId("t16-cycle-cancellation")).toHaveTextContent(
+      "UPSTREAM_WITHDRAWN",
+    );
+    expect(screen.getByTestId("t16-cycle-termination")).toBeInTheDocument();
+    expect(screen.getByTestId("t16-cycle-reopen")).toHaveTextContent("Intake");
+    expect(screen.getByTestId("t16-late-receipt")).toHaveTextContent(
+      "evidence.late_input_requires_reopen",
+    );
+    // The historical cycle view is read-only: no command surface.
+    expect(screen.queryByTestId("t16-cancel-section")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("t16-cancel-button")).not.toBeInTheDocument();
   });
 
   it("posts one exact cancel command and renders the typed accepted outcome", async () => {
@@ -415,6 +535,92 @@ describe("T16SettlementPanel (operator)", () => {
       ),
     );
     expect(screen.getByTestId("t16-settled-effects")).toBeInTheDocument();
+  });
+
+  it("restores the server-owned reopen binding from a replayed grant", async () => {
+    const user = userEvent.setup();
+    let grantCalls = 0;
+    const router = fetchRouter({
+      [`GET ${DELIVERY_PATH}`]: jsonRoute(
+        s14OperatorDeliveryView({ phase: "Terminated", lifecycle_revision: 7 }),
+      ),
+      [`POST ${GRANT_PATH}`]: () => {
+        grantCalls += 1;
+        return new Response(
+          JSON.stringify(
+            grantCalls === 1
+              ? s14AcceptedGrant()
+              : s14AcceptedGrant({ status: "replayed", replayed: true }),
+          ),
+          { headers: { "Content-Type": "application/json" } },
+        );
+      },
+      [`POST ${REOPEN_PATH}`]: () =>
+        new Response(JSON.stringify(s14AcceptedReopen()), {
+          headers: { "Content-Type": "application/json" },
+        }),
+    });
+    renderWithQuery(<T16SettlementPanel applicationId={S14_APPLICATION_ID} />);
+    const approver = await screen.findByTestId("t16-grant-approver");
+    await user.type(approver, S14_APPROVER_SUBJECT);
+    await user.type(
+      screen.getByTestId("t16-grant-permission-id"),
+      S14_PERMISSION_ID,
+    );
+    await user.click(screen.getByTestId("t16-grant-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("t16-result-status")).toHaveTextContent(
+        "accepted",
+      ),
+    );
+    // The second grant with the same key replays the original binding.
+    await user.click(screen.getByTestId("t16-grant-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("t16-result-status")).toHaveTextContent(
+        "replayed",
+      ),
+    );
+    // Reopen is enabled from the replayed server-owned binding.
+    await user.selectOptions(screen.getByTestId("t16-reopen-target"), "Intake");
+    await user.click(screen.getByTestId("t16-reopen-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("t16-reopen-result")).toHaveTextContent("2"),
+    );
+    const reopenPost = router.calls.find(({ url }) => url === REOPEN_PATH);
+    // The fetch boundary records parsed JSON; the reopen body shape is bound
+    // by the generated S14ReopenCommand type at the mutation call site.
+    const reopenBody = reopenPost?.body as
+      | { reopen_policy?: { release_digest?: string } }
+      | undefined;
+    expect(reopenBody?.reopen_policy?.release_digest).toBe(ARTIFACT_DIGEST);
+  });
+
+  it("enables notification processing only for the current Terminating cycle with a pending effect", async () => {
+    const user = userEvent.setup();
+    fetchRouter({
+      [`GET ${DELIVERY_PATH}`]: jsonRoute(s14OperatorDeliveryView()),
+      [`POST ${SETTLE_PATH}`]: () =>
+        new Response(JSON.stringify(s14OutstandingSettle()), {
+          status: 202,
+          headers: { "Content-Type": "application/json" },
+        }),
+      [`POST ${NOTIFY_PATH}`]: () =>
+        new Response(JSON.stringify({ status: "delivered" }), {
+          headers: { "Content-Type": "application/json" },
+        }),
+    });
+    renderWithQuery(<T16SettlementPanel applicationId={S14_APPLICATION_ID} />);
+    const notify = await screen.findByTestId("t16-notification-button");
+    // No outstanding settle result yet: the effect is unknown, button stays
+    // disabled even though the phase is Terminating.
+    expect(notify).toBeDisabled();
+    await user.click(screen.getByTestId("t16-settle-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("t16-result-status")).toHaveTextContent(
+        "outstanding",
+      ),
+    );
+    expect(notify).toBeEnabled();
   });
 
   it("surfaces an unknown notification transport with a reconcile affordance", async () => {

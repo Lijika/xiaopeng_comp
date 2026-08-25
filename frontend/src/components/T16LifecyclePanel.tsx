@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useState } from "react";
 
 import { useCurrentRoute,
   useApplicationHistory,
@@ -13,6 +13,7 @@ import { useCurrentRoute,
 } from "../api/hooks";
 import { HttpError, type CurrentRouteResponse } from "../api/client";
 import { Section, leafText } from "./Section";
+import type { ApplicationHistoryResponse } from "../api/client";
 
 function newIdempotencyKey(): string {
   return crypto.randomUUID();
@@ -175,6 +176,11 @@ export default function T16LifecyclePanel({
 
   const data: CurrentRouteResponse = route.data;
   const phase = data.phase;
+  const viewingHistoricalCycle =
+    selectedCycle !== null &&
+    selectedCycle !== undefined &&
+    history.data !== undefined &&
+    selectedCycle !== data.cycle;
   const cancellable =
     IS_TERMINAL_PHASE[phase] !== true &&
     !latched &&
@@ -231,6 +237,14 @@ export default function T16LifecyclePanel({
 
   return (
     <div data-testid="t16-lifecycle-panel">
+      {viewingHistoricalCycle && history.data !== undefined && (
+        <CycleHistoryView
+          cycle={selectedCycle as number}
+          history={history.data}
+        />
+      )}
+      {!viewingHistoricalCycle && (
+        <>
       <Section
         id="t16-facts-title"
         title="当前路由（服务器权威）"
@@ -348,13 +362,21 @@ export default function T16LifecyclePanel({
           </p>
         )}
       </Section>
+        </>
+      )}
 
       <Section
         id="t16-history-title"
         title="历史周期与运行（只读）"
         testId="t16-history-section"
       >
-        {history.data === undefined ? (
+        {history.isError ? (
+          <QueryErrorState
+            error={history.error}
+            onReload={() => void history.refetch()}
+            isReloading={history.isFetching}
+          />
+        ) : history.data === undefined ? (
           <p data-testid="t16-history-empty">—</p>
         ) : history.data.runs.length === 0 ? (
           <p data-testid="t16-history-empty">No recorded runs</p>
@@ -412,6 +434,117 @@ interface ReopenBinding {
   artifactDigest: string;
 }
 
+/** The immutable, cycle-scoped read-only projection of one historical
+ *  processing cycle, rebuilt from the authoritative history DTO: its runs,
+ *  cancellation, termination settlement, reopen links and late-input
+ *  receipts.  No command surface exists here — a selected old cycle is
+ *  evidence to read, never a target to mutate. */
+function CycleHistoryView({
+  cycle,
+  history,
+}: {
+  cycle: number;
+  history: ApplicationHistoryResponse;
+}) {
+  const runs = history.runs.filter((run) => run.cycle === cycle);
+  const cancellations = (history.cancellations ?? []).filter(
+    (entry) => entry.cycle === cycle,
+  );
+  const terminations = (history.terminations ?? []).filter(
+    (entry) => entry.cycle === cycle,
+  );
+  const reopens = (history.reopens ?? []).filter(
+    (entry) =>
+      entry.cycle === cycle || entry.predecessor_cycle === cycle,
+  );
+  return (
+    <div data-testid="t16-cycle-view">
+      <Section
+        id="t16-cycle-title"
+        title={`历史周期 ${cycle}（只读权威事实）`}
+        testId="t16-cycle-section"
+      >
+        <p role="status" aria-live="polite" data-testid="t16-cycle-banner">
+          Cycle {cycle} — 已封存的不可变事实；本视图不提供任何写操作
+        </p>
+        <h3>Runs</h3>
+        {runs.length === 0 ? (
+          <p data-testid="t16-cycle-runs-empty">No recorded runs</p>
+        ) : (
+          <ol className="history-list" data-testid="t16-cycle-runs">
+            {runs.map((run) => (
+              <li key={run.run_id} data-testid="t16-cycle-run">
+                <dl className="facts">
+                  <div>
+                    <dt>Run ID</dt>
+                    <dd>{leafText(run.run_id)}</dd>
+                  </div>
+                  <div>
+                    <dt>Status</dt>
+                    <dd>{leafText(run.status)}</dd>
+                  </div>
+                  <div>
+                    <dt>Evidence Snapshot</dt>
+                    <dd>{leafText(run.evidence_snapshot_id)}</dd>
+                  </div>
+                  <div>
+                    <dt>Release Digest</dt>
+                    <dd>{leafText(run.release_digest)}</dd>
+                  </div>
+                </dl>
+              </li>
+            ))}
+          </ol>
+        )}
+        <h3>Lifecycle Events</h3>
+        <ul className="history-list" data-testid="t16-cycle-events">
+          {cancellations.map((entry) => (
+            <li key={entry.event_id} data-testid="t16-cycle-cancellation">
+              cancelled · {leafText(entry.reason_code)} · by{" "}
+              {leafText(entry.authority_subject)} · cycle {entry.cycle}
+            </li>
+          ))}
+          {terminations.map((entry) => (
+            <li key={entry.event_id} data-testid="t16-cycle-termination">
+              terminated · cycle {entry.cycle} · revision{" "}
+              {entry.lifecycle_revision}
+            </li>
+          ))}
+          {reopens.map((entry) => (
+            <li key={entry.event_id} data-testid="t16-cycle-reopen">
+              reopened → cycle {entry.cycle} · target{" "}
+              {leafText(entry.target_phase)} · predecessor{" "}
+              {entry.predecessor_cycle}
+            </li>
+          ))}
+          {cancellations.length === 0 &&
+            terminations.length === 0 &&
+            reopens.length === 0 && (
+              <li data-testid="t16-cycle-events-empty">
+                No lifecycle events recorded for this cycle
+              </li>
+            )}
+        </ul>
+        <h3>Late-Input Receipts</h3>
+        {(history.late_input_receipts ?? []).length === 0 ? (
+          <p data-testid="t16-late-receipts-empty">No late-input receipts</p>
+        ) : (
+          <ul className="history-list" data-testid="t16-late-receipts">
+            {(history.late_input_receipts ?? []).map((receipt) => (
+              <li
+                key={receipt.receipt_id}
+                data-testid="t16-late-receipt"
+              >
+                {leafText(receipt.reason_code)} · {leafText(receipt.request_id)}
+              </li>
+            ))}
+          </ul>
+        )}
+      </Section>
+    </div>
+  );
+}
+
 /** The operator termination-settlement console.  The operator context owns
  * no reviewer session: its authoritative read seam is the released S13
  * delivery view, and every lifecycle change is an explicit typed command
@@ -434,7 +567,6 @@ export function T16SettlementPanel({
   const [targetPhase, setTargetPhase] = useState<"Intake" | "Assembly">("Intake");
   const [binding, setBinding] = useState<ReopenBinding | null>(null);
   const [latched, setLatched] = useState(false);
-  const revisionRef = useRef<number | null>(null);
 
   if (!applicationId) {
     return (
@@ -468,10 +600,16 @@ export function T16SettlementPanel({
 
   const view = delivery.data;
   const phase = view.phase;
-  revisionRef.current = view.lifecycle_revision;
 
   const anyPending =
     settle.isPending || notify.isPending || grant.isPending || reopen.isPending;
+  // The notification command is bound to THIS application/cycle and only
+  // eligible while the current Terminating cycle has that pending effect.
+  const pendingNotification =
+    phase === "Terminating" &&
+    (settle.data?.unresolved_effects ?? []).some(
+      (effect) => effect.kind === "termination_notification",
+    );
 
   const handleSettle = () => {
     if (anyPending || latched || phase !== "Terminating") return;
@@ -490,11 +628,14 @@ export function T16SettlementPanel({
   };
 
   const handleNotify = () => {
-    if (anyPending || latched) return;
-    notify.mutate(undefined, {
+    if (anyPending || latched || !pendingNotification) return;
+    notify.mutate(
+      { application_id: applicationId, cycle: view.cycle },
+      {
       onSuccess: (data) =>
         handleS14Outcome(data, () => setLatched(true), () => undefined),
-    });
+      },
+    );
   };
 
   const handleGrant = () => {
@@ -510,7 +651,13 @@ export function T16SettlementPanel({
       },
       {
         onSuccess: (data) => {
-          if (data.status === "accepted" && data.permission_id && data.artifact_release_digest) {
+          // A replayed grant carries the original accepted result: the
+          // server-owned binding is restored either way.
+          if (
+            (data.status === "accepted" || data.status === "replayed") &&
+            data.permission_id &&
+            data.artifact_release_digest
+          ) {
             setBinding({
               permissionId: data.permission_id,
               artifactDigest: data.artifact_release_digest,
@@ -619,7 +766,7 @@ export function T16SettlementPanel({
             type="button"
             data-testid="t16-notification-button"
             onClick={handleNotify}
-            disabled={anyPending || latched}
+            disabled={anyPending || latched || !pendingNotification}
           >
             {notify.isPending ? "通知处理中…" : "处理终止通知"}
           </button>
@@ -677,7 +824,7 @@ export function T16SettlementPanel({
               type="button"
               data-testid="t16-notification-retry"
               onClick={handleNotify}
-              disabled={anyPending || latched}
+              disabled={anyPending || latched || !pendingNotification}
             >
               重试处理终止通知
             </button>

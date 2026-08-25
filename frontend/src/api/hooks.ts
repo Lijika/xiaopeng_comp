@@ -1365,12 +1365,21 @@ export function useS14Reopen(
 export function useS14ProcessNotification(): UseMutationResult<
   S14CommandResult,
   Error,
-  void
+  S14NotificationCommand
 > {
-  return useS14CommandMutation<void>(
+  return useS14CommandMutation<S14NotificationCommand>(
     "/controlled/s01/api/commands/process-termination-notification",
   );
 }
+
+/**
+ * The closed termination-notification target binding, bound to the
+ * generated OpenAPI request schema.
+ */
+export type S14NotificationCommand =
+  NonNullable<
+    paths["/controlled/s01/api/commands/process-termination-notification"]["post"]["requestBody"]
+  >["content"]["application/json"];
 
 /** The bounded termination convergence outcomes.  ``terminated`` is only
  * ever reported from the authoritative current-route phase; ``timed_out`` is
@@ -1410,24 +1419,43 @@ export function useTerminationConvergence(
     const poll = async () => {
       if (cancelled) return;
       attempts += 1;
-      await queryClient.refetchQueries({ queryKey: ROUTE_KEY(applicationId) });
-      if (cancelled) return;
-      await queryClient.refetchQueries({
-        queryKey: HISTORY_KEY(applicationId),
-      });
+      // Freshness floor: facts observed before this attempt started cannot
+      // prove anything about the current reconciliation state.
+      const attemptStartedAt = Date.now();
+      try {
+        await queryClient.refetchQueries({
+          queryKey: ROUTE_KEY(applicationId),
+        });
+        if (cancelled) return;
+        await queryClient.refetchQueries({
+          queryKey: HISTORY_KEY(applicationId),
+        });
+      } catch {
+        // A rejected refetch is an incomplete read: consume the same bounded
+        // budget and retry; it never contributes to a terminal report.
+      }
       if (cancelled) return;
       const routeState = queryClient.getQueryState(ROUTE_KEY(applicationId));
-      const routeError = routeState?.error;
-      const hasRouteError = routeError !== undefined && routeError !== null;
-      if (hasRouteError && isDefinitiveRejection(routeError)) {
-        setOutcome("timed_out");
-        return;
-      }
-      if (!hasRouteError) {
+      const historyState = queryClient.getQueryState(
+        HISTORY_KEY(applicationId),
+      );
+      const readsFailed =
+        routeState === undefined ||
+        historyState === undefined ||
+        routeState.error !== null ||
+        historyState.error !== null ||
+        routeState.dataUpdatedAt < attemptStartedAt ||
+        historyState.dataUpdatedAt < attemptStartedAt;
+      if (!readsFailed) {
+        // Both authoritative reads succeeded fresh: only the server-owned
+        // route phase may report termination.
         const route = queryClient.getQueryData<CurrentRouteResponse>(
           ROUTE_KEY(applicationId),
         );
-        if (route?.phase === "Terminated") {
+        if (
+          route?.phase === "Terminated" &&
+          queryClient.getQueryData(HISTORY_KEY(applicationId)) !== undefined
+        ) {
           setOutcome("terminated");
           return;
         }

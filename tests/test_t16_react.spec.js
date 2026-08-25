@@ -192,7 +192,8 @@ for (const [label, viewport] of [
     test.setTimeout(180_000);
     server = await startServer(fixtureRoot);
     const fixture = readFixture(fixtureRoot);
-    const applicationId = fixture.application_id;
+    const activeApplicationId = fixture.active_application_id;
+    const lateApplicationId = fixture.late_application_id;
 
     const integratorRequests = [];
     const operatorRequests = [];
@@ -227,7 +228,7 @@ for (const [label, viewport] of [
 
     // --- integrator: authoritative facts, explicit cancel ------------------
     await integratorPage.goto(
-      `${server.baseURL}/controlled/s14?application=${encodeURIComponent(applicationId)}`,
+      `${server.baseURL}/controlled/s14?application=${encodeURIComponent(activeApplicationId)}`,
       { waitUntil: "domcontentloaded" },
     );
     await expect(integratorPage.getByTestId("s14-boundary-gate")).toHaveText("S14");
@@ -250,7 +251,7 @@ for (const [label, viewport] of [
 
     // --- operator: settle-arm, notify, settle-seal, grant, reopen ----------
     await operatorPage.goto(
-      `${server.baseURL}/controlled/s14/settlement?application=${encodeURIComponent(applicationId)}`,
+      `${server.baseURL}/controlled/s14/settlement?application=${encodeURIComponent(activeApplicationId)}`,
       { waitUntil: "domcontentloaded" },
     );
     await expect(
@@ -324,6 +325,47 @@ for (const [label, viewport] of [
     await expect(cycleNavButtons.first()).toContainText("1");
     await cycleNavButtons.first().click();
     await expect(integratorPage).toHaveURL(/cycle=1/);
+    // The selected historical cycle renders authoritative cycle-scoped facts
+    // (immutable cancellation/termination/reopen events and the late-input
+    // receipt), with no command surface.
+    await expect(integratorPage.getByTestId("t16-cycle-view")).toBeVisible();
+    await expect(integratorPage.getByTestId("t16-cycle-banner")).toContainText(
+      "Cycle 1",
+    );
+    await expect(
+      integratorPage.getByTestId("t16-cycle-cancellation"),
+    ).toContainText("UPSTREAM_WITHDRAWN");
+    await expect(
+      integratorPage.getByTestId("t16-cycle-termination"),
+    ).toBeVisible();
+    await expect(integratorPage.getByTestId("t16-cycle-reopen")).toContainText(
+      "Intake",
+    );
+    await expect(integratorPage.getByTestId("t16-cancel-button")).toHaveCount(0);
+
+    // The sealed late-work application renders its immutable cycle-scoped
+    // facts including the late-input receipt demanding explicit reopen.
+    await integratorPage.goto(
+      `${server.baseURL}/controlled/s14?application=${encodeURIComponent(lateApplicationId)}`,
+      { waitUntil: "domcontentloaded" },
+    );
+    await expect(integratorPage.getByTestId("t16-phase")).toHaveText(
+      "Intake",
+    );
+    await expect(integratorPage.getByTestId("t16-cycle")).toHaveText("2");
+    const lateCycleNav = integratorPage.getByTestId("t16-history-run-cycle");
+    await lateCycleNav.first().click();
+    await expect(integratorPage.getByTestId("t16-cycle-view")).toBeVisible();
+    await expect(
+      integratorPage.getByTestId("t16-cycle-cancellation"),
+    ).toContainText("UPSTREAM_WITHDRAWN");
+    await expect(
+      integratorPage.getByTestId("t16-cycle-termination"),
+    ).toBeVisible();
+    await expect(integratorPage.getByTestId("t16-late-receipt")).toContainText(
+      "evidence.late_input_requires_reopen",
+    );
+    await expect(integratorPage.getByTestId("t16-cancel-button")).toHaveCount(0);
 
     await integratorPage.goBack();
     await integratorPage.goForward();
@@ -366,8 +408,7 @@ for (const [label, viewport] of [
 
     assertAllowlistedRequests([...integratorRequests, ...operatorRequests]);
     await assertNoHorizontalOverflow(integratorPage, [
-      "t16-facts-section",
-      "t16-cancel-section",
+      "t16-cycle-section",
       "t16-history-section",
     ]);
     await assertNoHorizontalOverflow(operatorPage, [

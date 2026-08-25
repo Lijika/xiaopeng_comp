@@ -636,6 +636,10 @@ export interface paths {
         /**
          * Controlled S14 Process Notification
          * @description Deliver one pending termination notification (verified terminal gate).
+         *
+         *     The closed optional body binds processing to one application/cycle so an
+         *     operator console can never process another application's effect; without
+         *     a body the worker claims the first globally eligible pending event.
          */
         post: operations["controlled_s14_process_notification_controlled_s01_api_commands_process_termination_notification_post"];
         delete?: never;
@@ -2830,6 +2834,8 @@ export interface components {
             attachment_versions: components["schemas"]["S01HistoryAttachmentVersion"][];
             /** Business Exceptions */
             business_exceptions: components["schemas"]["S01HistoryBusinessException"][];
+            /** Cancellations */
+            cancellations?: components["schemas"]["S01HistoryCancellation"][];
             /** Corrections */
             corrections: components["schemas"]["S01HistoryCorrection"][];
             /** Current Run Id */
@@ -2838,14 +2844,20 @@ export interface components {
             entity_link_history?: components["schemas"]["S01HistoryEntityLinkCorrection"][];
             /** Entity Links */
             entity_links?: components["schemas"]["S01HistoryEntityLink"][];
+            /** Late Input Receipts */
+            late_input_receipts?: components["schemas"]["S01HistoryLateInputReceipt"][];
             /** Membership History */
             membership_history?: components["schemas"]["S01HistoryMembershipCorrection"][];
             /** Memberships */
             memberships?: components["schemas"]["S01HistoryMembership"][];
+            /** Reopens */
+            reopens?: components["schemas"]["S01HistoryReopen"][];
             /** Runs */
             runs: components["schemas"]["S01HistoryRun"][];
             /** Schema Version */
             schema_version: string;
+            /** Terminations */
+            terminations?: components["schemas"]["S01HistoryTermination"][];
         };
         /**
          * S01AttachmentSubmissionResponse
@@ -3297,6 +3309,30 @@ export interface components {
             /** Status */
             status: string;
         };
+        /**
+         * S01HistoryCancellation
+         * @description One immutable upstream-cancellation event rebuilt from audit facts.
+         */
+        S01HistoryCancellation: {
+            /** Authority Role */
+            authority_role?: string | null;
+            /** Authority Subject */
+            authority_subject?: string | null;
+            /** Cancelled At */
+            cancelled_at?: number | null;
+            /** Cycle */
+            cycle: number;
+            /** Event Id */
+            event_id?: string | null;
+            /** Fenced Effects */
+            fenced_effects?: {
+                [key: string]: number;
+            };
+            /** Lifecycle Revision */
+            lifecycle_revision: number;
+            /** Reason Code */
+            reason_code?: string | null;
+        };
         /** S01HistoryCorrection */
         S01HistoryCorrection: {
             /** Actor */
@@ -3464,6 +3500,21 @@ export interface components {
             release_id?: string | null;
         };
         /**
+         * S01HistoryLateInputReceipt
+         * @description One late-input receipt demanding explicit reopen; the content never
+         *     entered the sealed cycle.
+         */
+        S01HistoryLateInputReceipt: {
+            /** Occurred At */
+            occurred_at?: number | null;
+            /** Reason Code */
+            reason_code: string;
+            /** Receipt Id */
+            receipt_id: string;
+            /** Request Id */
+            request_id?: string | null;
+        };
+        /**
          * S01HistoryMembership
          * @description One append-only ledger record of the preserved page-membership history
          *     (S10): candidate claims and every accepted/unassigned decision with its
@@ -3586,6 +3637,28 @@ export interface components {
             /** Status */
             status: string;
         };
+        /**
+         * S01HistoryReopen
+         * @description One successor-cycle reopen link to its predecessor.
+         */
+        S01HistoryReopen: {
+            /** Cycle */
+            cycle: number;
+            /** Event Id */
+            event_id?: string | null;
+            /** Lifecycle Revision */
+            lifecycle_revision: number;
+            /** Predecessor Cycle */
+            predecessor_cycle: number;
+            /** Reopen Permission Id */
+            reopen_permission_id?: string | null;
+            /** Reopened At */
+            reopened_at?: number | null;
+            /** Reopened By */
+            reopened_by?: string | null;
+            /** Target Phase */
+            target_phase?: string | null;
+        };
         /** S01HistoryRun */
         S01HistoryRun: {
             /** Activation Event Id */
@@ -3679,6 +3752,24 @@ export interface components {
             source_region?: string | null;
             /** Source Sha256 */
             source_sha256: string;
+        };
+        /**
+         * S01HistoryTermination
+         * @description One sealed Terminated settlement with its settled effects.
+         */
+        S01HistoryTermination: {
+            /** Cycle */
+            cycle: number;
+            /** Event Id */
+            event_id?: string | null;
+            /** Lifecycle Revision */
+            lifecycle_revision: number;
+            /** Notification Event Id */
+            notification_event_id?: string | null;
+            /** Settled Effects */
+            settled_effects?: components["schemas"]["S14EffectItem"][];
+            /** Terminated At */
+            terminated_at?: number | null;
         };
         /**
          * S01HumanDecision
@@ -8318,6 +8409,17 @@ export interface components {
              */
             ttl_seconds: number;
         };
+        /**
+         * S14NotificationBody
+         * @description Optional target binding for the termination-notification worker:
+         *     when present, only this application/cycle's pending event is eligible.
+         */
+        S14NotificationBody: {
+            /** Application Id */
+            application_id: string;
+            /** Cycle */
+            cycle: number;
+        };
         /** S14ReopenBody */
         S14ReopenBody: {
             /** Expected Lifecycle Revision */
@@ -10288,7 +10390,11 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["S14NotificationBody"] | null;
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -15031,6 +15137,24 @@ export interface operations {
                     "text/html": string;
                 };
             };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
         };
     };
     controlled_s14_react_page_controlled_s14_react_get: {
@@ -15049,6 +15173,24 @@ export interface operations {
                 };
                 content: {
                     "text/html": string;
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
                 };
             };
         };
@@ -15071,6 +15213,24 @@ export interface operations {
                     "text/html": string;
                 };
             };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
         };
     };
     controlled_s14_settlement_react_page_controlled_s14_settlement_react_get: {
@@ -15089,6 +15249,24 @@ export interface operations {
                 };
                 content: {
                     "text/html": string;
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
                 };
             };
         };

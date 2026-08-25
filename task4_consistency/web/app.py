@@ -1185,6 +1185,16 @@ class S14GrantPermissionBody(BaseModel):
     ttl_seconds: int = Field(default=3600, ge=1, le=86400, strict=True)
 
 
+class S14NotificationBody(BaseModel):
+    """Optional target binding for the termination-notification worker:
+    when present, only this application/cycle's pending event is eligible."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    application_id: str = Field(min_length=1, max_length=200, strict=True)
+    cycle: int = Field(ge=1, strict=True)
+
+
 class S14EffectItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1950,6 +1960,61 @@ class S01HistoryRun(BaseModel):
     reconciliation: S01HistoryReconciliation | None = None
 
 
+class S01HistoryCancellation(BaseModel):
+    """One immutable upstream-cancellation event rebuilt from audit facts."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str | None = None
+    cycle: int
+    lifecycle_revision: int
+    reason_code: str | None = None
+    authority_subject: str | None = None
+    authority_role: str | None = None
+    fenced_effects: dict[str, int] = Field(default_factory=dict)
+    cancelled_at: int | None = None
+
+
+class S01HistoryTermination(BaseModel):
+    """One sealed Terminated settlement with its settled effects."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str | None = None
+    cycle: int
+    lifecycle_revision: int
+    notification_event_id: str | None = None
+    settled_effects: list[S14EffectItem] = Field(default_factory=list)
+    terminated_at: int | None = None
+
+
+class S01HistoryReopen(BaseModel):
+    """One successor-cycle reopen link to its predecessor."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str | None = None
+    predecessor_cycle: int
+    cycle: int
+    lifecycle_revision: int
+    target_phase: str | None = None
+    reopened_by: str | None = None
+    reopen_permission_id: str | None = None
+    reopened_at: int | None = None
+
+
+class S01HistoryLateInputReceipt(BaseModel):
+    """One late-input receipt demanding explicit reopen; the content never
+    entered the sealed cycle."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    receipt_id: str
+    reason_code: str
+    request_id: str | None = None
+    occurred_at: int | None = None
+
+
 class S01ApplicationHistoryResponse(BaseModel):
     schema_version: str
     application_id: str
@@ -1964,6 +2029,12 @@ class S01ApplicationHistoryResponse(BaseModel):
     )
     entity_links: list[S01HistoryEntityLink] = Field(default_factory=list)
     entity_link_history: list[S01HistoryEntityLinkCorrection] = Field(
+        default_factory=list
+    )
+    cancellations: list[S01HistoryCancellation] = Field(default_factory=list)
+    terminations: list[S01HistoryTermination] = Field(default_factory=list)
+    reopens: list[S01HistoryReopen] = Field(default_factory=list)
+    late_input_receipts: list[S01HistoryLateInputReceipt] = Field(
         default_factory=list
     )
 
@@ -4518,12 +4589,24 @@ def controlled_s14_reopen(
     responses=S14_COMMAND_RESPONSES,
 )
 def controlled_s14_process_notification(
-    request: Request, response: Response
+    request: Request,
+    response: Response,
+    body: S14NotificationBody | None = None,
 ) -> Response:
-    """Deliver one pending termination notification (verified terminal gate)."""
+    """Deliver one pending termination notification (verified terminal gate).
+
+    The closed optional body binds processing to one application/cycle so an
+    operator console can never process another application's effect; without
+    a body the worker claims the first globally eligible pending event."""
     _s01_require_operator(request)
     _s01_disable_cache(response)
-    result = _s01_service().process_termination_notification()
+    result = _s01_service().process_termination_notification(
+        **(
+            {"application_id": body.application_id, "cycle": body.cycle}
+            if body is not None
+            else {}
+        )
+    )
     return _s14_command_response(result)
 
 
@@ -6234,20 +6317,34 @@ def _s14_react_shell() -> Response:
     """The shared qualified React build for the T16 lifecycle shells, or the
     minimized closed S14 503 (no-store, like the S12/S13 sibling shells) when
     the build is missing or partial.  The shell never grants any authority."""
+    index_html = _s14_react_index_html_or_unavailable()
+    if isinstance(index_html, Response):
+        return index_html
+    response = HTMLResponse(index_html)
+    _s01_disable_cache(response)
+    return response
+
+
+def _s14_react_index_html_or_unavailable() -> str | Response:
+    """The qualified React build HTML, or the closed no-store S14 503 when
+    the build is missing or partial (shared by both T16 shell variants)."""
     index_html = _react_shell_index_html()
     if index_html is None:
-        response = JSONResponse(
-            status_code=503,
-            content={
-                "detail": {
-                    "error": "S14_REACT_UNAVAILABLE",
-                    "message": "Controlled S14 React shell is not built",
-                }
-            },
-        )
-        _s01_disable_cache(response)
-        return response
-    response = HTMLResponse(index_html)
+        return _s14_shell_unavailable_response()
+    return index_html
+
+
+def _s14_shell_unavailable_response() -> Response:
+    """The minimized closed no-store S14 shell-unavailable 503."""
+    response = JSONResponse(
+        status_code=503,
+        content={
+            "detail": {
+                "error": "S14_REACT_UNAVAILABLE",
+                "message": "Controlled S14 React shell is not built",
+            }
+        },
+    )
     _s01_disable_cache(response)
     return response
 
@@ -6255,23 +6352,35 @@ def _s14_react_shell() -> Response:
 def _s14_session_shell_response(request: Request) -> Response:
     """The T16 integrator workbench shell with the existing session
     issuance, or the closed no-store S14 503 when the build is missing."""
-    index_html = _react_shell_index_html()
-    if index_html is None:
-        response = JSONResponse(
-            status_code=503,
-            content={
-                "detail": {
-                    "error": "S14_REACT_UNAVAILABLE",
-                    "message": "Controlled S14 React shell is not built",
-                }
-            },
-        )
-        _s01_disable_cache(response)
-        return response
+    index_html = _s14_react_index_html_or_unavailable()
+    if isinstance(index_html, Response):
+        return index_html
     return _controlled_s01_shell_response(request, index_html)
 
 
-@app.get("/controlled/s14", response_class=HTMLResponse)
+_S14_SHELL_ERROR_RESPONSES = {
+    403: {
+        "content": {
+            "application/json": {
+                "schema": {"$ref": "#/components/schemas/S01ErrorResponse"}
+            }
+        },
+    },
+    503: {
+        "content": {
+            "application/json": {
+                "schema": {"$ref": "#/components/schemas/S01ErrorResponse"}
+            }
+        },
+    },
+}
+
+
+@app.get(
+    "/controlled/s14",
+    response_class=HTMLResponse,
+    responses=_S14_SHELL_ERROR_RESPONSES,
+)
 def controlled_s14_page(request: Request) -> Response:
     """Canonical T16 lifecycle cancellation workbench shell (Ticket #50):
     the shared qualified React build under the existing S01 controlled
@@ -6283,7 +6392,11 @@ def controlled_s14_page(request: Request) -> Response:
     return _s14_session_shell_response(request)
 
 
-@app.get("/controlled/s14/react", response_class=HTMLResponse)
+@app.get(
+    "/controlled/s14/react",
+    response_class=HTMLResponse,
+    responses=_S14_SHELL_ERROR_RESPONSES,
+)
 def controlled_s14_react_page(request: Request) -> Response:
     """The T16 /react alias: the same closed shell contract as the canonical
     route."""
@@ -6302,14 +6415,22 @@ def _s14_settlement_shell_response(request: Request) -> Response:
     return _s14_react_shell()
 
 
-@app.get("/controlled/s14/settlement", response_class=HTMLResponse)
+@app.get(
+    "/controlled/s14/settlement",
+    response_class=HTMLResponse,
+    responses=_S14_SHELL_ERROR_RESPONSES,
+)
 def controlled_s14_settlement_page(request: Request) -> Response:
     """Canonical T16 termination settlement console shell."""
 
     return _s14_settlement_shell_response(request)
 
 
-@app.get("/controlled/s14/settlement/react", response_class=HTMLResponse)
+@app.get(
+    "/controlled/s14/settlement/react",
+    response_class=HTMLResponse,
+    responses=_S14_SHELL_ERROR_RESPONSES,
+)
 def controlled_s14_settlement_react_page(request: Request) -> Response:
     """The settlement console /react alias: the same closed shell contract."""
 

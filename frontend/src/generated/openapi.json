@@ -1025,6 +1025,13 @@
             "title": "Business Exceptions",
             "type": "array"
           },
+          "cancellations": {
+            "items": {
+              "$ref": "#/components/schemas/S01HistoryCancellation"
+            },
+            "title": "Cancellations",
+            "type": "array"
+          },
           "corrections": {
             "items": {
               "$ref": "#/components/schemas/S01HistoryCorrection"
@@ -1057,6 +1064,13 @@
             "title": "Entity Links",
             "type": "array"
           },
+          "late_input_receipts": {
+            "items": {
+              "$ref": "#/components/schemas/S01HistoryLateInputReceipt"
+            },
+            "title": "Late Input Receipts",
+            "type": "array"
+          },
           "membership_history": {
             "items": {
               "$ref": "#/components/schemas/S01HistoryMembershipCorrection"
@@ -1071,6 +1085,13 @@
             "title": "Memberships",
             "type": "array"
           },
+          "reopens": {
+            "items": {
+              "$ref": "#/components/schemas/S01HistoryReopen"
+            },
+            "title": "Reopens",
+            "type": "array"
+          },
           "runs": {
             "items": {
               "$ref": "#/components/schemas/S01HistoryRun"
@@ -1081,6 +1102,13 @@
           "schema_version": {
             "title": "Schema Version",
             "type": "string"
+          },
+          "terminations": {
+            "items": {
+              "$ref": "#/components/schemas/S01HistoryTermination"
+            },
+            "title": "Terminations",
+            "type": "array"
           }
         },
         "required": [
@@ -2677,6 +2705,88 @@
         "title": "S01HistoryBusinessException",
         "type": "object"
       },
+      "S01HistoryCancellation": {
+        "additionalProperties": false,
+        "description": "One immutable upstream-cancellation event rebuilt from audit facts.",
+        "properties": {
+          "authority_role": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Authority Role"
+          },
+          "authority_subject": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Authority Subject"
+          },
+          "cancelled_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cancelled At"
+          },
+          "cycle": {
+            "title": "Cycle",
+            "type": "integer"
+          },
+          "event_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Id"
+          },
+          "fenced_effects": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Fenced Effects",
+            "type": "object"
+          },
+          "lifecycle_revision": {
+            "title": "Lifecycle Revision",
+            "type": "integer"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Code"
+          }
+        },
+        "required": [
+          "cycle",
+          "lifecycle_revision"
+        ],
+        "title": "S01HistoryCancellation",
+        "type": "object"
+      },
       "S01HistoryCorrection": {
         "properties": {
           "actor": {
@@ -3293,6 +3403,48 @@
         "title": "S01HistoryEntityLinkDecisionPin",
         "type": "object"
       },
+      "S01HistoryLateInputReceipt": {
+        "additionalProperties": false,
+        "description": "One late-input receipt demanding explicit reopen; the content never\nentered the sealed cycle.",
+        "properties": {
+          "occurred_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Occurred At"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "receipt_id": {
+            "title": "Receipt Id",
+            "type": "string"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Id"
+          }
+        },
+        "required": [
+          "receipt_id",
+          "reason_code"
+        ],
+        "title": "S01HistoryLateInputReceipt",
+        "type": "object"
+      },
       "S01HistoryMembership": {
         "description": "One append-only ledger record of the preserved page-membership history\n(S10): candidate claims and every accepted/unassigned decision with its\nexplicit status.",
         "properties": {
@@ -3719,6 +3871,86 @@
         "title": "S01HistoryReconciliation",
         "type": "object"
       },
+      "S01HistoryReopen": {
+        "additionalProperties": false,
+        "description": "One successor-cycle reopen link to its predecessor.",
+        "properties": {
+          "cycle": {
+            "title": "Cycle",
+            "type": "integer"
+          },
+          "event_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Id"
+          },
+          "lifecycle_revision": {
+            "title": "Lifecycle Revision",
+            "type": "integer"
+          },
+          "predecessor_cycle": {
+            "title": "Predecessor Cycle",
+            "type": "integer"
+          },
+          "reopen_permission_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reopen Permission Id"
+          },
+          "reopened_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reopened At"
+          },
+          "reopened_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reopened By"
+          },
+          "target_phase": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Phase"
+          }
+        },
+        "required": [
+          "predecessor_cycle",
+          "cycle",
+          "lifecycle_revision"
+        ],
+        "title": "S01HistoryReopen",
+        "type": "object"
+      },
       "S01HistoryRun": {
         "properties": {
           "activation_event_id": {
@@ -4099,6 +4331,66 @@
           "source_sha256"
         ],
         "title": "S01HistorySourceLocation",
+        "type": "object"
+      },
+      "S01HistoryTermination": {
+        "additionalProperties": false,
+        "description": "One sealed Terminated settlement with its settled effects.",
+        "properties": {
+          "cycle": {
+            "title": "Cycle",
+            "type": "integer"
+          },
+          "event_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Id"
+          },
+          "lifecycle_revision": {
+            "title": "Lifecycle Revision",
+            "type": "integer"
+          },
+          "notification_event_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notification Event Id"
+          },
+          "settled_effects": {
+            "items": {
+              "$ref": "#/components/schemas/S14EffectItem"
+            },
+            "title": "Settled Effects",
+            "type": "array"
+          },
+          "terminated_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Terminated At"
+          }
+        },
+        "required": [
+          "cycle",
+          "lifecycle_revision"
+        ],
+        "title": "S01HistoryTermination",
         "type": "object"
       },
       "S01HumanDecision": {
@@ -17392,6 +17684,29 @@
         "title": "S14GrantPermissionBody",
         "type": "object"
       },
+      "S14NotificationBody": {
+        "additionalProperties": false,
+        "description": "Optional target binding for the termination-notification worker:\nwhen present, only this application/cycle's pending event is eligible.",
+        "properties": {
+          "application_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Application Id",
+            "type": "string"
+          },
+          "cycle": {
+            "minimum": 1.0,
+            "title": "Cycle",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "application_id",
+          "cycle"
+        ],
+        "title": "S14NotificationBody",
+        "type": "object"
+      },
       "S14ReopenBody": {
         "additionalProperties": false,
         "properties": {
@@ -20462,8 +20777,25 @@
     },
     "/controlled/s01/api/commands/process-termination-notification": {
       "post": {
-        "description": "Deliver one pending termination notification (verified terminal gate).",
+        "description": "Deliver one pending termination notification (verified terminal gate).\n\nThe closed optional body binds processing to one application/cycle so an\noperator console can never process another application's effect; without\na body the worker claims the first globally eligible pending event.",
         "operationId": "controlled_s14_process_notification_controlled_s01_api_commands_process_termination_notification_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/S14NotificationBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "content": {
@@ -26575,6 +26907,26 @@
               }
             },
             "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "summary": "Controlled S14 Page"
@@ -26594,6 +26946,26 @@
               }
             },
             "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "summary": "Controlled S14 React Page"
@@ -26613,6 +26985,26 @@
               }
             },
             "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "summary": "Controlled S14 Settlement Page"
@@ -26632,6 +27024,26 @@
               }
             },
             "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "summary": "Controlled S14 Settlement React Page"

@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  useApplicationHistory,
   useCurrentRoute,
   ROUTE_KEY,
   useS14Cancel,
@@ -187,26 +188,6 @@ describe("S14 command hooks", () => {
     });
   });
 
-  it("posts the operator notification without a body", async () => {
-    const client = createQueryClient();
-    const router = fetchRouter({
-      [`POST ${NOTIFY_PATH}`]: () =>
-        new Response(
-          JSON.stringify({ status: "delivered", replayed: false }),
-          { headers: { "Content-Type": "application/json" } },
-        ),
-    });
-    const { result } = renderHook(() => useS14ProcessNotification(), {
-      wrapper: wrap(client),
-    });
-    result.current.mutate(undefined);
-    await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(result.current.data?.status).toBe("delivered");
-    expect(router.calls).toEqual([
-      { method: "POST", url: NOTIFY_PATH, body: undefined },
-    ]);
-  });
-
   it("invalidates the authoritative S01 reads after a typed outcome", async () => {
     const client = createQueryClient();
     client.setQueryData(ROUTE_KEY(S14_APPLICATION_ID), s14CurrentRoute());
@@ -290,6 +271,23 @@ describe("useTerminationConvergence", () => {
           { headers: { "Content-Type": "application/json" } },
         );
       },
+      [`GET /controlled/s01/api/queries/applications/${S14_APPLICATION_ID}/history`]:
+        () =>
+          new Response(
+            JSON.stringify({
+              schema_version: "s04-application-history/1",
+              application_id: S14_APPLICATION_ID,
+              runs: [],
+              corrections: [],
+              business_exceptions: [],
+              attachment_versions: [],
+              cancellations: [],
+              terminations: [],
+              reopens: [],
+              late_input_receipts: [],
+            }),
+            { headers: { "Content-Type": "application/json" } },
+          ),
     });
     const { result } = renderHook(
       () =>
@@ -304,6 +302,11 @@ describe("useTerminationConvergence", () => {
       { wrapper: wrap(client) },
     );
     await waitFor(() => expect(route.current.isSuccess).toBe(true));
+    const { result: history } = renderHook(
+      () => useApplicationHistory(S14_APPLICATION_ID),
+      { wrapper: wrap(client) },
+    );
+    await waitFor(() => expect(history.current.isSuccess).toBe(true));
     await waitFor(() => expect(result.current).toBe("terminated"));
     expect(routeCalls).toBeGreaterThanOrEqual(2);
   });
@@ -322,6 +325,23 @@ describe("useTerminationConvergence", () => {
           ),
           { headers: { "Content-Type": "application/json" } },
         ),
+      [`GET /controlled/s01/api/queries/applications/${S14_APPLICATION_ID}/history`]:
+        () =>
+          new Response(
+            JSON.stringify({
+              schema_version: "s04-application-history/1",
+              application_id: S14_APPLICATION_ID,
+              runs: [],
+              corrections: [],
+              business_exceptions: [],
+              attachment_versions: [],
+              cancellations: [],
+              terminations: [],
+              reopens: [],
+              late_input_receipts: [],
+            }),
+            { headers: { "Content-Type": "application/json" } },
+          ),
     });
     const { result } = renderHook(
       () =>
@@ -331,7 +351,18 @@ describe("useTerminationConvergence", () => {
         }),
       { wrapper: wrap(client) },
     );
+    const { result: route } = renderHook(
+      () => useCurrentRoute(S14_APPLICATION_ID),
+      { wrapper: wrap(client) },
+    );
+    const { result: history } = renderHook(
+      () => useApplicationHistory(S14_APPLICATION_ID),
+      { wrapper: wrap(client) },
+    );
+    await waitFor(() => expect(route.current.isSuccess).toBe(true));
+    await waitFor(() => expect(history.current.isSuccess).toBe(true));
     await waitFor(() => expect(result.current).toBe("timed_out"));
+    // Successful reads that never report termination stay non-terminal.
   });
 
   it("is idle when the poll is not active", () => {
@@ -343,5 +374,138 @@ describe("useTerminationConvergence", () => {
     );
     expect(result.current).toBe("idle");
     expect(router.calls).toHaveLength(0);
+  });
+
+  it("never reports terminated while a history read fails, even when the route says Terminated", async () => {
+    const client = createQueryClient();
+    client.setQueryData(
+      ROUTE_KEY(S14_APPLICATION_ID),
+      s14CurrentRoute({ phase: "Terminating", lifecycle_revision: 6 }),
+    );
+    fetchRouter({
+      [`GET ${ROUTE_PATH}`]: () =>
+        new Response(
+          JSON.stringify(
+            s14CurrentRoute({
+              phase: "Terminated",
+              lifecycle_revision: 7,
+              current_run_id: null,
+            }),
+          ),
+          { headers: { "Content-Type": "application/json" } },
+        ),
+      [`GET /controlled/s01/api/queries/applications/${S14_APPLICATION_ID}/history`]:
+        () =>
+          new Response(
+            JSON.stringify({ detail: { error: "S03_NOT_FOUND" } }),
+            { status: 404, headers: { "Content-Type": "application/json" } },
+          ),
+    });
+    const { result } = renderHook(
+      () =>
+        useTerminationConvergence(S14_APPLICATION_ID, true, {
+          intervalMs: 2,
+          maxAttempts: 3,
+        }),
+      { wrapper: wrap(client) },
+    );
+    const { result: route } = renderHook(
+      () => useCurrentRoute(S14_APPLICATION_ID),
+      { wrapper: wrap(client) },
+    );
+    const { result: history } = renderHook(
+      () => useApplicationHistory(S14_APPLICATION_ID),
+      { wrapper: wrap(client) },
+    );
+    await waitFor(() => expect(route.current.isSuccess).toBe(true));
+    await waitFor(() => expect(history.current.isError).toBe(true));
+    await waitFor(() => expect(result.current).toBe("timed_out"));
+    // The bounded unknown is the only outcome reachable without history.
+    expect(result.current).not.toBe("terminated");
+  });
+
+  it("recovers to terminated once a transient history failure clears", async () => {
+    const client = createQueryClient();
+    client.setQueryData(
+      ROUTE_KEY(S14_APPLICATION_ID),
+      s14CurrentRoute({ phase: "Terminating", lifecycle_revision: 6 }),
+    );
+    let historyReads = 0;
+    fetchRouter({
+      [`GET ${ROUTE_PATH}`]: () =>
+        new Response(
+          JSON.stringify(
+            s14CurrentRoute({
+              phase: "Terminated",
+              lifecycle_revision: 7,
+              current_run_id: null,
+            }),
+          ),
+          { headers: { "Content-Type": "application/json" } },
+        ),
+      [`GET /controlled/s01/api/queries/applications/${S14_APPLICATION_ID}/history`]:
+        () => {
+          historyReads += 1;
+          if (historyReads < 2) {
+            return new Response("{}", { status: 503 });
+          }
+          return new Response(
+            JSON.stringify({
+              schema_version: "s04-application-history/1",
+              application_id: S14_APPLICATION_ID,
+              runs: [],
+              corrections: [],
+              business_exceptions: [],
+              attachment_versions: [],
+              cancellations: [],
+              terminations: [],
+              reopens: [],
+              late_input_receipts: [],
+            }),
+            { headers: { "Content-Type": "application/json" } },
+          );
+        },
+    });
+    const { result } = renderHook(
+      () =>
+        useTerminationConvergence(S14_APPLICATION_ID, true, {
+          intervalMs: 5,
+          maxAttempts: 10,
+        }),
+      { wrapper: wrap(client) },
+    );
+    renderHook(() => useCurrentRoute(S14_APPLICATION_ID), {
+      wrapper: wrap(client),
+    });
+    renderHook(() => useApplicationHistory(S14_APPLICATION_ID), {
+      wrapper: wrap(client),
+    });
+    // The shared transient-retry policy backs off on the 503 before the
+    // next bounded attempt observes the recovered authoritative read.
+    await waitFor(() => expect(result.current).toBe("terminated"), {
+      timeout: 10_000,
+    });
+    expect(historyReads).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("S14 notification binding hook", () => {
+  it("posts the closed application/cycle binding body", async () => {
+    const client = createQueryClient();
+    const router = fetchRouter({
+      [`POST ${NOTIFY_PATH}`]: () =>
+        new Response(JSON.stringify({ status: "delivered" }), {
+          headers: { "Content-Type": "application/json" },
+        }),
+    });
+    const { result } = renderHook(() => useS14ProcessNotification(), {
+      wrapper: wrap(client),
+    });
+    result.current.mutate({ application_id: S14_APPLICATION_ID, cycle: 1 });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(router.calls[0]?.body).toEqual({
+      application_id: S14_APPLICATION_ID,
+      cycle: 1,
+    });
   });
 });
