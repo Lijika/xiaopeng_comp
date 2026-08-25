@@ -1186,13 +1186,55 @@ class S14GrantPermissionBody(BaseModel):
 
 
 class S14NotificationBody(BaseModel):
-    """Optional target binding for the termination-notification worker:
-    when present, only this application/cycle's pending event is eligible."""
+    """Required target binding for the public termination-notification
+    command: only the exact application/cycle/operation pending event is
+    eligible, so an operator console can never process another
+    application's effect."""
 
     model_config = ConfigDict(extra="forbid")
 
     application_id: str = Field(min_length=1, max_length=200, strict=True)
     cycle: int = Field(ge=1, strict=True)
+    operation_id: str = Field(min_length=1, max_length=200, strict=True)
+
+
+class S14PendingNotification(BaseModel):
+    """The authoritative pending termination notification of the current
+    Terminating cycle."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    operation_id: str
+    event_id: str
+
+
+class S14ReopenPermissionBinding(BaseModel):
+    """The server-owned reopen binding of the current cycle, complete with
+    the pinned artifact digest the successor reopen must echo."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    permission_id: str
+    artifact_release_digest: str
+    policy_release_digest: str
+    approved_by: str | None = None
+    expires_at: int | None = None
+
+
+class S14SettlementViewResponse(BaseModel):
+    """Minimized operator settlement projection: the authoritative pending
+    effect and permission facts for the current cycle.  Read-only; a
+    reloaded console observes these without replaying local results."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["s14-settlement-view/1"]
+    application_id: str
+    cycle: int
+    phase: str
+    lifecycle_revision: int
+    pending_notification: S14PendingNotification | None = None
+    reopen_permission: S14ReopenPermissionBinding | None = None
 
 
 class S14EffectItem(BaseModel):
@@ -1839,6 +1881,7 @@ class S01HistoryCorrection(BaseModel):
     source_location: S01HistorySourceLocation
     reason_code: str
     actor: str
+    cycle: int | None = None
     recorded_at: int
     invalidated_decision_ids: list[str]
     invalidated_exception_ids: list[str]
@@ -1873,6 +1916,7 @@ class S01HistoryAttachmentVersion(BaseModel):
     page_ids: list[str]
     producer_result_id: str | None = None
     evidence_revision: int
+    cycle: int | None = None
     current: bool
 
 
@@ -2012,6 +2056,7 @@ class S01HistoryLateInputReceipt(BaseModel):
     receipt_id: str
     reason_code: str
     request_id: str | None = None
+    cycle: int | None = None
     occurred_at: int | None = None
 
 
@@ -4591,23 +4636,44 @@ def controlled_s14_reopen(
 def controlled_s14_process_notification(
     request: Request,
     response: Response,
-    body: S14NotificationBody | None = None,
+    body: S14NotificationBody,
 ) -> Response:
-    """Deliver one pending termination notification (verified terminal gate).
-
-    The closed optional body binds processing to one application/cycle so an
-    operator console can never process another application's effect; without
-    a body the worker claims the first globally eligible pending event."""
+    """Deliver exactly one bound pending termination notification (verified
+    terminal gate).  The closed body binds processing to the exact
+    application/cycle/operation; there is no unbound fallback on the public
+    operator surface."""
     _s01_require_operator(request)
     _s01_disable_cache(response)
     result = _s01_service().process_termination_notification(
-        **(
-            {"application_id": body.application_id, "cycle": body.cycle}
-            if body is not None
-            else {}
-        )
+        application_id=body.application_id,
+        cycle=body.cycle,
+        operation_id=body.operation_id,
     )
     return _s14_command_response(result)
+
+
+@app.get(
+    "/controlled/s01/api/queries/applications/{application_id}/settlement",
+    response_model=S14SettlementViewResponse,
+    responses={
+        403: {"model": S01ErrorResponse},
+        404: {"model": S01ErrorResponse},
+    },
+)
+def controlled_s14_settlement_view(
+    application_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    """The operator settlement projection: authoritative pending effect and
+    permission binding facts for the current cycle.  Read-only; existence is
+    hidden behind the sanitized 404."""
+    _s01_require_operator(request)
+    _s01_disable_cache(response)
+    try:
+        return _s01_service().settlement_view(application_id=application_id)
+    except QueryNotFound as error:
+        raise HTTPException(404, detail={"error": "S01_NOT_FOUND"}) from error
 
 
 @app.post("/controlled/s01/api/_test/commands/project")
@@ -6350,8 +6416,10 @@ def _s14_shell_unavailable_response() -> Response:
 
 
 def _s14_session_shell_response(request: Request) -> Response:
-    """The T16 integrator workbench shell with the existing session
-    issuance, or the closed no-store S14 503 when the build is missing."""
+    """The T16 integrator workbench shell with the existing service gate and
+    session issuance, or the closed no-store S14 503 when the build is
+    missing or the controlled service is unavailable."""
+    _s01_service()
     index_html = _s14_react_index_html_or_unavailable()
     if isinstance(index_html, Response):
         return index_html
@@ -6388,8 +6456,9 @@ def controlled_s14_page(request: Request) -> Response:
     fail-closed missing-build behavior.  Every command stays guarded by its
     own route authority; the shell itself grants none."""
 
-    _s01_service()
-    return _s14_session_shell_response(request)
+    return _s14_shell_with_cache_policy(
+        lambda: _s14_session_shell_response(request)
+    )
 
 
 @app.get(
@@ -6401,8 +6470,9 @@ def controlled_s14_react_page(request: Request) -> Response:
     """The T16 /react alias: the same closed shell contract as the canonical
     route."""
 
-    _s01_service()
-    return _s14_session_shell_response(request)
+    return _s14_shell_with_cache_policy(
+        lambda: _s14_session_shell_response(request)
+    )
 
 
 def _s14_settlement_shell_response(request: Request) -> Response:
@@ -6411,8 +6481,26 @@ def _s14_settlement_shell_response(request: Request) -> Response:
     authoritative read seam is the S13 delivery view plus typed S14 command
     results; no reviewer query can fire from this boundary."""
 
+    _s01_service()
     _s01_require_operator(request)
     return _s14_react_shell()
+
+
+def _s14_shell_with_cache_policy(build: Callable[[], Response]) -> Response:
+    """Run a shell builder and close every reachable auth/unavailable
+    exception with the shell cache policy (no-store + no-cache), so no
+    authorization or availability response is ever cacheable."""
+
+    try:
+        return build()
+    except HTTPException as exc:
+        response = JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+            headers=dict(exc.headers or {}),
+        )
+        _s01_disable_cache(response)
+        return response
 
 
 @app.get(
@@ -6423,7 +6511,9 @@ def _s14_settlement_shell_response(request: Request) -> Response:
 def controlled_s14_settlement_page(request: Request) -> Response:
     """Canonical T16 termination settlement console shell."""
 
-    return _s14_settlement_shell_response(request)
+    return _s14_shell_with_cache_policy(
+        lambda: _s14_settlement_shell_response(request)
+    )
 
 
 @app.get(
@@ -6434,7 +6524,9 @@ def controlled_s14_settlement_page(request: Request) -> Response:
 def controlled_s14_settlement_react_page(request: Request) -> Response:
     """The settlement console /react alias: the same closed shell contract."""
 
-    return _s14_settlement_shell_response(request)
+    return _s14_shell_with_cache_policy(
+        lambda: _s14_settlement_shell_response(request)
+    )
 
 
 def create_s01_test_app() -> FastAPI:

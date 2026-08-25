@@ -2529,6 +2529,17 @@
             "title": "Current",
             "type": "boolean"
           },
+          "cycle": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cycle"
+          },
           "document_id": {
             "title": "Document Id",
             "type": "string"
@@ -2796,6 +2807,17 @@
           "correction_id": {
             "title": "Correction Id",
             "type": "string"
+          },
+          "cycle": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cycle"
           },
           "document_id": {
             "title": "Document Id",
@@ -3407,6 +3429,17 @@
         "additionalProperties": false,
         "description": "One late-input receipt demanding explicit reopen; the content never\nentered the sealed cycle.",
         "properties": {
+          "cycle": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cycle"
+          },
           "occurred_at": {
             "anyOf": [
               {
@@ -17686,7 +17719,7 @@
       },
       "S14NotificationBody": {
         "additionalProperties": false,
-        "description": "Optional target binding for the termination-notification worker:\nwhen present, only this application/cycle's pending event is eligible.",
+        "description": "Required target binding for the public termination-notification\ncommand: only the exact application/cycle/operation pending event is\neligible, so an operator console can never process another\napplication's effect.",
         "properties": {
           "application_id": {
             "maxLength": 200,
@@ -17698,13 +17731,40 @@
             "minimum": 1.0,
             "title": "Cycle",
             "type": "integer"
+          },
+          "operation_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Operation Id",
+            "type": "string"
           }
         },
         "required": [
           "application_id",
-          "cycle"
+          "cycle",
+          "operation_id"
         ],
         "title": "S14NotificationBody",
+        "type": "object"
+      },
+      "S14PendingNotification": {
+        "additionalProperties": false,
+        "description": "The authoritative pending termination notification of the current\nTerminating cycle.",
+        "properties": {
+          "event_id": {
+            "title": "Event Id",
+            "type": "string"
+          },
+          "operation_id": {
+            "title": "Operation Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation_id",
+          "event_id"
+        ],
+        "title": "S14PendingNotification",
         "type": "object"
       },
       "S14ReopenBody": {
@@ -17737,6 +17797,53 @@
           "reopen_policy"
         ],
         "title": "S14ReopenBody",
+        "type": "object"
+      },
+      "S14ReopenPermissionBinding": {
+        "additionalProperties": false,
+        "description": "The server-owned reopen binding of the current cycle, complete with\nthe pinned artifact digest the successor reopen must echo.",
+        "properties": {
+          "approved_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approved By"
+          },
+          "artifact_release_digest": {
+            "title": "Artifact Release Digest",
+            "type": "string"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "permission_id": {
+            "title": "Permission Id",
+            "type": "string"
+          },
+          "policy_release_digest": {
+            "title": "Policy Release Digest",
+            "type": "string"
+          }
+        },
+        "required": [
+          "permission_id",
+          "artifact_release_digest",
+          "policy_release_digest"
+        ],
+        "title": "S14ReopenPermissionBinding",
         "type": "object"
       },
       "S14ReopenPolicyBody": {
@@ -17784,6 +17891,62 @@
           "idempotency_key"
         ],
         "title": "S14SettleBody",
+        "type": "object"
+      },
+      "S14SettlementViewResponse": {
+        "additionalProperties": false,
+        "description": "Minimized operator settlement projection: the authoritative pending\neffect and permission facts for the current cycle.  Read-only; a\nreloaded console observes these without replaying local results.",
+        "properties": {
+          "application_id": {
+            "title": "Application Id",
+            "type": "string"
+          },
+          "cycle": {
+            "title": "Cycle",
+            "type": "integer"
+          },
+          "lifecycle_revision": {
+            "title": "Lifecycle Revision",
+            "type": "integer"
+          },
+          "pending_notification": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/S14PendingNotification"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "phase": {
+            "title": "Phase",
+            "type": "string"
+          },
+          "reopen_permission": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/S14ReopenPermissionBinding"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "schema_version": {
+            "const": "s14-settlement-view/1",
+            "title": "Schema Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "application_id",
+          "cycle",
+          "phase",
+          "lifecycle_revision"
+        ],
+        "title": "S14SettlementViewResponse",
         "type": "object"
       },
       "T05BusinessExceptionOperationsResult": {
@@ -20777,24 +20940,17 @@
     },
     "/controlled/s01/api/commands/process-termination-notification": {
       "post": {
-        "description": "Deliver one pending termination notification (verified terminal gate).\n\nThe closed optional body binds processing to one application/cycle so an\noperator console can never process another application's effect; without\na body the worker claims the first globally eligible pending event.",
+        "description": "Deliver exactly one bound pending termination notification (verified\nterminal gate).  The closed body binds processing to the exact\napplication/cycle/operation; there is no unbound fallback on the public\noperator surface.",
         "operationId": "controlled_s14_process_notification_controlled_s01_api_commands_process_termination_notification_post",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "anyOf": [
-                  {
-                    "$ref": "#/components/schemas/S14NotificationBody"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "title": "Body"
+                "$ref": "#/components/schemas/S14NotificationBody"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {
@@ -23214,6 +23370,66 @@
           }
         },
         "summary": "Controlled S04 Demo Application History"
+      }
+    },
+    "/controlled/s01/api/queries/applications/{application_id}/settlement": {
+      "get": {
+        "description": "The operator settlement projection: authoritative pending effect and\npermission binding facts for the current cycle.  Read-only; existence is\nhidden behind the sanitized 404.",
+        "operationId": "controlled_s14_settlement_view_controlled_s01_api_queries_applications__application_id__settlement_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "application_id",
+            "required": true,
+            "schema": {
+              "title": "Application Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S14SettlementViewResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Controlled S14 Settlement View"
       }
     },
     "/controlled/s01/api/queries/applications/{application_id}/workspace": {

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 
 import { useCurrentRoute,
   useApplicationHistory,
@@ -8,6 +9,8 @@ import { useCurrentRoute,
   useS14ProcessNotification,
   useS14Reopen,
   useS14Settle,
+  S14_SETTLEMENT_VIEW_KEY,
+  useS14SettlementView,
   useTerminationConvergence,
   type S14CommandResult,
 } from "../api/hooks";
@@ -237,12 +240,14 @@ export default function T16LifecyclePanel({
 
   return (
     <div data-testid="t16-lifecycle-panel">
-      {viewingHistoricalCycle && history.data !== undefined && (
-        <CycleHistoryView
-          cycle={selectedCycle as number}
-          history={history.data}
-        />
-      )}
+      {selectedCycle !== null &&
+        selectedCycle !== undefined &&
+        history.data !== undefined && (
+          <CycleHistoryView
+            cycle={selectedCycle}
+            history={history.data}
+          />
+        )}
       {!viewingHistoricalCycle && (
         <>
       <Section
@@ -376,6 +381,10 @@ export default function T16LifecyclePanel({
             onReload={() => void history.refetch()}
             isReloading={history.isFetching}
           />
+        ) : history.isPending && history.data === undefined ? (
+          <p data-testid="t16-history-loading" role="status" aria-live="polite">
+            正在加载历史周期…
+          </p>
         ) : history.data === undefined ? (
           <p data-testid="t16-history-empty">—</p>
         ) : history.data.runs.length === 0 ? (
@@ -496,6 +505,89 @@ function CycleHistoryView({
             ))}
           </ol>
         )}
+        <h3>Evidence Corrections</h3>
+        {(history.corrections ?? []).filter((entry) => entry.cycle === cycle).length === 0 ? (
+          <p data-testid="t16-cycle-corrections-empty">
+            No evidence corrections in this cycle
+          </p>
+        ) : (
+          <ul className="history-list" data-testid="t16-cycle-corrections">
+            {(history.corrections ?? [])
+              .filter((entry) => entry.cycle === cycle)
+              .map((entry) => (
+                <li key={entry.correction_id} data-testid="t16-cycle-correction">
+                  {leafText(entry.field)} · {leafText(entry.reason_code)} ·{" "}
+                  {leafText(entry.actor)}
+                </li>
+              ))}
+          </ul>
+        )}
+        <h3>Attachment Versions</h3>
+        {(history.attachment_versions ?? [])
+          .filter((entry) => entry.cycle === cycle).length === 0 ? (
+          <p data-testid="t16-cycle-attachments-empty">
+            No attachment versions in this cycle
+          </p>
+        ) : (
+          <ul className="history-list" data-testid="t16-cycle-attachments">
+            {(history.attachment_versions ?? [])
+              .filter((entry) => entry.cycle === cycle)
+              .map((entry) => (
+                <li key={entry.attachment_id} data-testid="t16-cycle-attachment">
+                  {leafText(entry.attachment_id)} · v{leafText(entry.version)} ·{" "}
+                  {leafText(entry.document_role)}
+                </li>
+              ))}
+          </ul>
+        )}
+        <h3>Page Memberships</h3>
+        {(history.memberships ?? [])
+          .filter((entry) => entry.cycle === cycle && entry.record_kind !== "candidate")
+          .length === 0 ? (
+          <p data-testid="t16-cycle-memberships-empty">
+            No membership decisions in this cycle
+          </p>
+        ) : (
+          <ul className="history-list" data-testid="t16-cycle-memberships">
+            {(history.memberships ?? [])
+              .filter(
+                (entry) =>
+                  entry.cycle === cycle && entry.record_kind !== "candidate",
+              )
+              .map((entry, index) => (
+                <li
+                  key={`${entry.decision_id ?? entry.claim_id ?? index}`}
+                  data-testid="t16-cycle-membership"
+                >
+                  {leafText(entry.record_kind)} · {leafText(entry.decision_id)}
+                </li>
+              ))}
+          </ul>
+        )}
+        <h3>Entity Links</h3>
+        {(history.entity_links ?? [])
+          .filter((entry) => entry.cycle === cycle && entry.record_kind !== "candidate")
+          .length === 0 ? (
+          <p data-testid="t16-cycle-entity-links-empty">
+            No entity-link decisions in this cycle
+          </p>
+        ) : (
+          <ul className="history-list" data-testid="t16-cycle-entity-links">
+            {(history.entity_links ?? [])
+              .filter(
+                (entry) =>
+                  entry.cycle === cycle && entry.record_kind !== "candidate",
+              )
+              .map((entry, index) => (
+                <li
+                  key={`${entry.link_id ?? entry.claim_id ?? index}`}
+                  data-testid="t16-cycle-entity-link"
+                >
+                  {leafText(entry.relationship)} · {leafText(entry.status)}
+                </li>
+              ))}
+          </ul>
+        )}
         <h3>Lifecycle Events</h3>
         <ul className="history-list" data-testid="t16-cycle-events">
           {cancellations.map((entry) => (
@@ -526,11 +618,13 @@ function CycleHistoryView({
             )}
         </ul>
         <h3>Late-Input Receipts</h3>
-        {(history.late_input_receipts ?? []).length === 0 ? (
+        {(history.late_input_receipts ?? []).filter((receipt) => receipt.cycle === cycle).length === 0 ? (
           <p data-testid="t16-late-receipts-empty">No late-input receipts</p>
         ) : (
           <ul className="history-list" data-testid="t16-late-receipts">
-            {(history.late_input_receipts ?? []).map((receipt) => (
+            {(history.late_input_receipts ?? [])
+              .filter((receipt) => receipt.cycle === cycle)
+              .map((receipt) => (
               <li
                 key={receipt.receipt_id}
                 data-testid="t16-late-receipt"
@@ -554,7 +648,9 @@ export function T16SettlementPanel({
 }: {
   applicationId: string | null;
 }) {
+  const queryClient = useQueryClient();
   const delivery = useS13Delivery(applicationId);
+  const settlementView = useS14SettlementView(applicationId);
   const settle = useS14Settle(applicationId ?? "");
   const notify = useS14ProcessNotification();
   const grant = useS14GrantReopenPermission(applicationId ?? "");
@@ -565,7 +661,7 @@ export function T16SettlementPanel({
   const [approverSubject, setApproverSubject] = useState("");
   const [permissionId, setPermissionId] = useState("");
   const [targetPhase, setTargetPhase] = useState<"Intake" | "Assembly">("Intake");
-  const [binding, setBinding] = useState<ReopenBinding | null>(null);
+  const [localBinding, setBinding] = useState<ReopenBinding | null>(null);
   const [latched, setLatched] = useState(false);
 
   if (!applicationId) {
@@ -603,13 +699,28 @@ export function T16SettlementPanel({
 
   const anyPending =
     settle.isPending || notify.isPending || grant.isPending || reopen.isPending;
-  // The notification command is bound to THIS application/cycle and only
-  // eligible while the current Terminating cycle has that pending effect.
+  // The notification command is bound to THIS application/cycle/operation
+  // and derives its availability from the authoritative settlement read, so
+  // a reloaded console observes a still-pending effect without replaying
+  // any prior local settle result.
+  const pendingOperationId =
+    settlementView.data?.pending_notification?.operation_id ?? null;
   const pendingNotification =
-    phase === "Terminating" &&
-    (settle.data?.unresolved_effects ?? []).some(
-      (effect) => effect.kind === "termination_notification",
-    );
+    phase === "Terminating" && pendingOperationId !== null;
+
+  // The server-owned reopen binding hydrates from the authoritative read;
+  // local state only mirrors it until the next authoritative refetch.
+  const serverPermission = settlementView.data?.reopen_permission ?? null;
+  const binding: ReopenBinding | null =
+    localBinding ??
+    (serverPermission !== null &&
+    serverPermission.permission_id !== "" &&
+    serverPermission.artifact_release_digest !== ""
+      ? {
+          permissionId: serverPermission.permission_id,
+          artifactDigest: serverPermission.artifact_release_digest,
+        }
+      : null);
 
   const handleSettle = () => {
     if (anyPending || latched || phase !== "Terminating") return;
@@ -630,7 +741,11 @@ export function T16SettlementPanel({
   const handleNotify = () => {
     if (anyPending || latched || !pendingNotification) return;
     notify.mutate(
-      { application_id: applicationId, cycle: view.cycle },
+      {
+        application_id: applicationId,
+        cycle: view.cycle,
+        operation_id: pendingOperationId,
+      },
       {
       onSuccess: (data) =>
         handleS14Outcome(data, () => setLatched(true), () => undefined),
@@ -698,6 +813,11 @@ export function T16SettlementPanel({
     if (anyPending) return;
     try {
       await delivery.refetch({ throwOnError: true });
+      // The authoritative settlement read refreshes alongside delivery so
+      // pending-effect and permission facts never lag the reload.
+      await queryClient.refetchQueries({
+        queryKey: S14_SETTLEMENT_VIEW_KEY(applicationId ?? ""),
+      });
     } catch {
       return;
     }

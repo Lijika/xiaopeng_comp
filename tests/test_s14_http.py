@@ -197,9 +197,19 @@ def test_s14_http_full_cancel_settle_reopen_path(
     assert armed_body["phase"] == "Terminating"
     kinds = {item["kind"] for item in armed_body["unresolved_effects"]}
     assert kinds == {"termination_notification"}
+    operation_id = next(
+        item["id"]
+        for item in armed_body["unresolved_effects"]
+        if item["kind"] == "termination_notification"
+    )
 
     delivered = client.post(
         "/controlled/s01/api/commands/process-termination-notification",
+        json={
+            "application_id": application_id,
+            "cycle": body["cycle"],
+            "operation_id": operation_id,
+        },
         headers=_operator_auth(),
     )
     assert delivered.status_code == 200, delivered.text
@@ -505,6 +515,11 @@ def test_s14_service_missing_returns_unavailable_typed_503(
 
     unavailable = client.post(
         "/controlled/s01/api/commands/process-termination-notification",
+        json={
+            "application_id": "app_any",
+            "cycle": 1,
+            "operation_id": "op_any",
+        },
         headers=_operator_auth(),
     )
 

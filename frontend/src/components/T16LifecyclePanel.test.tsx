@@ -26,6 +26,34 @@ const NOTIFY_PATH = "/controlled/s01/api/commands/process-termination-notificati
 const ROUTE_PATH = `/controlled/s01/api/queries/applications/${S14_APPLICATION_ID}/current-route`;
 const HISTORY_PATH = `/controlled/s01/api/queries/applications/${S14_APPLICATION_ID}/history`;
 const DELIVERY_PATH = `/controlled/s13/delivery/${S14_APPLICATION_ID}`;
+const SETTLEMENT_VIEW_PATH = `/controlled/s01/api/queries/applications/${S14_APPLICATION_ID}/settlement`;
+
+function settlementViewPayload(
+  phase: string,
+  options: {
+    pending?: boolean;
+    permission?: {
+      permission_id: string;
+      artifact_release_digest: string;
+      policy_release_digest: string;
+      approved_by?: string;
+      expires_at?: number;
+    } | null;
+  } = {},
+) {
+  return {
+    schema_version: "s14-settlement-view/1",
+    application_id: S14_APPLICATION_ID,
+    cycle: 1,
+    phase,
+    lifecycle_revision: 6,
+    pending_notification:
+      options.pending === true
+        ? { operation_id: "op_t16_00000001", event_id: "evt_t16_00000001" }
+        : null,
+    reopen_permission: options.permission ?? null,
+  };
+}
 
 function jsonRoute(payload: unknown): () => Response {
   return () =>
@@ -193,6 +221,7 @@ describe("T16LifecyclePanel (integrator cancellation)", () => {
                 reason_code: "evidence.late_input_requires_reopen",
                 request_id: "req_1",
                 occurred_at: 250,
+                cycle: 1,
               },
             ],
           },
@@ -226,6 +255,59 @@ describe("T16LifecyclePanel (integrator cancellation)", () => {
     // The historical cycle view is read-only: no command surface.
     expect(screen.queryByTestId("t16-cancel-section")).not.toBeInTheDocument();
     expect(screen.queryByTestId("t16-cancel-button")).not.toBeInTheDocument();
+  });
+
+  it("does not leak cycle-1 late receipts into the cycle-2 view", async () => {
+    fetchRouter({
+      [`GET ${ROUTE_PATH}`]: jsonRoute(
+        s14CurrentRoute({
+          phase: "Intake",
+          cycle: 2,
+          lifecycle_revision: 8,
+          current_run_id: null,
+          currentness_reason: "NO_CURRENT_RUN",
+        }),
+      ),
+      [`GET ${HISTORY_PATH}`]: jsonRoute(
+        historyPayload([{ cycle: 1, run_id: "run_cycle1" }], {
+          late_input_receipts: [
+            {
+              receipt_id: "late_1",
+              reason_code: "evidence.late_input_requires_reopen",
+              request_id: "req_1",
+              occurred_at: 250,
+              cycle: 1,
+            },
+          ],
+        }),
+      ),
+    });
+    renderWithQuery(
+      <T16LifecyclePanel
+        applicationId={S14_APPLICATION_ID}
+        selectedCycle={2}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("t16-cycle-view")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("t16-late-receipts-empty")).toBeInTheDocument();
+    expect(screen.queryByTestId("t16-late-receipt")).not.toBeInTheDocument();
+  });
+
+  it("renders an explicit loading state before history resolves", async () => {
+    fetchRouter({
+      [`GET ${ROUTE_PATH}`]: jsonRoute(s14CurrentRoute()),
+      [`GET ${HISTORY_PATH}`]: () =>
+        new Promise(() => {
+          // Pending history owns the explicit loading state.
+        }),
+    });
+    renderWithQuery(<T16LifecyclePanel applicationId={S14_APPLICATION_ID} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("t16-history-loading")).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId("t16-history-empty")).not.toBeInTheDocument();
   });
 
   it("posts one exact cancel command and renders the typed accepted outcome", async () => {
@@ -419,12 +501,23 @@ describe("T16SettlementPanel (operator)", () => {
   it("runs settle-arm, notification, settle-seal and renders every typed outcome", async () => {
     const user = userEvent.setup();
     let settleCalls = 0;
+    let armed = false;
     const router = fetchRouter({
       [`GET ${DELIVERY_PATH}`]: jsonRoute(s14OperatorDeliveryView()),
+      [`GET ${SETTLEMENT_VIEW_PATH}`]: () =>
+        new Response(
+          JSON.stringify(
+            settlementViewPayload("Terminating", { pending: armed }),
+          ),
+          { headers: { "Content-Type": "application/json" } },
+        ),
       [`POST ${SETTLE_PATH}`]: () => {
         settleCalls += 1;
+        armed = settleCalls === 1;
         const payload =
-          settleCalls === 1 ? s14OutstandingSettle() : s14TerminatedSettle();
+          settleCalls === 1
+            ? s14OutstandingSettle()
+            : s14TerminatedSettle({ status: "terminated", replayed: false });
         return new Response(JSON.stringify(payload), {
           status: settleCalls === 1 ? 202 : 200,
           headers: { "Content-Type": "application/json" },
@@ -595,15 +688,70 @@ describe("T16SettlementPanel (operator)", () => {
     expect(reopenBody?.reopen_policy?.release_digest).toBe(ARTIFACT_DIGEST);
   });
 
-  it("enables notification processing only for the current Terminating cycle with a pending effect", async () => {
+  it("hydrates the server-owned reopen binding after a full remount", async () => {
     const user = userEvent.setup();
-    fetchRouter({
-      [`GET ${DELIVERY_PATH}`]: jsonRoute(s14OperatorDeliveryView()),
-      [`POST ${SETTLE_PATH}`]: () =>
-        new Response(JSON.stringify(s14OutstandingSettle()), {
-          status: 202,
+    const router = fetchRouter({
+      [`GET ${DELIVERY_PATH}`]: jsonRoute(
+        s14OperatorDeliveryView({ phase: "Terminated", lifecycle_revision: 7 }),
+      ),
+      [`GET ${SETTLEMENT_VIEW_PATH}`]: jsonRoute({
+        schema_version: "s14-settlement-view/1",
+        application_id: S14_APPLICATION_ID,
+        cycle: 1,
+        phase: "Terminated",
+        lifecycle_revision: 7,
+        pending_notification: null,
+        reopen_permission: {
+          permission_id: S14_PERMISSION_ID,
+          artifact_release_digest: ARTIFACT_DIGEST,
+          policy_release_digest: ARTIFACT_DIGEST,
+          approved_by: S14_APPROVER_SUBJECT,
+          expires_at: 4_102_444_800,
+        },
+      }),
+      [`POST ${REOPEN_PATH}`]: () =>
+        new Response(JSON.stringify(s14AcceptedReopen()), {
           headers: { "Content-Type": "application/json" },
         }),
+    });
+    // A freshly mounted console (page reload) observes the granted
+    // permission through the authoritative read alone.
+    renderWithQuery(<T16SettlementPanel applicationId={S14_APPLICATION_ID} />);
+    const reopen = await screen.findByTestId("t16-reopen-button");
+    await waitFor(() => expect(reopen).toBeEnabled());
+    await user.selectOptions(screen.getByTestId("t16-reopen-target"), "Intake");
+    await user.click(reopen);
+    await waitFor(() =>
+      expect(screen.getByTestId("t16-reopen-result")).toHaveTextContent("2"),
+    );
+    const reopenPost = router.calls.find(({ url }) => url === REOPEN_PATH);
+    // The fetch boundary records parsed JSON; the body shape is bound by the
+    // generated S14ReopenCommand type at the mutation call site.
+    const reopenBody = reopenPost?.body as
+      | { reopen_policy?: { release_digest?: string } }
+      | undefined;
+    expect(reopenBody?.reopen_policy?.release_digest).toBe(ARTIFACT_DIGEST);
+  });
+
+  it("enables notification processing only for the current Terminating cycle with a pending effect", async () => {
+    const user = userEvent.setup();
+    let armed = false;
+    fetchRouter({
+      [`GET ${DELIVERY_PATH}`]: jsonRoute(s14OperatorDeliveryView()),
+      [`GET ${SETTLEMENT_VIEW_PATH}`]: () =>
+        new Response(
+          JSON.stringify(
+            settlementViewPayload("Terminating", { pending: armed }),
+          ),
+          { headers: { "Content-Type": "application/json" } },
+        ),
+      [`POST ${SETTLE_PATH}`]: () => {
+        armed = true;
+        return new Response(JSON.stringify(s14OutstandingSettle()), {
+          status: 202,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
       [`POST ${NOTIFY_PATH}`]: () =>
         new Response(JSON.stringify({ status: "delivered" }), {
           headers: { "Content-Type": "application/json" },
@@ -611,22 +759,28 @@ describe("T16SettlementPanel (operator)", () => {
     });
     renderWithQuery(<T16SettlementPanel applicationId={S14_APPLICATION_ID} />);
     const notify = await screen.findByTestId("t16-notification-button");
-    // No outstanding settle result yet: the effect is unknown, button stays
-    // disabled even though the phase is Terminating.
-    expect(notify).toBeDisabled();
+    // No authoritative pending effect yet: disabled even while Terminating.
+    await waitFor(() => expect(notify).toBeDisabled());
     await user.click(screen.getByTestId("t16-settle-button"));
     await waitFor(() =>
       expect(screen.getByTestId("t16-result-status")).toHaveTextContent(
         "outstanding",
       ),
     );
-    expect(notify).toBeEnabled();
+    // Availability follows the authoritative settlement read refreshed by
+    // the command invalidation.
+    await waitFor(() =>
+      expect(screen.getByTestId("t16-notification-button")).toBeEnabled(),
+    );
   });
 
   it("surfaces an unknown notification transport with a reconcile affordance", async () => {
     const user = userEvent.setup();
     fetchRouter({
       [`GET ${DELIVERY_PATH}`]: jsonRoute(s14OperatorDeliveryView()),
+      [`GET ${SETTLEMENT_VIEW_PATH}`]: jsonRoute(
+        settlementViewPayload("Terminating", { pending: true }),
+      ),
       [`POST ${SETTLE_PATH}`]: () =>
         new Response(JSON.stringify(s14OutstandingSettle()), {
           status: 202,

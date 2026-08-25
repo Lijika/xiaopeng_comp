@@ -1381,6 +1381,33 @@ export type S14NotificationCommand =
     paths["/controlled/s01/api/commands/process-termination-notification"]["post"]["requestBody"]
   >["content"]["application/json"];
 
+export type S14SettlementViewResponse =
+  components["schemas"]["S14SettlementViewResponse"];
+
+export const S14_SETTLEMENT_VIEW_KEY = (applicationId: string) =>
+  ["s01", "settlement-view", applicationId] as const;
+
+/**
+ * The operator settlement projection: authoritative pending effect and
+ * permission binding facts for the current cycle.  A reloaded console
+ * observes these without replaying prior local command results.
+ */
+export function useS14SettlementView(
+  applicationId: string | null,
+): UseQueryResult<S14SettlementViewResponse> {
+  return useQuery({
+    queryKey: S14_SETTLEMENT_VIEW_KEY(applicationId ?? ""),
+    enabled: Boolean(applicationId),
+    queryFn: () =>
+      request<S14SettlementViewResponse>(
+        `/controlled/s01/api/queries/applications/${encodeURIComponent(
+          applicationId ?? "",
+        )}/settlement`,
+      ),
+    retry: retryPolicy,
+  });
+}
+
 /** The bounded termination convergence outcomes.  ``terminated`` is only
  * ever reported from the authoritative current-route phase; ``timed_out`` is
  * the explicit bounded unknown and never claims termination; the poll count

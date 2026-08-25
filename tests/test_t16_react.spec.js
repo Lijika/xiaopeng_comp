@@ -269,6 +269,17 @@ for (const [label, viewport] of [
       "termination_notification",
     );
 
+    // A full reload must not lose the pending-effect fact: availability
+    // derives from the authoritative settlement read, not local results.
+    const operatorPostsBeforeReload = operatorRequests.filter(
+      ({ method }) => method === "POST",
+    ).length;
+    await operatorPage.reload({ waitUntil: "domcontentloaded" });
+    await expect(operatorPage.getByTestId("t16-settlement-phase")).toHaveText(
+      "Terminating",
+    );
+    await expect(operatorPage.getByTestId("t16-notification-button")).toBeEnabled();
+
     await operatorPage.getByTestId("t16-notification-button").click();
     await expect(operatorPage.getByTestId("t16-notification-status")).toContainText(
       "delivered",
@@ -297,8 +308,15 @@ for (const [label, viewport] of [
       "institutional-reopen-permission/t16-e2e",
     );
 
+    // The server-owned binding survives a full reload through the
+    // authoritative settlement read; reopen stays enabled without a
+    // duplicate grant.
+    await operatorPage.reload({ waitUntil: "domcontentloaded" });
+    await expect(
+      operatorPage.getByTestId("s14-settlement-boundary-gate"),
+    ).toHaveText("S14");
     const reopenButton = operatorPage.getByTestId("t16-reopen-button");
-    await expect(reopenButton).toBeEnabled();
+    await expect(reopenButton).toBeEnabled({ timeout: 10_000 });
     await operatorPage.getByTestId("t16-reopen-target").selectOption("Intake");
     await reopenButton.click();
     await expect(operatorPage.getByTestId("t16-reopen-result")).toContainText(
@@ -319,6 +337,12 @@ for (const [label, viewport] of [
     // A successor Intake cycle is genuinely cancellable again: eligibility
     // tracks the server-owned phase, never the page history.
     await expect(integratorPage.getByTestId("t16-cancel-button")).toBeEnabled();
+
+    await assertNoHorizontalOverflow(integratorPage, [
+      "t16-facts-section",
+      "t16-cancel-section",
+      "t16-history-section",
+    ]);
 
     // Old-cycle navigation stays presentation-only on the reopened cycle.
     const cycleNavButtons = integratorPage.getByTestId("t16-history-run-cycle");
@@ -367,6 +391,19 @@ for (const [label, viewport] of [
     );
     await expect(integratorPage.getByTestId("t16-cancel-button")).toHaveCount(0);
 
+    // Selecting the current reopened cycle shows no cycle-1 leakage.
+    await integratorPage.goto(
+      `${server.baseURL}/controlled/s14?application=${encodeURIComponent(lateApplicationId)}&cycle=2`,
+      { waitUntil: "domcontentloaded" },
+    );
+    await expect(integratorPage.getByTestId("t16-cycle-view")).toBeVisible();
+    await expect(
+      integratorPage.getByTestId("t16-late-receipts-empty"),
+    ).toContainText("No late-input receipts");
+    await expect(
+      integratorPage.getByTestId("t16-late-receipt"),
+    ).toHaveCount(0);
+
     await integratorPage.goBack();
     await integratorPage.goForward();
     const postsAfterReload = integratorPosts(integratorRequests);
@@ -407,6 +444,20 @@ for (const [label, viewport] of [
     }
 
     assertAllowlistedRequests([...integratorRequests, ...operatorRequests]);
+    // The active-app current view and the selected historical cycle view are
+    // both overflow-checked on their own section sets.
+    await assertNoHorizontalOverflow(integratorPage, [
+      "t16-facts-section",
+      "t16-cancel-section",
+      "t16-history-section",
+    ]);
+    await integratorPage.goto(
+      `${server.baseURL}/controlled/s14?application=${encodeURIComponent(lateApplicationId)}&cycle=1`,
+      { waitUntil: "domcontentloaded" },
+    );
+    await expect(integratorPage.getByTestId("t16-cycle-view")).toBeVisible();
+    // The late app's cycle-1 selected view is overflow-checked on the
+    // cycle-scoped section set.
     await assertNoHorizontalOverflow(integratorPage, [
       "t16-cycle-section",
       "t16-history-section",

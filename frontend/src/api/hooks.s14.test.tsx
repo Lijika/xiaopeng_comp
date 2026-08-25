@@ -501,11 +501,16 @@ describe("S14 notification binding hook", () => {
     const { result } = renderHook(() => useS14ProcessNotification(), {
       wrapper: wrap(client),
     });
-    result.current.mutate({ application_id: S14_APPLICATION_ID, cycle: 1 });
+    result.current.mutate({
+      application_id: S14_APPLICATION_ID,
+      cycle: 1,
+      operation_id: "op_t16_00000001",
+    });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(router.calls[0]?.body).toEqual({
       application_id: S14_APPLICATION_ID,
       cycle: 1,
+      operation_id: "op_t16_00000001",
     });
   });
 });

@@ -635,11 +635,10 @@ export interface paths {
         put?: never;
         /**
          * Controlled S14 Process Notification
-         * @description Deliver one pending termination notification (verified terminal gate).
-         *
-         *     The closed optional body binds processing to one application/cycle so an
-         *     operator console can never process another application's effect; without
-         *     a body the worker claims the first globally eligible pending event.
+         * @description Deliver exactly one bound pending termination notification (verified
+         *     terminal gate).  The closed body binds processing to the exact
+         *     application/cycle/operation; there is no unbound fallback on the public
+         *     operator surface.
          */
         post: operations["controlled_s14_process_notification_controlled_s01_api_commands_process_termination_notification_post"];
         delete?: never;
@@ -929,6 +928,28 @@ export interface paths {
         };
         /** Controlled S04 Demo Application History */
         get: operations["controlled_s04_demo_application_history_controlled_s01_api_queries_applications__application_id__history_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s01/api/queries/applications/{application_id}/settlement": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Controlled S14 Settlement View
+         * @description The operator settlement projection: authoritative pending effect and
+         *     permission binding facts for the current cycle.  Read-only; existence is
+         *     hidden behind the sanitized 404.
+         */
+        get: operations["controlled_s14_settlement_view_controlled_s01_api_queries_applications__application_id__settlement_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -3259,6 +3280,8 @@ export interface components {
             attachment_id: string;
             /** Current */
             current: boolean;
+            /** Cycle */
+            cycle?: number | null;
             /** Document Id */
             document_id: string;
             /** Document Role */
@@ -3339,6 +3362,8 @@ export interface components {
             actor: string;
             /** Correction Id */
             correction_id: string;
+            /** Cycle */
+            cycle?: number | null;
             /** Document Id */
             document_id: string;
             /** Document Role */
@@ -3505,6 +3530,8 @@ export interface components {
          *     entered the sealed cycle.
          */
         S01HistoryLateInputReceipt: {
+            /** Cycle */
+            cycle?: number | null;
             /** Occurred At */
             occurred_at?: number | null;
             /** Reason Code */
@@ -8411,14 +8438,29 @@ export interface components {
         };
         /**
          * S14NotificationBody
-         * @description Optional target binding for the termination-notification worker:
-         *     when present, only this application/cycle's pending event is eligible.
+         * @description Required target binding for the public termination-notification
+         *     command: only the exact application/cycle/operation pending event is
+         *     eligible, so an operator console can never process another
+         *     application's effect.
          */
         S14NotificationBody: {
             /** Application Id */
             application_id: string;
             /** Cycle */
             cycle: number;
+            /** Operation Id */
+            operation_id: string;
+        };
+        /**
+         * S14PendingNotification
+         * @description The authoritative pending termination notification of the current
+         *     Terminating cycle.
+         */
+        S14PendingNotification: {
+            /** Event Id */
+            event_id: string;
+            /** Operation Id */
+            operation_id: string;
         };
         /** S14ReopenBody */
         S14ReopenBody: {
@@ -8429,6 +8471,23 @@ export interface components {
             reopen_policy: components["schemas"]["S14ReopenPolicyBody"];
             /** Target Phase */
             target_phase: string;
+        };
+        /**
+         * S14ReopenPermissionBinding
+         * @description The server-owned reopen binding of the current cycle, complete with
+         *     the pinned artifact digest the successor reopen must echo.
+         */
+        S14ReopenPermissionBinding: {
+            /** Approved By */
+            approved_by?: string | null;
+            /** Artifact Release Digest */
+            artifact_release_digest: string;
+            /** Expires At */
+            expires_at?: number | null;
+            /** Permission Id */
+            permission_id: string;
+            /** Policy Release Digest */
+            policy_release_digest: string;
         };
         /** S14ReopenPolicyBody */
         S14ReopenPolicyBody: {
@@ -8443,6 +8502,29 @@ export interface components {
             expected_lifecycle_revision: number;
             /** Idempotency Key */
             idempotency_key: string;
+        };
+        /**
+         * S14SettlementViewResponse
+         * @description Minimized operator settlement projection: the authoritative pending
+         *     effect and permission facts for the current cycle.  Read-only; a
+         *     reloaded console observes these without replaying local results.
+         */
+        S14SettlementViewResponse: {
+            /** Application Id */
+            application_id: string;
+            /** Cycle */
+            cycle: number;
+            /** Lifecycle Revision */
+            lifecycle_revision: number;
+            pending_notification?: components["schemas"]["S14PendingNotification"] | null;
+            /** Phase */
+            phase: string;
+            reopen_permission?: components["schemas"]["S14ReopenPermissionBinding"] | null;
+            /**
+             * Schema Version
+             * @constant
+             */
+            schema_version: "s14-settlement-view/1";
         };
         /** T05BusinessExceptionOperationsResult */
         T05BusinessExceptionOperationsResult: {
@@ -10390,9 +10472,9 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody?: {
+        requestBody: {
             content: {
-                "application/json": components["schemas"]["S14NotificationBody"] | null;
+                "application/json": components["schemas"]["S14NotificationBody"];
             };
         };
         responses: {
@@ -11868,6 +11950,55 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["S01ApplicationHistoryResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    controlled_s14_settlement_view_controlled_s01_api_queries_applications__application_id__settlement_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                application_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S14SettlementViewResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
                 };
             };
             /** @description Not Found */

@@ -81,14 +81,20 @@ def _s13_require_operator(request: Request) -> Any:
     if not recognized:
         # Controlled same-operator mapping: the registered control-plane
         # operator may present the S01 operator credential at this read
-        # boundary so one operator console can complete settle/grant/reopen
-        # alongside delivery reads with distinct deployed credentials.  The
-        # audit identity stays the S13 subject/source below, and the S13
-        # credential never gains reciprocal S01 command authority.
+        # boundary only when both planes are explicitly configured for the
+        # SAME registered operator subject — the subject equality is the
+        # verified mapping.  Mismatched subjects fail closed; audit keeps
+        # the S13 identity below, and the S13 credential never gains
+        # reciprocal S01 command authority.
         s01_credential = str(getattr(module, "S01_OPERATOR_CREDENTIAL", "") or "")
-        recognized = bool(
+        s01_subject = str(getattr(module, "S01_OPERATOR_SUBJECT", "") or "")
+        same_operator_mapping = bool(
             subject
             and s01_credential
+            and s01_subject == subject
+        )
+        recognized = bool(
+            same_operator_mapping
             and module._s01_has_credential(request, s01_credential)  # type: ignore[attr-defined]
         )
     if not recognized:

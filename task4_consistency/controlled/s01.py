@@ -5916,6 +5916,7 @@ class ControlledScenarioService:
         worker_id: str = "s14-notification-worker",
         application_id: str | None = None,
         cycle: int | None = None,
+        operation_id: str | None = None,
         now: float | None = None,
     ) -> dict[str, Any]:
         """Claim, send and confirm one termination notification through the
@@ -5957,6 +5958,12 @@ class ControlledScenarioService:
             if cycle is not None:
                 candidates = (
                     event for event in candidates if int(event.get("cycle") or 0) == cycle
+                )
+            if operation_id is not None:
+                candidates = (
+                    event
+                    for event in candidates
+                    if str(event.get("operation_id") or "") == operation_id
                 )
             pending = next(candidates, None)
             if pending is None:
@@ -18711,6 +18718,7 @@ class ControlledScenarioService:
                 corrections.append(
                     {
                         "correction_id": correction["correction_id"],
+                        "cycle": invalidation.get("cycle"),
                         "superseded_observation_id": correction[
                             "supersedes_observation_id"
                         ],
@@ -18779,6 +18787,16 @@ class ControlledScenarioService:
                         if key != "evidence_revision"
                     }:
                         raise RuntimeError("attachment history is inconsistent")
+            evidence_revision_cycles = {
+                int(run["evidence_revision"]): int(run["cycle"])
+                for run in runs
+                if isinstance(run.get("evidence_revision"), int)
+                and isinstance(run.get("cycle"), int)
+            }
+            for item in attachment_versions_by_id.values():
+                item["cycle"] = evidence_revision_cycles.get(
+                    int(item["evidence_revision"])
+                )
             superseded_attachment_ids = {
                 item["supersedes_attachment_id"]
                 for item in attachment_versions_by_id.values()
@@ -19083,12 +19101,25 @@ class ControlledScenarioService:
                     and receipt.application_id == application_id
                     and receipt.reason_code == "evidence.late_input_requires_reopen"
                 ):
+                    # The sealed original cycle is bound to the receipt via
+                    # its supplement request record so no later cycle can
+                    # claim (or leak) another cycle's late work.
+                    request_cycle = next(
+                        (
+                            int(record.get("cycle") or 0)
+                            for record in self._store.review_records
+                            if record.get("record_type") == "supplement_request"
+                            and record.get("request_id") == receipt.request_id
+                        ),
+                        None,
+                    )
                     late_input_receipts.append(
                         {
                             "receipt_id": receipt.receipt_id,
                             "reason_code": receipt.reason_code,
                             "request_id": receipt.request_id,
                             "occurred_at": receipt.occurred_at,
+                            "cycle": request_cycle,
                         }
                     )
             return {
@@ -20337,6 +20368,79 @@ class ControlledScenarioService:
                 "attempt_count": len(self._s13_attempts_for_obligation(str(obligation.get("obligation_id") or ""))) if obligation is not None else 0,
                 "projection_watermark": self._store.projection_watermark,
                 "store_revision": self._store._store_revision,
+            }
+
+    def settlement_view(self, *, application_id: str) -> dict[str, Any]:
+        """Minimized operator settlement projection for one application: the
+        authoritative pending termination notification and the server-owned
+        reopen permission binding for the current cycle.  Read-only; every
+        field is rebuilt from the store so a reloaded console observes the
+        same facts without replaying prior local command results."""
+
+        with self._lock:
+            self._reload_store()
+            app = self._store.applications.get(application_id)
+            if app is None:
+                raise QueryNotFound(application_id)
+            cycle = int(app.get("cycle") or 0)
+            phase = str(app.get("phase") or "")
+            pending_notification = None
+            if phase == "Terminating":
+                event = next(
+                    (
+                        item
+                        for item in sorted(
+                            self._store.outbox,
+                            key=lambda entry: str(entry.get("event_id") or ""),
+                        )
+                        if item.get("kind")
+                        == "termination_notification_requested"
+                        and item.get("status") == "pending"
+                        and str(item.get("application_id") or "")
+                        == application_id
+                        and int(item.get("cycle") or 0) == cycle
+                    ),
+                    None,
+                )
+                if event is not None:
+                    pending_notification = {
+                        "operation_id": str(event.get("operation_id") or ""),
+                        "event_id": str(event.get("event_id") or ""),
+                    }
+            permission_record = max(
+                (
+                    record
+                    for record in self._store.review_records
+                    if record.get("record_type") == "s14_reopen_permission"
+                    and record.get("application_id") == application_id
+                    and int(record.get("cycle") or 0) == cycle
+                ),
+                key=lambda record: int(record.get("granted_at") or 0),
+                default=None,
+            )
+            reopen_permission = None
+            if permission_record is not None:
+                reopen_permission = {
+                    "permission_id": str(
+                        permission_record.get("permission_id") or ""
+                    ),
+                    "artifact_release_digest": str(
+                        permission_record.get("artifact_release_digest") or ""
+                    ),
+                    "policy_release_digest": str(
+                        permission_record.get("policy_release_digest") or ""
+                    ),
+                    "approved_by": permission_record.get("approved_by"),
+                    "expires_at": permission_record.get("expires_at"),
+                }
+            return {
+                "schema_version": "s14-settlement-view/1",
+                "application_id": application_id,
+                "cycle": cycle,
+                "phase": phase,
+                "lifecycle_revision": int(app.get("lifecycle_revision") or 0),
+                "pending_notification": pending_notification,
+                "reopen_permission": reopen_permission,
             }
 
     def process_next_delivery(

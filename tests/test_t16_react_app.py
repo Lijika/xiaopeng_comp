@@ -403,8 +403,19 @@ def test_t16_full_cancel_settle_reopen_path_through_public_routes(
     kinds = {item["kind"] for item in armed_body["unresolved_effects"]}
     assert kinds == {"termination_notification"}
 
+    view_operation_id = str(
+        client.get(
+            f"/controlled/s01/api/queries/applications/{application_id}/settlement",
+            headers=_operator_auth(),
+        ).json()["pending_notification"]["operation_id"]
+    )
     delivered = client.post(
         "/controlled/s01/api/commands/process-termination-notification",
+        json={
+            "application_id": application_id,
+            "cycle": 1,
+            "operation_id": view_operation_id,
+        },
         headers=_operator_auth(),
     )
     assert delivered.status_code == 200, delivered.text
@@ -568,9 +579,19 @@ def test_t16_notification_binding_is_application_scoped(
 
     # A binding naming application B (no pending notification of its own)
     # must never process A's pending event.
+    # An unbound public POST is a contract violation and never processes
+    # another application's effect.
+    unbound = client.post(
+        "/controlled/s01/api/commands/process-termination-notification",
+        headers=_operator_auth(),
+    )
+    assert unbound.status_code == 422
+    assert unbound.json()["status"] == "rejected"
+    assert unbound.json()["reason_code"] == "S14_COMMAND_INVALID"
+
     foreign = client.post(
         "/controlled/s01/api/commands/process-termination-notification",
-        json={"application_id": app_b, "cycle": 1},
+        json={"application_id": app_b, "cycle": 1, "operation_id": "op_none"},
         headers=_operator_auth(),
     )
     assert foreign.status_code == 200
@@ -578,9 +599,18 @@ def test_t16_notification_binding_is_application_scoped(
     assert foreign.json()["application_id"] == app_b
 
     # The bound call for the owning application/cycle processes exactly it.
+    bound_operation_id = next(
+        effect["id"]
+        for effect in armed.json()["unresolved_effects"]
+        if effect["kind"] == "termination_notification"
+    )
     delivered = client.post(
         "/controlled/s01/api/commands/process-termination-notification",
-        json={"application_id": app_a, "cycle": 1},
+        json={
+            "application_id": app_a,
+            "cycle": 1,
+            "operation_id": bound_operation_id,
+        },
         headers=_operator_auth(),
     )
     assert delivered.status_code == 200
@@ -669,6 +699,8 @@ def test_t16_history_exposes_lifecycle_events_and_late_receipts(
     assert (
         late_receipts[0]["reason_code"] == "evidence.late_input_requires_reopen"
     )
+    # The sealed original cycle is bound to the receipt at rejection time.
+    assert late_receipts[0]["cycle"] == 1
 
 
 def test_t16_operator_planes_accept_distinct_credentials(
@@ -712,6 +744,244 @@ def test_t16_operator_planes_accept_distinct_credentials(
         headers=_operator_headers(T16_S13_OPERATOR_CREDENTIAL),
     )
     assert settle.status_code == 403
+
+
+def test_t16_s13_mapping_requires_subject_equivalence(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    service = _install(monkeypatch, tmp_path)
+    client = TestClient(webapp_of())
+    application_id = _admit_manual_review(
+        service,
+        scenario_id="app_r53_bad_engine.json",
+        idempotency_key="t16-subject-map",
+    )
+
+    # The same-operator mapping is verified by subject equality across the
+    # two planes; a mismatched S13 subject configuration fails closed even
+    # for a valid S01 credential.
+    import task4_consistency.web.app as web
+
+    monkeypatch.setattr(web, "S13_OPERATOR_SUBJECT", "t16-someone-else")
+    mismatched = client.get(
+        f"/controlled/s13/delivery/{application_id}",
+        headers=_operator_auth(),
+    )
+    assert mismatched.status_code == 403
+
+def test_t16_shell_errors_carry_no_store_cache_policy(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    import task4_consistency.web.app as web
+
+    _install(monkeypatch, tmp_path)
+    client = TestClient(webapp_of())
+    shell_paths = (
+        "/controlled/s14",
+        "/controlled/s14/react",
+        "/controlled/s14/settlement",
+        "/controlled/s14/settlement/react",
+    )
+    for path in shell_paths:
+        denied = client.get(path)
+        assert denied.status_code == 403, path
+        assert denied.headers["cache-control"] == "no-store", path
+        assert denied.headers["pragma"] == "no-cache", path
+
+        wrong = client.get(
+            path, headers={"Authorization": "Bearer t16-not-a-credential"}
+        )
+        assert wrong.status_code == 403, path
+        assert wrong.headers["cache-control"] == "no-store", path
+        assert wrong.headers["pragma"] == "no-cache", path
+
+    # Service-unavailable path closes with the same cache policy.
+    monkeypatch.setattr(web, "S01_SERVICE", None)
+    for path in shell_paths:
+        unavailable = client.get(path, headers=_operator_auth())
+        assert unavailable.status_code == 503, path
+        assert unavailable.headers["cache-control"] == "no-store", path
+        assert unavailable.headers["pragma"] == "no-cache", path
+        assert (
+            unavailable.json()["detail"]["error"] == "S01_UNAVAILABLE"
+        ), path
+
+
+def test_t16_notification_public_command_requires_target_binding(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    service = _install(monkeypatch, tmp_path)
+    client = TestClient(webapp_of())
+    _login(client)
+    application_id = _admit_manual_review(
+        service,
+        scenario_id="app_r53_bad_engine.json",
+        idempotency_key="t16-unbound-a",
+    )
+    revision = int(
+        client.get(
+            f"/controlled/s01/api/queries/applications/{application_id}/current-route"
+        ).json()["lifecycle_revision"]
+    )
+    cancel = client.post(
+        f"/controlled/s01/api/commands/applications/{application_id}/cancel",
+        json={
+            "expected_lifecycle_revision": revision,
+            "idempotency_key": "t16-unbound-cancel",
+            "reason_code": "UPSTREAM_WITHDRAWN",
+        },
+    )
+    assert cancel.status_code == 200
+    armed = client.post(
+        f"/controlled/s01/api/commands/applications/{application_id}/settle-termination",
+        json={
+            "expected_lifecycle_revision": cancel.json()["lifecycle_revision"],
+            "idempotency_key": "t16-unbound-arm",
+        },
+        headers=_operator_auth(),
+    )
+    assert armed.status_code == 202
+    operation_id = next(
+        effect["id"]
+        for effect in armed.json()["unresolved_effects"]
+        if effect["kind"] == "termination_notification"
+    )
+
+    # An unbound public POST is a contract violation and must never fall
+    # back to a global claim.
+    unbound = client.post(
+        "/controlled/s01/api/commands/process-termination-notification",
+        headers=_operator_auth(),
+    )
+    assert unbound.status_code == 422
+    assert unbound.json()["status"] == "rejected"
+    assert unbound.json()["reason_code"] == "S14_COMMAND_INVALID"
+
+    # A binding with a wrong operation id processes nothing.
+    mismatched = client.post(
+        "/controlled/s01/api/commands/process-termination-notification",
+        json={
+            "application_id": application_id,
+            "cycle": 1,
+            "operation_id": "op_does_not_exist",
+        },
+        headers=_operator_auth(),
+    )
+    assert mismatched.status_code == 200
+    assert mismatched.json()["status"] == "idle"
+
+    # The exact bound command delivers exactly that operation.
+    delivered = client.post(
+        "/controlled/s01/api/commands/process-termination-notification",
+        json={
+            "application_id": application_id,
+            "cycle": 1,
+            "operation_id": operation_id,
+        },
+        headers=_operator_auth(),
+    )
+    assert delivered.status_code == 200
+    assert delivered.json()["status"] == "delivered"
+
+
+def test_t16_settlement_view_exposes_pending_effect_and_permission(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    service = _install(monkeypatch, tmp_path)
+    client = TestClient(webapp_of())
+    _login(client)
+    application_id = _admit_manual_review(
+        service,
+        scenario_id="app_r53_bad_engine.json",
+        idempotency_key="t16-settle-view",
+    )
+    view_url = (
+        f"/controlled/s01/api/queries/applications/{application_id}/settlement"
+    )
+
+    forbidden = client.get(view_url)
+    assert forbidden.status_code == 403
+
+    revision = int(
+        client.get(
+            f"/controlled/s01/api/queries/applications/{application_id}/current-route"
+        ).json()["lifecycle_revision"]
+    )
+    cancel = client.post(
+        f"/controlled/s01/api/commands/applications/{application_id}/cancel",
+        json={
+            "expected_lifecycle_revision": revision,
+            "idempotency_key": "t16-view-cancel",
+            "reason_code": "UPSTREAM_WITHDRAWN",
+        },
+    )
+    assert cancel.status_code == 200
+    armed = client.post(
+        f"/controlled/s01/api/commands/applications/{application_id}/settle-termination",
+        json={
+            "expected_lifecycle_revision": cancel.json()["lifecycle_revision"],
+            "idempotency_key": "t16-view-arm",
+        },
+        headers=_operator_auth(),
+    )
+    assert armed.status_code == 202
+
+    during = client.get(view_url, headers=_operator_auth())
+    assert during.status_code == 200, during.text
+    body = during.json()
+    assert body["phase"] == "Terminating"
+    assert body["cycle"] == 1
+    assert body["pending_notification"] is not None
+    assert body["pending_notification"]["operation_id"]
+    assert body["reopen_permission"] is None
+    assert during.headers["cache-control"] == "no-store"
+
+    delivered = client.post(
+        "/controlled/s01/api/commands/process-termination-notification",
+        json={
+            "application_id": application_id,
+            "cycle": 1,
+            "operation_id": body["pending_notification"]["operation_id"],
+        },
+        headers=_operator_auth(),
+    )
+    assert delivered.json()["status"] == "delivered"
+    settled = client.post(
+        f"/controlled/s01/api/commands/applications/{application_id}/settle-termination",
+        json={
+            "expected_lifecycle_revision": cancel.json()["lifecycle_revision"],
+            "idempotency_key": "t16-view-seal",
+        },
+        headers=_operator_auth(),
+    )
+    assert settled.json()["status"] == "terminated"
+
+    granted = client.post(
+        f"/controlled/s01/api/commands/applications/{application_id}/grant-reopen-permission",
+        json={
+            "expected_lifecycle_revision": settled.json()["lifecycle_revision"],
+            "approver_subject": "t16-independent-approver",
+            "permission_id": "t16-view-permission/1",
+            "idempotency_key": "t16-view-grant",
+        },
+        headers=_operator_auth(),
+    )
+    assert granted.status_code == 200
+
+    after = client.get(view_url, headers=_operator_auth())
+    after_body = after.json()
+    assert after_body["phase"] == "Terminated"
+    assert after_body["pending_notification"] is None
+    permission = after_body["reopen_permission"]
+    assert permission is not None
+    assert permission["permission_id"] == "t16-view-permission/1"
+    assert len(permission["artifact_release_digest"]) == 64
+
+    missing = client.get(
+        "/controlled/s01/api/queries/applications/app_unknown/settlement",
+        headers=_operator_auth(),
+    )
+    assert missing.status_code == 404
 
 
 def webapp_of():
