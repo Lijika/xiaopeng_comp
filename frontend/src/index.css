@@ -146,6 +146,31 @@ body {
   max-inline-size: 16rem;
 }
 
+/* T16 lifecycle panels: scoped command rows keep text inputs on their own
+   line so narrow viewports never overflow the section */
+
+.t16-command-row {
+  flex-wrap: wrap;
+}
+
+.t16-command-row input,
+.t16-command-row select {
+  border: 1px solid var(--border);
+  border-radius: 0.25rem;
+  padding: 0.25rem 0.375rem;
+  background-color: var(--background);
+  color: var(--foreground);
+}
+
+.t16-command-row input {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+
+.t16-binding {
+  overflow-wrap: anywhere;
+}
+
 /* T06 demo shell: scoped responsive controls/report, no new design system */
 
 .demo-controls {

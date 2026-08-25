@@ -12,6 +12,9 @@ import QueuePanel from "./components/QueuePanel";
 import RecoveryWorkPanel from "./components/RecoveryWorkPanel";
 import S12EvaluationOperator from "./components/S12EvaluationOperator";
 import ReviewWorkPanel from "./components/ReviewWorkPanel";
+import T16LifecyclePanel, {
+  T16SettlementPanel,
+} from "./components/T16LifecyclePanel";
 import T15DeliveryPanel from "./components/T15DeliveryPanel";
 
 function readParam(name: string): string | null {
@@ -49,6 +52,26 @@ function isS12Shell(): boolean {
 
 function isS13Shell(): boolean {
   return window.location.pathname.startsWith("/controlled/s13");
+}
+
+/** The T16 lifecycle cancellation workbench mounted only for the S14
+ * canonical route and its alias: an integrator session boundary whose panel
+ * reads the authoritative current-route/history and issues explicit cancel
+ * commands. */
+function isS14LifecycleShell(): boolean {
+  const pathname = window.location.pathname;
+  return pathname === "/controlled/s14" || pathname === "/controlled/s14/react";
+}
+
+/** The T16 termination-settlement console mounted only for its canonical
+ * route and alias: a registered-operator boundary whose panel reads the S13
+ * delivery view and issues settle/notification/grant/reopen commands. */
+function isS14SettlementShell(): boolean {
+  const pathname = window.location.pathname;
+  return (
+    pathname === "/controlled/s14/settlement" ||
+    pathname === "/controlled/s14/settlement/react"
+  );
 }
 
 /** The T06/T07 competition demo shell: only the closed synthetic facade
@@ -225,6 +248,80 @@ function DeliveryConsoleShell() {
   );
 }
 
+/** The T16 integrator workbench shell: the ``application``/``cycle`` query
+ * values are presentation/navigation state only — selecting an old cycle in
+ * history never issues any command, least of all reopen. */
+function LifecycleWorkbenchShell() {
+  const [applicationId, setApplicationId] = useState<string | null>(() =>
+    readParam("application"),
+  );
+  const [cycle, setCycle] = useState<number | null>(() => {
+    const raw = readParam("cycle");
+    return raw === null ? null : Number.parseInt(raw, 10);
+  });
+  useEffect(() => {
+    const sync = () => {
+      setApplicationId(readParam("application"));
+      const raw = readParam("cycle");
+      setCycle(raw === null ? null : Number.parseInt(raw, 10));
+    };
+    window.addEventListener("popstate", sync);
+    return () => window.removeEventListener("popstate", sync);
+  }, []);
+  const selectCycle = useCallback((selected: number) => {
+    setCycle(selected);
+    const params = new URLSearchParams(window.location.search);
+    params.set("cycle", String(selected));
+    window.history.pushState(null, "", `?${params.toString()}`);
+  }, []);
+  return (
+    <div className="mx-auto max-w-4xl px-4 py-6">
+      <header className="app-header">
+        <h1>生命周期取消工作台</h1>
+        <span className="boundary track" data-testid="s14-boundary-track">
+          C-DEMO
+        </span>
+        <span className="boundary" data-testid="s14-boundary-gate">
+          S14
+        </span>
+      </header>
+      <main>
+        <T16LifecyclePanel
+          applicationId={applicationId}
+          selectedCycle={cycle}
+          onCycleSelected={selectCycle}
+        />
+      </main>
+    </div>
+  );
+}
+
+/** The T16 operator settlement console shell: navigation values are never
+ * command inputs; reopen happens only from the panel's explicit button. */
+function SettlementConsoleShell() {
+  const [applicationId, setApplicationId] = useState<string | null>(() =>
+    readParam("application"),
+  );
+  useEffect(() => {
+    const sync = () => setApplicationId(readParam("application"));
+    window.addEventListener("popstate", sync);
+    return () => window.removeEventListener("popstate", sync);
+  }, []);
+  return (
+    <div className="mx-auto max-w-4xl px-4 py-6">
+      <header className="app-header">
+        <h1>终止结算控制台</h1>
+        <span className="boundary" data-testid="s14-settlement-boundary-gate">
+          S14
+        </span>
+      </header>
+      <main>
+        <T16SettlementPanel applicationId={applicationId} />
+      </main>
+    </div>
+  );
+}
+
 /** The Reviewer workbench owns every S01 read; it is never mounted on the
  * Integrator shell, so no S01 query can fire there. */
 function ReviewerWorkbench() {
@@ -304,6 +401,12 @@ export default function App() {
   }
   if (isS13Shell()) {
     return <DeliveryConsoleShell />;
+  }
+  if (isS14SettlementShell()) {
+    return <SettlementConsoleShell />;
+  }
+  if (isS14LifecycleShell()) {
+    return <LifecycleWorkbenchShell />;
   }
   return <ReviewerWorkbench />;
 }

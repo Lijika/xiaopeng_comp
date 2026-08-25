@@ -11,6 +11,7 @@ import { useEffect, useState } from "react";
 import type { paths, components } from "../generated/api";
 import {
   request,
+  requestS14Command,
   HttpError,
   isDefinitiveRejection,
   isDefinitiveS08Rejection,
@@ -1269,4 +1270,179 @@ export function useS13Delivery(
       ),
     retry: retryPolicy,
   });
+}
+
+// ---------------------------------------------------------------------------
+// T16 — S14 lifecycle cancellation / settlement workflow
+// ---------------------------------------------------------------------------
+
+export type S14CommandResult = components["schemas"]["S14CommandResult"];
+
+/**
+ * The S14 command bodies are bound to the generated OpenAPI request schemas;
+ * a backend contract change fails strict typecheck here.
+ */
+export type S14CancelCommand =
+  paths["/controlled/s01/api/commands/applications/{application_id}/cancel"]["post"]["requestBody"]["content"]["application/json"];
+export type S14SettleCommand =
+  paths["/controlled/s01/api/commands/applications/{application_id}/settle-termination"]["post"]["requestBody"]["content"]["application/json"];
+export type S14GrantPermissionCommand =
+  paths["/controlled/s01/api/commands/applications/{application_id}/grant-reopen-permission"]["post"]["requestBody"]["content"]["application/json"];
+export type S14ReopenCommand =
+  paths["/controlled/s01/api/commands/applications/{application_id}/reopen"]["post"]["requestBody"]["content"]["application/json"];
+
+function s14CommandPath(applicationId: string, action: string): string {
+  return `/controlled/s01/api/commands/applications/${encodeURIComponent(
+    applicationId,
+  )}/${action}`;
+}
+
+/**
+ * The S14 command hooks share one shape: a retry:false POST through the
+ * same-origin adapter that resolves the closed typed envelope for every
+ * registered domain outcome (accepted, replayed, outstanding, terminated,
+ * stale, rejected, unavailable) and invalidates the authoritative S01 reads
+ * so the UI converges on server facts only.  An unknown transport outcome
+ * never retries and never rotates the caller's idempotency key.
+ */
+function useS14CommandMutation<TCommand>(
+  path: string,
+): UseMutationResult<S14CommandResult, Error, TCommand> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (command: TCommand) =>
+      requestS14Command<S14CommandResult>(path, {
+        method: "POST",
+        body: JSON.stringify(command),
+      }),
+    retry: false,
+    // Both authoritative read seams observe S14 outcomes: the integrator's
+    // current-route/history under s01 and the operator's S13 delivery view.
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["s01"] });
+      void queryClient.invalidateQueries({ queryKey: ["s13"] });
+    },
+  });
+}
+
+/** The authorized integrator's explicit cancellation command. */
+export function useS14Cancel(
+  applicationId: string,
+): UseMutationResult<S14CommandResult, Error, S14CancelCommand> {
+  return useS14CommandMutation<S14CancelCommand>(
+    s14CommandPath(applicationId, "cancel"),
+  );
+}
+
+/** The authorized operator's explicit termination settlement command. */
+export function useS14Settle(
+  applicationId: string,
+): UseMutationResult<S14CommandResult, Error, S14SettleCommand> {
+  return useS14CommandMutation<S14SettleCommand>(
+    s14CommandPath(applicationId, "settle-termination"),
+  );
+}
+
+/** The authorized operator's governed reopen permission grant. */
+export function useS14GrantReopenPermission(
+  applicationId: string,
+): UseMutationResult<S14CommandResult, Error, S14GrantPermissionCommand> {
+  return useS14CommandMutation<S14GrantPermissionCommand>(
+    s14CommandPath(applicationId, "grant-reopen-permission"),
+  );
+}
+
+/** The authorized operator's explicit successor-cycle reopen command. */
+export function useS14Reopen(
+  applicationId: string,
+): UseMutationResult<S14CommandResult, Error, S14ReopenCommand> {
+  return useS14CommandMutation<S14ReopenCommand>(
+    s14CommandPath(applicationId, "reopen"),
+  );
+}
+
+/** One durable termination-notification delivery per explicit action. */
+export function useS14ProcessNotification(): UseMutationResult<
+  S14CommandResult,
+  Error,
+  void
+> {
+  return useS14CommandMutation<void>(
+    "/controlled/s01/api/commands/process-termination-notification",
+  );
+}
+
+/** The bounded termination convergence outcomes.  ``terminated`` is only
+ * ever reported from the authoritative current-route phase; ``timed_out`` is
+ * the explicit bounded unknown and never claims termination; the poll count
+ * and elapsed time are never facts. */
+export type TerminationConvergence =
+  | "idle"
+  | "waiting"
+  | "terminated"
+  | "timed_out";
+
+/**
+ * Bounded reconciliation polling while a cancelled cycle stays
+ * ``Terminating``: refetch only the authoritative current-route and history
+ * queries and stop on the server-owned ``Terminated`` phase, a definitive
+ * read rejection, unmount/context change, or the attempt ceiling.  The
+ * ceiling surfaces an explicit ``timed_out`` (reconciliation needed); it
+ * never derives termination from attempts or elapsed time.
+ */
+export function useTerminationConvergence(
+  applicationId: string | null,
+  active: boolean,
+  options: { intervalMs?: number; maxAttempts?: number } = {},
+): TerminationConvergence {
+  const { intervalMs = 1_500, maxAttempts = 240 } = options;
+  const queryClient = useQueryClient();
+  const [outcome, setOutcome] = useState<TerminationConvergence>("idle");
+  useEffect(() => {
+    if (applicationId === null || !active) {
+      setOutcome("idle");
+      return;
+    }
+    setOutcome("waiting");
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let attempts = 0;
+    const poll = async () => {
+      if (cancelled) return;
+      attempts += 1;
+      await queryClient.refetchQueries({ queryKey: ROUTE_KEY(applicationId) });
+      if (cancelled) return;
+      await queryClient.refetchQueries({
+        queryKey: HISTORY_KEY(applicationId),
+      });
+      if (cancelled) return;
+      const routeState = queryClient.getQueryState(ROUTE_KEY(applicationId));
+      const routeError = routeState?.error;
+      const hasRouteError = routeError !== undefined && routeError !== null;
+      if (hasRouteError && isDefinitiveRejection(routeError)) {
+        setOutcome("timed_out");
+        return;
+      }
+      if (!hasRouteError) {
+        const route = queryClient.getQueryData<CurrentRouteResponse>(
+          ROUTE_KEY(applicationId),
+        );
+        if (route?.phase === "Terminated") {
+          setOutcome("terminated");
+          return;
+        }
+      }
+      if (attempts >= maxAttempts) {
+        setOutcome("timed_out");
+        return;
+      }
+      timer = setTimeout(poll, intervalMs);
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [applicationId, active, intervalMs, maxAttempts, queryClient]);
+  return outcome;
 }

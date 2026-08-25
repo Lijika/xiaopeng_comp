@@ -7156,6 +7156,7 @@ class ControlledScenarioService:
                 "scope": permission["scope"],
                 "policy_release_id": permission["policy_release_id"],
                 "policy_release_digest": permission["policy_release_digest"],
+                "artifact_release_digest": permission["artifact_release_digest"],
                 "source_binding": admission_source,
                 "granted_via_source": granted_via_source,
                 "expires_at": permission["expires_at"],

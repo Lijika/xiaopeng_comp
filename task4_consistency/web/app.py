@@ -728,6 +728,7 @@ class OptionalTokenAuth(BaseHTTPMiddleware):
         "/controlled/s09",
         "/controlled/s12",
         "/controlled/s13",
+        "/controlled/s14",
     )
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
@@ -1241,6 +1242,7 @@ class S14CommandResult(BaseModel):
     scope: str | None = None
     policy_release_id: str | None = None
     policy_release_digest: str | None = None
+    artifact_release_digest: str | None = None
     source_binding: str | None = None
     granted_via_source: str | None = None
     expires_at: int | None = None
@@ -6226,6 +6228,92 @@ def controlled_s13_react_page(request: Request) -> Response:
 
     _s13_require_operator(request)
     return _s13_react_shell()
+
+
+def _s14_react_shell() -> Response:
+    """The shared qualified React build for the T16 lifecycle shells, or the
+    minimized closed S14 503 (no-store, like the S12/S13 sibling shells) when
+    the build is missing or partial.  The shell never grants any authority."""
+    index_html = _react_shell_index_html()
+    if index_html is None:
+        response = JSONResponse(
+            status_code=503,
+            content={
+                "detail": {
+                    "error": "S14_REACT_UNAVAILABLE",
+                    "message": "Controlled S14 React shell is not built",
+                }
+            },
+        )
+        _s01_disable_cache(response)
+        return response
+    response = HTMLResponse(index_html)
+    _s01_disable_cache(response)
+    return response
+
+
+def _s14_session_shell_response(request: Request) -> Response:
+    """The T16 integrator workbench shell with the existing session
+    issuance, or the closed no-store S14 503 when the build is missing."""
+    index_html = _react_shell_index_html()
+    if index_html is None:
+        response = JSONResponse(
+            status_code=503,
+            content={
+                "detail": {
+                    "error": "S14_REACT_UNAVAILABLE",
+                    "message": "Controlled S14 React shell is not built",
+                }
+            },
+        )
+        _s01_disable_cache(response)
+        return response
+    return _controlled_s01_shell_response(request, index_html)
+
+
+@app.get("/controlled/s14", response_class=HTMLResponse)
+def controlled_s14_page(request: Request) -> Response:
+    """Canonical T16 lifecycle cancellation workbench shell (Ticket #50):
+    the shared qualified React build under the existing S01 controlled
+    boundary with the established session issuance, no-store headers and
+    fail-closed missing-build behavior.  Every command stays guarded by its
+    own route authority; the shell itself grants none."""
+
+    _s01_service()
+    return _s14_session_shell_response(request)
+
+
+@app.get("/controlled/s14/react", response_class=HTMLResponse)
+def controlled_s14_react_page(request: Request) -> Response:
+    """The T16 /react alias: the same closed shell contract as the canonical
+    route."""
+
+    _s01_service()
+    return _s14_session_shell_response(request)
+
+
+def _s14_settlement_shell_response(request: Request) -> Response:
+    """Operator settlement console shell (Ticket #50): served only to the
+    registered operator credential with no session issuance.  The operator's
+    authoritative read seam is the S13 delivery view plus typed S14 command
+    results; no reviewer query can fire from this boundary."""
+
+    _s01_require_operator(request)
+    return _s14_react_shell()
+
+
+@app.get("/controlled/s14/settlement", response_class=HTMLResponse)
+def controlled_s14_settlement_page(request: Request) -> Response:
+    """Canonical T16 termination settlement console shell."""
+
+    return _s14_settlement_shell_response(request)
+
+
+@app.get("/controlled/s14/settlement/react", response_class=HTMLResponse)
+def controlled_s14_settlement_react_page(request: Request) -> Response:
+    """The settlement console /react alias: the same closed shell contract."""
+
+    return _s14_settlement_shell_response(request)
 
 
 def create_s01_test_app() -> FastAPI:

@@ -16989,6 +16989,17 @@
             ],
             "title": "Approved By"
           },
+          "artifact_release_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Artifact Release Digest"
+          },
           "cancel_reason_code": {
             "anyOf": [
               {
@@ -26548,6 +26559,82 @@
           }
         },
         "summary": "Controlled S13 React Page"
+      }
+    },
+    "/controlled/s14": {
+      "get": {
+        "description": "Canonical T16 lifecycle cancellation workbench shell (Ticket #50):\nthe shared qualified React build under the existing S01 controlled\nboundary with the established session issuance, no-store headers and\nfail-closed missing-build behavior.  Every command stays guarded by its\nown route authority; the shell itself grants none.",
+        "operationId": "controlled_s14_page_controlled_s14_get",
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Controlled S14 Page"
+      }
+    },
+    "/controlled/s14/react": {
+      "get": {
+        "description": "The T16 /react alias: the same closed shell contract as the canonical\nroute.",
+        "operationId": "controlled_s14_react_page_controlled_s14_react_get",
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Controlled S14 React Page"
+      }
+    },
+    "/controlled/s14/settlement": {
+      "get": {
+        "description": "Canonical T16 termination settlement console shell.",
+        "operationId": "controlled_s14_settlement_page_controlled_s14_settlement_get",
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Controlled S14 Settlement Page"
+      }
+    },
+    "/controlled/s14/settlement/react": {
+      "get": {
+        "description": "The settlement console /react alias: the same closed shell contract.",
+        "operationId": "controlled_s14_settlement_react_page_controlled_s14_settlement_react_get",
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Controlled S14 Settlement React Page"
       }
     },
     "/demo/react": {

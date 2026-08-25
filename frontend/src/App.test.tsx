@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react";
+import { cleanup, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -1346,5 +1346,32 @@ describe("delivery console shell (T15)", () => {
 
     expect(screen.getByTestId("s13-no-application")).toBeInTheDocument();
     expect(router.calls).toHaveLength(0);
+  });
+});
+
+describe("S14 lifecycle shells (App)", () => {
+  it("mounts the cancellation workbench on the S14 canonical route and alias", () => {
+    for (const pathname of ["/controlled/s14", "/controlled/s14/react"]) {
+      window.history.pushState(null, "", `${pathname}?application=app_x`);
+      renderWithQuery(<App />);
+      expect(screen.getByTestId("s14-boundary-gate")).toHaveTextContent("S14");
+      expect(screen.getByTestId("t16-lifecycle-panel")).toBeInTheDocument();
+      cleanup();
+    }
+  });
+
+  it("mounts the settlement console on its canonical route and alias", () => {
+    for (const pathname of [
+      "/controlled/s14/settlement",
+      "/controlled/s14/settlement/react",
+    ]) {
+      window.history.pushState(null, "", `${pathname}?application=app_x`);
+      renderWithQuery(<App />);
+      expect(
+        screen.getByTestId("s14-settlement-boundary-gate"),
+      ).toHaveTextContent("S14");
+      expect(screen.getByTestId("t16-settlement-panel")).toBeInTheDocument();
+      cleanup();
+    }
   });
 });

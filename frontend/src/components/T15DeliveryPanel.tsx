@@ -1,5 +1,6 @@
 import { HttpError } from "../api/client";
 import { useS13Delivery, type S13QueryResponse } from "../api/hooks";
+import { Section, leafText } from "./Section";
 
 function S13ErrorState({
   error,
@@ -67,30 +68,6 @@ function ErrorStateContent({
         {isReloading ? "Reloading" : "Reload authoritative view"}
       </button>
     </div>
-  );
-}
-
-function leafText(value: unknown): string {
-  if (value === null || value === undefined || value === "") return "—";
-  return String(value);
-}
-
-function Section({
-  id,
-  title,
-  testId,
-  children,
-}: {
-  id: string;
-  title: string;
-  testId: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <section className="panel" data-testid={testId} aria-labelledby={id}>
-      <h2 id={id}>{title}</h2>
-      {children}
-    </section>
   );
 }
 

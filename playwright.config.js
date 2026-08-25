@@ -15,6 +15,7 @@ module.exports = defineConfig({
     "test_t08_react.spec.js",
     "test_t14_s12_react.spec.js",
     "test_t15_react.spec.js",
+    "test_t16_react.spec.js",
     "test_t54_prior_artifact.spec.js",
   ],
   fullyParallel: false,

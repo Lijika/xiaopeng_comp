@@ -2312,6 +2312,91 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/controlled/s14": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Controlled S14 Page
+         * @description Canonical T16 lifecycle cancellation workbench shell (Ticket #50):
+         *     the shared qualified React build under the existing S01 controlled
+         *     boundary with the established session issuance, no-store headers and
+         *     fail-closed missing-build behavior.  Every command stays guarded by its
+         *     own route authority; the shell itself grants none.
+         */
+        get: operations["controlled_s14_page_controlled_s14_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s14/react": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Controlled S14 React Page
+         * @description The T16 /react alias: the same closed shell contract as the canonical
+         *     route.
+         */
+        get: operations["controlled_s14_react_page_controlled_s14_react_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s14/settlement": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Controlled S14 Settlement Page
+         * @description Canonical T16 termination settlement console shell.
+         */
+        get: operations["controlled_s14_settlement_page_controlled_s14_settlement_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s14/settlement/react": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Controlled S14 Settlement React Page
+         * @description The settlement console /react alias: the same closed shell contract.
+         */
+        get: operations["controlled_s14_settlement_react_page_controlled_s14_settlement_react_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/demo/react": {
         parameters: {
             query?: never;
@@ -8143,6 +8228,8 @@ export interface components {
             application_id?: string | null;
             /** Approved By */
             approved_by?: string | null;
+            /** Artifact Release Digest */
+            artifact_release_digest?: string | null;
             /** Cancel Reason Code */
             cancel_reason_code?: string | null;
             /** Cancelled By */
@@ -14922,6 +15009,86 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["S13ErrorResponse"];
+                };
+            };
+        };
+    };
+    controlled_s14_page_controlled_s14_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
+            };
+        };
+    };
+    controlled_s14_react_page_controlled_s14_react_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
+            };
+        };
+    };
+    controlled_s14_settlement_page_controlled_s14_settlement_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
+            };
+        };
+    };
+    controlled_s14_settlement_react_page_controlled_s14_settlement_react_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
                 };
             };
         };

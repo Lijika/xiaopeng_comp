@@ -277,15 +277,33 @@ export function isDefinitiveS12Rejection(
   return S12_DEFINITIVE_STATUSES.has(error.status);
 }
 
-/**
- * The one thin same-origin JSON fetch adapter.  It owns credentials, no-store
- * requests, response decoding, and structured HTTP errors; it owns no business
- * transition and adds no generated runtime SDK.
- */
-export async function request<T>(
+/** The closed S14 command outcome vocabulary (mirrors the FastAPI literal).
+ *  Only registered statuses resolve as a typed envelope; any other shape is
+ *  an unknown transport result that retains the caller's idempotency key. */
+const S14_COMMAND_STATUS_BY_NAME: Record<string, true> = {
+  accepted: true,
+  replayed: true,
+  rejected: true,
+  unavailable: true,
+  stale: true,
+  outstanding: true,
+  terminated: true,
+  idle: true,
+  blocked: true,
+  claimed: true,
+  delivered: true,
+  unknown: true,
+  retry_scheduled: true,
+  compensated: true,
+  failed: true,
+};
+
+/** The one thin same-origin JSON fetch envelope shared by every adapter:
+ * credentials, no-store, JSON body headers and response decoding. */
+async function fetchJson(
   path: string,
   init: RequestInit = {},
-): Promise<T> {
+): Promise<{ status: number; payload: unknown }> {
   const response = await fetch(path, {
     ...init,
     credentials: "same-origin",
@@ -304,9 +322,53 @@ export async function request<T>(
       payload = null;
     }
   }
-  if (!response.ok) {
+  return { status: response.status, payload };
+}
+
+/**
+ * The S14 command adapter over the single fetch envelope.  Every registered
+ * domain outcome — accepted, replayed, outstanding, terminated, stale,
+ * rejected, unavailable, delivered — is a typed body on both 2xx and the
+ * registered 403/404/409/422/503 statuses, so a closed envelope is resolved
+ * instead of discarded as an exception.  Only a transport-level failure or a
+ * non-envelope body rejects (as an unknown result); such an outcome may have
+ * committed an effect and retains its idempotency key upstream for exact
+ * replay through query reconciliation.
+ */
+export async function requestS14Command<T>(
+  path: string,
+  init: RequestInit = {},
+): Promise<T> {
+  const { status, payload } = await fetchJson(path, init);
+  if (
+    payload !== null &&
+    typeof payload === "object" &&
+    typeof (payload as Record<string, unknown>).status === "string" &&
+    S14_COMMAND_STATUS_BY_NAME[
+      (payload as Record<string, unknown>).status as string
+    ] === true
+  ) {
+    return payload as T;
+  }
+  if (status >= 200 && status < 300) {
+    throw new Error(`S14_COMMAND_ENVELOPE_INVALID_${status}`);
+  }
+  throw new HttpError(status, (payload as { detail?: unknown } | null)?.detail);
+}
+
+/**
+ * The one thin same-origin JSON fetch adapter.  It owns credentials, no-store
+ * requests, response decoding, and structured HTTP errors; it owns no business
+ * transition and adds no generated runtime SDK.
+ */
+export async function request<T>(
+  path: string,
+  init: RequestInit = {},
+): Promise<T> {
+  const { status, payload } = await fetchJson(path, init);
+  if (status < 200 || status >= 300) {
     const detail = (payload as { detail?: unknown } | null)?.detail;
-    throw new HttpError(response.status, detail);
+    throw new HttpError(status, detail);
   }
   return payload as T;
 }
