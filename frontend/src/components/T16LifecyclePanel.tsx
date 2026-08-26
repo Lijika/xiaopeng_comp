@@ -315,7 +315,8 @@ export default function T16LifecyclePanel({
         )}
       {selectedIsCurrentCycle && (
         <p role="status" data-testid="t16-cycle-current-selection">
-          Cycle {leafText(selectedCycle)} 为当前周期（未封存）
+          Cycle {leafText(selectedCycle)} 为当前周期（
+          {IS_TERMINAL_PHASE[phase] === true ? "已封存" : "未封存"}）
         </p>
       )}
       {!viewingHistoricalCycle && (
@@ -704,41 +705,98 @@ function CycleHistoryView({
         <h3>Lifecycle Events</h3>
         <ul className="history-list" data-testid="t16-cycle-events">
           {cancellations.map((entry) => (
-            <li key={entry.event_id} data-testid="t16-cycle-cancellation">
+            <li
+              key={entry.event_id}
+              id={entry.destination?.target_id}
+              data-testid="t16-cycle-cancellation"
+            >
               cancelled · {leafText(entry.reason_code)} · by{" "}
               {leafText(entry.authority_subject)} · route{" "}
-              <span data-testid="t16-cycle-cancellation-route">
-                {leafText(entry.route)}
-              </span>{" "}
+              {entry.destination ? (
+                <a
+                  data-testid="t16-cycle-cancellation-route-link"
+                  href={entry.destination.href}
+                >
+                  <span data-testid="t16-cycle-cancellation-route">
+                    {leafText(entry.route)}
+                  </span>
+                </a>
+              ) : (
+                <span data-testid="t16-cycle-cancellation-route">
+                  {leafText(entry.route)}
+                </span>
+              )}{" "}
               · application {leafText(history.application_id)} · cycle{" "}
               {entry.cycle}
             </li>
           ))}
           {terminations.map((entry) => (
-            <li key={entry.event_id} data-testid="t16-cycle-termination">
+            <li
+              key={entry.event_id}
+              id={entry.destination?.target_id}
+              data-testid="t16-cycle-termination"
+            >
               terminated · route{" "}
-              <span data-testid="t16-cycle-termination-route">
-                {leafText(entry.route)}
-              </span>{" "}
+              {entry.destination ? (
+                <a
+                  data-testid="t16-cycle-termination-route-link"
+                  href={entry.destination.href}
+                >
+                  <span data-testid="t16-cycle-termination-route">
+                    {leafText(entry.route)}
+                  </span>
+                </a>
+              ) : (
+                <span data-testid="t16-cycle-termination-route">
+                  {leafText(entry.route)}
+                </span>
+              )}{" "}
               · cycle {entry.cycle} ·{" "}
               {(entry.settled_effects ?? []).length > 0 && (
                 <span data-testid="t16-cycle-termination-work">
                   work:{" "}
-                  {(entry.settled_effects ?? [])
-                    .map((effect) => `${effect.kind}:${effect.id}`)
-                    .join(", ")}
+                  {entry.work_destinations?.length
+                    ? entry.work_destinations.map((work, index) => (
+                        <span key={`${work.kind}:${work.id}`} id={work.target_id}>
+                          {index > 0 ? ", " : null}
+                          <a
+                            data-testid="t16-cycle-work-destination"
+                            href={work.href}
+                          >
+                            {work.kind}:{work.id}
+                          </a>
+                        </span>
+                      ))
+                    : (entry.settled_effects ?? [])
+                        .map((effect) => `${effect.kind}:${effect.id}`)
+                        .join(", ")}
                 </span>
               )}
             </li>
           ))}
           {reopens.map((entry) => (
-            <li key={entry.event_id} data-testid="t16-cycle-reopen">
+            <li
+              key={entry.event_id}
+              id={entry.destination?.target_id}
+              data-testid="t16-cycle-reopen"
+            >
               reopened → cycle {entry.cycle} · target{" "}
               {leafText(entry.target_phase)} · predecessor{" "}
               {entry.predecessor_cycle} · route{" "}
-              <span data-testid="t16-cycle-reopen-route">
-                {leafText(entry.route)}
-              </span>
+              {entry.destination ? (
+                <a
+                  data-testid="t16-cycle-reopen-route-link"
+                  href={entry.destination.href}
+                >
+                  <span data-testid="t16-cycle-reopen-route">
+                    {leafText(entry.route)}
+                  </span>
+                </a>
+              ) : (
+                <span data-testid="t16-cycle-reopen-route">
+                  {leafText(entry.route)}
+                </span>
+              )}
             </li>
           ))}
           {cancellations.length === 0 &&

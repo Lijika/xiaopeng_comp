@@ -372,6 +372,47 @@ for (const [label, viewport] of [
     );
     await expect(integratorPage.getByTestId("t16-cancel-button")).toHaveCount(0);
 
+    // FastAPI supplies read-only destinations for the sealed route and its
+    // settled work. Following either destination retains the owning
+    // application/cycle and cannot issue a lifecycle mutation.
+    const postsBeforeDestinations = integratorPosts(integratorRequests).length;
+    const routeDestination = integratorPage
+      .getByTestId("t16-cycle-cancellation-route-link")
+      .first();
+    await expect(routeDestination).toHaveAttribute(
+      "href",
+      new RegExp(
+        `^/controlled/s14\\?application=${activeApplicationId}&cycle=1#t16-route-`,
+      ),
+    );
+    await routeDestination.click();
+    await expect(integratorPage).toHaveURL(
+      new RegExp(
+        `/controlled/s14\\?application=${activeApplicationId}&cycle=1#t16-route-`,
+      ),
+    );
+    await expect(integratorPage.getByTestId("t16-cycle-view")).toBeVisible();
+
+    const workDestination = integratorPage
+      .getByTestId("t16-cycle-work-destination")
+      .first();
+    await expect(workDestination).toHaveAttribute(
+      "href",
+      new RegExp(
+        `^/controlled/s14\\?application=${activeApplicationId}&cycle=1#t16-work-`,
+      ),
+    );
+    await workDestination.click();
+    await expect(integratorPage).toHaveURL(
+      new RegExp(
+        `/controlled/s14\\?application=${activeApplicationId}&cycle=1#t16-work-`,
+      ),
+    );
+    await expect(integratorPage.getByTestId("t16-cycle-view")).toBeVisible();
+    expect(integratorPosts(integratorRequests)).toHaveLength(
+      postsBeforeDestinations,
+    );
+
     // The sealed late-work application renders its immutable cycle-scoped
     // facts including the late-input receipt demanding explicit reopen.
     await integratorPage.goto(

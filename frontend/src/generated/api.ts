@@ -2904,6 +2904,8 @@ export interface components {
             batch_id: string | null;
             /** Claim Label */
             claim_label: string | null;
+            /** Cycle */
+            cycle: number | null;
             /** Disposition */
             disposition: string;
             /** Envelope Fingerprint */
@@ -3345,6 +3347,7 @@ export interface components {
             cancelled_at?: number | null;
             /** Cycle */
             cycle: number;
+            destination?: components["schemas"]["S01HistoryDestination"] | null;
             /** Event Id */
             event_id?: string | null;
             /** Fenced Effects */
@@ -3387,6 +3390,20 @@ export interface components {
             successor_observation_id: string;
             /** Superseded Observation Id */
             superseded_observation_id: string;
+        };
+        /**
+         * S01HistoryDestination
+         * @description One server-derived read destination bound to its application/cycle.
+         */
+        S01HistoryDestination: {
+            /** Application Id */
+            application_id: string;
+            /** Cycle */
+            cycle: number;
+            /** Href */
+            href: string;
+            /** Target Id */
+            target_id: string;
         };
         /**
          * S01HistoryEntityLink
@@ -3673,6 +3690,7 @@ export interface components {
         S01HistoryReopen: {
             /** Cycle */
             cycle: number;
+            destination?: components["schemas"]["S01HistoryDestination"] | null;
             /** Event Id */
             event_id?: string | null;
             /** Lifecycle Revision */
@@ -3793,6 +3811,7 @@ export interface components {
         S01HistoryTermination: {
             /** Cycle */
             cycle: number;
+            destination?: components["schemas"]["S01HistoryDestination"] | null;
             /** Event Id */
             event_id?: string | null;
             /** Lifecycle Revision */
@@ -3805,6 +3824,25 @@ export interface components {
             settled_effects?: components["schemas"]["S14EffectItem"][];
             /** Terminated At */
             terminated_at?: number | null;
+            /** Work Destinations */
+            work_destinations?: components["schemas"]["S01HistoryWorkDestination"][];
+        };
+        /** S01HistoryWorkDestination */
+        S01HistoryWorkDestination: {
+            /** Application Id */
+            application_id: string;
+            /** Cycle */
+            cycle: number;
+            /** Href */
+            href: string;
+            /** Id */
+            id: string;
+            /** Kind */
+            kind: string;
+            /** Result */
+            result?: string | null;
+            /** Target Id */
+            target_id: string;
         };
         /**
          * S01HumanDecision
@@ -12715,9 +12753,61 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["S01AttachmentSubmissionResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
                 };
             };
         };

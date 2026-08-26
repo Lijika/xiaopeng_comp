@@ -17,7 +17,7 @@ from email.message import Message
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Annotated, Any, Callable, Literal
-from urllib.parse import urlparse
+from urllib.parse import quote, urlencode, urlparse
 
 import yaml
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -2005,11 +2005,28 @@ class S01HistoryRun(BaseModel):
     reconciliation: S01HistoryReconciliation | None = None
 
 
+class S01HistoryDestination(BaseModel):
+    """One server-derived read destination bound to its application/cycle."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    application_id: str
+    cycle: int
+    href: str
+    target_id: str
+
+
+class S01HistoryWorkDestination(S01HistoryDestination):
+    kind: str
+    id: str
+    result: str | None = None
+
+
 class S01HistoryCancellation(BaseModel):
     """One immutable upstream-cancellation event rebuilt from audit facts."""
     model_config = ConfigDict(extra="forbid")
     route: str | None = None
-
+    destination: S01HistoryDestination | None = None
 
     event_id: str | None = None
     cycle: int
@@ -2025,13 +2042,16 @@ class S01HistoryTermination(BaseModel):
     """One sealed Terminated settlement with its settled effects."""
     model_config = ConfigDict(extra="forbid")
     route: str | None = None
-
+    destination: S01HistoryDestination | None = None
 
     event_id: str | None = None
     cycle: int
     lifecycle_revision: int
     notification_event_id: str | None = None
     settled_effects: list[S14EffectItem] = Field(default_factory=list)
+    work_destinations: list[S01HistoryWorkDestination] = Field(
+        default_factory=list
+    )
     terminated_at: int | None = None
 
 
@@ -2039,7 +2059,7 @@ class S01HistoryReopen(BaseModel):
     """One successor-cycle reopen link to its predecessor."""
     model_config = ConfigDict(extra="forbid")
     route: str | None = None
-
+    destination: S01HistoryDestination | None = None
 
     event_id: str | None = None
     predecessor_cycle: int
@@ -2741,6 +2761,7 @@ class S01AttachmentSubmissionResponse(BaseModel):
     real_cross_document_opportunities: int | None
     performance_status: str | None
     request_id: str | None
+    cycle: int | None
     request_status: str | None
     batch_id: str | None
     batch_closed: bool | None
@@ -3212,6 +3233,49 @@ def _s01_disable_cache(response: Response) -> None:
     response.headers["Pragma"] = "no-cache"
 
 
+def _s01_history_with_destinations(
+    history: dict[str, Any], *, page_path: str
+) -> dict[str, Any]:
+    """Add read-only HTTP destinations to authoritative history facts."""
+
+    application_id = str(history["application_id"])
+
+    def destination(cycle: int, target_id: str) -> dict[str, Any]:
+        query = urlencode({"application": application_id, "cycle": cycle})
+        return {
+            "application_id": application_id,
+            "cycle": cycle,
+            "href": f"{page_path}?{query}#{quote(target_id, safe='-_.~')}",
+            "target_id": target_id,
+        }
+
+    for collection in ("cancellations", "terminations", "reopens"):
+        for event in history.get(collection, []):
+            cycle = int(event["cycle"])
+            target_id = f"t16-route-{event.get('event_id') or cycle}"
+            event["destination"] = destination(cycle, target_id)
+
+    for termination in history.get("terminations", []):
+        cycle = int(termination["cycle"])
+        work_destinations = []
+        for effect in termination.get("settled_effects", []):
+            kind = str(effect.get("kind") or "")
+            effect_id = str(effect.get("id") or "")
+            if not kind or not effect_id:
+                continue
+            target_id = f"t16-work-{kind}-{effect_id}"
+            work_destinations.append(
+                {
+                    **destination(cycle, target_id),
+                    "kind": kind,
+                    "id": effect_id,
+                    "result": effect.get("result"),
+                }
+            )
+        termination["work_destinations"] = work_destinations
+    return history
+
+
 def _s02_service() -> ControlledScenarioService:
     if S01_SERVICE is None or not S02_CONFIGURED:
         raise HTTPException(
@@ -3309,6 +3373,7 @@ def _s02_admission_json(result: Any) -> dict[str, Any]:
         "real_cross_document_opportunities": result.real_cross_document_opportunities,
         "performance_status": result.performance_status,
         "request_id": result.request_id,
+        "cycle": result.cycle,
         "request_status": result.request_status,
         "batch_id": result.batch_id,
         "batch_closed": result.batch_closed,
@@ -3822,7 +3887,19 @@ def controlled_s02_session(request: Request, response: Response) -> Response:
     return response
 
 
-@app.post("/controlled/s02/api/commands/submit")
+@app.post(
+    "/controlled/s02/api/commands/submit",
+    response_model=S01AttachmentSubmissionResponse,
+    response_model_exclude_none=True,
+    responses={
+        403: {"model": S01ErrorResponse},
+        404: {"model": S01ErrorResponse},
+        409: {"model": S01ErrorResponse},
+        413: {"model": S01ErrorResponse},
+        422: {"model": S01ErrorResponse},
+        503: {"model": S01ErrorResponse},
+    },
+)
 async def controlled_s02_submit(
     request: Request, response: Response
 ) -> dict[str, Any]:
@@ -4028,9 +4105,12 @@ def controlled_s04_application_history(
     _s01_disable_cache(response)
     principal = _s03_reviewer_principal(request)
     try:
-        return _s02_service().application_history_view(
-            principal=principal,
-            application_id=application_id,
+        return _s01_history_with_destinations(
+            _s02_service().application_history_view(
+                principal=principal,
+                application_id=application_id,
+            ),
+            page_path="/controlled/s14",
         )
     except QueryNotFound as error:
         raise _s03_not_found(error) from error
@@ -5726,9 +5806,12 @@ def controlled_s04_demo_application_history(
     _s01_disable_cache(response)
     principal = _s04_demo_reviewer_principal(request)
     try:
-        return _s01_service().application_history_view(
-            principal=principal,
-            application_id=application_id,
+        return _s01_history_with_destinations(
+            _s01_service().application_history_view(
+                principal=principal,
+                application_id=application_id,
+            ),
+            page_path="/controlled/s14",
         )
     except QueryNotFound as error:
         raise _s03_not_found(error) from error

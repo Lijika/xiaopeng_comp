@@ -689,8 +689,24 @@ def test_t16_history_exposes_lifecycle_events_and_late_receipts(
     assert len(body["cancellations"]) == 1
     assert body["cancellations"][0]["cycle"] == 1
     assert body["cancellations"][0]["reason_code"] == "UPSTREAM_WITHDRAWN"
+    cancellation_destination = body["cancellations"][0]["destination"]
+    assert cancellation_destination["application_id"] == application_id
+    assert cancellation_destination["cycle"] == 1
+    assert cancellation_destination["href"].startswith(
+        f"/controlled/s14?application={application_id}&cycle=1#t16-route-"
+    )
     assert len(body["terminations"]) == 1
     assert body["terminations"][0]["cycle"] == 1
+    work_destinations = body["terminations"][0]["work_destinations"]
+    assert work_destinations
+    assert all(item["application_id"] == application_id for item in work_destinations)
+    assert all(item["cycle"] == 1 for item in work_destinations)
+    assert all(
+        item["href"].startswith(
+            f"/controlled/s14?application={application_id}&cycle=1#t16-work-"
+        )
+        for item in work_destinations
+    )
     assert len(body["reopens"]) == 1
     assert body["reopens"][0]["predecessor_cycle"] == 1
     assert body["reopens"][0]["cycle"] == 2
@@ -994,8 +1010,8 @@ def test_t16_registered_late_receipt_public_route_after_reopen(
     assert late_body["disposition"] == "rejected", late.text[:300]
     assert late_body["reason_code"] == "evidence.late_input_requires_reopen"
     assert late_body["application_id"] == application_id
-    if "cycle" in late_body:
-        assert late_body["cycle"] == 1
+    assert late_body["cycle"] == 1
+    assert late_body["request_id"] == rev1_body["receipt_id"]
 
     replayed = client.post(
         submit_url,
@@ -1005,6 +1021,9 @@ def test_t16_registered_late_receipt_public_route_after_reopen(
     replay_body = replayed.json()
     assert replay_body["replayed"] is True
     assert replay_body["receipt_id"] == late_body["receipt_id"]
+    assert replay_body["application_id"] == late_body["application_id"]
+    assert replay_body["cycle"] == late_body["cycle"]
+    assert replay_body["request_id"] == late_body["request_id"]
 
     # History visibility via a registered-scope reviewer principal.
     history = service.application_history_view(
@@ -1023,6 +1042,22 @@ def test_t16_registered_late_receipt_public_route_after_reopen(
     ]
     assert len(receipts) == 1
     assert receipts[0]["cycle"] == 1
+    assert receipts[0]["request_id"] == rev1_body["receipt_id"]
+
+    settlement_url = (
+        f"/controlled/s01/api/queries/applications/{application_id}/settlement"
+    )
+    cross_scope = client.get(settlement_url, headers=_operator_auth())
+    assert cross_scope.status_code == 404
+    assert cross_scope.json()["detail"]["error"] == "S01_NOT_FOUND"
+    assert cross_scope.headers["cache-control"] == "no-store"
+
+    unknown = client.get(
+        "/controlled/s01/api/queries/applications/app_unknown/settlement",
+        headers=_operator_auth(),
+    )
+    assert unknown.status_code == 404
+    assert unknown.json()["detail"]["error"] == "S01_NOT_FOUND"
 
 
 def test_t16_notification_public_command_requires_target_binding(
@@ -1147,8 +1182,10 @@ def test_t16_settlement_view_exposes_pending_effect_and_permission(
     during = client.get(view_url, headers=_operator_auth())
     assert during.status_code == 200, during.text
     body = during.json()
-    assert body["phase"] == "Terminating"
+    assert body["application_id"] == application_id
     assert body["cycle"] == 1
+    assert body["phase"] == "Terminating"
+    assert body["lifecycle_revision"] == cancel.json()["lifecycle_revision"]
     assert body["pending_notification"] is not None
     assert body["pending_notification"]["operation_id"]
     assert body["reopen_permission"] is None

@@ -278,8 +278,43 @@ describe("T16LifecyclePanel (integrator cancellation)", () => {
             reason_code: "UPSTREAM_WITHDRAWN",
             authority_subject: "t16-registered-integrator",
             route: "cancelled",
+            destination: {
+              application_id: S14_APPLICATION_ID,
+              cycle: 1,
+              href: `/controlled/s14?application=${encodeURIComponent(S14_APPLICATION_ID)}&cycle=1#t16-route-canc_sel_1`,
+            },
             fenced_effects: { review_work_items: 1 },
             cancelled_at: 100,
+          },
+        ],
+        terminations: [
+          {
+            event_id: "term_sel_1",
+            cycle: 1,
+            lifecycle_revision: 7,
+            route: "cancelled",
+            destination: {
+              application_id: S14_APPLICATION_ID,
+              cycle: 1,
+              href: `/controlled/s14?application=${encodeURIComponent(S14_APPLICATION_ID)}&cycle=1#t16-route-term_sel_1`,
+            },
+            settled_effects: [
+              {
+                kind: "review_work_item",
+                id: "work_cycle1",
+                result: "cancelled",
+              },
+            ],
+            work_destinations: [
+              {
+                application_id: S14_APPLICATION_ID,
+                cycle: 1,
+                kind: "review_work_item",
+                id: "work_cycle1",
+                result: "cancelled",
+                href: `/controlled/s14?application=${encodeURIComponent(S14_APPLICATION_ID)}&cycle=1#t16-work-review_work_item-work_cycle1`,
+              },
+            ],
           },
         ],
       },
@@ -317,9 +352,14 @@ describe("T16LifecyclePanel (integrator cancellation)", () => {
     expect(
       screen.getByTestId("t16-cycle-run-lifecycle-phase"),
     ).toBeInTheDocument();
-    expect(
-      screen.getByTestId("t16-cycle-cancellation-route"),
-    ).toBeVisible();
+    expect(screen.getByTestId("t16-cycle-cancellation-route-link")).toHaveAttribute(
+      "href",
+      `/controlled/s14?application=${encodeURIComponent(S14_APPLICATION_ID)}&cycle=1#t16-route-canc_sel_1`,
+    );
+    expect(screen.getByTestId("t16-cycle-work-destination")).toHaveAttribute(
+      "href",
+      `/controlled/s14?application=${encodeURIComponent(S14_APPLICATION_ID)}&cycle=1#t16-work-review_work_item-work_cycle1`,
+    );
     first.unmount();
 
     // ...differ from the explicit current-selection view, which renders
@@ -339,6 +379,28 @@ describe("T16LifecyclePanel (integrator cancellation)", () => {
       second.queryByTestId("t16-cycle-run-findings"),
     ).not.toBeInTheDocument();
     second.unmount();
+  });
+
+  it("labels an explicitly selected current terminal cycle as sealed", async () => {
+    fetchRouter({
+      [`GET ${ROUTE_PATH}`]: jsonRoute(
+        s14CurrentRoute({ phase: "Terminated", cycle: 1, lifecycle_revision: 7 }),
+      ),
+      [`GET ${HISTORY_PATH}`]: jsonRoute(
+        historyPayload([{ cycle: 1, run_id: "run_cycle1", current: true }]),
+      ),
+    });
+
+    renderWithQuery(
+      <T16LifecyclePanel applicationId={S14_APPLICATION_ID} selectedCycle={1} />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId("t16-cycle-current-selection")).toHaveTextContent(
+        "已封存",
+      ),
+    );
+    expect(screen.getByTestId("t16-terminated")).toBeInTheDocument();
   });
 
   it("does not leak cycle-1 late receipts into an unrelated cycle view", async () => {

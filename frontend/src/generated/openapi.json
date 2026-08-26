@@ -1225,6 +1225,17 @@
             ],
             "title": "Claim Label"
           },
+          "cycle": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cycle"
+          },
           "disposition": {
             "title": "Disposition",
             "type": "string"
@@ -1579,6 +1590,7 @@
           "real_cross_document_opportunities",
           "performance_status",
           "request_id",
+          "cycle",
           "request_status",
           "batch_id",
           "batch_closed",
@@ -2757,6 +2769,16 @@
             "title": "Cycle",
             "type": "integer"
           },
+          "destination": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/S01HistoryDestination"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "event_id": {
             "anyOf": [
               {
@@ -2896,6 +2918,36 @@
           "evidence_revision"
         ],
         "title": "S01HistoryCorrection",
+        "type": "object"
+      },
+      "S01HistoryDestination": {
+        "additionalProperties": false,
+        "description": "One server-derived read destination bound to its application/cycle.",
+        "properties": {
+          "application_id": {
+            "title": "Application Id",
+            "type": "string"
+          },
+          "cycle": {
+            "title": "Cycle",
+            "type": "integer"
+          },
+          "href": {
+            "title": "Href",
+            "type": "string"
+          },
+          "target_id": {
+            "title": "Target Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "application_id",
+          "cycle",
+          "href",
+          "target_id"
+        ],
+        "title": "S01HistoryDestination",
         "type": "object"
       },
       "S01HistoryEntityLink": {
@@ -3923,6 +3975,16 @@
             "title": "Cycle",
             "type": "integer"
           },
+          "destination": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/S01HistoryDestination"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "event_id": {
             "anyOf": [
               {
@@ -4407,6 +4469,16 @@
             "title": "Cycle",
             "type": "integer"
           },
+          "destination": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/S01HistoryDestination"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "event_id": {
             "anyOf": [
               {
@@ -4461,6 +4533,13 @@
               }
             ],
             "title": "Terminated At"
+          },
+          "work_destinations": {
+            "items": {
+              "$ref": "#/components/schemas/S01HistoryWorkDestination"
+            },
+            "title": "Work Destinations",
+            "type": "array"
           }
         },
         "required": [
@@ -4468,6 +4547,56 @@
           "lifecycle_revision"
         ],
         "title": "S01HistoryTermination",
+        "type": "object"
+      },
+      "S01HistoryWorkDestination": {
+        "additionalProperties": false,
+        "properties": {
+          "application_id": {
+            "title": "Application Id",
+            "type": "string"
+          },
+          "cycle": {
+            "title": "Cycle",
+            "type": "integer"
+          },
+          "href": {
+            "title": "Href",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
+          "target_id": {
+            "title": "Target Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "application_id",
+          "cycle",
+          "href",
+          "target_id",
+          "kind",
+          "id"
+        ],
+        "title": "S01HistoryWorkDestination",
         "type": "object"
       },
       "S01HumanDecision": {
@@ -24274,13 +24403,71 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Controlled S02 Submit Controlled S02 Api Commands Submit Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/S01AttachmentSubmissionResponse"
                 }
               }
             },
             "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "summary": "Controlled S02 Submit"
