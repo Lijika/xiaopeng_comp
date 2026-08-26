@@ -2416,12 +2416,21 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     if (requiresReload || work.isError || !owningReadsCurrent) return;
     const token = liveToken(link.observation_id);
     if (token === null) return;
+    // S15 bounded reveal: the client must declare the explicit purpose,
+    // reason, classification and the exact source region it intends to read.
+    // Any other value will be rejected by the closed server schema; the
+    // source region is taken from the authoritative evidence link itself so
+    // the request proves it knows the exact location.
     const command: RevealCommand = {
       application_id: work.data.application_id,
       observation_id: link.observation_id,
       expected_fence: work.data.claim_fence,
       expected_context: work.data.command_context,
       idempotency_key: revealKey,
+      purpose: "MANUAL_REVIEW",
+      reason: "EVIDENCE_VERIFICATION",
+      classification: "RESTRICTED",
+      expected_source_region: link.source_region ?? null,
     };
     // A new restricted command scrubs every previous restricted holder.
     invalidateRestricted();

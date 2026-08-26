@@ -674,10 +674,17 @@ async def _sanitized_validation_handler(
                 }
             },
         )
-    return JSONResponse(
+    response = JSONResponse(
         status_code=422,
         content={"detail": _sanitized_validation_detail(exc.errors())},
     )
+    # S15: every controlled S01 success and error response is no-store
+    # (including sanitized validation 422s) so a raw value can never be
+    # recovered from history/cache after expiry/revocation.
+    if request.url.path.startswith("/controlled/s01"):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+    return response
 
 
 class _ImmutableHashedAssets(StaticFiles):
@@ -1332,11 +1339,17 @@ async def _s14_http_exception_handler(
             content=jsonable_encoder(body),
             headers=exc.headers,
         )
-    return JSONResponse(
+    response = JSONResponse(
         status_code=exc.status_code,
         content={"detail": exc.detail},
         headers=exc.headers,
     )
+    # S15: every controlled S01 error response is no-store, including
+    # existence-hiding 404s and stale/conflict 409s.
+    if request.url.path.startswith("/controlled/s01"):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+    return response
 
 
 def _s14_command_response(result: dict[str, Any]) -> Response:
@@ -2356,13 +2369,23 @@ class S01FieldObservationCorrection(BaseModel):
 
 
 class S01ReviewRevealBody(S01ReviewFencedBody):
-    """The migrated S01 reveal command.  ``expected_fence`` is bounded at 1
-    because the domain rejects an unclaimed (fence 0) reveal as invalid; the
-    wire status for that violation is the same 422 the domain raises today."""
+    """The S15 reveal command.  ``expected_fence`` is bounded at 1 because
+    the domain rejects an unclaimed (fence 0) reveal as invalid; the wire
+    status for that violation is the same 422 the domain raises today.
+    S15 adds the explicit bounded ``purpose``, ``reason`` and
+    ``classification`` as closed literals (``MANUAL_REVIEW``,
+    ``EVIDENCE_VERIFICATION`` and ``RESTRICTED``); any other value fails the
+    closed schema with a 422 and never reaches the domain.  An optional
+    ``expected_source_region`` must, when supplied, equal the authoritative
+    link's region exactly or the domain fails the command closed."""
 
     expected_fence: int = Field(ge=1, strict=True)
     application_id: str = Field(min_length=1, max_length=200, strict=True)
     observation_id: str = Field(min_length=1, max_length=200, strict=True)
+    purpose: Literal["MANUAL_REVIEW"]
+    reason: Literal["EVIDENCE_VERIFICATION"]
+    classification: Literal["RESTRICTED"]
+    expected_source_region: str | None = Field(default=None, max_length=500)
 
 
 class S01ReviewCorrectionBody(S01ReviewFencedBody):
@@ -2384,10 +2407,13 @@ class S01RevealSourceLocation(BaseModel):
 
 
 class S01RevealResult(BaseModel):
-    """The authorized reveal response.  ``source_text`` is restricted data:
-    it exists only in this command response and the exact live panel state
-    authorized to display it.  A replay returns the same reveal for the same
-    principal and command."""
+    """The authorized S15 reveal response.  ``source_text`` is restricted
+    data: it exists only in this command response and the exact live panel
+    state authorized to display it.  A replay returns the same reveal for
+    the same principal and command.  The response also carries the bounded
+    ``purpose``/``reason``/``classification`` and the minimal lease term
+    ``claim_expires_at`` so the client can enforce the expiry without a
+    second query."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -2399,6 +2425,10 @@ class S01RevealResult(BaseModel):
     source_location: S01RevealSourceLocation
     source_text: str
     revealed_at: int
+    purpose: Literal["MANUAL_REVIEW"]
+    reason: Literal["EVIDENCE_VERIFICATION"]
+    classification: Literal["RESTRICTED"]
+    claim_expires_at: int
 
 
 class S01CorrectionResult(BaseModel):
@@ -5191,6 +5221,10 @@ async def controlled_s04_demo_reveal_field_observation(
             expected_fence=body.expected_fence,
             expected_context=body.expected_context.model_dump(mode="json"),
             idempotency_key=body.idempotency_key,
+            purpose=body.purpose,
+            reason=body.reason,
+            classification=body.classification,
+            expected_source_region=body.expected_source_region,
             now=S01_SESSION_CLOCK(),
         )
     except QueryNotFound as error:

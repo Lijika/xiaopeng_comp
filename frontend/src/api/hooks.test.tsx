@@ -168,7 +168,15 @@ describe("generated request body binding (S2)", () => {
     expectTypeOf<RevealCommand>().toEqualTypeOf<RevealBody>();
     expectTypeOf<CorrectionCommand>().toEqualTypeOf<CorrectBody>();
     expectTypeOf<keyof RevealBody>().toEqualTypeOf<
-      "application_id" | "observation_id" | "expected_fence" | "expected_context" | "idempotency_key"
+      | "application_id"
+      | "observation_id"
+      | "expected_fence"
+      | "expected_context"
+      | "idempotency_key"
+      | "purpose"
+      | "reason"
+      | "classification"
+      | "expected_source_region"
     >();
     expectTypeOf<keyof CorrectBody>().toEqualTypeOf<
       "application_id" | "expected_fence" | "expected_context" | "idempotency_key" | "correction"
@@ -987,6 +995,10 @@ describe("reveal and correction mutations (T03)", () => {
       current_context: "ctx",
     },
     idempotency_key: "t03-reveal-key",
+    purpose: "MANUAL_REVIEW",
+    reason: "EVIDENCE_VERIFICATION",
+    classification: "RESTRICTED",
+    expected_source_region: "region:1",
   };
 
   const correctionCommand: CorrectionCommand = {
@@ -1031,6 +1043,10 @@ describe("reveal and correction mutations (T03)", () => {
       },
       source_text: RESTRICTED_SOURCE_TEXT,
       revealed_at: 1786000000,
+      purpose: "MANUAL_REVIEW",
+      reason: "EVIDENCE_VERIFICATION",
+      classification: "RESTRICTED",
+      claim_expires_at: 1786000900,
     };
   }
 

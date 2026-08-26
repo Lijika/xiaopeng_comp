@@ -4365,16 +4365,36 @@ export interface components {
         };
         /**
          * S01RevealResult
-         * @description The authorized reveal response.  ``source_text`` is restricted data:
-         *     it exists only in this command response and the exact live panel state
-         *     authorized to display it.  A replay returns the same reveal for the same
-         *     principal and command.
+         * @description The authorized S15 reveal response.  ``source_text`` is restricted
+         *     data: it exists only in this command response and the exact live panel
+         *     state authorized to display it.  A replay returns the same reveal for
+         *     the same principal and command.  The response also carries the bounded
+         *     ``purpose``/``reason``/``classification`` and the minimal lease term
+         *     ``claim_expires_at`` so the client can enforce the expiry without a
+         *     second query.
          */
         S01RevealResult: {
             /** Application Id */
             application_id: string;
+            /** Claim Expires At */
+            claim_expires_at: number;
+            /**
+             * Classification
+             * @constant
+             */
+            classification: "RESTRICTED";
             /** Observation Id */
             observation_id: string;
+            /**
+             * Purpose
+             * @constant
+             */
+            purpose: "MANUAL_REVIEW";
+            /**
+             * Reason
+             * @constant
+             */
+            reason: "EVIDENCE_VERIFICATION";
             /** Replayed */
             replayed: boolean;
             /** Revealed At */
@@ -11561,6 +11581,11 @@ export interface operations {
                     /** Application Id */
                     application_id: string;
                     /**
+                     * Classification
+                     * @constant
+                     */
+                    classification: "RESTRICTED";
+                    /**
                      * S01ReviewCommandContext
                      * @description The closed review command context.  The domain compares it by exact
                      *     equality (``_review_context_matches``), so a partial context is a semantic
@@ -11581,10 +11606,22 @@ export interface operations {
                     };
                     /** Expected Fence */
                     expected_fence: number;
+                    /** Expected Source Region */
+                    expected_source_region?: string | null;
                     /** Idempotency Key */
                     idempotency_key: string;
                     /** Observation Id */
                     observation_id: string;
+                    /**
+                     * Purpose
+                     * @constant
+                     */
+                    purpose: "MANUAL_REVIEW";
+                    /**
+                     * Reason
+                     * @constant
+                     */
+                    reason: "EVIDENCE_VERIFICATION";
                 };
             };
         };

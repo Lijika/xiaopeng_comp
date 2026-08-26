@@ -68,12 +68,19 @@ def test_s01_reveal_and_correction_openapi_contracts_are_closed(
     reveal_body = reveal["requestBody"]["content"]["application/json"]["schema"]
     assert set(reveal_body["properties"]) == {
         "application_id",
+        "classification",
         "expected_context",
         "expected_fence",
+        "expected_source_region",
         "idempotency_key",
         "observation_id",
+        "purpose",
+        "reason",
     }
     assert reveal_body["properties"]["expected_fence"]["minimum"] == 1
+    assert reveal_body["properties"]["purpose"]["const"] == "MANUAL_REVIEW"
+    assert reveal_body["properties"]["reason"]["const"] == "EVIDENCE_VERIFICATION"
+    assert reveal_body["properties"]["classification"]["const"] == "RESTRICTED"
     correction_body = correct["requestBody"]["content"]["application/json"]["schema"]
     assert set(correction_body["properties"]) == {
         "application_id",
@@ -124,7 +131,14 @@ def test_s01_reveal_and_correction_openapi_contracts_are_closed(
         "source_location",
         "source_text",
         "revealed_at",
+        "purpose",
+        "reason",
+        "classification",
+        "claim_expires_at",
     }
+    assert reveal_result["properties"]["purpose"]["const"] == "MANUAL_REVIEW"
+    assert reveal_result["properties"]["reason"]["const"] == "EVIDENCE_VERIFICATION"
+    assert reveal_result["properties"]["classification"]["const"] == "RESTRICTED"
     correction_result = document["components"]["schemas"]["S01CorrectionResult"]
     assert correction_result.get("additionalProperties") is False
     assert {

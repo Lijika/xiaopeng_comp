@@ -5984,14 +5984,33 @@
       },
       "S01RevealResult": {
         "additionalProperties": false,
-        "description": "The authorized reveal response.  ``source_text`` is restricted data:\nit exists only in this command response and the exact live panel state\nauthorized to display it.  A replay returns the same reveal for the same\nprincipal and command.",
+        "description": "The authorized S15 reveal response.  ``source_text`` is restricted\ndata: it exists only in this command response and the exact live panel\nstate authorized to display it.  A replay returns the same reveal for\nthe same principal and command.  The response also carries the bounded\n``purpose``/``reason``/``classification`` and the minimal lease term\n``claim_expires_at`` so the client can enforce the expiry without a\nsecond query.",
         "properties": {
           "application_id": {
             "title": "Application Id",
             "type": "string"
           },
+          "claim_expires_at": {
+            "title": "Claim Expires At",
+            "type": "integer"
+          },
+          "classification": {
+            "const": "RESTRICTED",
+            "title": "Classification",
+            "type": "string"
+          },
           "observation_id": {
             "title": "Observation Id",
+            "type": "string"
+          },
+          "purpose": {
+            "const": "MANUAL_REVIEW",
+            "title": "Purpose",
+            "type": "string"
+          },
+          "reason": {
+            "const": "EVIDENCE_VERIFICATION",
+            "title": "Reason",
             "type": "string"
           },
           "replayed": {
@@ -6026,7 +6045,11 @@
           "observation_id",
           "source_location",
           "source_text",
-          "revealed_at"
+          "revealed_at",
+          "purpose",
+          "reason",
+          "classification",
+          "claim_expires_at"
         ],
         "title": "S01RevealResult",
         "type": "object"
@@ -22864,12 +22887,17 @@
             "application/json": {
               "schema": {
                 "additionalProperties": false,
-                "description": "The migrated S01 reveal command.  ``expected_fence`` is bounded at 1\nbecause the domain rejects an unclaimed (fence 0) reveal as invalid; the\nwire status for that violation is the same 422 the domain raises today.",
+                "description": "The S15 reveal command.  ``expected_fence`` is bounded at 1 because\nthe domain rejects an unclaimed (fence 0) reveal as invalid; the wire\nstatus for that violation is the same 422 the domain raises today.\nS15 adds the explicit bounded ``purpose``, ``reason`` and\n``classification`` as closed literals (``MANUAL_REVIEW``,\n``EVIDENCE_VERIFICATION`` and ``RESTRICTED``); any other value fails the\nclosed schema with a 422 and never reaches the domain.  An optional\n``expected_source_region`` must, when supplied, equal the authoritative\nlink's region exactly or the domain fails the command closed.",
                 "properties": {
                   "application_id": {
                     "maxLength": 200,
                     "minLength": 1,
                     "title": "Application Id",
+                    "type": "string"
+                  },
+                  "classification": {
+                    "const": "RESTRICTED",
+                    "title": "Classification",
                     "type": "string"
                   },
                   "expected_context": {
@@ -22912,6 +22940,18 @@
                     "title": "Expected Fence",
                     "type": "integer"
                   },
+                  "expected_source_region": {
+                    "anyOf": [
+                      {
+                        "maxLength": 500,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Expected Source Region"
+                  },
                   "idempotency_key": {
                     "title": "Idempotency Key",
                     "type": "string"
@@ -22921,6 +22961,16 @@
                     "minLength": 1,
                     "title": "Observation Id",
                     "type": "string"
+                  },
+                  "purpose": {
+                    "const": "MANUAL_REVIEW",
+                    "title": "Purpose",
+                    "type": "string"
+                  },
+                  "reason": {
+                    "const": "EVIDENCE_VERIFICATION",
+                    "title": "Reason",
+                    "type": "string"
                   }
                 },
                 "required": [
@@ -22928,7 +22978,10 @@
                   "expected_fence",
                   "idempotency_key",
                   "application_id",
-                  "observation_id"
+                  "observation_id",
+                  "purpose",
+                  "reason",
+                  "classification"
                 ],
                 "title": "S01ReviewRevealBody",
                 "type": "object"

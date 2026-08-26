@@ -550,6 +550,18 @@ class ControlledScenarioService:
     )
     _REVIEW_NOTE_MAX_CHARACTERS = 2000
     _REVIEW_NOTE_MAX_BYTES = 4096
+    # S15: the closed bounded purpose/reason/classification vocabulary for a
+    # controlled reveal.  The reveal is the only action that may expose a
+    # single raw source value, and it must be bound to an explicit,
+    # closed task purpose, a verification reason and a data classification.
+    # The literals are the minimal safe closed set derived from the S15
+    # annex (C12-C15): a reviewer in an assigned manual-review task may
+    # reveal one field observation for manual review / evidence verification
+    # while the data remains RESTRICTED.  Any other value fails closed.
+    _REVEAL_PURPOSES = frozenset({"MANUAL_REVIEW"})
+    _REVEAL_REASONS = frozenset({"EVIDENCE_VERIFICATION"})
+    _REVEAL_CLASSIFICATIONS = frozenset({"RESTRICTED"})
+    _REVEAL_AUDIT_SCHEMA = "s15-reveal-audit/1"
     _DEMO_RETENTION_SECONDS = 24 * 60 * 60
     _C_DEMO_PROVENANCE_SCHEMA = "c-demo-source-provenance/1"
     _C_DEMO_RECEIVED_AT = "2000-01-01T00:00:00Z"
@@ -11261,12 +11273,43 @@ class ControlledScenarioService:
         expected_fence: int,
         expected_context: dict[str, Any],
         idempotency_key: str,
+        purpose: str | None = None,
+        reason: str | None = None,
+        classification: str | None = None,
+        expected_source_region: str | None = None,
         now: float | None = None,
     ) -> dict[str, Any]:
-        """Reveal one claimed C-DEMO source region after recording its audit fact."""
+        """Reveal one claimed C-DEMO source region after recording its audit fact.
+
+        S15 binds the reveal to an explicit bounded purpose, a verification
+        reason, a data classification and the exact source region that the
+        caller intends to read.  All four are validated closed; any mismatch
+        fails with no value and zero business revision.  The successful
+        audit fact and its idempotency binding commit atomically with the
+        read, and the response carries only the single requested value plus
+        minimal location/term metadata.
+        """
         reveal_time = int(self._clock() if now is None else now)
         if not self._valid_reviewer_principal(principal, now=reveal_time):
             raise QueryNotFound(work_item_id)
+        # S15 closed authorization fields: purpose/reason/classification are
+        # required and must be one of the fixed literals; an absent or
+        # unknown value fails closed with no raw and no audit value.
+        if (
+            not isinstance(purpose, str)
+            or purpose not in self._REVEAL_PURPOSES
+            or not isinstance(reason, str)
+            or reason not in self._REVEAL_REASONS
+            or not isinstance(classification, str)
+            or classification not in self._REVEAL_CLASSIFICATIONS
+        ):
+            raise ValueError("source reveal authorization is invalid")
+        # expected_source_region, when supplied, must be an exact region
+        # locator; the server later proves it equals the authoritative link.
+        if expected_source_region is not None and not isinstance(
+            expected_source_region, str
+        ):
+            raise ValueError("source reveal region is invalid")
         if (
             not isinstance(application_id, str)
             or not application_id
@@ -11288,9 +11331,13 @@ class ControlledScenarioService:
             if work_item["application_id"] != application_id:
                 raise QueryNotFound(work_item_id)
             app, _, actual_context = self._review_current_context(work_item)
+            # The S15 fingerprint covers the bounded authorization fields and
+            # the exact region so a replay with a different purpose,
+            # reason, classification or region is an idempotency conflict,
+            # not a second audit fact.
             command_key, command_fingerprint = self._review_lifecycle_idempotency(
                 action=(
-                    f"reveal_field_observation:{application_id}:{observation_id}"
+                    f"reveal_field_observation:{application_id}:{observation_id}:{purpose}:{reason}:{classification}:{expected_source_region or ''}"
                 ),
                 work_item_id=work_item_id,
                 expected_fence=expected_fence,
@@ -11408,6 +11455,35 @@ class ControlledScenarioService:
                 ))
             ):
                 raise ValueError("source reveal observation is not current")
+            # S15 exact region binding: when the caller supplies an expected
+            # source region it must equal the public projected link's region
+            # (the workspace-visible locator, e.g. ``region:1``).  The
+            # authoritative stored link carries the original source path, but
+            # the client only ever learns the projected locator, so the
+            # request proves it targeted the exact workspace-visible region.
+            # A mismatch fails closed with no value and no partial success.
+            if expected_source_region is not None:
+                # Resolve the public projected locator for this observation.
+                projected_region = None
+                try:
+                    for proj in self._mandatory_blocker_projections(
+                        application_id, work_item["run_id"]
+                    ):
+                        for plink in proj.get("evidence_links", []):
+                            if plink.get("observation_id") == observation_id:
+                                projected_region = plink.get("source_region")
+                                break
+                        if projected_region is not None:
+                            break
+                except Exception:
+                    projected_region = None
+                expected = (
+                    projected_region
+                    if isinstance(projected_region, str)
+                    else binding["source_region"]
+                )
+                if expected_source_region != expected:
+                    raise ValueError("source reveal region is invalid")
 
             source = app.get("source")
             if not isinstance(source, dict) or binding["source_sha256"] != source.get(
@@ -11464,6 +11540,13 @@ class ControlledScenarioService:
                 },
                 "source_text": source_text,
                 "revealed_at": reveal_time,
+                # S15 minimal term metadata: the bounded purpose/session and
+                # classification are echoed so the client knows the grant's
+                # scope without learning any other field.
+                "purpose": purpose,
+                "reason": reason,
+                "classification": classification,
+                "claim_expires_at": int(state.get("claim_expires_at", 0)),
             }
             staged = copy.deepcopy(self._store)
             try:
@@ -11495,6 +11578,22 @@ class ControlledScenarioService:
                         ),
                         "result": "revealed",
                         "reason_code": "SOURCE_REVEAL_AUTHORIZED",
+                        # S15 bounded authorization fact — no raw value, no
+                        # free text, no locator, no credential, no path.
+                        "purpose": purpose,
+                        "verification_reason": reason,
+                        "classification": classification,
+                        "expected_source_region": binding["source_region"],
+                        "source_region": binding["source_region"],
+                        "idempotency_key": idempotency_key,
+                        "idempotency_fingerprint": command_fingerprint,
+                        "idempotency_binding": binding_key,
+                        "expected_context": copy.deepcopy(expected_context),
+                        "lifecycle_revision": int(app.get("lifecycle_revision", 0) or 0),
+                        "evidence_revision": int(app.get("evidence_revision", 0) or 0),
+                        "claim_fence": int(expected_fence),
+                        "claim_expires_at": int(state.get("claim_expires_at", 0) or 0),
+                        "schema_version": self._REVEAL_AUDIT_SCHEMA,
                         **self._audit_time_fields(staged, now=reveal_time),
                     }
                 )
@@ -19103,6 +19202,18 @@ class ControlledScenarioService:
                         },
                     }
                 )
+            # S15: history DTOs are minimized/Masked by default as well.
+            # Redact the restricted mention raw in both the append-only ledger
+            # snapshot and the chronological correction history; the raw is
+            # only ever returned by the explicit reveal command for a field
+            # observation and never by history/queue/workspace/search.
+            for bucket in (entity_links, entity_link_history):
+                for record in bucket:
+                    mention = record.get("mention")
+                    if isinstance(mention, dict) and isinstance(
+                        mention.get("raw"), str
+                    ):
+                        mention["raw"] = "[REDACTED]"
 
             # S14: cancellation, termination settlement, reopen links and
             # late-input receipts are rebuilt from immutable audit events and
@@ -23580,6 +23691,15 @@ class ControlledScenarioService:
                 and len(predecessor_finding_ids) == 1
             ):
                 mention["finding_id"] = next(iter(predecessor_finding_ids))
+            # S15: the workspace DTO is minimized and masked by default.  The
+            # entity-link mention raw is restricted data that must not be
+            # exposed in the queue/workspace/search/notification DTOs; only
+            # the explicit reveal command may return a single source value.
+            # Preserve the shape (mention_id/type/field) but redact the raw.
+            if isinstance(mention.get("mention"), dict) and isinstance(
+                mention["mention"].get("raw"), str
+            ):
+                mention["mention"]["raw"] = "[REDACTED]"
         return [mentions[key] for key in sorted(mentions)]
 
     @classmethod

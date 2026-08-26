@@ -1198,6 +1198,10 @@ def test_vin_correction_maps_legacy_differential_at_target_run_seam(
             expected_fence=claimed["claim_fence"],
             expected_context=work_item["command_context"],
             idempotency_key="s04-unauthorized-vin-reveal",
+            purpose="MANUAL_REVIEW",
+            reason="EVIDENCE_VERIFICATION",
+            classification="RESTRICTED",
+            expected_source_region=source["source_region"],
             now=100,
         )
     revealed = service.reveal_field_observation(
@@ -1208,6 +1212,10 @@ def test_vin_correction_maps_legacy_differential_at_target_run_seam(
         expected_fence=claimed["claim_fence"],
         expected_context=work_item["command_context"],
         idempotency_key="s04-vin-reveal",
+        purpose="MANUAL_REVIEW",
+        reason="EVIDENCE_VERIFICATION",
+        classification="RESTRICTED",
+        expected_source_region=source["source_region"],
         now=100,
     )
     replayed = service.reveal_field_observation(
@@ -1218,6 +1226,10 @@ def test_vin_correction_maps_legacy_differential_at_target_run_seam(
         expected_fence=claimed["claim_fence"],
         expected_context=work_item["command_context"],
         idempotency_key="s04-vin-reveal",
+        purpose="MANUAL_REVIEW",
+        reason="EVIDENCE_VERIFICATION",
+        classification="RESTRICTED",
+        expected_source_region=source["source_region"],
         now=100,
     )
     conflict = service.reveal_field_observation(
@@ -1228,6 +1240,9 @@ def test_vin_correction_maps_legacy_differential_at_target_run_seam(
         expected_fence=claimed["claim_fence"],
         expected_context=work_item["command_context"],
         idempotency_key="s04-vin-reveal",
+        purpose="MANUAL_REVIEW",
+        reason="EVIDENCE_VERIFICATION",
+        classification="RESTRICTED",
         now=100,
     )
     accepted = service.correct_field_observation(

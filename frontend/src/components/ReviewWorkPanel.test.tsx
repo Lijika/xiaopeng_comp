@@ -1551,6 +1551,10 @@ function revealResultPayload(overrides: Record<string, unknown> = {}) {
     },
     source_text: SOURCE_SENTINEL,
     revealed_at: 1786000000,
+    purpose: "MANUAL_REVIEW",
+    reason: "EVIDENCE_VERIFICATION",
+    classification: "RESTRICTED",
+    claim_expires_at: LIVE_CLAIM_EXPIRES_AT,
     ...overrides,
   };
 }
@@ -2108,14 +2112,24 @@ describe("ReviewWorkPanel controlled reveal (T03)", () => {
       expected_fence: 1,
       expected_context: CONTEXT,
       idempotency_key: expect.any(String),
+      purpose: "MANUAL_REVIEW",
+      reason: "EVIDENCE_VERIFICATION",
+      classification: "RESTRICTED",
+      expected_source_region: expect.any(String),
     });
-    expect(Object.keys(revealCall?.body ?? {})).toEqual([
-      "application_id",
-      "observation_id",
-      "expected_fence",
-      "expected_context",
-      "idempotency_key",
-    ]);
+    expect(Object.keys(revealCall?.body ?? {}).sort()).toEqual(
+      [
+        "application_id",
+        "classification",
+        "expected_context",
+        "expected_fence",
+        "expected_source_region",
+        "idempotency_key",
+        "observation_id",
+        "purpose",
+        "reason",
+      ].sort(),
+    );
   });
 
   it("keeps the source masked while a reveal is in flight and renders only on the authorized response", async () => {
