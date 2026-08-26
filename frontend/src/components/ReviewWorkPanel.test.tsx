@@ -92,7 +92,7 @@ const CONTEXT = {
 };
 
 function workPayload(overrides: Record<string, unknown> = {}) {
-  return {
+  const base: Record<string, unknown> = {
     status: "unclaimed",
     application_id: APP_ID,
     work_item_id: WORK_ID,
@@ -125,8 +125,41 @@ function workPayload(overrides: Record<string, unknown> = {}) {
       eligible: false,
       ineligible_reason_code: "REVEAL_NOT_ASSIGNED",
     },
-    ...overrides,
   };
+  const merged = { ...base, ...overrides } as Record<string, unknown> & {
+    status: string;
+    claim_subject: unknown;
+    claim_expires_at: unknown;
+    reveal_eligibility?: unknown;
+  };
+  // When the work is claimed and assigned, the C19 reveal eligibility is
+  // derived from the canonical policy; keep the mock consistent so the
+  // reveal button is enabled for the claimed fixtures that the S15 UI
+  // exercises, but disabled for unclaimed/expired.
+  if (
+    merged.status === "claimed" &&
+    typeof merged.claim_subject === "string" &&
+    merged.claim_subject &&
+    typeof merged.claim_expires_at === "number" &&
+    merged.claim_expires_at !== 0 &&
+    (merged.reveal_eligibility == null ||
+      (typeof merged.reveal_eligibility === "object" &&
+        (merged.reveal_eligibility as { eligible?: boolean }).eligible !== true))
+  ) {
+    // Only auto-populate when the caller did not explicitly set a custom
+    // eligibility (e.g., the expiry tests that set nearExpiry).
+    const hasExplicitEligibility = "reveal_eligibility" in overrides;
+    if (!hasExplicitEligibility) {
+      merged.reveal_eligibility = {
+        eligible: true,
+        purpose: "MANUAL_REVIEW",
+        reason: "EVIDENCE_VERIFICATION",
+        classification: "RESTRICTED",
+        max_term_seconds: 900,
+      };
+    }
+  }
+  return merged;
 }
 
 function workspacePayload(overrides: Record<string, unknown> = {}) {
