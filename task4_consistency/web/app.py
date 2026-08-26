@@ -4105,12 +4105,9 @@ def controlled_s04_application_history(
     _s01_disable_cache(response)
     principal = _s03_reviewer_principal(request)
     try:
-        return _s01_history_with_destinations(
-            _s02_service().application_history_view(
-                principal=principal,
-                application_id=application_id,
-            ),
-            page_path="/controlled/s14",
+        return _s02_service().application_history_view(
+            principal=principal,
+            application_id=application_id,
         )
     except QueryNotFound as error:
         raise _s03_not_found(error) from error
