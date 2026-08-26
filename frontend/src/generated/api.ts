@@ -50,7 +50,12 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Api Check */
+        /**
+         * Api Check
+         * @description Synthetic-only boundary: runs the local RuleEngine on synthetic
+         *     input and never creates a controlled S01 processing cycle, evidence
+         *     revision or audit fact.  Controlled sessions are existence-hidden.
+         */
         post: operations["api_check_api_check_post"];
         delete?: never;
         options?: never;
@@ -213,7 +218,13 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Fixture */
+        /**
+         * Get Fixture
+         * @description Synthetic-only boundary: serves only preloaded synthetic fixtures and
+         *     never reads the controlled S01 store.  Controlled sessions are
+         *     existence-hidden (404) and the route cannot serve controlled application
+         *     data; it is not part of the S15 reveal data plane.
+         */
         get: operations["get_fixture_api_fixtures__name__get"];
         put?: never;
         post?: never;
@@ -4364,6 +4375,30 @@ export interface components {
             retry_offsets_seconds: number[];
         };
         /**
+         * S01RevealEligibility
+         * @description The S15 reveal eligibility projection — derived from the canonical
+         *     C19 policy (configs/c19_reveal_policy.json) and the current
+         *     tenant/resource assignment.  The UI must not hand-write purpose/
+         *     reason/classification; it consumes this authorized projection, and the
+         *     domain re-validates the same policy at command time.  When the policy
+         *     is unavailable or the tenant is not G4, eligible is false and the
+         *     reveal remains closed.
+         */
+        S01RevealEligibility: {
+            /** Classification */
+            classification?: string | null;
+            /** Eligible */
+            eligible: boolean;
+            /** Ineligible Reason Code */
+            ineligible_reason_code?: string | null;
+            /** Max Term Seconds */
+            max_term_seconds?: number | null;
+            /** Purpose */
+            purpose?: string | null;
+            /** Reason */
+            reason?: string | null;
+        };
+        /**
          * S01RevealResult
          * @description The authorized S15 reveal response.  ``source_text`` is restricted
          *     data: it exists only in this command response and the exact live panel
@@ -4459,6 +4494,7 @@ export interface components {
             lifecycle_revision: number;
             /** Phase */
             phase: string;
+            reveal_eligibility?: components["schemas"]["S01RevealEligibility"] | null;
             /** Route */
             route: string;
             run_authority: components["schemas"]["S01RunAuthority"];
@@ -11607,7 +11643,7 @@ export interface operations {
                     /** Expected Fence */
                     expected_fence: number;
                     /** Expected Source Region */
-                    expected_source_region?: string | null;
+                    expected_source_region: string;
                     /** Idempotency Key */
                     idempotency_key: string;
                     /** Observation Id */

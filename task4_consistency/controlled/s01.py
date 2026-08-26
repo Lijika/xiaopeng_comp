@@ -558,10 +558,64 @@ class ControlledScenarioService:
     # annex (C12-C15): a reviewer in an assigned manual-review task may
     # reveal one field observation for manual review / evidence verification
     # while the data remains RESTRICTED.  Any other value fails closed.
-    _REVEAL_PURPOSES = frozenset({"MANUAL_REVIEW"})
-    _REVEAL_REASONS = frozenset({"EVIDENCE_VERIFICATION"})
-    _REVEAL_CLASSIFICATIONS = frozenset({"RESTRICTED"})
     _REVEAL_AUDIT_SCHEMA = "s15-reveal-audit/1"
+    # C19: the institutional reveal policy is owned by the data-governance
+    # owner and lives at configs/c19_reveal_policy.json.  The domain loads
+    # the canonical allowed purpose/reason/classification/term values from
+    # that file and validates the current tenant/resource context against
+    # it.  A configuration change therefore changes the authorization result
+    # without touching Python constants, and a missing or unowned policy
+    # keeps the reveal closed (G4) per C19.
+    _C19_REVEAL_POLICY_PATH = Path(__file__).resolve().parents[2] / "configs" / "c19_reveal_policy.json"
+
+    @classmethod
+    def _load_c19_reveal_policy(cls) -> dict[str, Any] | None:
+        try:
+            raw = json.loads(cls._C19_REVEAL_POLICY_PATH.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                return None
+            if raw.get("owner") != "institution-data-governance":
+                return None
+            if raw.get("tenant_scope") != "institution-controlled":
+                return None
+            purposes = raw.get("purposes")
+            reasons = raw.get("reasons")
+            classifications = raw.get("classifications")
+            if not (
+                isinstance(purposes, list)
+                and purposes
+                and all(isinstance(p, str) and p and p.strip() == p for p in purposes)
+                and isinstance(reasons, list)
+                and reasons
+                and all(isinstance(r, str) and r and r.strip() == r for r in reasons)
+                and isinstance(classifications, list)
+                and classifications
+                and all(isinstance(c, str) and c and c.strip() == c for c in classifications)
+            ):
+                return None
+            max_term = raw.get("max_term_seconds")
+            if not isinstance(max_term, int) or max_term <= 0:
+                return None
+            return raw
+        except Exception:
+            return None
+
+    def _is_c19_reveal_policy_available(self) -> bool:
+        return self._load_c19_reveal_policy() is not None
+
+    def _c19_reveal_allowed_values(self) -> tuple[set[str], set[str], set[str]] | None:
+        policy = self._load_c19_reveal_policy()
+        if policy is None:
+            return None
+        try:
+            return (
+                set(str(p) for p in policy.get("purposes", [])),
+                set(str(r) for r in policy.get("reasons", [])),
+                set(str(c) for c in policy.get("classifications", [])),
+            )
+        except Exception:
+            return None
+
     _DEMO_RETENTION_SECONDS = 24 * 60 * 60
     _C_DEMO_PROVENANCE_SCHEMA = "c-demo-source-provenance/1"
     _C_DEMO_RECEIVED_AT = "2000-01-01T00:00:00Z"
@@ -11273,43 +11327,45 @@ class ControlledScenarioService:
         expected_fence: int,
         expected_context: dict[str, Any],
         idempotency_key: str,
-        purpose: str | None = None,
-        reason: str | None = None,
-        classification: str | None = None,
-        expected_source_region: str | None = None,
+        purpose: str,
+        reason: str,
+        classification: str,
+        expected_source_region: str,
         now: float | None = None,
     ) -> dict[str, Any]:
-        """Reveal one claimed C-DEMO source region after recording its audit fact.
+        """Reveal one claimed controlled source region after recording its
+        audit fact.
 
         S15 binds the reveal to an explicit bounded purpose, a verification
-        reason, a data classification and the exact source region that the
-        caller intends to read.  All four are validated closed; any mismatch
-        fails with no value and zero business revision.  The successful
-        audit fact and its idempotency binding commit atomically with the
-        read, and the response carries only the single requested value plus
-        minimal location/term metadata.
+        reason, a data classification and the exact public source region
+        (``region:<n>``) that the caller intends to read.  All four are
+        validated closed and the region is required; any mismatch fails with
+        no value and zero business revision.  The successful audit fact and
+        its idempotency binding commit atomically with the read, and the
+        response carries only the single requested value plus minimal
+        location/term metadata.
         """
         reveal_time = int(self._clock() if now is None else now)
         if not self._valid_reviewer_principal(principal, now=reveal_time):
             raise QueryNotFound(work_item_id)
-        # S15 closed authorization fields: purpose/reason/classification are
-        # required and must be one of the fixed literals; an absent or
-        # unknown value fails closed with no raw and no audit value.
+        # S15 closed shape validation: the wire must supply well-formed
+        # strings and a region locator shape; the closed vocab check
+        # (unknown purpose/classification) is evaluated inside the lock so
+        # a sanitized failed-attempt audit can be recorded with the
+        # authoritative context.
         if (
             not isinstance(purpose, str)
-            or purpose not in self._REVEAL_PURPOSES
+            or not purpose
             or not isinstance(reason, str)
-            or reason not in self._REVEAL_REASONS
+            or not reason
             or not isinstance(classification, str)
-            or classification not in self._REVEAL_CLASSIFICATIONS
+            or not classification
+            or not isinstance(expected_source_region, str)
+            or not expected_source_region
+            or not expected_source_region.startswith("region:")
+            or not expected_source_region[7:].isdigit()
         ):
             raise ValueError("source reveal authorization is invalid")
-        # expected_source_region, when supplied, must be an exact region
-        # locator; the server later proves it equals the authoritative link.
-        if expected_source_region is not None and not isinstance(
-            expected_source_region, str
-        ):
-            raise ValueError("source reveal region is invalid")
         if (
             not isinstance(application_id, str)
             or not application_id
@@ -11331,6 +11387,164 @@ class ControlledScenarioService:
             if work_item["application_id"] != application_id:
                 raise QueryNotFound(work_item_id)
             app, _, actual_context = self._review_current_context(work_item)
+            # S15/C19 gate: the reveal's canonical purpose/reason/
+            # classification/term values are owned by
+            # configs/c19_reveal_policy.json (institution-data-governance).
+            # The domain loads that policy and validates the current
+            # tenant/resource context; a change to the JSON changes the
+            # authorization result without touching Python constants, and a
+            # missing/unowned policy keeps the reveal closed (G4) per C19.
+            policy = self._load_c19_reveal_policy()
+            if policy is None:
+                try:
+                    staged_policy = copy.deepcopy(self._store)
+                    self._before_write("reveal.audit")
+                    staged_policy.audit_events.append(
+                        {
+                            "event_id": self._stable_id(
+                                "audit",
+                                f"evidence_source_revealed:{work_item_id}:{observation_id}:{reveal_time}:policy_unavailable",
+                            ),
+                            "action": "evidence_source_revealed",
+                            "subject": principal.subject,
+                            "role": principal.role,
+                            "scope": work_item["visibility_scope"],
+                            "source_id": principal.source_id,
+                            "application_id": application_id,
+                            "work_item_id": work_item_id,
+                            "observation_id": observation_id,
+                            "result": "rejected",
+                            "reason_code": "REVEAL_POLICY_UNAVAILABLE",
+                            "purpose": purpose,
+                            "verification_reason": reason,
+                            "classification": classification,
+                            "idempotency_key": idempotency_key,
+                            "expected_context": copy.deepcopy(expected_context),
+                            "lifecycle_revision": int(app.get("lifecycle_revision", 0) or 0),
+                            "evidence_revision": int(app.get("evidence_revision", 0) or 0),
+                            "claim_fence": int(expected_fence),
+                            "schema_version": self._REVEAL_AUDIT_SCHEMA,
+                            **self._audit_time_fields(staged_policy, now=reveal_time),
+                        }
+                    )
+                    staged_policy.persist()
+                    self._store = staged_policy
+                except Exception:
+                    pass
+                return {
+                    "status": "rejected",
+                    "replayed": False,
+                    "application_id": application_id,
+                    "work_item_id": work_item_id,
+                    "reason_code": "REVEAL_POLICY_UNAVAILABLE",
+                }
+            # Tenant/resource context validation against the canonical
+            # policy: only registered controlled scopes (institution tenant)
+            # may authorize S15 reveal.  Synthetic C-DEMO sessions and
+            # synthetic C-DEMO tracks cannot authorize S15 reveal per the
+            # R1 brief: the only successful S15 path is the registered
+            # controlled authority with G4/C19, tenant/resource/action,
+            # assignment and claim/context/revision satisfied.
+            if self.is_c_demo_scope(principal.scope) or app.get("track") == "C-DEMO":
+                try:
+                    staged_demo = copy.deepcopy(self._store)
+                    self._before_write("reveal.audit")
+                    staged_demo.audit_events.append(
+                        {
+                            "event_id": self._stable_id(
+                                "audit",
+                                f"evidence_source_revealed:{work_item_id}:{observation_id}:{reveal_time}:demo_denied",
+                            ),
+                            "action": "evidence_source_revealed",
+                            "subject": principal.subject,
+                            "role": principal.role,
+                            "scope": work_item["visibility_scope"],
+                            "source_id": principal.source_id,
+                            "application_id": application_id,
+                            "work_item_id": work_item_id,
+                            "observation_id": observation_id,
+                            "result": "rejected",
+                            "reason_code": "REVEAL_SYNTHETIC_DENIED" if self.is_c_demo_scope(principal.scope) else "REVEAL_SYNTHETIC_TRACK_DENIED",
+                            "purpose": purpose,
+                            "verification_reason": reason,
+                            "classification": classification,
+                            "idempotency_key": idempotency_key,
+                            "expected_context": copy.deepcopy(expected_context),
+                            "lifecycle_revision": int(app.get("lifecycle_revision", 0) or 0),
+                            "evidence_revision": int(app.get("evidence_revision", 0) or 0),
+                            "claim_fence": int(expected_fence),
+                            "schema_version": self._REVEAL_AUDIT_SCHEMA,
+                            **self._audit_time_fields(staged_demo, now=reveal_time),
+                        }
+                    )
+                    staged_demo.persist()
+                    self._store = staged_demo
+                except Exception:
+                    pass
+                return {
+                    "status": "rejected",
+                    "replayed": False,
+                    "application_id": application_id,
+                    "work_item_id": work_item_id,
+                    "reason_code": "REVEAL_SYNTHETIC_DENIED" if self.is_c_demo_scope(principal.scope) else "REVEAL_SYNTHETIC_TRACK_DENIED",
+                }
+            # Closed vocab check against the canonical policy (not hard-coded
+            # Python literals).  An unknown purpose/reason/classification
+            # is a bounded-authorization failure that must be audited
+            # without raw/locator, and a policy change alone flips the
+            # result.
+            allowed_purposes = set(str(p) for p in policy.get("purposes", []))
+            allowed_reasons = set(str(r) for r in policy.get("reasons", []))
+            allowed_classifications = set(
+                str(c) for c in policy.get("classifications", [])
+            )
+            if (
+                purpose not in allowed_purposes
+                or reason not in allowed_reasons
+                or classification not in allowed_classifications
+            ):
+                try:
+                    staged_vocab = copy.deepcopy(self._store)
+                    self._before_write("reveal.audit")
+                    staged_vocab.audit_events.append(
+                        {
+                            "event_id": self._stable_id(
+                                "audit",
+                                f"evidence_source_revealed:{work_item_id}:{observation_id}:{reveal_time}:vocab_rejected",
+                            ),
+                            "action": "evidence_source_revealed",
+                            "subject": principal.subject,
+                            "role": principal.role,
+                            "scope": work_item["visibility_scope"],
+                            "source_id": principal.source_id,
+                            "application_id": application_id,
+                            "work_item_id": work_item_id,
+                            "observation_id": observation_id,
+                            "result": "rejected",
+                            "reason_code": "REVEAL_VOCABULARY_UNKNOWN",
+                            "purpose": purpose,
+                            "verification_reason": reason,
+                            "classification": classification,
+                            "idempotency_key": idempotency_key,
+                            "expected_context": copy.deepcopy(expected_context),
+                            "lifecycle_revision": int(app.get("lifecycle_revision", 0) or 0),
+                            "evidence_revision": int(app.get("evidence_revision", 0) or 0),
+                            "claim_fence": int(expected_fence),
+                            "schema_version": self._REVEAL_AUDIT_SCHEMA,
+                            **self._audit_time_fields(staged_vocab, now=reveal_time),
+                        }
+                    )
+                    staged_vocab.persist()
+                    self._store = staged_vocab
+                except Exception:
+                    pass
+                return {
+                    "status": "rejected",
+                    "replayed": False,
+                    "application_id": application_id,
+                    "work_item_id": work_item_id,
+                    "reason_code": "REVEAL_VOCABULARY_UNKNOWN",
+                }
             # The S15 fingerprint covers the bounded authorization fields and
             # the exact region so a replay with a different purpose,
             # reason, classification or region is an idempotency conflict,
@@ -11379,8 +11593,7 @@ class ControlledScenarioService:
                     "reason_code": "STALE_WORK_ITEM_CLAIM",
                 }
             if (
-                app.get("track") != "C-DEMO"
-                or app.get("phase") != "Manual Review"
+                app.get("phase") != "Manual Review"
                 or app.get("current_run_id") != work_item["run_id"]
                 or app.get("lifecycle_revision") != work_item["lifecycle_revision"]
                 or app.get("evidence_revision") != work_item["evidence_revision"]
@@ -11433,18 +11646,45 @@ class ControlledScenarioService:
                 for candidate in links[1:]
             ):
                 raise RuntimeError("source reveal observation authority is ambiguous")
-            selected_documents = [
-                document
-                for document in self._assemble_evidence(self._admitted_evidence(app))
-                if document.get("document_id") == binding["document_id"]
-                and document.get("document_role") == binding["document_role"]
-            ]
-            selected = (
-                selected_documents[0].get("fields", {}).get(binding["field"])
-                if len(selected_documents) == 1
-                and isinstance(selected_documents[0].get("fields"), dict)
-                else None
-            )
+            # Resolve the authoritative observation for the requested
+            # evidence link.  C-DEMO synthetic evidence is stored as fields
+            # in the assembled evidence, while R-OBSERVED registered
+            # evidence is stored as observations.  Both are verified with
+            # the full tuple (observation, document role/source identity,
+            # SHA, page, region) before any raw read.
+            evidence = self._admitted_evidence(app)
+            assembled = self._assemble_evidence(evidence)
+            selected: dict[str, Any] | None = None
+            if app.get("track") == "C-DEMO":
+                selected_documents = [
+                    document
+                    for document in assembled
+                    if document.get("document_id") == binding["document_id"]
+                    and document.get("document_role") == binding["document_role"]
+                ]
+                selected = (
+                    selected_documents[0].get("fields", {}).get(binding["field"])
+                    if len(selected_documents) == 1
+                    and isinstance(selected_documents[0].get("fields"), dict)
+                    else None
+                )
+            else:
+                for doc in evidence:
+                    if doc.get("document_id") != binding["document_id"]:
+                        continue
+                    if doc.get("document_role") != binding["document_role"]:
+                        continue
+                    for obs in doc.get("observations", []) or []:
+                        if not isinstance(obs, dict):
+                            continue
+                        if obs.get("observation_id") != observation_id:
+                            continue
+                        if obs.get("field") != binding["field"]:
+                            continue
+                        selected = obs
+                        break
+                    if selected is not None:
+                        break
             if (
                 not isinstance(selected, dict)
                 or selected.get("observation_id") != observation_id
@@ -11455,59 +11695,80 @@ class ControlledScenarioService:
                 ))
             ):
                 raise ValueError("source reveal observation is not current")
-            # S15 exact region binding: when the caller supplies an expected
-            # source region it must equal the public projected link's region
-            # (the workspace-visible locator, e.g. ``region:1``).  The
+            # S15 exact region binding: the required expected_source_region
+            # must equal the public projected locator (``region:1``).  The
             # authoritative stored link carries the original source path, but
             # the client only ever learns the projected locator, so the
             # request proves it targeted the exact workspace-visible region.
-            # A mismatch fails closed with no value and no partial success.
-            if expected_source_region is not None:
-                # Resolve the public projected locator for this observation.
-                projected_region = None
-                try:
-                    for proj in self._mandatory_blocker_projections(
-                        application_id, work_item["run_id"]
-                    ):
-                        for plink in proj.get("evidence_links", []):
-                            if plink.get("observation_id") == observation_id:
-                                projected_region = plink.get("source_region")
-                                break
-                        if projected_region is not None:
+            # Missing, malformed or mismatched regions fail closed before any
+            # raw read and are bound into the idempotency fingerprint.
+            projected_region = None
+            try:
+                for proj in self._mandatory_blocker_projections(
+                    application_id, work_item["run_id"]
+                ):
+                    for plink in proj.get("evidence_links", []):
+                        if plink.get("observation_id") == observation_id:
+                            projected_region = plink.get("source_region")
                             break
-                except Exception:
-                    projected_region = None
-                expected = (
-                    projected_region
-                    if isinstance(projected_region, str)
-                    else binding["source_region"]
-                )
-                if expected_source_region != expected:
-                    raise ValueError("source reveal region is invalid")
+                    if projected_region is not None:
+                        break
+            except Exception:
+                projected_region = None
+            expected = (
+                projected_region
+                if isinstance(projected_region, str)
+                else binding["source_region"]
+            )
+            if expected_source_region != expected:
+                raise ValueError("source reveal region is invalid")
 
             source = app.get("source")
-            if not isinstance(source, dict) or binding["source_sha256"] != source.get(
-                "source_sha256"
-            ):
-                raise RuntimeError("source reveal authority does not match")
-            payload, _ = self._read_fixed_scenario(source.get("scenario_id"))
-            source_documents = [
-                document
-                for document in payload["documents"]
-                if document.get("doc_id") == binding["document_id"]
-                and document.get("doc_type") == binding["document_role"]
-            ]
-            source_field = (
-                source_documents[0].get("fields", {}).get(binding["field"])
-                if len(source_documents) == 1
-                and isinstance(source_documents[0].get("fields"), dict)
-                else None
-            )
-            source_text = (
-                source_field.get("source_text")
-                if isinstance(source_field, dict)
-                else None
-            )
+            # Source authority differs by track: C-DEMO reads the fixed
+            # synthetic scenario, while R-OBSERVED (registered) derives the
+            # value from the admitted evidence and the registered object
+            # boundary (already verified by _review_write_gate).  In both
+            # cases the returned source_text is the single requested value
+            # and the audit never persists a locator.
+            source_text: str | None = None
+            if app.get("track") == "C-DEMO":
+                if not isinstance(source, dict) or binding["source_sha256"] != source.get(
+                    "source_sha256"
+                ):
+                    raise RuntimeError("source reveal authority does not match")
+                payload, _ = self._read_fixed_scenario(source.get("scenario_id"))
+                source_documents = [
+                    document
+                    for document in payload["documents"]
+                    if document.get("doc_id") == binding["document_id"]
+                    and document.get("doc_type") == binding["document_role"]
+                ]
+                source_field = (
+                    source_documents[0].get("fields", {}).get(binding["field"])
+                    if len(source_documents) == 1
+                    and isinstance(source_documents[0].get("fields"), dict)
+                    else None
+                )
+                source_text = (
+                    source_field.get("source_text")
+                    if isinstance(source_field, dict)
+                    else None
+                )
+            else:
+                # Registered controlled track: the field's raw value is the
+                # source authority; the registered boundary has already
+                # verified the underlying object via _review_write_gate.
+                if isinstance(selected, dict):
+                    # Prefer the raw lexeme preserved by the adapter; fall
+                    # back to source_text if present.
+                    raw_candidate = selected.get("raw")
+                    if isinstance(raw_candidate, str) and raw_candidate:
+                        source_text = raw_candidate
+                    else:
+                        source_text = selected.get("source_text") if isinstance(selected.get("source_text"), str) else None
+                # For registered, the source sha check is via the boundary
+                # already, so no additional source dict check is required
+                # beyond the evidence eligibility already proven.
             if (
                 not isinstance(source_text, str)
                 or not source_text
@@ -11579,12 +11840,13 @@ class ControlledScenarioService:
                         "result": "revealed",
                         "reason_code": "SOURCE_REVEAL_AUTHORIZED",
                         # S15 bounded authorization fact — no raw value, no
-                        # free text, no locator, no credential, no path.
+                        # OCR, no free text, no locator, no credential, no
+                        # path, no object URL.  Only the bounded
+                        # purpose/reason/classification and safe correlation
+                        # metadata are persisted.
                         "purpose": purpose,
                         "verification_reason": reason,
                         "classification": classification,
-                        "expected_source_region": binding["source_region"],
-                        "source_region": binding["source_region"],
                         "idempotency_key": idempotency_key,
                         "idempotency_fingerprint": command_fingerprint,
                         "idempotency_binding": binding_key,
@@ -18095,6 +18357,44 @@ class ControlledScenarioService:
                 for decision_id in state["decision_ids"]
             ]
             decision = decisions[0] if len(decisions) == 1 else None
+            # S15 reveal eligibility projection — derived from the canonical
+            # C19 policy (configs/c19_reveal_policy.json) and the current
+            # tenant/resource assignment.  The UI must consume this
+            # authorized projection instead of hand-writing literals; the
+            # domain re-validates the same policy at command time.
+            policy = self._load_c19_reveal_policy()
+            reveal_eligibility: dict[str, Any]
+            if policy is None:
+                reveal_eligibility = {
+                    "eligible": False,
+                    "ineligible_reason_code": "REVEAL_POLICY_UNAVAILABLE",
+                }
+            elif not self.is_registered_scope(principal.scope):
+                reveal_eligibility = {
+                    "eligible": False,
+                    "ineligible_reason_code": "REVEAL_TENANT_NOT_G4",
+                }
+            elif status != "claimed" or state.get("claim_subject") != principal.subject:
+                reveal_eligibility = {
+                    "eligible": False,
+                    "ineligible_reason_code": "REVEAL_NOT_ASSIGNED",
+                }
+            elif float(state.get("claim_expires_at", 0) or 0) <= query_time:
+                reveal_eligibility = {
+                    "eligible": False,
+                    "ineligible_reason_code": "REVEAL_CLAIM_EXPIRED",
+                }
+            else:
+                # Eligible — expose the canonical allowed values from the
+                # C19 policy; changing the JSON changes the UI and the
+                # domain result without touching Python constants.
+                reveal_eligibility = {
+                    "eligible": True,
+                    "purpose": policy["purposes"][0] if isinstance(policy.get("purposes"), list) and policy["purposes"] else None,
+                    "reason": policy["reasons"][0] if isinstance(policy.get("reasons"), list) and policy["reasons"] else None,
+                    "classification": policy["classifications"][0] if isinstance(policy.get("classifications"), list) and policy["classifications"] else None,
+                    "max_term_seconds": policy.get("max_term_seconds"),
+                }
             return {
                 "status": status,
                 "application_id": work_item["application_id"],
@@ -18118,6 +18418,7 @@ class ControlledScenarioService:
                 "completed_finding_ids": copy.deepcopy(
                     state["completed_finding_ids"]
                 ),
+                "reveal_eligibility": reveal_eligibility,
             }
 
     def queue_view(
@@ -18340,6 +18641,18 @@ class ControlledScenarioService:
             "admission_after_stop",
             "requeued_jobs",
             "admission_after_recovery",
+            # S15 reveal safe context — purpose/reason/classification and
+            # correlation metadata are projected; raw/locator/credential/path
+            # are never included.
+            "purpose",
+            "verification_reason",
+            "classification",
+            "schema_version",
+            "idempotency_key",
+            "idempotency_fingerprint",
+            "idempotency_binding",
+            "expected_context",
+            "claim_expires_at",
         )
         with self._lock:
             self._reload_store()

@@ -1,0 +1,12 @@
+{
+  "policy_id": "c19-reveal-policy/1",
+  "policy_version": "1",
+  "owner": "institution-data-governance",
+  "effective_from": "2026-08-27T00:00:00Z",
+  "tenant_scope": "institution-controlled",
+  "purposes": ["MANUAL_REVIEW"],
+  "reasons": ["EVIDENCE_VERIFICATION"],
+  "classifications": ["RESTRICTED"],
+  "max_term_seconds": 900,
+  "description": "Canonical S15 reveal policy — bounded purpose/reason/classification and term for the registered controlled deployment. Loaded by the domain authority; missing or invalid policy keeps reveal closed per C19."
+}

@@ -5982,6 +5982,76 @@
         "title": "S01RetryPolicy",
         "type": "object"
       },
+      "S01RevealEligibility": {
+        "additionalProperties": false,
+        "description": "The S15 reveal eligibility projection — derived from the canonical\nC19 policy (configs/c19_reveal_policy.json) and the current\ntenant/resource assignment.  The UI must not hand-write purpose/\nreason/classification; it consumes this authorized projection, and the\ndomain re-validates the same policy at command time.  When the policy\nis unavailable or the tenant is not G4, eligible is false and the\nreveal remains closed.",
+        "properties": {
+          "classification": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Classification"
+          },
+          "eligible": {
+            "title": "Eligible",
+            "type": "boolean"
+          },
+          "ineligible_reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ineligible Reason Code"
+          },
+          "max_term_seconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Term Seconds"
+          },
+          "purpose": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Purpose"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "required": [
+          "eligible"
+        ],
+        "title": "S01RevealEligibility",
+        "type": "object"
+      },
       "S01RevealResult": {
         "additionalProperties": false,
         "description": "The authorized S15 reveal response.  ``source_text`` is restricted\ndata: it exists only in this command response and the exact live panel\nstate authorized to display it.  A replay returns the same reveal for\nthe same principal and command.  The response also carries the bounded\n``purpose``/``reason``/``classification`` and the minimal lease term\n``claim_expires_at`` so the client can enforce the expiry without a\nsecond query.",
@@ -6183,6 +6253,16 @@
           "phase": {
             "title": "Phase",
             "type": "string"
+          },
+          "reveal_eligibility": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/S01RevealEligibility"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "route": {
             "title": "Route",
@@ -19143,6 +19223,7 @@
     },
     "/api/check": {
       "post": {
+        "description": "Synthetic-only boundary: runs the local RuleEngine on synthetic\ninput and never creates a controlled S01 processing cycle, evidence\nrevision or audit fact.  Controlled sessions are existence-hidden.",
         "operationId": "api_check_api_check_post",
         "requestBody": {
           "content": {
@@ -19482,6 +19563,7 @@
     },
     "/api/fixtures/{name}": {
       "get": {
+        "description": "Synthetic-only boundary: serves only preloaded synthetic fixtures and\nnever reads the controlled S01 store.  Controlled sessions are\nexistence-hidden (404) and the route cannot serve controlled application\ndata; it is not part of the S15 reveal data plane.",
         "operationId": "get_fixture_api_fixtures__name__get",
         "parameters": [
           {
@@ -22887,7 +22969,7 @@
             "application/json": {
               "schema": {
                 "additionalProperties": false,
-                "description": "The S15 reveal command.  ``expected_fence`` is bounded at 1 because\nthe domain rejects an unclaimed (fence 0) reveal as invalid; the wire\nstatus for that violation is the same 422 the domain raises today.\nS15 adds the explicit bounded ``purpose``, ``reason`` and\n``classification`` as closed literals (``MANUAL_REVIEW``,\n``EVIDENCE_VERIFICATION`` and ``RESTRICTED``); any other value fails the\nclosed schema with a 422 and never reaches the domain.  An optional\n``expected_source_region`` must, when supplied, equal the authoritative\nlink's region exactly or the domain fails the command closed.",
+                "description": "The S15 reveal command.  ``expected_fence`` is bounded at 1 because\nthe domain rejects an unclaimed (fence 0) reveal as invalid; the wire\nstatus for that violation is the same 422 the domain raises today.\nS15 adds the explicit bounded ``purpose``, ``reason`` and\n``classification`` as closed literals (``MANUAL_REVIEW``,\n``EVIDENCE_VERIFICATION`` and ``RESTRICTED``); any other value fails the\nclosed schema with a 422 and never reaches the domain.  An optional\n``expected_source_region`` must, when supplied, equal the authoritative\nlink's region exactly or the domain fails the command closed.  The\n``expected_source_region`` is required and must equal the public\nprojected locator (``region:<n>``) or the command is rejected before\nany raw read.",
                 "properties": {
                   "application_id": {
                     "maxLength": 200,
@@ -22941,16 +23023,11 @@
                     "type": "integer"
                   },
                   "expected_source_region": {
-                    "anyOf": [
-                      {
-                        "maxLength": 500,
-                        "type": "string"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ],
-                    "title": "Expected Source Region"
+                    "maxLength": 500,
+                    "minLength": 1,
+                    "pattern": "^region:[0-9]+$",
+                    "title": "Expected Source Region",
+                    "type": "string"
                   },
                   "idempotency_key": {
                     "title": "Idempotency Key",
@@ -22981,7 +23058,8 @@
                   "observation_id",
                   "purpose",
                   "reason",
-                  "classification"
+                  "classification",
+                  "expected_source_region"
                 ],
                 "title": "S01ReviewRevealBody",
                 "type": "object"

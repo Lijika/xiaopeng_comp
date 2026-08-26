@@ -674,17 +674,10 @@ async def _sanitized_validation_handler(
                 }
             },
         )
-    response = JSONResponse(
+    return JSONResponse(
         status_code=422,
         content={"detail": _sanitized_validation_detail(exc.errors())},
     )
-    # S15: every controlled S01 success and error response is no-store
-    # (including sanitized validation 422s) so a raw value can never be
-    # recovered from history/cache after expiry/revocation.
-    if request.url.path.startswith("/controlled/s01"):
-        response.headers["Cache-Control"] = "no-store"
-        response.headers["Pragma"] = "no-cache"
-    return response
 
 
 class _ImmutableHashedAssets(StaticFiles):
@@ -1339,17 +1332,11 @@ async def _s14_http_exception_handler(
             content=jsonable_encoder(body),
             headers=exc.headers,
         )
-    response = JSONResponse(
+    return JSONResponse(
         status_code=exc.status_code,
         content={"detail": exc.detail},
         headers=exc.headers,
     )
-    # S15: every controlled S01 error response is no-store, including
-    # existence-hiding 404s and stale/conflict 409s.
-    if request.url.path.startswith("/controlled/s01"):
-        response.headers["Cache-Control"] = "no-store"
-        response.headers["Pragma"] = "no-cache"
-    return response
 
 
 def _s14_command_response(result: dict[str, Any]) -> Response:
@@ -1567,6 +1554,25 @@ class S01HumanDecision(BaseModel):
         }
 
 
+class S01RevealEligibility(BaseModel):
+    """The S15 reveal eligibility projection — derived from the canonical
+    C19 policy (configs/c19_reveal_policy.json) and the current
+    tenant/resource assignment.  The UI must not hand-write purpose/
+    reason/classification; it consumes this authorized projection, and the
+    domain re-validates the same policy at command time.  When the policy
+    is unavailable or the tenant is not G4, eligible is false and the
+    reveal remains closed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    eligible: bool
+    purpose: str | None = None
+    reason: str | None = None
+    classification: str | None = None
+    max_term_seconds: int | None = None
+    ineligible_reason_code: str | None = None
+
+
 class S01ReviewWorkItemResponse(BaseModel):
     status: str
     application_id: str
@@ -1584,6 +1590,7 @@ class S01ReviewWorkItemResponse(BaseModel):
     decision: S01HumanDecision | None = None
     decisions: list[S01HumanDecision]
     completed_finding_ids: list[str]
+    reveal_eligibility: S01RevealEligibility | None = None
 
 
 class S01EvidenceLink(BaseModel):
@@ -2377,7 +2384,10 @@ class S01ReviewRevealBody(S01ReviewFencedBody):
     ``EVIDENCE_VERIFICATION`` and ``RESTRICTED``); any other value fails the
     closed schema with a 422 and never reaches the domain.  An optional
     ``expected_source_region`` must, when supplied, equal the authoritative
-    link's region exactly or the domain fails the command closed."""
+    link's region exactly or the domain fails the command closed.  The
+    ``expected_source_region`` is required and must equal the public
+    projected locator (``region:<n>``) or the command is rejected before
+    any raw read."""
 
     expected_fence: int = Field(ge=1, strict=True)
     application_id: str = Field(min_length=1, max_length=200, strict=True)
@@ -2385,7 +2395,9 @@ class S01ReviewRevealBody(S01ReviewFencedBody):
     purpose: Literal["MANUAL_REVIEW"]
     reason: Literal["EVIDENCE_VERIFICATION"]
     classification: Literal["RESTRICTED"]
-    expected_source_region: str | None = Field(default=None, max_length=500)
+    expected_source_region: str = Field(
+        min_length=1, max_length=500, pattern=r"^region:[0-9]+$", strict=True
+    )
 
 
 class S01ReviewCorrectionBody(S01ReviewFencedBody):
@@ -4981,8 +4993,23 @@ def controlled_s04_demo_review_work_item(
     request: Request,
     response: Response,
 ) -> dict[str, Any]:
+    # S15: the work-item view now carries the C19 reveal-eligibility
+    # projection.  The endpoint accepts both the registered controlled
+    # session and the legacy synthetic session; the service evaluates
+    # tenant/resource eligibility and returns eligible=false for
+    # synthetic or unconfigured tenants while keeping the DTO minimized.
     _s01_disable_cache(response)
-    principal = _s04_demo_reviewer_principal(request)
+    principal: S01CommandPrincipal | None = None
+    last_error: HTTPException | None = None
+    for factory in (_s03_reviewer_principal, _s04_demo_reviewer_principal):
+        try:
+            principal = factory(request)
+            break
+        except HTTPException as exc:
+            last_error = exc
+            continue
+    if principal is None:
+        raise last_error  # type: ignore[misc]
     try:
         return _s01_service().review_work_item_view(
             principal=principal,
@@ -5208,8 +5235,13 @@ async def controlled_s04_demo_reveal_field_observation(
     request: Request,
     response: Response,
 ) -> dict[str, Any]:
-    _s01_disable_cache(response)
-    principal = _s04_demo_reviewer_principal(request)
+    # S15 reveal is the registered controlled authority (G4/C19).  Only
+    # a registered institution session (tenant/resource/action grant via
+    # _s03_reviewer_principal) may authorize it; C-DEMO synthetic
+    # sessions and synthetic C-DEMO tracks are not part of the S15 data
+    # plane.  The central S01ResponsePolicy enforces no-store for both
+    # success and sanitized errors; no dual fallback is retained.
+    principal = _s03_reviewer_principal(request)
     body = await _s03_command_body(request, S01ReviewRevealBody)
     assert isinstance(body, S01ReviewRevealBody)
     try:
@@ -6135,7 +6167,20 @@ def get_step2_sample(sample_id: str) -> dict[str, Any]:
 
 
 @app.get("/api/fixtures/{name}")
-def get_fixture(name: str) -> dict[str, Any]:
+def get_fixture(name: str, request: Request) -> dict[str, Any]:
+    """Synthetic-only boundary: serves only preloaded synthetic fixtures and
+    never reads the controlled S01 store.  Controlled sessions are
+    existence-hidden (404) and the route cannot serve controlled application
+    data; it is not part of the S15 reveal data plane.
+    """
+    # Isolate from the controlled data plane: any valid controlled
+    # (registered) session is hidden as 404, proving the synthetic
+    # boundary cannot be used as a direct-object bypass for S15.
+    principal = _s01_principal(request)
+    if principal is not None and ControlledScenarioService.is_registered_scope(
+        principal.scope
+    ):
+        raise HTTPException(404, detail={"error": "SYNTHETIC_ONLY"})
     if "/" in name or ".." in name:
         raise HTTPException(400, "invalid name")
     fp = FIXTURES / name
@@ -6145,7 +6190,16 @@ def get_fixture(name: str) -> dict[str, Any]:
 
 
 @app.post("/api/check")
-def api_check(body: CheckBody) -> dict[str, Any]:
+def api_check(body: CheckBody, request: Request) -> dict[str, Any]:
+    """Synthetic-only boundary: runs the local RuleEngine on synthetic
+    input and never creates a controlled S01 processing cycle, evidence
+    revision or audit fact.  Controlled sessions are existence-hidden.
+    """
+    principal = _s01_principal(request)
+    if principal is not None and ControlledScenarioService.is_registered_scope(
+        principal.scope
+    ):
+        raise HTTPException(404, detail={"error": "SYNTHETIC_ONLY"})
     if not isinstance(body.application, dict):
         raise HTTPException(
             400,

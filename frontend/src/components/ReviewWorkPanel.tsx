@@ -1036,15 +1036,27 @@ function WorkspaceSection({
                             来源读取中…
                           </span>
                         ) : (
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            data-testid="review-reveal-button"
-                            disabled={controlsDisabled}
-                            onClick={() => onReveal(link)}
-                          >
-                            查看来源
-                          </Button>
+                          (() => {
+                            const isRegionValid =
+                              typeof link.source_region === "string" &&
+                              /^region:[0-9]+$/.test(link.source_region);
+                            const isRevealEligible =
+                              work.reveal_eligibility != null &&
+                              work.reveal_eligibility.eligible === true;
+                            const revealDisabled =
+                              controlsDisabled || !isRegionValid || !isRevealEligible;
+                            return (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                data-testid="review-reveal-button"
+                                disabled={revealDisabled}
+                                onClick={() => onReveal(link)}
+                              >
+                                查看来源
+                              </Button>
+                            );
+                          })()
                         )}
                         {revealedHere && (
                           <p
@@ -2417,20 +2429,36 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     const token = liveToken(link.observation_id);
     if (token === null) return;
     // S15 bounded reveal: the client must declare the explicit purpose,
-    // reason, classification and the exact source region it intends to read.
-    // Any other value will be rejected by the closed server schema; the
-    // source region is taken from the authoritative evidence link itself so
-    // the request proves it knows the exact location.
+    // reason, classification and the exact source region it intends to
+    // read.  When the link lacks a legitimate source_region the UI keeps
+    // the value masked and disables the reveal; the server continues to
+    // reject missing/mismatched regions before any raw read.
+    const rawRegion = link.source_region;
+    if (typeof rawRegion !== "string" || !/^region:[0-9]+$/.test(rawRegion)) {
+      return;
+    }
+    // Purpose/reason/classification are taken from the authorized
+    // reveal-eligibility projection (C19 policy), not hand-written.
+    const eligibility = work.data.reveal_eligibility;
+    if (
+      eligibility == null ||
+      eligibility.eligible !== true ||
+      typeof eligibility.purpose !== "string" ||
+      typeof eligibility.reason !== "string" ||
+      typeof eligibility.classification !== "string"
+    ) {
+      return;
+    }
     const command: RevealCommand = {
       application_id: work.data.application_id,
       observation_id: link.observation_id,
       expected_fence: work.data.claim_fence,
       expected_context: work.data.command_context,
       idempotency_key: revealKey,
-      purpose: "MANUAL_REVIEW",
-      reason: "EVIDENCE_VERIFICATION",
-      classification: "RESTRICTED",
-      expected_source_region: link.source_region ?? null,
+      purpose: eligibility.purpose as RevealCommand["purpose"],
+      reason: eligibility.reason as RevealCommand["reason"],
+      classification: eligibility.classification as RevealCommand["classification"],
+      expected_source_region: rawRegion,
     };
     // A new restricted command scrubs every previous restricted holder.
     invalidateRestricted();

@@ -121,6 +121,10 @@ function workPayload(overrides: Record<string, unknown> = {}) {
     decision: null,
     decisions: [],
     completed_finding_ids: [],
+    reveal_eligibility: {
+      eligible: false,
+      ineligible_reason_code: "REVEAL_NOT_ASSIGNED",
+    },
     ...overrides,
   };
 }
@@ -281,6 +285,13 @@ function claimedWorkPayload(overrides: Record<string, unknown> = {}) {
     claim_subject: "t02-reviewer",
     claim_fence: 1,
     claim_expires_at: LIVE_CLAIM_EXPIRES_AT,
+    reveal_eligibility: {
+      eligible: true,
+      purpose: "MANUAL_REVIEW",
+      reason: "EVIDENCE_VERIFICATION",
+      classification: "RESTRICTED",
+      max_term_seconds: 900,
+    },
     ...overrides,
   });
 }
