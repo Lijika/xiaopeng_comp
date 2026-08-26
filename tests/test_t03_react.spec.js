@@ -815,33 +815,32 @@ async function runHistoryBoundaryTracer(browser) {
     });
     const { diagnostics } = await openClaimedReviewPanel(reviewer, server);
 
-    await reviewer.getByTestId("review-reveal-button").nth(3).click();
-    expectByteEqual(
-      await reviewer.getByTestId("review-reveal-source").textContent(),
-      sourceValue,
-    );
-    expect(revealRequests).toBe(1);
+    // S15: C-DEMO synthetic reveal is disabled; the registered controlled
+    // reveal is verified via test_s15_policy_owner.py and the Vitest panel
+    // suite.  This browser slice keeps the C-DEMO disabled assertion and
+    // proves the back/forward/refresh lifetime still scrubs every
+    // restricted surface and never leaks raw into DOM/URL/storage.
+    const revealButtons = reviewer.getByTestId("review-reveal-button");
+    await expect(revealButtons.nth(3)).toBeDisabled();
+    await expect(reviewer.getByTestId("review-reveal-source")).toHaveCount(0);
+    expect(revealRequests).toBe(0);
 
     await reviewer.goBack();
     await expect(reviewer.getByTestId("review-panel")).toHaveCount(0);
     await assertSentinelAbsentEverywhere(reviewer, sourceValue);
     await assertSentinelAbsentEverywhere(reviewer, misreadValue);
-    expect(revealRequests).toBe(1);
+    expect(revealRequests).toBe(0);
 
     await reviewer.goForward();
     await expect(reviewer.getByTestId("review-panel")).toBeVisible();
     await expect(reviewer.getByTestId("review-evidence-masked")).toHaveCount(4);
     await assertSentinelAbsentEverywhere(reviewer, sourceValue);
     await assertSentinelAbsentEverywhere(reviewer, misreadValue);
-    expect(revealRequests).toBe(1);
+    expect(revealRequests).toBe(0);
 
-    await reviewer.getByTestId("review-reveal-button").nth(3).click();
-    expectByteEqual(
-      await reviewer.getByTestId("review-reveal-source").textContent(),
-      sourceValue,
-    );
-    expect(revealRequests).toBe(2);
-    await assertOnlyOneSentinelElement(reviewer, sourceValue);
+    await expect(reviewer.getByTestId("review-reveal-button").nth(3)).toBeDisabled();
+    await expect(reviewer.getByTestId("review-reveal-source")).toHaveCount(0);
+    expect(revealRequests).toBe(0);
     assertNoDiagnostics(diagnostics);
   } catch (error) {
     failure = error;
@@ -1170,22 +1169,15 @@ async function runKeyboardTracer(browser, viewport) {
     // Claim was issued by mouse in the shared helper; the reveal, correction,
     // and rerun below are keyboard-only (Tab/Enter) with visible focus on
     // every restricted control.
-    await tabUntil(
-      reviewer,
-      (page) =>
-        page.evaluate(
-          () => document.activeElement?.dataset?.testid === "review-reveal-button",
-        ),
-    );
-    await tabUntil(reviewer, (page) => isInvoiceRevealFocused(page));
-    await reviewer.keyboard.press("Enter");
-    expectByteEqual(
-      await reviewer.getByTestId("review-reveal-source").textContent(),
-      sourceValue,
-    );
-    // The reveal button remounts when its pending state clears, so focus
-    // returns to the document root; keyboard navigation continues with Tab
-    // until the invoice correction button is reached again.
+    // S15: C-DEMO synthetic reveal is disabled, so the keyboard path
+    // verifies the reveal button is disabled and never issues a reveal,
+    // then continues to the invoice correction control (Tab/Enter) which
+    // remains the keyboard-accessible restricted action.
+    const revealButtons = reviewer.getByTestId("review-reveal-button");
+    for (const button of await revealButtons.all()) {
+      await expect(button).toBeDisabled();
+    }
+    await expect(reviewer.getByTestId("review-reveal-source")).toHaveCount(0);
     await tabUntil(reviewer, (page) => isInvoiceCorrectFocused(page));
     await reviewer.keyboard.press("Enter");
     await expect(reviewer.getByTestId("review-correction-form")).toBeVisible();
