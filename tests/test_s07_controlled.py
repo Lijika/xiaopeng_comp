@@ -2283,9 +2283,14 @@ def test_release_drill_resumes_only_after_probe_and_fences_old_execution(
         principal=S06_REVIEWER,
         application_id=application_id,
     )
-    assert history_after["attachment_versions"] == history_before[
-        "attachment_versions"
+    assert [
+        {key: value for key, value in item.items() if key != "cycle"}
+        for item in history_after["attachment_versions"]
+    ] == [
+        {key: value for key, value in item.items() if key != "cycle"}
+        for item in history_before["attachment_versions"]
     ]
+    assert {item["cycle"] for item in history_after["attachment_versions"]} == {1}
     assert {run["run_id"] for run in history_before["runs"]} <= {
         run["run_id"] for run in history_after["runs"]
     }

@@ -529,6 +529,7 @@ def test_t04_integrator_projection_http_closed_contract(tmp_path: Path) -> None:
             "recovery_action",
             "retryable",
             "application_id",
+            "cycle",
             "receipt_id",
             "job_id",
             "lifecycle_revision",
