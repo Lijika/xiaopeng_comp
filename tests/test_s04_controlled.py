@@ -1204,7 +1204,12 @@ def test_vin_correction_maps_legacy_differential_at_target_run_seam(
             expected_source_region=source["source_region"],
             now=100,
         )
-    revealed = service.reveal_field_observation(
+    # S15: C-DEMO synthetic S15 reveal is explicitly denied (G4/C19).
+    # The only successful S15 path is the registered controlled authority
+    # with validated policy and tenant/resource grant.  This sibling
+    # therefore asserts C-DEMO denial and drives the subsequent S04
+    # correction via a known fixture value rather than a leaked reveal.
+    denied = service.reveal_field_observation(
         principal=REVIEWER,
         application_id=application_id,
         work_item_id=work_item_id,
@@ -1218,34 +1223,32 @@ def test_vin_correction_maps_legacy_differential_at_target_run_seam(
         expected_source_region=source["source_region"],
         now=100,
     )
-    replayed = service.reveal_field_observation(
-        principal=REVIEWER,
-        application_id=application_id,
-        work_item_id=work_item_id,
-        observation_id=source["observation_id"],
-        expected_fence=claimed["claim_fence"],
-        expected_context=work_item["command_context"],
-        idempotency_key="s04-vin-reveal",
-        purpose="MANUAL_REVIEW",
-        reason="EVIDENCE_VERIFICATION",
-        classification="RESTRICTED",
-        expected_source_region=source["source_region"],
-        now=100,
-    )
-    conflict = service.reveal_field_observation(
-        principal=REVIEWER,
-        application_id=application_id,
-        work_item_id=work_item_id,
-        observation_id="obs_changed_for_retry",
-        expected_fence=claimed["claim_fence"],
-        expected_context=work_item["command_context"],
-        idempotency_key="s04-vin-reveal",
-        purpose="MANUAL_REVIEW",
-        reason="EVIDENCE_VERIFICATION",
-        classification="RESTRICTED",
-        expected_source_region="region:1",
-        now=100,
-    )
+    assert denied["status"] == "rejected"
+    assert denied["reason_code"] in ("REVEAL_SYNTHETIC_DENIED", "REVEAL_SYNTHETIC_TRACK_DENIED")
+    # For the registered controlled S15 success path, see
+    # test_registered_reveal_s15_success_and_policy_denial.
+    # Use the known fixture source_text directly for the S04 correction
+    # differential without relying on a C-DEMO reveal.
+    revealed = {
+        "status": "rejected",
+        "source_text": "LSVAA4182N5000054",
+        "replayed": False,
+        "application_id": application_id,
+        "work_item_id": work_item_id,
+        "observation_id": source["observation_id"],
+        "source_location": {
+            "source_sha256": source["source_sha256"],
+            "source_page": source["source_page"],
+            "source_region": source["source_region"],
+        },
+        "revealed_at": 100,
+        "purpose": "MANUAL_REVIEW",
+        "reason": "EVIDENCE_VERIFICATION",
+        "classification": "RESTRICTED",
+        "claim_expires_at": claimed["claim_expires_at"],
+    }
+    replayed = denied
+    conflict = denied
     accepted = service.correct_field_observation(
         principal=REVIEWER,
         application_id=application_id,
@@ -1288,25 +1291,23 @@ def test_vin_correction_maps_legacy_differential_at_target_run_seam(
         for event in timeline["events"]
         if event["action"] == "evidence_source_revealed"
     ]
+    # S15: C-DEMO synthetic reveal is denied (G4/C19) — the only
+    # successful S15 path is the registered controlled authority.
+    assert len(reveal_events) == 1
     reveal_event = reveal_events[0]
+    assert reveal_event["result"] == "rejected"
+    assert reveal_event["context"]["reason_code"] in (
+        "REVEAL_SYNTHETIC_DENIED",
+        "REVEAL_SYNTHETIC_TRACK_DENIED",
+    )
+    # The synthetic denial is audited without raw/locator.
+    assert "LSVAA4182N5000054" not in json.dumps(timeline, ensure_ascii=False)
+    assert "source_region" not in json.dumps(reveal_event, ensure_ascii=False)
+    # The S04 correction still proceeds via the known fixture value.
+    assert denied["status"] == "rejected"
 
     assert first_run.semantic_differential is not None
     assert first_run.semantic_differential["status"] == "match"
-    assert revealed["status"] == "revealed"
-    assert revealed["replayed"] is False
-    assert revealed["source_text"] == "LSVAA4182N5000054"
-    assert replayed == {**revealed, "replayed": True}
-    assert conflict == {
-        "status": "conflict",
-        "replayed": False,
-        "application_id": application_id,
-        "work_item_id": work_item_id,
-        "reason_code": "IDEMPOTENCY_KEY_CONFLICT",
-    }
-    assert reveal_event["result"] == "revealed"
-    assert len(reveal_events) == 1
-    assert reveal_event["context"]["observation_id"] == source["observation_id"]
-    assert "LSVAA4182N5000054" not in json.dumps(timeline, ensure_ascii=False)
     assert accepted["status"] == "accepted"
     assert second_run.semantic_differential is not None
     assert second_run.semantic_differential["status"] == "mismatch"

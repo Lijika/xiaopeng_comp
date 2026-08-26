@@ -11440,15 +11440,12 @@ class ControlledScenarioService:
                 }
             # Tenant/resource context validation against the canonical
             # policy: only registered controlled scopes (institution tenant)
-            # may authorize S15 reveal for controlled data.  Synthetic
-            # C-DEMO sessions are denied for controlled (non-C-DEMO)
-            # applications, and synthetic C-DEMO tracks are not part of
-            # the G4 controlled S15 authority, but the synthetic C-DEMO
-            # fixture path remains available for development (e.g., the
-            # T03 production tracer and S04 sibling use C-DEMO fixtures
-            # via the same seam).  The only G4 successful S15 path for
-            # controlled data is the registered controlled authority.
-            if self.is_c_demo_scope(principal.scope) and app.get("track") != "C-DEMO":
+            # may authorize S15 reveal.  Synthetic C-DEMO sessions and
+            # synthetic C-DEMO tracks cannot authorize S15 reveal per the
+            # R1 brief: the only successful S15 path is the registered
+            # controlled authority with G4/C19, tenant/resource/action,
+            # assignment and claim/context/revision satisfied.
+            if self.is_c_demo_scope(principal.scope) or app.get("track") == "C-DEMO":
                 try:
                     staged_demo = copy.deepcopy(self._store)
                     self._before_write("reveal.audit")
@@ -18372,17 +18369,10 @@ class ControlledScenarioService:
                     "eligible": False,
                     "ineligible_reason_code": "REVEAL_POLICY_UNAVAILABLE",
                 }
-            elif self.is_c_demo_scope(principal.scope) and app.get("track") == "C-DEMO":
-                # Synthetic C-DEMO fixture path remains available for
-                # development (T03/S04).  The UI consumes this eligible
-                # projection, but the S15 G4 controlled path for
-                # R-OBSERVED remains the only production success path.
+            elif self.is_c_demo_scope(principal.scope) or app.get("track") == "C-DEMO":
                 reveal_eligibility = {
-                    "eligible": True,
-                    "purpose": policy["purposes"][0] if isinstance(policy.get("purposes"), list) and policy["purposes"] else None,
-                    "reason": policy["reasons"][0] if isinstance(policy.get("reasons"), list) and policy["reasons"] else None,
-                    "classification": policy["classifications"][0] if isinstance(policy.get("classifications"), list) and policy["classifications"] else None,
-                    "max_term_seconds": policy.get("max_term_seconds"),
+                    "eligible": False,
+                    "ineligible_reason_code": "REVEAL_SYNTHETIC_DENIED" if self.is_c_demo_scope(principal.scope) else "REVEAL_SYNTHETIC_TRACK_DENIED",
                 }
             elif not self.is_registered_scope(principal.scope):
                 reveal_eligibility = {
