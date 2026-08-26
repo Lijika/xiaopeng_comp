@@ -2007,8 +2007,9 @@ class S01HistoryRun(BaseModel):
 
 class S01HistoryCancellation(BaseModel):
     """One immutable upstream-cancellation event rebuilt from audit facts."""
-
     model_config = ConfigDict(extra="forbid")
+    route: str | None = None
+
 
     event_id: str | None = None
     cycle: int
@@ -2022,8 +2023,9 @@ class S01HistoryCancellation(BaseModel):
 
 class S01HistoryTermination(BaseModel):
     """One sealed Terminated settlement with its settled effects."""
-
     model_config = ConfigDict(extra="forbid")
+    route: str | None = None
+
 
     event_id: str | None = None
     cycle: int
@@ -2035,8 +2037,9 @@ class S01HistoryTermination(BaseModel):
 
 class S01HistoryReopen(BaseModel):
     """One successor-cycle reopen link to its predecessor."""
-
     model_config = ConfigDict(extra="forbid")
+    route: str | None = None
+
 
     event_id: str | None = None
     predecessor_cycle: int
@@ -4670,11 +4673,24 @@ def controlled_s14_settlement_view(
     """The operator settlement projection: authoritative pending effect and
     permission binding facts for the current cycle.  Read-only; existence is
     hidden behind the sanitized 404."""
-    _s01_require_operator(request)
+    principal = _s01_require_operator(request)
     _s01_disable_cache(response)
     try:
-        return _s01_service().settlement_view(application_id=application_id)
+        return _s01_service().settlement_view(
+            principal=S01CommandPrincipal(
+                subject=principal.subject,
+                role="operator",
+                scope=principal.scope,
+                source_id="c-demo-operator-control-plane",
+                expires_at=principal.expires_at,
+            ),
+            application_id=application_id,
+        )
     except QueryNotFound as error:
+        raise HTTPException(404, detail={"error": "S01_NOT_FOUND"}) from error
+    except _ApplicationStateAuthorityUnavailable as error:
+        # Existence-hiding: an unusable admission authority is indistinguish-
+        # able from a missing application.
         raise HTTPException(404, detail={"error": "S01_NOT_FOUND"}) from error
 
 

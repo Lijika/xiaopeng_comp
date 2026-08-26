@@ -181,12 +181,45 @@ export default function T16LifecyclePanel({
   const phase = data.phase;
   const cycleExplicitlySelected =
     selectedCycle !== null && selectedCycle !== undefined;
+
+  // Authoritative cycle projection: a selected cycle exists only when the
+  // current-route cycle or the history DTO records it.  Everything else is
+  // presentation state and can never invent a sealed cycle.
+  const knownCycles =
+    history.data !== undefined
+      ? new Set<number>([
+          ...history.data.runs.map((run) => run.cycle),
+          ...(history.data.cancellations ?? []).map((entry) => entry.cycle),
+          ...(history.data.terminations ?? []).map((entry) => entry.cycle),
+          ...(history.data.reopens ?? []).flatMap((entry) =>
+            entry.predecessor_cycle !== null &&
+            entry.predecessor_cycle !== undefined
+              ? [entry.predecessor_cycle, entry.cycle]
+              : [entry.cycle],
+          ),
+        ])
+      : new Set<number>();
+  if (route.data !== undefined) {
+    knownCycles.add(data.cycle);
+  }
+
   // A non-null ?cycle= selection is historical/read-only intent from the
   // first render: current-cycle commands stay hidden while the authoritative
   // history read is pending, and after it fails, until it succeeds.
   const viewingHistoricalCycle =
     cycleExplicitlySelected &&
-    (history.data === undefined || selectedCycle !== data.cycle);
+    (history.data === undefined ||
+      !knownCycles.has(selectedCycle) ||
+      selectedCycle !== data.cycle);
+  // Explicit current selection: the chosen cycle IS the live cycle.
+  const selectedIsCurrentCycle =
+    cycleExplicitlySelected &&
+    history.data !== undefined &&
+    selectedCycle === data.cycle;
+  const selectedCycleUnknown =
+    cycleExplicitlySelected &&
+    history.data !== undefined &&
+    !knownCycles.has(selectedCycle);
   const cancellable =
     IS_TERMINAL_PHASE[phase] !== true &&
     !latched &&
@@ -244,13 +277,16 @@ export default function T16LifecyclePanel({
   return (
     <div data-testid="t16-lifecycle-panel">
       {viewingHistoricalCycle &&
-        (history.isError ? (
+        history.isError && (
           <QueryErrorState
             error={history.error}
             onReload={() => void history.refetch()}
             isReloading={history.isFetching}
           />
-        ) : (
+        )}
+      {viewingHistoricalCycle &&
+        !history.isError &&
+        history.data === undefined && (
           <p
             data-testid="t16-cycle-gate-loading"
             role="status"
@@ -258,14 +294,30 @@ export default function T16LifecyclePanel({
           >
             正在加载所选周期的权威事实；写操作保持隐藏
           </p>
-        ))}
-      {cycleExplicitlySelected &&
+        )}
+      {viewingHistoricalCycle &&
+        selectedCycleUnknown &&
+        history.data !== undefined && (
+          <p
+            role="alert"
+            data-testid="t16-cycle-unknown"
+          >
+            所选周期不存在或不可见：仅显示权威已知事实，无任何写操作
+          </p>
+        )}
+      {viewingHistoricalCycle &&
+        !selectedCycleUnknown &&
         history.data !== undefined && (
           <CycleHistoryView
             cycle={selectedCycle as number}
             history={history.data}
           />
         )}
+      {selectedIsCurrentCycle && (
+        <p role="status" data-testid="t16-cycle-current-selection">
+          Cycle {leafText(selectedCycle)} 为当前周期（未封存）
+        </p>
+      )}
       {!viewingHistoricalCycle && (
         <>
       <Section
@@ -654,20 +706,39 @@ function CycleHistoryView({
           {cancellations.map((entry) => (
             <li key={entry.event_id} data-testid="t16-cycle-cancellation">
               cancelled · {leafText(entry.reason_code)} · by{" "}
-              {leafText(entry.authority_subject)} · cycle {entry.cycle}
+              {leafText(entry.authority_subject)} · route{" "}
+              <span data-testid="t16-cycle-cancellation-route">
+                {leafText(entry.route)}
+              </span>{" "}
+              · application {leafText(history.application_id)} · cycle{" "}
+              {entry.cycle}
             </li>
           ))}
           {terminations.map((entry) => (
             <li key={entry.event_id} data-testid="t16-cycle-termination">
-              terminated · cycle {entry.cycle} · revision{" "}
-              {entry.lifecycle_revision}
+              terminated · route{" "}
+              <span data-testid="t16-cycle-termination-route">
+                {leafText(entry.route)}
+              </span>{" "}
+              · cycle {entry.cycle} ·{" "}
+              {(entry.settled_effects ?? []).length > 0 && (
+                <span data-testid="t16-cycle-termination-work">
+                  work:{" "}
+                  {(entry.settled_effects ?? [])
+                    .map((effect) => `${effect.kind}:${effect.id}`)
+                    .join(", ")}
+                </span>
+              )}
             </li>
           ))}
           {reopens.map((entry) => (
             <li key={entry.event_id} data-testid="t16-cycle-reopen">
               reopened → cycle {entry.cycle} · target{" "}
               {leafText(entry.target_phase)} · predecessor{" "}
-              {entry.predecessor_cycle}
+              {entry.predecessor_cycle} · route{" "}
+              <span data-testid="t16-cycle-reopen-route">
+                {leafText(entry.route)}
+              </span>
             </li>
           ))}
           {cancellations.length === 0 &&

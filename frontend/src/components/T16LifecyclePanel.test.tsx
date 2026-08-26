@@ -193,6 +193,7 @@ describe("T16LifecyclePanel (integrator cancellation)", () => {
                 lifecycle_revision: 6,
                 reason_code: "UPSTREAM_WITHDRAWN",
                 authority_subject: "t16-registered-integrator",
+                route: "cancelled",
                 fenced_effects: { review_work_items: 1 },
                 cancelled_at: 100,
               },
@@ -249,6 +250,9 @@ describe("T16LifecyclePanel (integrator cancellation)", () => {
     expect(screen.getByTestId("t16-cycle-cancellation")).toHaveTextContent(
       "UPSTREAM_WITHDRAWN",
     );
+    expect(
+      screen.getByTestId("t16-cycle-cancellation-route"),
+    ).toHaveTextContent("cancelled");
     expect(screen.getByTestId("t16-cycle-termination")).toBeInTheDocument();
     expect(screen.getByTestId("t16-cycle-reopen")).toHaveTextContent("Intake");
     expect(screen.getByTestId("t16-late-receipt")).toHaveTextContent(
@@ -259,29 +263,43 @@ describe("T16LifecyclePanel (integrator cancellation)", () => {
     expect(screen.queryByTestId("t16-cancel-button")).not.toBeInTheDocument();
   });
 
-  it("renders cycle-scoped work and route facts that differ by selected cycle", async () => {
-    const workHistory = (cycle: number, runId: string, findingId: string) => {
-      const payload = historyPayload([{ cycle, run_id: runId }]);
-      const run = payload.runs[0];
-      // The generated S01HistoryRun types pin these arrays; the literal
-      // annotations keep the fixture assignments checked.
-      const findings: string[] = [findingId];
-      const decisions: string[] = [`decision_${cycle}`];
-      const casMismatches: string[] =
-        cycle === 1 ? [`cas_cycle${cycle}`] : [];
-      run.finding_ids = findings;
-      run.decision_ids = decisions;
-      run.cas_mismatches = casMismatches;
-      return payload;
-    };
+  it("renders cycle-scoped work/route facts that differ by selection", async () => {
+    const payload = historyPayload(
+      [
+        { cycle: 1, run_id: "run_cycle1" },
+        { cycle: 2, run_id: "run_cycle2" },
+      ],
+      {
+        cancellations: [
+          {
+            event_id: "canc_sel_1",
+            cycle: 1,
+            lifecycle_revision: 6,
+            reason_code: "UPSTREAM_WITHDRAWN",
+            authority_subject: "t16-registered-integrator",
+            route: "cancelled",
+            fenced_effects: { review_work_items: 1 },
+            cancelled_at: 100,
+          },
+        ],
+      },
+    );
+    const run1 = payload.runs[0];
+    const findings1: string[] = ["finding_cycle1"];
+    const decisions1: string[] = ["decision_1"];
+    const cas1: string[] = ["cas_cycle1"];
+    run1.finding_ids = findings1;
+    run1.decision_ids = decisions1;
+    run1.cas_mismatches = cas1;
 
-    // Cycle 1's immutable work pins...
     fetchRouter({
-      [`GET ${ROUTE_PATH}`]: jsonRoute(s14CurrentRoute({ phase: "Terminated" })),
-      [`GET ${HISTORY_PATH}`]: jsonRoute(
-        workHistory(1, "run_cycle1", "finding_cycle1"),
+      [`GET ${ROUTE_PATH}`]: jsonRoute(
+        s14CurrentRoute({ phase: "Intake", cycle: 2, lifecycle_revision: 8 }),
       ),
+      [`GET ${HISTORY_PATH}`]: jsonRoute(payload),
     });
+
+    // Selected historical cycle 1: immutable work pins and route facts...
     const first = renderWithQuery(
       <T16LifecyclePanel applicationId={S14_APPLICATION_ID} selectedCycle={1} />,
     );
@@ -296,58 +314,37 @@ describe("T16LifecyclePanel (integrator cancellation)", () => {
     expect(screen.getByTestId("t16-cycle-run-currentness")).toHaveTextContent(
       "CONTEXT_NOT_CURRENT",
     );
-    // The original route fact (phase at that run's revision) is bound to
-    // the selected cycle.
     expect(
       screen.getByTestId("t16-cycle-run-lifecycle-phase"),
     ).toBeInTheDocument();
+    expect(
+      screen.getByTestId("t16-cycle-cancellation-route"),
+    ).toBeVisible();
     first.unmount();
 
-    // ...are replaced by cycle 2's when the selection changes.
-    fetchRouter({
-      [`GET ${ROUTE_PATH}`]: jsonRoute(
-        s14CurrentRoute({
-          phase: "Intake",
-          cycle: 2,
-          lifecycle_revision: 8,
-          current_run_id: null,
-          currentness_reason: "NO_CURRENT_RUN",
-        }),
-      ),
-      [`GET ${HISTORY_PATH}`]: jsonRoute(
-        workHistory(2, "run_cycle2", "finding_cycle2"),
-      ),
-    });
-    renderWithQuery(
+    // ...differ from the explicit current-selection view, which renders
+    // live commands and never fabricates a sealed projection.
+    const second = renderWithQuery(
       <T16LifecyclePanel applicationId={S14_APPLICATION_ID} selectedCycle={2} />,
     );
     await waitFor(() =>
-      expect(screen.getByTestId("t16-cycle-run-findings")).toHaveTextContent(
-        "finding_cycle2",
+      expect(second.getByTestId("t16-cycle-current-selection")).toHaveTextContent(
+        "Cycle 2",
       ),
     );
     expect(
-      screen.getByTestId("t16-cycle-run-findings"),
-    ).not.toHaveTextContent("finding_cycle1");
-    // Cycle 2 carries no CAS mismatches and no cancellation of its own.
-    expect(screen.getByTestId("t16-cycle-run-cas-mismatches")).toHaveTextContent(
-      "none",
-    );
-    expect(
-      screen.queryByTestId("t16-cycle-cancellation"),
+      second.queryByTestId("t16-cycle-view"),
     ).not.toBeInTheDocument();
+    expect(
+      second.queryByTestId("t16-cycle-run-findings"),
+    ).not.toBeInTheDocument();
+    second.unmount();
   });
 
-  it("does not leak cycle-1 late receipts into the cycle-2 view", async () => {
+  it("does not leak cycle-1 late receipts into an unrelated cycle view", async () => {
     fetchRouter({
       [`GET ${ROUTE_PATH}`]: jsonRoute(
-        s14CurrentRoute({
-          phase: "Intake",
-          cycle: 2,
-          lifecycle_revision: 8,
-          current_run_id: null,
-          currentness_reason: "NO_CURRENT_RUN",
-        }),
+        s14CurrentRoute({ phase: "Intake", cycle: 2, lifecycle_revision: 8 }),
       ),
       [`GET ${HISTORY_PATH}`]: jsonRoute(
         historyPayload([{ cycle: 1, run_id: "run_cycle1" }], {
@@ -364,16 +361,27 @@ describe("T16LifecyclePanel (integrator cancellation)", () => {
       ),
     });
     renderWithQuery(
-      <T16LifecyclePanel
-        applicationId={S14_APPLICATION_ID}
-        selectedCycle={2}
-      />,
+      <T16LifecyclePanel applicationId={S14_APPLICATION_ID} selectedCycle={2} />,
+    );
+    // Selecting the current cycle never fabricates a sealed view.
+    await waitFor(() =>
+      expect(screen.getByTestId("t16-cycle-current-selection")).toHaveTextContent(
+        "Cycle 2",
+      ),
+    );
+    expect(screen.queryByTestId("t16-late-receipt")).not.toBeInTheDocument();
+
+    // Selecting an unknown cycle yields the explicit unresolved state.
+    const second = renderWithQuery(
+      <T16LifecyclePanel applicationId={S14_APPLICATION_ID} selectedCycle={9} />,
     );
     await waitFor(() =>
-      expect(screen.getByTestId("t16-cycle-view")).toBeInTheDocument(),
+      expect(second.getByTestId("t16-cycle-unknown")).toBeInTheDocument(),
     );
-    expect(screen.getByTestId("t16-late-receipts-empty")).toBeInTheDocument();
-    expect(screen.queryByTestId("t16-late-receipt")).not.toBeInTheDocument();
+    expect(
+      second.queryByTestId("t16-late-receipt"),
+    ).not.toBeInTheDocument();
+    second.unmount();
   });
 
   it("hides current-cycle commands for a direct historical URL while history is pending", async () => {

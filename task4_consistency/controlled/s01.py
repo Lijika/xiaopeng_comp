@@ -2039,17 +2039,42 @@ class ControlledScenarioService:
                     and predecessor_receipt.application_id
                     else None
                 )
-                owning_cycle = (
-                    int(
-                        self._store.applications.get(
-                            owning_application_id, {}
-                        ).get("cycle")
-                        or 0
+                # The late submission belongs to the SEALED cycle that holds
+                # the predecessor revision — never to a successor cycle the
+                # application may have reopened into afterwards.
+                owning_cycle = None
+                owning_request_id = None
+                if (
+                    owning_application_id is not None
+                    and isinstance(
+                        predecessor_receipt.lifecycle_revision, int
                     )
-                    or None
-                    if owning_application_id is not None
-                    else None
-                )
+                    and not isinstance(
+                        predecessor_receipt.lifecycle_revision, bool
+                    )
+                ):
+                    predecessor_event = next(
+                        (
+                            event
+                            for event in self._store.lifecycle_events
+                            if event.get("application_id")
+                            == owning_application_id
+                            and event.get("revision")
+                            == int(predecessor_receipt.lifecycle_revision)
+                        ),
+                        None,
+                    )
+                    if predecessor_event is not None:
+                        owning_cycle = int(
+                            predecessor_event.get("cycle") or 0
+                        ) or None
+                    # Stable resource binding: the authoritative predecessor
+                    # receipt identity (no synthetic identifiers).
+                    owning_request_id = (
+                        str(predecessor_receipt.receipt_id) or None
+                        if predecessor_receipt.receipt_id
+                        else None
+                    )
                 error = S02IntakeError(
                     "rejected" if predecessor_exists else "awaiting_predecessor",
                     (
@@ -2083,6 +2108,7 @@ class ControlledScenarioService:
                     submission=submission,
                     envelope=envelope,
                     application_id=owning_application_id,
+                    request_id=owning_request_id,
                     cycle=owning_cycle,
                 )
             if not self.audit_available:
@@ -5133,6 +5159,7 @@ class ControlledScenarioService:
                     "run_id": run_id,
                     "cancelled_by": principal.subject,
                     "cancelled_by_role": principal.role,
+                    "route": self._S14_CANCELLED_ROUTE,
                 }
             )
             staged_app["phase"] = "Terminating"
@@ -5361,6 +5388,7 @@ class ControlledScenarioService:
                     "lifecycle_revision": next_revision,
                     "result": "accepted",
                     "reason_code": reason_code,
+                    "route": self._S14_CANCELLED_ROUTE,
                     "fenced_effects": copy.deepcopy(effects_summary),
                     **self._audit_time_fields(staged, now=event_time),
                 }
@@ -5613,6 +5641,7 @@ class ControlledScenarioService:
                     "run_id": staged_app.get("current_run_id"),
                     "terminated_by": principal.subject,
                     "settled_effects": copy.deepcopy(settled_effects),
+                    "route": staged_app.get("route"),
                 }
             )
             self._before_write("s14.settle.audit")
@@ -5633,6 +5662,7 @@ class ControlledScenarioService:
                     "result": "accepted",
                     "notification_operation_id": notification_operation,
                     "settled_effects": settled_effects,
+                    "route": staged_app.get("route"),
                     **self._audit_time_fields(staged, now=event_time),
                 }
             )
@@ -7489,6 +7519,7 @@ class ControlledScenarioService:
                     ),
                     "reopened_by": principal.subject,
                     "reopen_permission_id": permission_id,
+                    "route": "pending_check",
                 }
             )
             staged_app["cycle"] = new_cycle
@@ -7521,6 +7552,7 @@ class ControlledScenarioService:
                     "predecessor_cycle": predecessor_cycle,
                     "target_phase": target_phase,
                     "reopen_permission_id": permission_id,
+                    "route": "pending_check",
                     **self._audit_time_fields(staged, now=event_time),
                 }
             )
@@ -19088,6 +19120,7 @@ class ControlledScenarioService:
                         {
                             "event_id": event.get("event_id"),
                             "cycle": int(event.get("cycle") or 0),
+                            "route": event.get("route"),
                             "lifecycle_revision": int(
                                 event.get("lifecycle_revision") or 0
                             ),
@@ -19105,6 +19138,7 @@ class ControlledScenarioService:
                         {
                             "event_id": event.get("event_id"),
                             "cycle": int(event.get("cycle") or 0),
+                            "route": event.get("route"),
                             "lifecycle_revision": int(
                                 event.get("lifecycle_revision") or 0
                             ),
@@ -19124,6 +19158,7 @@ class ControlledScenarioService:
                             "predecessor_cycle": int(
                                 event.get("predecessor_cycle") or 0
                             ),
+                            "route": event.get("route"),
                             "cycle": int(event.get("cycle") or 0),
                             "lifecycle_revision": int(
                                 event.get("lifecycle_revision") or 0
@@ -20418,17 +20453,33 @@ class ControlledScenarioService:
                 "store_revision": self._store._store_revision,
             }
 
-    def settlement_view(self, *, application_id: str) -> dict[str, Any]:
+    def settlement_view(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        application_id: str,
+    ) -> dict[str, Any]:
         """Minimized operator settlement projection for one application: the
         authoritative pending termination notification and the server-owned
         reopen permission binding for the current cycle.  Read-only; every
         field is rebuilt from the store so a reloaded console observes the
-        same facts without replaying prior local command results."""
+        same facts without replaying prior local command results.  The read
+        is bound to the principal's resource scope — a mismatch is the same
+        sanitized not-found as any other unauthorized query."""
 
         with self._lock:
             self._reload_store()
             app = self._store.applications.get(application_id)
             if app is None:
+                raise QueryNotFound(application_id)
+            # Resource-scope authorization: the authenticated operator's
+            # scope must equal the application's visibility scope.  Every
+            # mismatch maps to the sanitized 404 — never a scope disclosure.
+            expected_scope = self._application_visibility_scope(application_id)
+            if (
+                principal.role != "operator"
+                or str(principal.scope or "") != expected_scope
+            ):
                 raise QueryNotFound(application_id)
             cycle = int(app.get("cycle") or 0)
             phase = str(app.get("phase") or "")

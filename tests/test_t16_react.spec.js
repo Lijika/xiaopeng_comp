@@ -402,31 +402,52 @@ for (const [label, viewport] of [
     ).toBeVisible();
     await expect(integratorPage.getByTestId("t16-cancel-button")).toHaveCount(0);
 
-    // Selecting the current reopened cycle shows no cycle-1 leakage.
+
+    // Unknown cycles render the explicit unresolved state and never a
+    // fabricated sealed projection or any command surface.
+    const postsBeforeUnknown = integratorPosts(integratorRequests).length;
+    await integratorPage.goto(
+      `${server.baseURL}/controlled/s14?application=${encodeURIComponent(lateApplicationId)}&cycle=999`,
+      { waitUntil: "domcontentloaded" },
+    );
+    await expect(
+      integratorPage.getByTestId("t16-cycle-unknown"),
+    ).toBeVisible();
+    await expect(
+      integratorPage.getByTestId("t16-cancel-button"),
+    ).toHaveCount(0);
+    expect(integratorPosts(integratorRequests).length).toBe(postsBeforeUnknown);
+
+    // Selecting the CURRENT cycle shows live commands plus an explicit
+    // current marker, and never a sealed read-only view for it.
     await integratorPage.goto(
       `${server.baseURL}/controlled/s14?application=${encodeURIComponent(lateApplicationId)}&cycle=2`,
       { waitUntil: "domcontentloaded" },
     );
-    await expect(integratorPage.getByTestId("t16-cycle-view")).toBeVisible();
+    await expect(integratorPage.getByTestId("t16-phase")).toHaveText("Intake");
     await expect(
-      integratorPage.getByTestId("t16-late-receipts-empty"),
-    ).toContainText("No late-input receipts");
+      integratorPage.getByTestId("t16-cycle-current-selection"),
+    ).toContainText("Cycle 2");
     await expect(
-      integratorPage.getByTestId("t16-late-receipt"),
+      integratorPage.getByTestId("t16-cycle-view"),
     ).toHaveCount(0);
+    expect(integratorPosts(integratorRequests).length).toBe(
+      postsBeforeUnknown,
+    );
 
     // Back/forward navigation stays read-only.  The overflow and POST
     // assertions run only after the forward URL and the required sections
     // have settled, so React navigation is never raced.
     await integratorPage.goBack();
-    await expect(integratorPage).toHaveURL(/cycle=1/);
-    await expect(integratorPage.getByTestId("t16-cycle-view")).toBeVisible();
+    await expect(integratorPage).toHaveURL(/cycle=999/);
+    await expect(
+      integratorPage.getByTestId("t16-cycle-unknown"),
+    ).toBeVisible();
     await integratorPage.goForward();
     await expect(integratorPage).toHaveURL(/cycle=2/);
-    await expect(integratorPage.getByTestId("t16-cycle-view")).toBeVisible();
     await expect(
-      integratorPage.getByTestId("t16-late-receipts-empty"),
-    ).toContainText("No late-input receipts");
+      integratorPage.getByTestId("t16-cycle-current-selection"),
+    ).toContainText("Cycle 2");
     const postsAfterReload = integratorPosts(integratorRequests);
     expect(postsAfterReload.length).toBe(postsBeforeReload);
     expect(postsAfterReload.every(({ url }) => url.endsWith("/cancel"))).toBe(true);
