@@ -1,165 +1,318 @@
-"""S15 C19 policy-owner and registered reveal authority (focused)."""
+"""Focused S15 R2 authority, audit, C19 and legacy-boundary tests."""
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 
 import pytest
 
-from task4_consistency.controlled.s01 import ControlledScenarioService, S01CommandPrincipal, QueryNotFound
-from tests.test_s03_controlled import ready_review_work_item
+from task4_consistency.controlled.s01 import (
+    AdmissionDisposition,
+    ControlledScenarioService,
+    QueryNotFound,
+    S01CommandPrincipal,
+)
+from task4_consistency.controlled.s08 import PolicyGovernanceService
+from tests.test_s01_http import UvicornLoopback
+from tests.test_s02_http import _configured_http_source, _open_session
+from tests.test_s02_controlled import INTEGRATOR, ROOT, TENANT_SCOPE, _registered_service
 
 
-def test_c19_reveal_policy_is_owned_by_institution_and_governs_vocab(tmp_path: Path) -> None:
-    """The canonical S15 policy at configs/c19_reveal_policy.json is owned
-    by institution-data-governance and its purpose/reason/classification/
-    term lists are the sole authority for reveal.  A configuration change
-    flips the authorization result without touching Python constants, while
-    the DTO Literals in web/app.py remain the closed wire shape."""
-    policy_path = Path(ControlledScenarioService._C19_REVEAL_POLICY_PATH)
-    assert policy_path.exists(), "C19 reveal policy file must exist"
-    raw = json.loads(policy_path.read_text(encoding="utf-8"))
-    assert raw.get("owner") == "institution-data-governance"
-    assert raw.get("tenant_scope") == "institution-controlled"
-    assert "MANUAL_REVIEW" in raw.get("purposes", [])
-    assert "EVIDENCE_VERIFICATION" in raw.get("reasons", [])
-    assert "RESTRICTED" in raw.get("classifications", [])
-    # The service loads the same file as its authority.
-    loaded = ControlledScenarioService._load_c19_reveal_policy()
-    assert loaded is not None
-    assert set(loaded["purposes"]) == set(raw["purposes"])
-    # Tampering the file to remove the canonical purpose must cause the
-    # loader to consider the policy unavailable, closing the reveal (G4).
-    # This is the focused proof that a pure configuration change flips the
-    # result without code change.
-    tampered = dict(raw)
-    tampered["purposes"] = []
-    tmp_tampered = tmp_path / "tampered.json"
-    tmp_tampered.write_text(json.dumps(tampered), encoding="utf-8")
-    orig = ControlledScenarioService._C19_REVEAL_POLICY_PATH
-    try:
-        ControlledScenarioService._C19_REVEAL_POLICY_PATH = tmp_tampered  # type: ignore[assignment]
-        assert ControlledScenarioService._load_c19_reveal_policy() is None
-    finally:
-        ControlledScenarioService._C19_REVEAL_POLICY_PATH = orig  # type: ignore[assignment]
-    # After restoring, the real policy is again available.
-    assert ControlledScenarioService._load_c19_reveal_policy() is not None
+NOW = 1_800_000_000
 
 
-def test_registered_reveal_s15_success_and_policy_denial(tmp_path: Path) -> None:
-    """Registered controlled authority is the only successful S15 path.
-    C-DEMO synthetic is denied, registered with correct vocab and region
-    succeeds with single value and zero business revision, while unknown
-    vocab or tampered policy is audited as rejected."""
-    # Create a registered review work item (R-OBSERVED track).
-    service, reviewer, application_id, work_item_id = ready_review_work_item(tmp_path)
-    # Claim the work item to obtain a live fence/context.
-    work = service.review_work_item_view(principal=reviewer, work_item_id=work_item_id, now=101)
+def _governed_ready(tmp_path: Path) -> tuple[ControlledScenarioService, S01CommandPrincipal, str, str]:
+    """Registered R-OBSERVED work item with the same store backed by an
+    approved/activated S08 release.  No local C19 JSON participates in this
+    authority; the release checker artifact carries the immutable reveal
+    policy and term."""
+    service, submission = _registered_service(tmp_path)
+    governance = PolicyGovernanceService(
+        state_path=tmp_path / "target.sqlite3",
+        source_rules_path=ROOT / "configs" / "rules_auto_lease.yaml",
+        source_kb_path=ROOT / "configs" / "kb" / "entity_kb.json",
+        corpus_root=ROOT / "fixtures" / "applications",
+        clock=lambda: NOW,
+    )
+    bootstrapped = governance.bootstrap_once()
+    assert bootstrapped["status"] in {"activated", "already_active"}
+    service._policy_governance = governance
+    reviewer = S01CommandPrincipal(
+        subject=INTEGRATOR.subject,
+        role="reviewer",
+        scope=TENANT_SCOPE,
+        source_id="s15-review-console",
+        expires_at=float(NOW + 10_000),
+    )
+    admitted = service.submit_registered(
+        submission=submission,
+        idempotency_key="s15-governed-admission",
+        principal=INTEGRATOR,
+    )
+    assert admitted.disposition is AdmissionDisposition.ACCEPTED
+    assert admitted.application_id is not None
+    completed = service.process_next_job()
+    assert completed.status == "complete"
+    service.refresh_projection()
+    queue = service.queue_view(
+        role="reviewer",
+        scope=reviewer.scope,
+        subject=reviewer.subject,
+        now=NOW,
+    )
+    assert len(queue["items"]) == 1
+    return service, reviewer, admitted.application_id, queue["items"][0]["work_item_id"]
+
+
+def _claimed_reveal_context(tmp_path: Path):
+    service, reviewer, application_id, work_item_id = _governed_ready(tmp_path)
+    now = NOW
+    work = service.review_work_item_view(
+        principal=reviewer, work_item_id=work_item_id, now=now
+    )
     claimed = service.claim_review_work_item(
         principal=reviewer,
         work_item_id=work_item_id,
         expected_context=work["command_context"],
-        now=101,
+        now=now,
     )
-    # Workspace is minimized: evidence_links are masked, entity mentions redacted.
     workspace = service.workspace_view(
         application_id,
         role="reviewer",
         scope=reviewer.scope,
         subject=reviewer.subject,
-        now=101,
+        now=now,
     )
-    assert all(link["raw_masked"] == "[REDACTED]" for link in workspace["selected_finding"]["evidence_links"] if link["value_state"] == "present")
-    # Pick one link's observation for reveal.
     link = workspace["selected_finding"]["evidence_links"][0]
-    obs_id = link["observation_id"]
-    region = link["source_region"]
-    assert isinstance(region, str) and region.startswith("region:")
-    # Wrong scope: C-DEMO synthetic principal cannot reveal even though it
-    # may hold a claim; this is the demo denial coverage.
-    c_demo_reviewer = S01CommandPrincipal(
+    return service, reviewer, application_id, work_item_id, work, claimed, link, now
+
+
+def _reveal_args(work, claimed, link, **overrides):
+    return {
+        "observation_id": link["observation_id"],
+        "expected_fence": claimed["claim_fence"],
+        "expected_context": work["command_context"],
+        "idempotency_key": "s15-reveal-key",
+        "purpose": "MANUAL_REVIEW",
+        "reason": "EVIDENCE_VERIFICATION",
+        "classification": "RESTRICTED",
+        "expected_source_region": link["source_region"],
+        **overrides,
+    }
+
+
+def _auditor(scope: str) -> S01CommandPrincipal:
+    return S01CommandPrincipal(
+        subject="s15-auditor", role="auditor", scope=scope, source_id="s15-audit"
+    )
+
+
+def test_governed_c19_release_authorizes_registered_reveal_for_tenant_resource(tmp_path: Path) -> None:
+    service, reviewer, application_id, work_item_id, work, claimed, link, now = _claimed_reveal_context(tmp_path)
+    decision = service._resolve_governed_c19_reveal_policy(
+        principal=reviewer,
+        app=service._store.applications[application_id],
+        now=NOW,
+    )
+    assert decision is not None
+    assert decision["policy_id"] == "s15-controlled-reveal/1"
+    assert decision["policy_version"] == "1"
+    assert len(decision["policy_digest"]) == 64
+    assert decision["tenant_id"] == "tenant-test"
+    assert decision["resource_id"] == application_id
+    assert decision["max_term_seconds"] == 900
+    result = service.reveal_field_observation(
+        principal=reviewer,
+        application_id=application_id,
+        work_item_id=work_item_id,
+        now=NOW,
+        **_reveal_args(work, claimed, link),
+    )
+    assert result["status"] == "revealed"
+    assert result["claim_expires_at"] == NOW + 900  # min(identity, claim, release term)
+
+
+def test_c19_release_denial_and_term_bound_close_reveal(tmp_path: Path) -> None:
+    service, reviewer, application_id, work_item_id, work, claimed, link, now = _claimed_reveal_context(tmp_path)
+    wrong_tenant = S01CommandPrincipal(
         subject=reviewer.subject,
         role="reviewer",
-        scope="C-DEMO",
-        source_id="c-demo-review-console",
+        scope="R-OBSERVED/another-tenant",
+        source_id=reviewer.source_id,
         expires_at=reviewer.expires_at,
     )
-    # The service's demo denial is at the domain level: a C-DEMO principal
-    # attempting to reveal a registered R-OBSERVED work item is existence-
-    # hidden (404) because the work item's visibility_scope is registered.
     with pytest.raises(QueryNotFound):
         service.reveal_field_observation(
-            principal=c_demo_reviewer,
+            principal=wrong_tenant,
             application_id=application_id,
             work_item_id=work_item_id,
-            observation_id=obs_id,
-            expected_fence=claimed["claim_fence"],
-            expected_context=work["command_context"],
-            idempotency_key="s15-demo-denial",
-            purpose="MANUAL_REVIEW",
-            reason="EVIDENCE_VERIFICATION",
-            classification="RESTRICTED",
-            expected_source_region=region,
-            now=102,
+            now=NOW,
+            **_reveal_args(work, claimed, link),
         )
-    # Correct registered reveal succeeds with single value and term.
-    before_app = dict(service._store.applications[application_id])
-    revealed = service.reveal_field_observation(
+    # Session expiry is the smallest term, so it closes before claim expiry.
+    short_identity = S01CommandPrincipal(
+        subject=reviewer.subject,
+        role="reviewer",
+        scope=reviewer.scope,
+        source_id=reviewer.source_id,
+        expires_at=NOW,
+    )
+    with pytest.raises(QueryNotFound):
+        service.reveal_field_observation(
+            principal=short_identity,
+            application_id=application_id,
+            work_item_id=work_item_id,
+            now=NOW,
+            **_reveal_args(work, claimed, link, idempotency_key="s15-term-expired"),
+        )
+
+
+def test_registered_reveal_returns_requested_public_region_without_bbox_locator(tmp_path: Path) -> None:
+    service, reviewer, application_id, work_item_id, work, claimed, link, now = _claimed_reveal_context(tmp_path)
+    assert link["source_region"] == "region:1"
+    result = service.reveal_field_observation(
         principal=reviewer,
         application_id=application_id,
         work_item_id=work_item_id,
-        observation_id=obs_id,
-        expected_fence=claimed["claim_fence"],
-        expected_context=work["command_context"],
-        idempotency_key="s15-registered-success",
-        purpose="MANUAL_REVIEW",
-        reason="EVIDENCE_VERIFICATION",
-        classification="RESTRICTED",
-        expected_source_region=region,
-        now=102,
+        now=NOW,
+        **_reveal_args(work, claimed, link),
     )
-    assert revealed["status"] == "revealed"
-    assert revealed["purpose"] == "MANUAL_REVIEW"
-    assert revealed["classification"] == "RESTRICTED"
-    assert isinstance(revealed["source_text"], str) and revealed["source_text"]
-    assert revealed["claim_expires_at"] == claimed["claim_expires_at"]
-    # Zero business revision: lifecycle and evidence revisions unchanged.
-    after_app = service._store.applications[application_id]
-    assert after_app["lifecycle_revision"] == before_app["lifecycle_revision"]
-    assert after_app["evidence_revision"] == before_app["evidence_revision"]
-    # Unknown classification is a closed-vocab rejection, audited without raw.
-    vocab_rejected = service.reveal_field_observation(
-        principal=reviewer,
-        application_id=application_id,
-        work_item_id=work_item_id,
-        observation_id=obs_id,
-        expected_fence=claimed["claim_fence"],
-        expected_context=work["command_context"],
-        idempotency_key="s15-vocab-unknown",
-        purpose="MANUAL_REVIEW",
-        reason="EVIDENCE_VERIFICATION",
-        classification="UNKNOWN_CLASS",
-        expected_source_region=region,
-        now=103,
-    )
-    assert vocab_rejected["status"] == "rejected"
-    assert vocab_rejected["reason_code"] == "REVEAL_VOCABULARY_UNKNOWN"
-    # Audit timeline is minimized and contains the safe context, not raw/locator.
+    serialized = json.dumps(result, sort_keys=True)
+    assert result["source_location"]["source_region"] == link["source_region"]
+    assert "bbox:[" not in serialized
+    assert "source_pointer" not in serialized
     timeline = service.audit_timeline(
-        principal=S01CommandPrincipal(
-            subject="s15-auditor",
-            role="auditor",
-            scope=reviewer.scope,
-            source_id="s15-audit-console",
-        ),
-        application_id=application_id,
+        principal=_auditor(reviewer.scope), application_id=application_id
     )
-    reveal_events = [e for e in timeline["events"] if e["action"] == "evidence_source_revealed"]
-    # At least the successful reveal and the vocab rejection are audited.
-    assert any(e["result"] == "revealed" for e in reveal_events)
-    assert any(e["result"] == "rejected" and e["context"].get("reason_code") == "REVEAL_VOCABULARY_UNKNOWN" for e in reveal_events)
-    for ev in reveal_events:
-        # No raw, locator, credential or path in the projected audit.
-        assert "source_text" not in json.dumps(ev)
-        assert "locator" not in json.dumps(ev).lower()
-        assert ev["context"].get("purpose") in ("MANUAL_REVIEW", None)
+    assert "bbox:[" not in json.dumps(timeline, sort_keys=True)
+    assert "region:1" not in json.dumps(timeline, sort_keys=True)
+    mismatch = service.reveal_field_observation(
+        principal=reviewer,
+        application_id=application_id,
+        work_item_id=work_item_id,
+        now=NOW + 1,
+        **_reveal_args(work, claimed, link, idempotency_key="s15-region-mismatch", expected_source_region="region:2"),
+    )
+    assert mismatch["status"] == "rejected"
+    assert mismatch["reason_code"] == "REVEAL_REGION_MISMATCH"
+    assert "bbox:[" not in json.dumps(mismatch)
+
+
+def test_reveal_failure_outcomes_are_audited_once_without_values(tmp_path: Path) -> None:
+    service, reviewer, application_id, work_item_id, work, claimed, link, now = _claimed_reveal_context(tmp_path)
+    failures = [
+        service.reveal_field_observation(
+            principal=reviewer, application_id=application_id, work_item_id=work_item_id,
+            now=NOW, **_reveal_args(work, claimed, link, idempotency_key="s15-stale", expected_context={}),
+        ),
+        service.reveal_field_observation(
+            principal=reviewer, application_id=application_id, work_item_id=work_item_id,
+            now=NOW, **_reveal_args(work, claimed, link, idempotency_key="s15-region", expected_source_region="region:2"),
+        ),
+        service.reveal_field_observation(
+            principal=reviewer, application_id=application_id, work_item_id=work_item_id,
+            now=NOW, **_reveal_args(work, claimed, link, idempotency_key="s15-vocab", classification="UNKNOWN"),
+        ),
+    ]
+    assert [item["status"] for item in failures] == ["stale", "rejected", "rejected"]
+    timeline = service.audit_timeline(principal=_auditor(reviewer.scope), application_id=application_id)
+    events = [event for event in timeline["events"] if event["action"] == "evidence_source_revealed"]
+    assert len(events) == 3
+    body = json.dumps(events, sort_keys=True)
+    for forbidden in ("TEST-VIN-A", "bbox:[", "source_pointer", "source_object_ref", "expected_source_region"):
+        assert forbidden not in body
+    assert {event["context"]["reason_code"] for event in events} == {
+        "STALE_REVIEW_CONTEXT", "REVEAL_REGION_MISMATCH", "REVEAL_VOCABULARY_UNKNOWN"
+    }
+
+
+def test_reveal_audit_fault_is_atomic_and_returns_unavailable(tmp_path: Path) -> None:
+    service, reviewer, application_id, work_item_id, work, claimed, link, now = _claimed_reveal_context(tmp_path)
+    before = copy.deepcopy(service._store.applications[application_id])
+    def fail(point: str) -> None:
+        if point == "reveal.audit":
+            raise OSError("audit down")
+    service._fault_injector = fail
+    result = service.reveal_field_observation(
+        principal=reviewer, application_id=application_id, work_item_id=work_item_id,
+        now=NOW, **_reveal_args(work, claimed, link),
+    )
+    assert result["status"] == "unavailable"
+    assert "source_text" not in result
+    after = service._store.applications[application_id]
+    assert after["lifecycle_revision"] == before["lifecycle_revision"]
+    assert after["evidence_revision"] == before["evidence_revision"]
+
+
+def test_failed_reveal_replay_and_conflict_keep_one_audit_fact(tmp_path: Path) -> None:
+    service, reviewer, application_id, work_item_id, work, claimed, link, now = _claimed_reveal_context(tmp_path)
+    first = service.reveal_field_observation(
+        principal=reviewer, application_id=application_id, work_item_id=work_item_id,
+        now=NOW, **_reveal_args(work, claimed, link, idempotency_key="s15-one", classification="UNKNOWN"),
+    )
+    replay = service.reveal_field_observation(
+        principal=reviewer, application_id=application_id, work_item_id=work_item_id,
+        now=NOW, **_reveal_args(work, claimed, link, idempotency_key="s15-one", classification="UNKNOWN"),
+    )
+    conflict = service.reveal_field_observation(
+        principal=reviewer, application_id=application_id, work_item_id=work_item_id,
+        now=NOW, **_reveal_args(work, claimed, link, idempotency_key="s15-one", expected_source_region="region:2"),
+    )
+    assert first["status"] == "rejected"
+    assert replay == {**first, "replayed": True}
+    assert conflict["status"] == "conflict"
+    events = [event for event in service.audit_timeline(principal=_auditor(reviewer.scope), application_id=application_id)["events"] if event["action"] == "evidence_source_revealed"]
+    # failure + conflict (the same-fingerprint replay creates no second event)
+    assert len(events) == 2
+
+def test_registered_session_cannot_reach_legacy_raw_routes(tmp_path: Path) -> None:
+    environment, _submission = _configured_http_source(tmp_path)
+    with UvicornLoopback(environment, app_target="task4_consistency.web.app:create_s02_test_app", app_factory=True) as server:
+        cookie = _open_session(server)
+        fixture = server.request(
+            "GET",
+            "/api/fixtures/app_r53_bad_engine.json",
+            headers={"Cookie": cookie},
+            use_session=False,
+        )
+        arbitrary = server.request(
+            "POST",
+            "/api/check",
+            body={"application": {"application_id": "cross-tenant-raw", "documents": []}},
+            headers={"Cookie": cookie},
+            use_session=False,
+        )
+    assert fixture.status == 404
+    assert arbitrary.status == 404
+    assert fixture.json() == {"detail": {"error": "SYNTHETIC_ONLY"}}
+    assert arbitrary.json() == {"detail": {"error": "SYNTHETIC_ONLY"}}
+    assert "cross-tenant-raw" not in arbitrary.text
+
+
+def test_legacy_demo_check_accepts_only_manifest_fixture_identity(tmp_path: Path) -> None:
+    # The legacy route is retained only as a synthetic manifest adapter.
+    # The exact fixture payload is accepted; an arbitrary raw Application and
+    # caller-selected rules path are existence-hidden.
+    fixture_path = ROOT / "fixtures" / "applications" / "app_r53_bad_engine.json"
+    fixture_payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+    with UvicornLoopback() as server:
+        accepted = server.request(
+            "POST",
+            "/api/check",
+            body={"application": fixture_payload},
+            use_session=False,
+        )
+        arbitrary = server.request(
+            "POST",
+            "/api/check",
+            body={
+                "application": {"application_id": "arbitrary", "documents": []},
+                "rules_path": "configs/rules_auto_lease.yaml",
+            },
+            use_session=False,
+        )
+    assert accepted.status == 200
+    assert accepted.headers.get("cache-control") == "no-store"
+    assert arbitrary.status == 404
+    assert arbitrary.json() == {"detail": {"error": "SYNTHETIC_ONLY"}}

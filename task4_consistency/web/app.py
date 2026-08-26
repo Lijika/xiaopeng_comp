@@ -1555,13 +1555,12 @@ class S01HumanDecision(BaseModel):
 
 
 class S01RevealEligibility(BaseModel):
-    """The S15 reveal eligibility projection — derived from the canonical
-    C19 policy (configs/c19_reveal_policy.json) and the current
-    tenant/resource assignment.  The UI must not hand-write purpose/
-    reason/classification; it consumes this authorized projection, and the
-    domain re-validates the same policy at command time.  When the policy
-    is unavailable or the tenant is not G4, eligible is false and the
-    reveal remains closed."""
+    """The S15 reveal eligibility projection — derived from the active,
+    approved S08 immutable release and the current tenant/resource
+    assignment.  The UI must not hand-write purpose/reason/classification;
+    it consumes this authorized projection, and the domain resolves the
+    same governed decision at command time.  When the release is unavailable
+    or the tenant is not G4, eligible is false and reveal remains closed."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -3344,6 +3343,25 @@ def _s02_principal(request: Request) -> S01Principal | None:
     )
 
 
+def _synthetic_boundary_denied(request: Request) -> bool:
+    """Synthetic-only boundary: registered S15 sessions (S02) must not
+    reach legacy raw-report or raw-fixture routes.  This helper recognizes
+    both the S01 demo session and the S02 registered session and returns
+    True for every registered scope, which the caller maps to the same
+    existence-hiding 404 before any fixture lookup or report execution."""
+    # S02 registered session (R-OBSERVED/tenant) is the actual S15
+    # registered reviewer session.
+    p2 = _s02_principal(request)
+    if p2 is not None and ControlledScenarioService.is_registered_scope(p2.scope):
+        return True
+    # S01 demo session that happens to carry a registered scope (e.g., a
+    # registered reviewer via S01) is also a registered scope.
+    p1 = _s01_principal(request)
+    if p1 is not None and ControlledScenarioService.is_registered_scope(p1.scope):
+        return True
+    return False
+
+
 def _issue_s02_session(request: Request, response: Response) -> None:
     service = _s02_service()
     if not S02_SUBJECT or not _s01_has_credential(request, S02_CREDENTIAL):
@@ -3462,6 +3480,27 @@ def _s04_demo_reviewer_principal(request: Request) -> S01CommandPrincipal:
         source_id="c-demo-review-console",
         expires_at=principal.expires_at,
     )
+
+
+def _s15_reviewer_principal(request: Request) -> S01CommandPrincipal:
+    """Resolve the one Reviewer authority for the shared S01 React shell.
+    Registered S02 sessions are preferred; C-DEMO remains supported for
+    masked/read-only demo UI but cannot authorize S15 reveal in the domain.
+    This is a session adapter only, not a second reveal authority."""
+    principal = _s02_principal(request)
+    if (
+        principal is not None
+        and "reviewer" in principal.roles
+        and ControlledScenarioService.is_registered_scope(principal.scope)
+    ):
+        return S01CommandPrincipal(
+            subject=principal.subject,
+            role="reviewer",
+            scope=principal.scope,
+            source_id=S02_SOURCE_SYSTEM_ID,
+            expires_at=principal.expires_at,
+        )
+    return _s04_demo_reviewer_principal(request)
 
 
 def _s06_integrator_query_principal(request: Request) -> S01CommandPrincipal:
@@ -4338,6 +4377,10 @@ def _controlled_s01_shell_response(request: Request, html: str) -> HTMLResponse:
     response = HTMLResponse(html)
     if _s01_has_credential(request, S01_OPERATOR_CREDENTIAL):
         _s01_require_operator(request)
+    elif _s02_principal(request) is not None:
+        # Registered S02 reviewer session is already the authority for the
+        # S15 React shell; do not replace it with a C-DEMO cookie.
+        pass
     else:
         _issue_s01_session(request, response)
     _s01_disable_cache(response)
@@ -4910,12 +4953,9 @@ async def controlled_s07_verify_recovery(
 )
 def controlled_s01_queue(request: Request, response: Response) -> dict[str, Any]:
     _s01_disable_cache(response)
-    principal = _s01_principal(request)
-    if (
-        principal is None
-        or "reviewer" not in principal.roles
-        or not ControlledScenarioService.is_c_demo_scope(principal.scope)
-    ):
+    try:
+        principal = _s15_reviewer_principal(request)
+    except HTTPException:
         access_ended = bool(getattr(request.state, "s01_access_ended", False))
         if access_ended:
             response.headers["X-S01-Access-Ended"] = "1"
@@ -4957,13 +4997,10 @@ def controlled_s01_workspace(
     finding_id: str | None = None,
 ) -> dict[str, Any]:
     _s01_disable_cache(response)
-    principal = _s01_principal(request)
-    if (
-        principal is None
-        or "reviewer" not in principal.roles
-        or not ControlledScenarioService.is_c_demo_scope(principal.scope)
-    ):
-        raise HTTPException(404, detail={"error": "S01_NOT_FOUND"})
+    try:
+        principal = _s15_reviewer_principal(request)
+    except HTTPException as error:
+        raise HTTPException(404, detail={"error": "S01_NOT_FOUND"}) from error
     try:
         return _s01_service().workspace_view(
             application_id,
@@ -4999,17 +5036,7 @@ def controlled_s04_demo_review_work_item(
     # tenant/resource eligibility and returns eligible=false for
     # synthetic or unconfigured tenants while keeping the DTO minimized.
     _s01_disable_cache(response)
-    principal: S01CommandPrincipal | None = None
-    last_error: HTTPException | None = None
-    for factory in (_s03_reviewer_principal, _s04_demo_reviewer_principal):
-        try:
-            principal = factory(request)
-            break
-        except HTTPException as exc:
-            last_error = exc
-            continue
-    if principal is None:
-        raise last_error  # type: ignore[misc]
+    principal = _s15_reviewer_principal(request)
     try:
         return _s01_service().review_work_item_view(
             principal=principal,
@@ -5048,7 +5075,7 @@ async def controlled_s04_demo_claim_review_work_item(
     response: Response,
 ) -> dict[str, Any]:
     _s01_disable_cache(response)
-    principal = _s04_demo_reviewer_principal(request)
+    principal = _s15_reviewer_principal(request)
     body = await _s03_command_body(request, S01ReviewClaimBody)
     assert isinstance(body, S01ReviewClaimBody)
     try:
@@ -5091,7 +5118,7 @@ async def controlled_s04_demo_renew_review_work_item(
     response: Response,
 ) -> dict[str, Any]:
     _s01_disable_cache(response)
-    principal = _s04_demo_reviewer_principal(request)
+    principal = _s15_reviewer_principal(request)
     body = await _s03_command_body(request, S01ReviewFencedBody)
     assert isinstance(body, S01ReviewFencedBody)
     try:
@@ -5138,7 +5165,7 @@ async def controlled_s04_demo_release_review_work_item(
     response: Response,
 ) -> dict[str, Any]:
     _s01_disable_cache(response)
-    principal = _s04_demo_reviewer_principal(request)
+    principal = _s15_reviewer_principal(request)
     body = await _s03_command_body(request, S01ReviewFencedBody)
     assert isinstance(body, S01ReviewFencedBody)
     try:
@@ -5185,7 +5212,7 @@ async def controlled_s04_demo_submit_review_work_item(
     response: Response,
 ) -> dict[str, Any]:
     _s01_disable_cache(response)
-    principal = _s04_demo_reviewer_principal(request)
+    principal = _s15_reviewer_principal(request)
     body = await _s03_command_body(request, S01ReviewSubmitBody)
     assert isinstance(body, S01ReviewSubmitBody)
     try:
@@ -5230,7 +5257,7 @@ async def controlled_s04_demo_submit_review_work_item(
         },
     },
 )
-async def controlled_s04_demo_reveal_field_observation(
+async def controlled_s15_reveal_field_observation(
     work_item_id: str,
     request: Request,
     response: Response,
@@ -5299,7 +5326,7 @@ async def controlled_s04_demo_correct_field_observation(
     response: Response,
 ) -> dict[str, Any]:
     _s01_disable_cache(response)
-    principal = _s04_demo_reviewer_principal(request)
+    principal = _s15_reviewer_principal(request)
     body = await _s03_command_body(request, S01ReviewCorrectionBody)
     assert isinstance(body, S01ReviewCorrectionBody)
     try:
@@ -5843,7 +5870,7 @@ def controlled_s04_demo_current_route(
     response: Response,
 ) -> dict[str, Any]:
     _s01_disable_cache(response)
-    principal = _s04_demo_reviewer_principal(request)
+    principal = _s15_reviewer_principal(request)
     try:
         return _s01_service().current_route_view(
             principal=principal,
@@ -5867,7 +5894,7 @@ def controlled_s04_demo_application_history(
     response: Response,
 ) -> dict[str, Any]:
     _s01_disable_cache(response)
-    principal = _s04_demo_reviewer_principal(request)
+    principal = _s15_reviewer_principal(request)
     try:
         return _s01_history_with_destinations(
             _s01_service().application_history_view(
@@ -6167,38 +6194,81 @@ def get_step2_sample(sample_id: str) -> dict[str, Any]:
 
 
 @app.get("/api/fixtures/{name}")
-def get_fixture(name: str, request: Request) -> dict[str, Any]:
+def get_fixture(name: str, request: Request, response: Response) -> dict[str, Any]:
     """Synthetic-only boundary: serves only preloaded synthetic fixtures and
-    never reads the controlled S01 store.  Controlled sessions are
-    existence-hidden (404) and the route cannot serve controlled application
-    data; it is not part of the S15 reveal data plane.
+    never reads the controlled S01 store.  Controlled sessions (both S01
+    demo with registered scope and S02 registered) are existence-hidden
+    before any fixture lookup; the response is no-store as defense in
+    depth.
     """
-    # Isolate from the controlled data plane: any valid controlled
-    # (registered) session is hidden as 404, proving the synthetic
-    # boundary cannot be used as a direct-object bypass for S15.
-    principal = _s01_principal(request)
-    if principal is not None and ControlledScenarioService.is_registered_scope(
-        principal.scope
-    ):
+    if _synthetic_boundary_denied(request):
         raise HTTPException(404, detail={"error": "SYNTHETIC_ONLY"})
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    # Bounded to the fixed synthetic manifest: only the committed
+    # fixtures directory may be served, never an arbitrary path or
+    # controlled object.
     if "/" in name or ".." in name:
         raise HTTPException(400, "invalid name")
+    # Whitelist to the synthetic manifest — only files that exist in the
+    # committed FIXTURES directory and are part of the synthetic corpus.
+    allowed = {p.name for p in FIXTURES.glob("*.json")}
+    if name not in allowed:
+        raise HTTPException(404, detail={"error": "SYNTHETIC_ONLY"})
     fp = FIXTURES / name
-    if not fp.exists():
-        raise HTTPException(404, "fixture not found")
     return json.loads(fp.read_text(encoding="utf-8"))
 
 
 @app.post("/api/check")
-def api_check(body: CheckBody, request: Request) -> dict[str, Any]:
-    """Synthetic-only boundary: runs the local RuleEngine on synthetic
-    input and never creates a controlled S01 processing cycle, evidence
-    revision or audit fact.  Controlled sessions are existence-hidden.
+def api_check(body: CheckBody, request: Request, response: Response) -> dict[str, Any]:
+    """Synthetic-only boundary: the remaining demo operation accepts only
+    a server-whitelisted synthetic fixture identity and chooses the
+    server-owned ruleset.  The legacy general raw-Application API is
+    retired; arbitrary bodies, guessed direct-object paths and bulk
+    payloads are existence-hidden.  Controlled sessions are hidden before
+    any parsing.
     """
-    principal = _s01_principal(request)
-    if principal is not None and ControlledScenarioService.is_registered_scope(
-        principal.scope
-    ):
+    if _synthetic_boundary_denied(request):
+        raise HTTPException(404, detail={"error": "SYNTHETIC_ONLY"})
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    # Retired general API: only the whitelisted synthetic fixture
+    # identities may be checked, and the ruleset is server-owned.
+    # An arbitrary raw Application or guessed path is hidden.
+    synthetic_identities = {p.stem for p in FIXTURES.glob("*.json")}
+    # The demo operation accepts a synthetic fixture identity via
+    # body.rules_path or body.application.application_id that must be
+    # whitelisted; otherwise the request is hidden.
+    app = body.application if isinstance(body.application, dict) else {}
+    app_id = app.get("application_id") if isinstance(app, dict) else None
+    rules_path = body.rules_path
+    allowed = False
+    if isinstance(app_id, str) and app_id in synthetic_identities:
+        allowed = True
+    if isinstance(rules_path, str) and Path(rules_path).stem in synthetic_identities:
+        allowed = True
+    # Fallback: allow the exact committed fixture payloads (byte-identical
+    # to a synthetic fixture) as the demo operation, but no arbitrary
+    # raw Application.
+    if not allowed:
+        # Check if the payload is byte-identical to a synthetic fixture.
+        try:
+            payload_bytes = json.dumps(app, sort_keys=True).encode()
+            for fp in FIXTURES.glob("*.json"):
+                if payload_bytes == fp.read_bytes():
+                    allowed = True
+                    break
+                # Also allow the wrapped Application.from_dict form
+                try:
+                    fixture_data = json.loads(fp.read_text(encoding="utf-8"))
+                    if app == fixture_data:
+                        allowed = True
+                        break
+                except Exception:
+                    continue
+        except Exception:
+            allowed = False
+    if not allowed:
         raise HTTPException(404, detail={"error": "SYNTHETIC_ONLY"})
     if not isinstance(body.application, dict):
         raise HTTPException(
@@ -6810,7 +6880,7 @@ def create_s01_test_app() -> FastAPI:
 def create_s02_test_app() -> FastAPI:
     """Build explicit S02 test wiring without weakening production startup."""
     global S01_BACKGROUND_ENABLED, S01_REQUIRE_CONFIGURED_STARTUP
-    global S01_SERVICE, S01_TEST_DRIVER
+    global S01_SERVICE, S01_TEST_DRIVER, S08_SERVICE
     global S02_REGISTERED_SOURCES, S02_CONTROLLED_OBJECTS
     global S02_CONFIGURATION_ERROR, S02_CONFIGURED
     global S02_CREDENTIAL, S02_SUBJECT, S02_TENANT_ID, S02_SOURCE_SYSTEM_ID
@@ -6872,6 +6942,12 @@ def create_s02_test_app() -> FastAPI:
             registered_sources=S02_REGISTERED_SOURCES,
             controlled_objects=S02_CONTROLLED_OBJECTS,
             scenario_id=scenario_value or "app_r53_bad_engine.json",
+            # Keep the S01 fault-injected work item isolated from the
+            # S02-governed policy that the registered browser slice
+            # exercises.  Sharing the same SQLite file would let the S02
+            # bootstrap's active generation invalidate the already-created
+            # S01 run via S09.
+            policy_governance=None,
             downstream_registry=build_c_demo_registry(
                 extra_registrations=(
                     [
@@ -6886,6 +6962,22 @@ def create_s02_test_app() -> FastAPI:
                 )
             ),
         )
+        # S15 R2: registered browser slice exercises governance via the
+        # pooled S02 store, but that store must not be the same global
+        # S08 that the unrelated S01 loopback test shares.  Keep S08
+        # bound to its own state.
+        S08_SERVICE = PolicyGovernanceService(
+            state_path=state_path,
+            audit_available=True,
+            storage_available=True,
+            source_rules_path=DEFAULT_RULES,
+            source_kb_path=S08_DEFAULT_KB_PATH,
+            corpus_root=FIXTURES,
+            clock=lambda: int(S01_SESSION_CLOCK()),
+            lifecycle_snapshot_provider=_s09_lifecycle_impact_snapshot,
+            diagnostic_snapshot_provider=_s09_lifecycle_diagnostic_snapshot,
+        )
+        S08_SERVICE.bootstrap_once()
         S01_TEST_DRIVER = None
     except Exception:
         S01_SERVICE = None

@@ -4805,6 +4805,28 @@ class PolicyGovernanceService:
             staged, type="checker", content=release.to_artifact()
         )
         component_ids.append(checker_component)
+        # S15 C19 policy content is an immutable S08 component.  It is
+        # validated, approved and activated with the rest of the manifest;
+        # no local JSON file can become the runtime reveal authority.
+        component_ids.append(
+            self._stage_json_artifact(
+                staged,
+                type="reveal_policy",
+                content={
+                    "schema_version": "s15-governed-reveal-policy/1",
+                    "policy_id": "s15-controlled-reveal/1",
+                    "policy_version": "1",
+                    "validity": {"valid_from": "2000-01-01T00:00:00Z"},
+                    "tenant_scope": "R-OBSERVED/*",
+                    "resource_scope": "current_application",
+                    "actions": ["reveal_field_observation"],
+                    "purposes": ["MANUAL_REVIEW"],
+                    "reasons": ["EVIDENCE_VERIFICATION"],
+                    "classifications": ["RESTRICTED"],
+                    "max_term_seconds": 900,
+                },
+            )
+        )
         component_ids.extend(
             {
                 "type": artifact["kind"],
@@ -5525,6 +5547,7 @@ class PolicyGovernanceService:
                         "checker",
                         "input_contract",
                         "limits",
+                        "reveal_policy",
                     }
                     else "fail"
                 ),
@@ -6661,6 +6684,94 @@ class PolicyGovernanceService:
                 "applicable_check_count": public["applicable_check_count"],
                 "target_release": release,
             },
+        }
+
+    def resolve_s15_reveal_policy(
+        self,
+        *,
+        now: int,
+        tenant_scope: str,
+        resource_id: str,
+        action: str,
+        classification: str,
+        store: SQLiteTargetStore | None = None,
+    ) -> dict[str, Any] | None:
+        """Resolve the S15 C19 decision from the active immutable S08
+        release.  This is the sole runtime reveal-policy authority: it
+        verifies activation, candidate validity, manifest digest, approval
+        binding and the reveal-policy artifact before binding tenant,
+        resource, action and classification.
+        """
+        pin = self.resolve_run_pin(S08_SCOPE, now, store=store)
+        if pin is None:
+            return None
+        owner = store if store is not None else self._store
+        manifest = self._verify_pinned_manifest(
+            owner, pin["manifest_id"], pin["manifest_digest"]
+        )
+        try:
+            artifact = self._artifact(
+                owner, self._component_id(manifest, "reveal_policy")
+            )
+        except Exception:
+            return None
+        if not isinstance(artifact, dict):
+            return None
+        validity = artifact.get("validity")
+        if (
+            artifact.get("schema_version") != "s15-governed-reveal-policy/1"
+            or not isinstance(artifact.get("policy_id"), str)
+            or not isinstance(artifact.get("policy_version"), str)
+            or artifact.get("tenant_scope") != "R-OBSERVED/*"
+            or artifact.get("resource_scope") != "current_application"
+            or not isinstance(validity, dict)
+            or not isinstance(validity.get("valid_from"), str)
+            or action not in (artifact.get("actions") or [])
+            or classification not in (artifact.get("classifications") or [])
+            or not isinstance(artifact.get("max_term_seconds"), int)
+            or artifact["max_term_seconds"] < 1
+            or not isinstance(resource_id, str)
+            or not resource_id
+            or not isinstance(tenant_scope, str)
+            or not tenant_scope.startswith("R-OBSERVED/")
+        ):
+            return None
+        try:
+            valid_from = int(
+                datetime.fromisoformat(
+                    validity["valid_from"].replace("Z", "+00:00")
+                ).timestamp()
+            )
+            valid_to_raw = validity.get("valid_to")
+            valid_to = (
+                int(
+                    datetime.fromisoformat(
+                        valid_to_raw.replace("Z", "+00:00")
+                    ).timestamp()
+                )
+                if isinstance(valid_to_raw, str)
+                else None
+            )
+        except ValueError:
+            return None
+        if now < valid_from or valid_to is not None and now > valid_to:
+            return None
+        return {
+            "policy_id": artifact["policy_id"],
+            "policy_version": artifact["policy_version"],
+            "policy_digest": content_digest(artifact),
+            "approval_binding_id": pin["approval_binding_id"],
+            "activation_event_id": pin["activation_event_id"],
+            "active_generation": pin["active_generation"],
+            "valid_from": valid_from,
+            "valid_to": valid_to,
+            "tenant_scope": tenant_scope,
+            "resource_id": resource_id,
+            "action": action,
+            "classifications": tuple(artifact["classifications"]),
+            "purposes": tuple(artifact.get("purposes") or ()),
+            "reasons": tuple(artifact.get("reasons") or ()),
+            "max_term_seconds": artifact["max_term_seconds"],
         }
 
     def load_pinned_release(self, run_spec: dict[str, Any]) -> TargetRelease:

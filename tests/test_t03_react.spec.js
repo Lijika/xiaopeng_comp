@@ -66,17 +66,45 @@ async function setRestrictedInput(locator, value) {
   }, value);
 }
 
-/** Minimal S02 registered-source runtime so the legacy Reviewer shell serves
- * 200 on the same test app (the C-DEMO flow itself never touches S02). */
+/** Registered S02 runtime used by the S15 browser vertical slice.  It mirrors
+ * the accepted ocr-detection/unversioned fixture shape in
+ * tests/test_s02_controlled.py: one registered page object plus one VIN
+ * observation, both integrity-bound by their descriptors. */
 function createS02Fixture() {
   const root = fs.mkdtempSync(
     path.join("/tmp", `xiaopeng-task4-t03-react-s02-${process.pid}-`),
   );
   const objectRoot = path.join(root, "objects");
   fs.mkdirSync(objectRoot);
+  const result = {
+    per_image_results: [
+      {
+        image_path: "page.png",
+        image_size: { width: 1, height: 1 },
+        detections: [
+          {
+            bbox: [0, 0, 1, 1],
+            class_id: 1,
+            class_name: "vehicle_identifier",
+            confidence: 0.97,
+            field_key: "vin",
+            ocr_text: "TEST-VIN-A",
+            value: "TEST-VIN-A",
+          },
+        ],
+      },
+    ],
+  };
   fs.writeFileSync(
     path.join(objectRoot, "result.json"),
-    JSON.stringify({ synthetic: true }),
+    JSON.stringify(result),
+  );
+  fs.writeFileSync(
+    path.join(objectRoot, "page.png"),
+    Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYGAAAAAEAAH2FzhVAAAAAElFTkSuQmCC",
+      "base64",
+    ),
   );
   fs.writeFileSync(
     path.join(root, "registry.json"),
@@ -92,7 +120,7 @@ function createS02Fixture() {
           source_shape: "ocr-detection/unversioned",
           producer_family: "t03-react-ocr",
           enabled: true,
-          allowed_media_types: ["application/json"],
+          allowed_media_types: ["application/json", "image/png"],
           max_result_bytes: 1048576,
           max_attachment_bytes: 1048576,
           max_pages: 1,
@@ -106,6 +134,13 @@ function createS02Fixture() {
           object_ref: "t03-react-result-object",
           media_type: "application/json",
           file: "result.json",
+        },
+        {
+          tenant_id: S02_TENANT,
+          source_system_id: S02_SOURCE,
+          object_ref: "t03-react-page-object",
+          media_type: "image/png",
+          file: "page.png",
         },
       ],
     }),
@@ -1237,6 +1272,191 @@ async function runKeyboardTracer(browser, viewport) {
   }
 }
 
+/** Builds the canonical S02 submission envelope for a registered
+ * (R-OBSERVED) source, mirroring the Python registered fixture so the S15
+ * reveal browser slice exercises the same evidence graph (single vin
+ * observation with bbox region and TEST-VIN-A value). */
+function createRegisteredS02Submission() {
+  const crypto = require("node:crypto");
+  const sha256 = (value) => crypto.createHash("sha256").update(value).digest("hex");
+  const detectionPayload = {
+    per_image_results: [
+      {
+        image_path: "page.png",
+        image_size: { width: 1, height: 1 },
+        detections: [
+          {
+            bbox: [0, 0, 1, 1],
+            class_id: 1,
+            class_name: "vehicle_identifier",
+            confidence: 0.97,
+            field_key: "vin",
+            ocr_text: "TEST-VIN-A",
+            value: "TEST-VIN-A",
+          },
+        ],
+      },
+    ],
+  };
+  const resultBytes = Buffer.from(JSON.stringify(detectionPayload), "utf8");
+  const pageBytes = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYGAAAAAEAAH2FzhVAAAAAElFTkSuQmCC",
+    "base64",
+  );
+  const descriptor = (ref, mediaType, bytes) => ({
+    controlled_object_ref: ref,
+    media_type: mediaType,
+    size_bytes: bytes.length,
+    sha256: sha256(bytes),
+  });
+  const sourceNameDigest = sha256(Buffer.from("page.png", "utf8"));
+  return {
+    envelope_id: "envelope-t03-registered-s15",
+    schema_version: "1.0.0",
+    semantic_version: "1.0.0",
+    command_type: "submit_observation_result",
+    upstream_application_ref: "upstream-t03-registered-s15",
+    stream_id: "source-stream-t03-registered-s15",
+    source_revision: 1,
+    predecessor_revision: null,
+    must_understand: [],
+    workload_identity_id: "t03-react-workload",
+    document_binding: {
+      source_document_ref: "source-document-t03",
+      document_type: "motor_vehicle_registration_certificate",
+      document_role: "registration_certificate",
+    },
+    result_object: descriptor(
+      "t03-react-result-object",
+      "application/json",
+      resultBytes,
+    ),
+    attachments: [
+      {
+        source_attachment_ref: "source-attachment-t03",
+        page_ref: "source-page-t03",
+        page_ordinal: 1,
+        source_name_sha256: sourceNameDigest,
+        object: descriptor("t03-react-page-object", "image/png", pageBytes),
+      },
+    ],
+    producer: {
+      producer_id: "t03-react-producer",
+      producer_family: "t03-react-ocr",
+      task_id: "t03-react-field-extraction",
+      task_version: "1",
+      run_id: "t03-react-producer-run",
+      model_id: "t03-react-model",
+      model_version: "1",
+      coordinate_system: { name: "pixel", unit: "pixel", origin: "top_left" },
+      confidence_semantics: {
+        minimum: 0.0,
+        maximum: 1.0,
+        higher_is: "stronger_detection",
+        meaning: "producer_detection_score",
+        granularity: "observation",
+        calibration: "unknown",
+      },
+    },
+  };
+}
+
+/** Registered-controlled S15 reveal lifetime: the only successful S15 path
+ * is the registered controlled authority with G4/C19, tenant/resource grant,
+ * assignment and claim/context/revision satisfied.  This slice drives the
+ * S02 registered submission (R-OBSERVED) and the React shell, verifying:
+ * masked by default, single explicit reveal with bounded purpose/
+ * classification from the C19 eligibility projection, no raw in URL/storage/
+ * history, and expiry/reload scrubbing.  Distinct-action boundary (no
+ * direct-object/download/export/print/copy grant) is also asserted. */
+async function runRegisteredRevealLifetimeTracer(browser) {
+  const resources = {};
+  let failure;
+  try {
+    const s02 = createRegisteredS02Submission();
+    resources.server = await startServer();
+    const server = resources.server;
+    resources.registeredContext = await browser.newContext({
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: { Authorization: `Bearer ${S02_CREDENTIAL}` },
+    });
+    const page = await resources.registeredContext.newPage();
+    // Establish the S02 registered session; the S01 React shell shares the
+    // same S01 queue/workbench via the unified _s15_reviewer_principal.
+    const session = await page.request.get(`${server.baseURL}/controlled/s02`, {
+      headers: { Authorization: `Bearer ${S02_CREDENTIAL}` },
+    });
+    expect(session.ok()).toBeTruthy();
+    const admission = await page.request.post(
+      `${server.baseURL}/controlled/s02/api/commands/submit`,
+      { data: { idempotency_key: "t03-registered-s15-admission", submission: s02 } },
+    );
+    expect(admission.ok()).toBeTruthy();
+    const accepted = await admission.json();
+    if (accepted.disposition !== "accepted") {
+      throw new Error(
+        `registered submission rejected: ${JSON.stringify({
+          disposition: accepted.disposition,
+          reason_code: accepted.reason_code,
+          gate_results: accepted.gate_results,
+        })}`,
+      );
+    }
+    const deadline = Date.now() + 20_000;
+    let item;
+    while (Date.now() < deadline) {
+      const queue = await page.request.get(`${server.baseURL}/controlled/s01/api/queries/queue`);
+      if (queue.ok()) {
+        const body = await queue.json();
+        item = (body.items || []).find((c) => c.application_id === accepted.application_id);
+        if (item) break;
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    expect(item).toBeDefined();
+    const workId = item.work_item_id;
+    const applicationId = item.application_id;
+    const shellResponse = await page.goto(`${server.baseURL}/controlled/s01/react`, { waitUntil: "networkidle" });
+    expect(shellResponse.status()).toBe(200);
+    await expect(page.getByTestId("queue-panel")).toBeVisible();
+    await page.getByRole("link", { name: new RegExp(workId) }).click();
+    await expect(page.getByTestId("review-panel")).toBeVisible();
+    // Masked before reveal.
+    await assertSentinelAbsentEverywhere(page, "TEST-VIN-A");
+    await expect(page.getByTestId("review-evidence-masked").first()).toBeVisible();
+    // Claim then reveal.
+    await page.getByRole("button", { name: "认领" }).click();
+    await expect(page.getByTestId("review-status")).toHaveText("claimed");
+    const revealButton = page.getByTestId("review-reveal-button").first();
+    await expect(revealButton).toBeEnabled();
+    await revealButton.click();
+    await expect(page.getByTestId("review-reveal-source")).toBeVisible();
+    expectByteEqual(await page.getByTestId("review-reveal-source").textContent(), "TEST-VIN-A");
+    await assertOnlyOneSentinelElement(page, "TEST-VIN-A");
+    // No direct-object/download/export/print/copy grant.
+    const history = await page.request.get(`${server.baseURL}/controlled/s01/api/queries/applications/${encodeURIComponent(applicationId)}/history`);
+    expect(history.ok()).toBeTruthy();
+    const historyBody = await history.json();
+    expect(JSON.stringify(historyBody).includes("TEST-VIN-A")).toBe(false);
+    // Expiry/reload scrubbing: hard refresh must remask.
+    await page.reload({ waitUntil: "networkidle" });
+    await expect(page.getByTestId("review-reveal-source")).toHaveCount(0);
+    await assertSentinelAbsentEverywhere(page, "TEST-VIN-A");
+  } catch (error) {
+    failure = error;
+    throw error;
+  } finally {
+    try {
+      await settleCleanup([
+        resources.registeredContext ? () => resources.registeredContext.close() : () => Promise.resolve(),
+        resources.server ? () => stopServer(resources.server) : () => Promise.resolve(),
+      ]);
+    } catch (cleanupError) {
+      if (failure === undefined) throw cleanupError;
+    }
+  }
+}
+
 if (process.env.T03_DEBUG_EXPORTS === "1") {
   module.exports.__startServerForDebug = startServer;
   module.exports.__installManualWork = installManualWork;
@@ -1273,6 +1493,13 @@ if (process.env.T03_DEBUG_EXPORTS === "1") {
   }) => {
     test.setTimeout(180_000);
     await runStaleCorrectionReloadTracer(browser);
+  });
+
+  test("S15 registered reveal lifetime and distinct-action boundary", async ({
+    browser,
+  }) => {
+    test.setTimeout(180_000);
+    await runRegisteredRevealLifetimeTracer(browser);
   });
 
   for (const viewport of VIEWPORTS) {

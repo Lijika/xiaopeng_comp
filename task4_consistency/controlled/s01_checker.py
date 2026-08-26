@@ -233,6 +233,9 @@ class TargetRelease:
     vin_strict_check_digit: bool
     expand_id15_to_18: bool
     limits: tuple[tuple[str, int], ...]
+    # S15 C19 policy is part of the immutable checker release artifact,
+    # not a mutable local configuration file.  S08 pins/approves/activates
+    # this object together with the manifest.
 
     @classmethod
     def compile(

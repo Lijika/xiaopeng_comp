@@ -49,6 +49,7 @@ from .s02 import (
     tenant_from_scope,
 )
 from .s08 import S08_SCOPE
+from . import s08 as _s08
 from . import s13 as _s13
 
 
@@ -559,59 +560,54 @@ class ControlledScenarioService:
     # reveal one field observation for manual review / evidence verification
     # while the data remains RESTRICTED.  Any other value fails closed.
     _REVEAL_AUDIT_SCHEMA = "s15-reveal-audit/1"
-    # C19: the institutional reveal policy is owned by the data-governance
-    # owner and lives at configs/c19_reveal_policy.json.  The domain loads
-    # the canonical allowed purpose/reason/classification/term values from
-    # that file and validates the current tenant/resource context against
-    # it.  A configuration change therefore changes the authorization result
-    # without touching Python constants, and a missing or unowned policy
-    # keeps the reveal closed (G4) per C19.
-    _C19_REVEAL_POLICY_PATH = Path(__file__).resolve().parents[2] / "configs" / "c19_reveal_policy.json"
+    def _resolve_governed_c19_reveal_policy(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        app: dict[str, Any],
+        now: int,
+    ) -> dict[str, Any] | None:
+        """Return a C19 decision from the existing S08 immutable active
+        release, or ``None`` to close reveal.
 
-    @classmethod
-    def _load_c19_reveal_policy(cls) -> dict[str, Any] | None:
+        The mutable local JSON policy is deliberately not consulted.  S08's
+        ``resolve_run_pin`` verifies active generation, candidate validity,
+        manifest digest, validation and approval binding.  This adapter
+        binds that governed decision to the registered tenant and current
+        application resource, then exposes only the closed S15 action
+        vocabulary and release-owned term limit.
+        """
+        if self._policy_governance is None or not self.is_registered_scope(
+            principal.scope
+        ):
+            return None
         try:
-            raw = json.loads(cls._C19_REVEAL_POLICY_PATH.read_text(encoding="utf-8"))
-            if not isinstance(raw, dict):
-                return None
-            if raw.get("owner") != "institution-data-governance":
-                return None
-            if raw.get("tenant_scope") != "institution-controlled":
-                return None
-            purposes = raw.get("purposes")
-            reasons = raw.get("reasons")
-            classifications = raw.get("classifications")
-            if not (
-                isinstance(purposes, list)
-                and purposes
-                and all(isinstance(p, str) and p and p.strip() == p for p in purposes)
-                and isinstance(reasons, list)
-                and reasons
-                and all(isinstance(r, str) and r and r.strip() == r for r in reasons)
-                and isinstance(classifications, list)
-                and classifications
-                and all(isinstance(c, str) and c and c.strip() == c for c in classifications)
-            ):
-                return None
-            max_term = raw.get("max_term_seconds")
-            if not isinstance(max_term, int) or max_term <= 0:
-                return None
-            return raw
+            tenant_id = tenant_from_scope(principal.scope)
         except Exception:
             return None
-
-    def _is_c19_reveal_policy_available(self) -> bool:
-        return self._load_c19_reveal_policy() is not None
-
-    def _c19_reveal_allowed_values(self) -> tuple[set[str], set[str], set[str]] | None:
-        policy = self._load_c19_reveal_policy()
-        if policy is None:
+        envelope = app.get("envelope")
+        context = (
+            envelope.get("authenticated_context")
+            if isinstance(envelope, dict)
+            else None
+        )
+        if not isinstance(context, dict) or context.get("tenant_id") != tenant_id:
+            return None
+        if app.get("track") != "R-OBSERVED":
             return None
         try:
+            decision = self._policy_governance.resolve_s15_reveal_policy(
+                now=now,
+                tenant_scope=principal.scope,
+                resource_id=str(app.get("application_id") or ""),
+                action="reveal_field_observation",
+                classification="RESTRICTED",
+                store=self._store,
+            )
             return (
-                set(str(p) for p in policy.get("purposes", [])),
-                set(str(r) for r in policy.get("reasons", [])),
-                set(str(c) for c in policy.get("classifications", [])),
+                {**decision, "tenant_id": tenant_id}
+                if isinstance(decision, dict)
+                else None
             )
         except Exception:
             return None
@@ -11317,6 +11313,120 @@ class ControlledScenarioService:
         ).encode("utf-8")
         return f"s03_idempotency_{hashlib.sha256(encoded).hexdigest()}"
 
+    def _record_reveal_outcome(
+        self,
+        *,
+        principal: S01CommandPrincipal,
+        work_item: dict[str, Any],
+        app: dict[str, Any],
+        observation_id: str,
+        purpose: str,
+        reason: str,
+        classification: str,
+        expected_fence: int,
+        expected_context: dict[str, Any],
+        idempotency_key: str,
+        command_fingerprint: str,
+        binding_key: str,
+        result: dict[str, Any],
+        now: int,
+        policy_decision: dict[str, Any] | None = None,
+        store_result: bool = True,
+    ) -> dict[str, Any]:
+        """Append one safe S15 reveal outcome and, except for an
+        idempotency-conflict observation, bind it atomically for replay.
+
+        This is the only protected outcome writer for reveal.  It receives
+        no raw source text or locator: event and replay metadata are limited
+        to actor/scope/resource/action, bounded policy values, revision /
+        context digest, policy pin and stable result/reason.  A write fault,
+        storage failure or CAS race produces ``unavailable`` with no binding
+        and no raw; callers never swallow those failures.
+        """
+        context_bytes = json.dumps(
+            expected_context,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        context_digest = hashlib.sha256(context_bytes).hexdigest()
+        staged = copy.deepcopy(self._store)
+        safe_result = {
+            key: copy.deepcopy(value)
+            for key, value in result.items()
+            if key != "source_text"
+        }
+        try:
+            self._before_write("reveal.audit")
+            staged.audit_events.append(
+                {
+                    "event_id": self._stable_id(
+                        "audit",
+                        f"evidence_source_revealed:{work_item['work_item_id']}:{observation_id}:{now}:{result.get('status')}:{len(staged.audit_events) + 1}",
+                    ),
+                    "action": "evidence_source_revealed",
+                    "subject": principal.subject,
+                    "role": principal.role,
+                    "scope": work_item["visibility_scope"],
+                    "source_id": principal.source_id,
+                    "application_id": app["application_id"],
+                    "work_item_id": work_item["work_item_id"],
+                    "observation_id": observation_id,
+                    "result": result.get("status"),
+                    "reason_code": (
+                        "SOURCE_REVEAL_AUTHORIZED"
+                        if result.get("status") == "revealed"
+                        else result.get("reason_code")
+                    ),
+                    "purpose": purpose,
+                    "verification_reason": reason,
+                    "classification": classification,
+                    "idempotency_key": idempotency_key,
+                    "idempotency_fingerprint": command_fingerprint,
+                    "idempotency_binding": binding_key,
+                    "context_digest": context_digest,
+                    "lifecycle_revision": int(app.get("lifecycle_revision", 0) or 0),
+                    "evidence_revision": int(app.get("evidence_revision", 0) or 0),
+                    "claim_fence": int(expected_fence),
+                    "claim_expires_at": int(result.get("claim_expires_at") or 0),
+                    "policy_id": (
+                        policy_decision.get("policy_id") if policy_decision else None
+                    ),
+                    "policy_digest": (
+                        policy_decision.get("policy_digest") if policy_decision else None
+                    ),
+                    "policy_version": (
+                        policy_decision.get("policy_version") if policy_decision else None
+                    ),
+                    "policy_term_seconds": (
+                        policy_decision.get("max_term_seconds") if policy_decision else None
+                    ),
+                    "schema_version": self._REVEAL_AUDIT_SCHEMA,
+                    **self._audit_time_fields(staged, now=now),
+                }
+            )
+            if store_result:
+                self._before_write("reveal.idempotency")
+                staged.idempotency[binding_key] = (command_fingerprint, safe_result)
+            staged.persist()
+        except (StaleStoreRevision, _StoreWriteFailure, OSError, RuntimeError, ValueError):
+            # _StoreWriteFailure and all persistence errors are intentionally
+            # collapsed to the same no-value fail-closed result.  Do not
+            # install an idempotency binding because the protected audit
+            # transaction did not commit.
+            self._reload_store()
+            return {
+                "status": "unavailable",
+                "replayed": False,
+                "application_id": app["application_id"],
+                "work_item_id": work_item["work_item_id"],
+                "reason_code": "AUDIT_UNAVAILABLE"
+                if not self.audit_available
+                else "STORAGE_UNAVAILABLE",
+            }
+        self._store = staged
+        return result
+
     def reveal_field_observation(
         self,
         *,
@@ -11387,171 +11497,9 @@ class ControlledScenarioService:
             if work_item["application_id"] != application_id:
                 raise QueryNotFound(work_item_id)
             app, _, actual_context = self._review_current_context(work_item)
-            # S15/C19 gate: the reveal's canonical purpose/reason/
-            # classification/term values are owned by
-            # configs/c19_reveal_policy.json (institution-data-governance).
-            # The domain loads that policy and validates the current
-            # tenant/resource context; a change to the JSON changes the
-            # authorization result without touching Python constants, and a
-            # missing/unowned policy keeps the reveal closed (G4) per C19.
-            policy = self._load_c19_reveal_policy()
-            if policy is None:
-                try:
-                    staged_policy = copy.deepcopy(self._store)
-                    self._before_write("reveal.audit")
-                    staged_policy.audit_events.append(
-                        {
-                            "event_id": self._stable_id(
-                                "audit",
-                                f"evidence_source_revealed:{work_item_id}:{observation_id}:{reveal_time}:policy_unavailable",
-                            ),
-                            "action": "evidence_source_revealed",
-                            "subject": principal.subject,
-                            "role": principal.role,
-                            "scope": work_item["visibility_scope"],
-                            "source_id": principal.source_id,
-                            "application_id": application_id,
-                            "work_item_id": work_item_id,
-                            "observation_id": observation_id,
-                            "result": "rejected",
-                            "reason_code": "REVEAL_POLICY_UNAVAILABLE",
-                            "purpose": purpose,
-                            "verification_reason": reason,
-                            "classification": classification,
-                            "idempotency_key": idempotency_key,
-                            "expected_context": copy.deepcopy(expected_context),
-                            "lifecycle_revision": int(app.get("lifecycle_revision", 0) or 0),
-                            "evidence_revision": int(app.get("evidence_revision", 0) or 0),
-                            "claim_fence": int(expected_fence),
-                            "schema_version": self._REVEAL_AUDIT_SCHEMA,
-                            **self._audit_time_fields(staged_policy, now=reveal_time),
-                        }
-                    )
-                    staged_policy.persist()
-                    self._store = staged_policy
-                except Exception:
-                    pass
-                return {
-                    "status": "rejected",
-                    "replayed": False,
-                    "application_id": application_id,
-                    "work_item_id": work_item_id,
-                    "reason_code": "REVEAL_POLICY_UNAVAILABLE",
-                }
-            # Tenant/resource context validation against the canonical
-            # policy: only registered controlled scopes (institution tenant)
-            # may authorize S15 reveal.  Synthetic C-DEMO sessions and
-            # synthetic C-DEMO tracks cannot authorize S15 reveal per the
-            # R1 brief: the only successful S15 path is the registered
-            # controlled authority with G4/C19, tenant/resource/action,
-            # assignment and claim/context/revision satisfied.
-            if self.is_c_demo_scope(principal.scope) or app.get("track") == "C-DEMO":
-                try:
-                    staged_demo = copy.deepcopy(self._store)
-                    self._before_write("reveal.audit")
-                    staged_demo.audit_events.append(
-                        {
-                            "event_id": self._stable_id(
-                                "audit",
-                                f"evidence_source_revealed:{work_item_id}:{observation_id}:{reveal_time}:demo_denied",
-                            ),
-                            "action": "evidence_source_revealed",
-                            "subject": principal.subject,
-                            "role": principal.role,
-                            "scope": work_item["visibility_scope"],
-                            "source_id": principal.source_id,
-                            "application_id": application_id,
-                            "work_item_id": work_item_id,
-                            "observation_id": observation_id,
-                            "result": "rejected",
-                            "reason_code": "REVEAL_SYNTHETIC_DENIED",
-                            "purpose": purpose,
-                            "verification_reason": reason,
-                            "classification": classification,
-                            "idempotency_key": idempotency_key,
-                            "expected_context": copy.deepcopy(expected_context),
-                            "lifecycle_revision": int(app.get("lifecycle_revision", 0) or 0),
-                            "evidence_revision": int(app.get("evidence_revision", 0) or 0),
-                            "claim_fence": int(expected_fence),
-                            "schema_version": self._REVEAL_AUDIT_SCHEMA,
-                            **self._audit_time_fields(staged_demo, now=reveal_time),
-                        }
-                    )
-                    staged_demo.persist()
-                    self._store = staged_demo
-                except Exception:
-                    pass
-                return {
-                    "status": "rejected",
-                    "replayed": False,
-                    "application_id": application_id,
-                    "work_item_id": work_item_id,
-                    "reason_code": "REVEAL_SYNTHETIC_DENIED",
-                }
-            # Closed vocab check against the canonical policy (not hard-coded
-            # Python literals).  An unknown purpose/reason/classification
-            # is a bounded-authorization failure that must be audited
-            # without raw/locator, and a policy change alone flips the
-            # result.
-            allowed_purposes = set(str(p) for p in policy.get("purposes", []))
-            allowed_reasons = set(str(r) for r in policy.get("reasons", []))
-            allowed_classifications = set(
-                str(c) for c in policy.get("classifications", [])
-            )
-            if (
-                purpose not in allowed_purposes
-                or reason not in allowed_reasons
-                or classification not in allowed_classifications
-            ):
-                try:
-                    staged_vocab = copy.deepcopy(self._store)
-                    self._before_write("reveal.audit")
-                    staged_vocab.audit_events.append(
-                        {
-                            "event_id": self._stable_id(
-                                "audit",
-                                f"evidence_source_revealed:{work_item_id}:{observation_id}:{reveal_time}:vocab_rejected",
-                            ),
-                            "action": "evidence_source_revealed",
-                            "subject": principal.subject,
-                            "role": principal.role,
-                            "scope": work_item["visibility_scope"],
-                            "source_id": principal.source_id,
-                            "application_id": application_id,
-                            "work_item_id": work_item_id,
-                            "observation_id": observation_id,
-                            "result": "rejected",
-                            "reason_code": "REVEAL_VOCABULARY_UNKNOWN",
-                            "purpose": purpose,
-                            "verification_reason": reason,
-                            "classification": classification,
-                            "idempotency_key": idempotency_key,
-                            "expected_context": copy.deepcopy(expected_context),
-                            "lifecycle_revision": int(app.get("lifecycle_revision", 0) or 0),
-                            "evidence_revision": int(app.get("evidence_revision", 0) or 0),
-                            "claim_fence": int(expected_fence),
-                            "schema_version": self._REVEAL_AUDIT_SCHEMA,
-                            **self._audit_time_fields(staged_vocab, now=reveal_time),
-                        }
-                    )
-                    staged_vocab.persist()
-                    self._store = staged_vocab
-                except Exception:
-                    pass
-                return {
-                    "status": "rejected",
-                    "replayed": False,
-                    "application_id": application_id,
-                    "work_item_id": work_item_id,
-                    "reason_code": "REVEAL_VOCABULARY_UNKNOWN",
-                }
-            # The S15 fingerprint covers the bounded authorization fields and
-            # the exact region so a replay with a different purpose,
-            # reason, classification or region is an idempotency conflict,
-            # not a second audit fact.
             command_key, command_fingerprint = self._review_lifecycle_idempotency(
                 action=(
-                    f"reveal_field_observation:{application_id}:{observation_id}:{purpose}:{reason}:{classification}:{expected_source_region or ''}"
+                    f"reveal_field_observation:{application_id}:{observation_id}:{purpose}:{reason}:{classification}:{expected_source_region}"
                 ),
                 work_item_id=work_item_id,
                 expected_fence=expected_fence,
@@ -11564,55 +11512,125 @@ class ControlledScenarioService:
                 command_key,
                 action="reveal_field_observation",
             )
-            previous = self._store.idempotency.get(binding_key)
-            if previous is not None and previous[0] != command_fingerprint:
-                return {
-                    "status": "conflict",
+
+            def outcome(
+                status: str,
+                reason_code: str,
+                *,
+                claim_expires_at: int | None = None,
+                policy_decision: dict[str, Any] | None = None,
+                store_result: bool = True,
+            ) -> dict[str, Any]:
+                payload: dict[str, Any] = {
+                    "status": status,
                     "replayed": False,
                     "application_id": application_id,
                     "work_item_id": work_item_id,
-                    "reason_code": "IDEMPOTENCY_KEY_CONFLICT",
+                    "reason_code": reason_code,
                 }
+                if claim_expires_at is not None:
+                    payload["claim_expires_at"] = claim_expires_at
+                return self._record_reveal_outcome(
+                    principal=principal,
+                    work_item=work_item,
+                    app=app,
+                    observation_id=observation_id,
+                    purpose=purpose,
+                    reason=reason,
+                    classification=classification,
+                    expected_fence=expected_fence,
+                    expected_context=expected_context,
+                    idempotency_key=idempotency_key,
+                    command_fingerprint=command_fingerprint,
+                    binding_key=binding_key,
+                    result=payload,
+                    now=reveal_time,
+                    policy_decision=policy_decision,
+                    store_result=store_result,
+                )
+            previous = self._store.idempotency.get(binding_key)
+            if previous is not None:
+                if previous[0] != command_fingerprint:
+                    return outcome(
+                        "conflict", "IDEMPOTENCY_KEY_CONFLICT", store_result=False
+                    )
+                previous_result = copy.deepcopy(previous[1])
+                # Failed/rejected/stale outcomes replay without re-running
+                # policy or source reads.  A successful reveal still proves
+                # the current source before returning the value below.
+                if previous_result.get("status") != "revealed":
+                    return {**previous_result, "replayed": True}
+            # Tenant/resource context validation against the canonical
+            # policy: only registered controlled scopes (institution tenant)
+            # may authorize S15 reveal.  Synthetic C-DEMO sessions and
+            # synthetic C-DEMO tracks cannot authorize S15 reveal per the
+            # R1 brief: the only successful S15 path is the registered
+            # controlled authority with G4/C19, tenant/resource/action,
+            # assignment and claim/context/revision satisfied.
+            if self.is_c_demo_scope(principal.scope) or app.get("track") == "C-DEMO":
+                return outcome("rejected", "REVEAL_SYNTHETIC_DENIED")
+            policy = self._resolve_governed_c19_reveal_policy(
+                principal=principal, app=app, now=reveal_time
+            )
+            if policy is None:
+                return outcome("rejected", "REVEAL_POLICY_UNAVAILABLE")
+            # Closed vocab check against the immutable governed decision.
+            allowed_purposes = set(policy["purposes"])
+            allowed_reasons = set(policy["reasons"])
+            allowed_classifications = set(policy["classifications"])
+            if (
+                purpose not in allowed_purposes
+                or reason not in allowed_reasons
+                or classification not in allowed_classifications
+            ):
+                return outcome(
+                    "rejected", "REVEAL_VOCABULARY_UNKNOWN", policy_decision=policy
+                )
+            # The S15 fingerprint covers the bounded authorization fields and
+            # the exact region so a replay with a different purpose,
+            # reason, classification or region is an idempotency conflict,
+            # not a second audit fact.
             if not self._review_context_matches(expected_context, actual_context):
-                return {
-                    "status": "stale",
-                    "application_id": application_id,
-                    "work_item_id": work_item_id,
-                    "reason_code": "STALE_REVIEW_CONTEXT",
-                }
+                return outcome("stale", "STALE_REVIEW_CONTEXT")
             if (
                 state["status"] != "claimed"
                 or state["claim_subject"] != principal.subject
                 or state["claim_fence"] != expected_fence
                 or float(state["claim_expires_at"]) <= reveal_time
             ):
-                return {
-                    "status": "stale",
-                    "application_id": application_id,
-                    "work_item_id": work_item_id,
-                    "reason_code": "STALE_WORK_ITEM_CLAIM",
-                }
+                return outcome(
+                    "stale",
+                    "STALE_WORK_ITEM_CLAIM",
+                    claim_expires_at=int(state.get("claim_expires_at") or 0),
+                )
+            identity_expiry = (
+                int(principal.expires_at)
+                if isinstance(principal.expires_at, (int, float))
+                else int(state["claim_expires_at"])
+            )
+            effective_reveal_expiry = min(
+                identity_expiry,
+                int(state["claim_expires_at"]),
+                reveal_time + int(policy["max_term_seconds"]),
+            )
+            if effective_reveal_expiry <= reveal_time:
+                return outcome(
+                    "stale",
+                    "REVEAL_TERM_EXPIRED",
+                    claim_expires_at=effective_reveal_expiry,
+                    policy_decision=policy,
+                )
             if (
                 app.get("phase") != "Manual Review"
                 or app.get("current_run_id") != work_item["run_id"]
                 or app.get("lifecycle_revision") != work_item["lifecycle_revision"]
                 or app.get("evidence_revision") != work_item["evidence_revision"]
             ):
-                return {
-                    "status": "stale",
-                    "application_id": application_id,
-                    "work_item_id": work_item_id,
-                    "reason_code": "STALE_REVIEW_CONTEXT",
-                }
+                return outcome("stale", "STALE_REVIEW_CONTEXT")
             gate = self._review_write_gate(app=app)
             if gate is not None:
                 status, reason_code = gate
-                return {
-                    "status": status,
-                    "application_id": application_id,
-                    "work_item_id": work_item_id,
-                    "reason_code": reason_code,
-                }
+                return outcome(status, reason_code)
 
             links = [
                 link
@@ -11624,7 +11642,7 @@ class ControlledScenarioService:
                 if link.get("observation_id") == observation_id
             ]
             if not links:
-                raise ValueError("source reveal observation is unavailable")
+                return outcome("rejected", "SOURCE_REVEAL_UNAVAILABLE")
             link = links[0]
             binding = {
                 key: link.get(key)
@@ -11645,7 +11663,7 @@ class ControlledScenarioService:
                 != binding
                 for candidate in links[1:]
             ):
-                raise RuntimeError("source reveal observation authority is ambiguous")
+                return outcome("rejected", "SOURCE_REVEAL_AMBIGUOUS")
             # Resolve the authoritative observation for the requested
             # evidence link.  C-DEMO synthetic evidence is stored as fields
             # in the assembled evidence, while R-OBSERVED registered
@@ -11694,7 +11712,7 @@ class ControlledScenarioService:
                     "source_region",
                 ))
             ):
-                raise ValueError("source reveal observation is not current")
+                return outcome("stale", "STALE_REVIEW_CONTEXT")
             # S15 exact region binding: the required expected_source_region
             # must equal the public projected locator (``region:1``).  The
             # authoritative stored link carries the original source path, but
@@ -11721,7 +11739,7 @@ class ControlledScenarioService:
                 else binding["source_region"]
             )
             if expected_source_region != expected:
-                raise ValueError("source reveal region is invalid")
+                return outcome("rejected", "REVEAL_REGION_MISMATCH")
 
             source = app.get("source")
             # Source authority differs by track: C-DEMO reads the fixed
@@ -11775,12 +11793,7 @@ class ControlledScenarioService:
                 or len(source_text) > self._REVIEW_NOTE_MAX_CHARACTERS
                 or len(source_text.encode("utf-8")) > self._REVIEW_NOTE_MAX_BYTES
             ):
-                return {
-                    "status": "rejected",
-                    "application_id": application_id,
-                    "work_item_id": work_item_id,
-                    "reason_code": "SOURCE_REVEAL_UNAVAILABLE",
-                }
+                return outcome("rejected", "SOURCE_REVEAL_UNAVAILABLE")
 
             if previous is not None:
                 return {
@@ -11797,7 +11810,10 @@ class ControlledScenarioService:
                 "source_location": {
                     "source_sha256": binding["source_sha256"],
                     "source_page": binding["source_page"],
-                    "source_region": binding["source_region"],
+                    # S15: the response conveys the one public requested
+                    # region (region:N) that was validated, not the
+                    # internal bbox-derived locator.
+                    "source_region": expected_source_region,
                 },
                 "source_text": source_text,
                 "revealed_at": reveal_time,
@@ -11807,96 +11823,25 @@ class ControlledScenarioService:
                 "purpose": purpose,
                 "reason": reason,
                 "classification": classification,
-                "claim_expires_at": int(state.get("claim_expires_at", 0)),
+                "claim_expires_at": effective_reveal_expiry,
             }
-            staged = copy.deepcopy(self._store)
-            try:
-                self._before_write("reveal.audit")
-                staged.audit_events.append(
-                    {
-                        "event_id": self._stable_id(
-                            "audit",
-                            f"evidence_source_revealed:{work_item_id}:{observation_id}:{reveal_time}:{len(staged.audit_events) + 1}",
-                        ),
-                        "action": "evidence_source_revealed",
-                        "subject": principal.subject,
-                        "role": principal.role,
-                        "scope": work_item["visibility_scope"],
-                        "source_id": principal.source_id,
-                        "application_id": application_id,
-                        "work_item_id": work_item_id,
-                        "observation_id": observation_id,
-                        "finding_id": next(
-                            finding["finding_id"]
-                            for finding in self._store.findings
-                            if finding.get("application_id") == application_id
-                            and finding.get("run_id") == work_item["run_id"]
-                            and finding.get("finding_id") in work_item["finding_ids"]
-                            and any(
-                                item.get("observation_id") == observation_id
-                                for item in finding.get("evidence_links", [])
-                            )
-                        ),
-                        "result": "revealed",
-                        "reason_code": "SOURCE_REVEAL_AUTHORIZED",
-                        # S15 bounded authorization fact — no raw value, no
-                        # OCR, no free text, no locator, no credential, no
-                        # path, no object URL.  Only the bounded
-                        # purpose/reason/classification and safe correlation
-                        # metadata are persisted.
-                        "purpose": purpose,
-                        "verification_reason": reason,
-                        "classification": classification,
-                        "idempotency_key": idempotency_key,
-                        "idempotency_fingerprint": command_fingerprint,
-                        "idempotency_binding": binding_key,
-                        "expected_context": copy.deepcopy(expected_context),
-                        "lifecycle_revision": int(app.get("lifecycle_revision", 0) or 0),
-                        "evidence_revision": int(app.get("evidence_revision", 0) or 0),
-                        "claim_fence": int(expected_fence),
-                        "claim_expires_at": int(state.get("claim_expires_at", 0) or 0),
-                        "schema_version": self._REVEAL_AUDIT_SCHEMA,
-                        **self._audit_time_fields(staged, now=reveal_time),
-                    }
-                )
-                self._before_write("reveal.idempotency")
-                staged.idempotency[binding_key] = (
-                    command_fingerprint,
-                    {
-                        key: copy.deepcopy(value)
-                        for key, value in result.items()
-                        if key != "source_text"
-                    },
-                )
-                staged.persist()
-            except _StoreWriteFailure as error:
-                return {
-                    "status": "unavailable",
-                    "application_id": application_id,
-                    "work_item_id": work_item_id,
-                    "reason_code": (
-                        "AUDIT_UNAVAILABLE"
-                        if str(error) == "reveal.audit"
-                        else "STORAGE_UNAVAILABLE"
-                    ),
-                }
-            except StaleStoreRevision:
-                self._reload_store()
-                return {
-                    "status": "stale",
-                    "application_id": application_id,
-                    "work_item_id": work_item_id,
-                    "reason_code": "STALE_REVIEW_CONTEXT",
-                }
-            except Exception:
-                return {
-                    "status": "unavailable",
-                    "application_id": application_id,
-                    "work_item_id": work_item_id,
-                    "reason_code": "STORAGE_UNAVAILABLE",
-                }
-            self._store = staged
-            return result
+            return self._record_reveal_outcome(
+                principal=principal,
+                work_item=work_item,
+                app=app,
+                observation_id=observation_id,
+                purpose=purpose,
+                reason=reason,
+                classification=classification,
+                expected_fence=expected_fence,
+                expected_context=expected_context,
+                idempotency_key=idempotency_key,
+                command_fingerprint=command_fingerprint,
+                binding_key=binding_key,
+                result=result,
+                now=reveal_time,
+                policy_decision=policy,
+            )
 
     @classmethod
     def _c_demo_supplement_policy(cls) -> dict[str, Any]:
@@ -18357,12 +18302,13 @@ class ControlledScenarioService:
                 for decision_id in state["decision_ids"]
             ]
             decision = decisions[0] if len(decisions) == 1 else None
-            # S15 reveal eligibility projection — derived from the canonical
-            # C19 policy (configs/c19_reveal_policy.json) and the current
-            # tenant/resource assignment.  The UI must consume this
-            # authorized projection instead of hand-writing literals; the
-            # domain re-validates the same policy at command time.
-            policy = self._load_c19_reveal_policy()
+            # S15 reveal eligibility projection — derived from the existing
+            # S08 active immutable release and current tenant/resource
+            # assignment.  The UI consumes this server decision; the domain
+            # resolves the same governed pin at command time.
+            policy = self._resolve_governed_c19_reveal_policy(
+                principal=principal, app=app, now=int(query_time)
+            )
             reveal_eligibility: dict[str, Any]
             if policy is None:
                 reveal_eligibility = {
@@ -18390,16 +18336,29 @@ class ControlledScenarioService:
                     "ineligible_reason_code": "REVEAL_CLAIM_EXPIRED",
                 }
             else:
-                # Eligible — expose the canonical allowed values from the
-                # C19 policy; changing the JSON changes the UI and the
-                # domain result without touching Python constants.
-                reveal_eligibility = {
-                    "eligible": True,
-                    "purpose": policy["purposes"][0] if isinstance(policy.get("purposes"), list) and policy["purposes"] else None,
-                    "reason": policy["reasons"][0] if isinstance(policy.get("reasons"), list) and policy["reasons"] else None,
-                    "classification": policy["classifications"][0] if isinstance(policy.get("classifications"), list) and policy["classifications"] else None,
-                    "max_term_seconds": policy.get("max_term_seconds"),
-                }
+                identity_expiry = (
+                    int(principal.expires_at)
+                    if isinstance(principal.expires_at, (int, float))
+                    else int(state["claim_expires_at"])
+                )
+                effective_expiry = min(
+                    identity_expiry,
+                    int(state["claim_expires_at"]),
+                    int(query_time) + int(policy["max_term_seconds"]),
+                )
+                if effective_expiry <= query_time:
+                    reveal_eligibility = {
+                        "eligible": False,
+                        "ineligible_reason_code": "REVEAL_TERM_EXPIRED",
+                    }
+                else:
+                    reveal_eligibility = {
+                        "eligible": True,
+                        "purpose": policy["purposes"][0],
+                        "reason": policy["reasons"][0],
+                        "classification": policy["classifications"][0],
+                        "max_term_seconds": policy["max_term_seconds"],
+                    }
             return {
                 "status": status,
                 "application_id": work_item["application_id"],
@@ -18656,8 +18615,12 @@ class ControlledScenarioService:
             "idempotency_key",
             "idempotency_fingerprint",
             "idempotency_binding",
-            "expected_context",
+            "context_digest",
             "claim_expires_at",
+            "policy_id",
+            "policy_version",
+            "policy_digest",
+            "policy_term_seconds",
         )
         with self._lock:
             self._reload_store()
