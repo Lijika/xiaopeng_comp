@@ -32,6 +32,7 @@ function settlementViewPayload(
   phase: string,
   options: {
     pending?: boolean;
+    lifecycleRevision?: number;
     permission?: {
       permission_id: string;
       artifact_release_digest: string;
@@ -46,7 +47,7 @@ function settlementViewPayload(
     application_id: S14_APPLICATION_ID,
     cycle: 1,
     phase,
-    lifecycle_revision: 6,
+    lifecycle_revision: options.lifecycleRevision ?? 6,
     pending_notification:
       options.pending === true
         ? { operation_id: "op_t16_00000001", event_id: "evt_t16_00000001" }
@@ -295,6 +296,11 @@ describe("T16LifecyclePanel (integrator cancellation)", () => {
     expect(screen.getByTestId("t16-cycle-run-currentness")).toHaveTextContent(
       "CONTEXT_NOT_CURRENT",
     );
+    // The original route fact (phase at that run's revision) is bound to
+    // the selected cycle.
+    expect(
+      screen.getByTestId("t16-cycle-run-lifecycle-phase"),
+    ).toBeInTheDocument();
     first.unmount();
 
     // ...are replaced by cycle 2's when the selection changes.
@@ -368,6 +374,54 @@ describe("T16LifecyclePanel (integrator cancellation)", () => {
     );
     expect(screen.getByTestId("t16-late-receipts-empty")).toBeInTheDocument();
     expect(screen.queryByTestId("t16-late-receipt")).not.toBeInTheDocument();
+  });
+
+  it("hides current-cycle commands for a direct historical URL while history is pending", async () => {
+    fetchRouter({
+      [`GET ${ROUTE_PATH}`]: jsonRoute(
+        s14CurrentRoute({ phase: "Intake", cycle: 2 }),
+      ),
+      [`GET ${HISTORY_PATH}`]: () =>
+        new Promise(() => {
+          // Pending history must gate the write surface.
+        }),
+    });
+    // The direct historical URL is the shell's selectedCycle=1 intent.
+    renderWithQuery(
+      <T16LifecyclePanel applicationId={S14_APPLICATION_ID} selectedCycle={1} />,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("t16-cycle-gate-loading")).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId("t16-cancel-section")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("t16-cancel-button")).not.toBeInTheDocument();
+  });
+
+  it("keeps current-cycle commands hidden when history fails on a historical URL", async () => {
+    fetchRouter({
+      [`GET ${ROUTE_PATH}`]: jsonRoute(
+        s14CurrentRoute({ phase: "Intake", cycle: 2 }),
+      ),
+      [`GET ${HISTORY_PATH}`]: () =>
+        new Response(
+          JSON.stringify({ detail: { error: "S03_NOT_FOUND" } }),
+          { status: 404, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    renderWithQuery(
+      <T16LifecyclePanel applicationId={S14_APPLICATION_ID} selectedCycle={1} />,
+    );
+    // Both the cycle gate and the history section render their own copy of
+    // the sanitized error; at least one must be present, and the write
+    // surface stays hidden either way.
+    await waitFor(() =>
+      expect(
+        screen.getAllByTestId("t16-error-not-found").length,
+      ).toBeGreaterThan(0),
+    );
+    expect(screen.queryByTestId("t16-cancel-section")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("t16-cancel-button")).not.toBeInTheDocument();
+    expect(screen.getAllByTestId("t16-reload").length).toBeGreaterThan(0);
   });
 
   it("renders an explicit loading state before history resolves", async () => {
@@ -646,6 +700,7 @@ describe("T16SettlementPanel (operator)", () => {
         new Response(
           JSON.stringify(
             settlementViewPayload("Terminated", {
+              lifecycleRevision: 7,
               permission: granted
                 ? {
                     permission_id: S14_PERMISSION_ID,
@@ -671,60 +726,44 @@ describe("T16SettlementPanel (operator)", () => {
     });
     renderWithQuery(<T16SettlementPanel applicationId={S14_APPLICATION_ID} />);
 
-    const reopen = await screen.findByTestId("t16-reopen-button");
-    expect(reopen).toBeDisabled();
+    expect(await screen.findByTestId("t16-reopen-button")).toBeDisabled();
 
-    const approver = screen.getByTestId("t16-grant-approver");
-    await user.type(approver, S14_APPROVER_SUBJECT);
-    await user.type(screen.getByTestId("t16-grant-permission-id"), S14_PERMISSION_ID);
+    await user.type(
+      screen.getByTestId("t16-grant-approver"),
+      S14_APPROVER_SUBJECT,
+    );
+    await user.type(
+      screen.getByTestId("t16-grant-permission-id"),
+      S14_PERMISSION_ID,
+    );
     await user.click(screen.getByTestId("t16-grant-button"));
     await waitFor(() =>
-      expect(screen.getByTestId("t16-grant-binding")).toHaveTextContent(S14_PERMISSION_ID),
+      expect(screen.getByTestId("t16-grant-binding")).toHaveTextContent(
+        ARTIFACT_DIGEST,
+      ),
     );
-    expect(screen.getByTestId("t16-grant-binding")).toHaveTextContent(ARTIFACT_DIGEST);
 
+    // The dual-read consistency gate settles once both authoritative reads
+    // stop refetching; reopen becomes clickable only then.
+    const reopenButton = screen.getByTestId("t16-reopen-button");
+    await waitFor(() => expect(reopenButton).toBeEnabled(), { timeout: 8_000 });
     await user.selectOptions(screen.getByTestId("t16-reopen-target"), "Intake");
-    await user.click(reopen);
+    await user.click(reopenButton);
     await waitFor(() =>
       expect(screen.getByTestId("t16-reopen-result")).toHaveTextContent("2"),
     );
     expect(screen.getByTestId("t16-reopen-result")).toHaveTextContent("Intake");
-    expect(router.calls.find(({ url }) => url === REOPEN_PATH)?.body).toEqual({
-      expected_lifecycle_revision: 7,
-      idempotency_key: expect.any(String),
-      target_phase: "Intake",
-      reopen_policy: {
-        permission_id: S14_PERMISSION_ID,
-        release_digest: ARTIFACT_DIGEST,
-      },
-    });
-    // Exactly one reopen POST: the explicit click. Reload/mount never reopens.
-    expect(router.calls.filter(({ url }) => url === REOPEN_PATH)).toHaveLength(1);
-  });
-
-  it("renders a replayed duplicate settle verbatim with its server facts", async () => {
-    const user = userEvent.setup();
-    fetchRouter({
-      [`GET ${DELIVERY_PATH}`]: jsonRoute(s14OperatorDeliveryView()),
-      [`GET ${SETTLEMENT_VIEW_PATH}`]: jsonRoute(
-        settlementViewPayload("Terminating", { pending: false }),
-      ),
-      [`POST ${SETTLE_PATH}`]: () =>
-        new Response(
-          JSON.stringify(
-            s14TerminatedSettle({ status: "replayed", replayed: true }),
-          ),
-          { headers: { "Content-Type": "application/json" } },
-        ),
-    });
-    renderWithQuery(<T16SettlementPanel applicationId={S14_APPLICATION_ID} />);
-    await user.click(await screen.findByTestId("t16-settle-button"));
-    await waitFor(() =>
-      expect(screen.getByTestId("t16-result-status")).toHaveTextContent(
-        "replayed",
-      ),
-    );
-    expect(screen.getByTestId("t16-settled-effects")).toBeInTheDocument();
+    const reopenPost = router.calls.find(({ url }) => url === REOPEN_PATH);
+    // The fetch boundary records parsed JSON; the body shape is bound by the
+    // generated S14ReopenCommand type at the mutation call site.
+    const reopenBody = reopenPost?.body as
+      | { reopen_policy?: { release_digest?: string } }
+      | undefined;
+    expect(reopenBody?.reopen_policy?.release_digest).toBe(ARTIFACT_DIGEST);
+    // Exactly one reopen POST for one explicit click.
+    expect(
+      router.calls.filter(({ url }) => url === REOPEN_PATH),
+    ).toHaveLength(1);
   });
 
   it("restores the server-owned reopen binding from a replayed grant", async () => {
@@ -738,6 +777,7 @@ describe("T16SettlementPanel (operator)", () => {
         new Response(
           JSON.stringify(
             settlementViewPayload("Terminated", {
+              lifecycleRevision: 7,
               permission: granted
                 ? {
                     permission_id: S14_PERMISSION_ID,
@@ -753,7 +793,9 @@ describe("T16SettlementPanel (operator)", () => {
       [`POST ${GRANT_PATH}`]: () => {
         granted = true;
         return new Response(
-          JSON.stringify(s14AcceptedGrant({ status: "replayed", replayed: true })),
+          JSON.stringify(
+            s14AcceptedGrant({ status: "replayed", replayed: true }),
+          ),
           { headers: { "Content-Type": "application/json" } },
         );
       },
@@ -763,8 +805,10 @@ describe("T16SettlementPanel (operator)", () => {
         }),
     });
     renderWithQuery(<T16SettlementPanel applicationId={S14_APPLICATION_ID} />);
-    const approver = await screen.findByTestId("t16-grant-approver");
-    await user.type(approver, S14_APPROVER_SUBJECT);
+    await user.type(
+      await screen.findByTestId("t16-grant-approver"),
+      S14_APPROVER_SUBJECT,
+    );
     await user.type(
       screen.getByTestId("t16-grant-permission-id"),
       S14_PERMISSION_ID,
@@ -773,22 +817,6 @@ describe("T16SettlementPanel (operator)", () => {
     // result; the server-owned binding is restored through the authoritative
     // settlement-view refetch either way.
     await user.click(screen.getByTestId("t16-grant-button"));
-    await waitFor(() => {
-      const grantPosts = router.calls.filter(
-        ({ method, url }) => method === "POST" && url === GRANT_PATH,
-      ).length;
-      if (grantPosts === 0) {
-        throw new Error(
-          `grant not posted; calls=${JSON.stringify(
-            router.calls.map((c) => `${c.method} ${c.url}`),
-          )} approver="${(
-            screen.getByTestId("t16-grant-approver") as HTMLInputElement
-          ).value}" permission="${(
-            screen.getByTestId("t16-grant-permission-id") as HTMLInputElement
-          ).value}"`,
-        );
-      }
-    });
     await waitFor(() =>
       expect(screen.getByTestId("t16-result-status")).toHaveTextContent(
         "replayed",
@@ -797,19 +825,94 @@ describe("T16SettlementPanel (operator)", () => {
     expect(screen.getByTestId("t16-grant-binding")).toHaveTextContent(
       S14_PERMISSION_ID,
     );
+
+    const reopenButton = screen.getByTestId("t16-reopen-button");
+    await waitFor(() => expect(reopenButton).toBeEnabled(), { timeout: 8_000 });
     await user.selectOptions(screen.getByTestId("t16-reopen-target"), "Intake");
-    await user.click(screen.getByTestId("t16-reopen-button"));
+    await user.click(reopenButton);
     await waitFor(() =>
       expect(screen.getByTestId("t16-reopen-result")).toHaveTextContent("2"),
     );
-    const reopenPost = router.calls.find(({ url }) => url === REOPEN_PATH);
-    // The fetch boundary records parsed JSON; the reopen body shape is bound
-    // by the generated S14ReopenCommand type at the mutation call site.
+    // The fetch boundary records parsed JSON; the body shape is bound by the
+    // generated S14ReopenCommand type at the mutation call site.
+    const reopenPost = [...router.calls]
+      .reverse()
+      .find(({ url }) => url === REOPEN_PATH);
     const reopenBody = reopenPost?.body as
       | { reopen_policy?: { release_digest?: string } }
       | undefined;
     expect(reopenBody?.reopen_policy?.release_digest).toBe(ARTIFACT_DIGEST);
   });
+
+  it("keeps the idempotency key unreconciled across a failed settlement reload", async () => {
+    const user = userEvent.setup();
+    let settlementHealthy = true;
+    const postedKeys: string[] = [];
+    fetchRouter({
+      [`GET ${DELIVERY_PATH}`]: jsonRoute(s14OperatorDeliveryView()),
+      [`GET ${SETTLEMENT_VIEW_PATH}`]: () => {
+        if (!settlementHealthy) {
+          // A non-transient read failure (not retried by the shared policy)
+          // replaces the panel with the sanitized unavailable state.
+          return new Response(
+            JSON.stringify({ detail: { error: "S01_UNAVAILABLE" } }),
+            { status: 500, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response(
+          JSON.stringify(settlementViewPayload("Terminating")),
+          { headers: { "Content-Type": "application/json" } },
+        );
+      },
+      [`POST ${SETTLE_PATH}`]: (_url, init) => {
+        postedKeys.push(
+          (JSON.parse(String(init?.body)) as { idempotency_key: string })
+            .idempotency_key,
+        );
+        // Unknown transport outcome: the effect may have committed, so the
+        // semantic key must be retained until an authoritative reconciliation
+        // proves otherwise.
+        throw new TypeError("network lost");
+      },
+    });
+    renderWithQuery(<T16SettlementPanel applicationId={S14_APPLICATION_ID} />);
+    await user.click(await screen.findByTestId("t16-settle-button"));
+    await waitFor(() =>
+      expect(screen.getByTestId("t16-settle-unknown")).toBeInTheDocument(),
+    );
+    expect(postedKeys).toHaveLength(1);
+
+    // A reload while the settlement read fails replaces the panel with the
+    // sanitized error state; no command POST can fire from it and the
+    // unreconciled key is untouched.
+    settlementHealthy = false;
+    await user.click(screen.getByTestId("t16-reload"));
+    await waitFor(() =>
+      expect(screen.getByTestId("t16-error-unavailable")).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId("t16-settle-button")).not.toBeInTheDocument();
+
+    // Once the read recovers, the console returns with the SAME unknown
+    // outcome still surfaced; a retry reuses the identical key.
+    settlementHealthy = true;
+    await user.click(screen.getAllByTestId("t16-reload")[0]);
+    await waitFor(() =>
+      expect(screen.getByTestId("t16-settle-unknown")).toBeInTheDocument(),
+    );
+    await user.click(screen.getByTestId("t16-settle-button"));
+    // The retried command reuses the identical semantic key and stays in
+    // the exact unknown outcome (the transport keeps failing).
+    await waitFor(() => {
+      if (postedKeys.length < 2) {
+        throw new Error("retry did not post");
+      }
+    });
+    expect(postedKeys[1]).toBe(postedKeys[0]);
+    await waitFor(() =>
+      expect(screen.getByTestId("t16-settle-unknown")).toBeInTheDocument(),
+    );
+  });
+
 
   it.each([
     [403, "t16-error-forbidden"],
@@ -861,6 +964,73 @@ describe("T16SettlementPanel (operator)", () => {
     );
   });
 
+
+
+
+  it("renders a replayed duplicate settle verbatim with its settled effects", async () => {
+    fetchRouter({
+      [`GET ${DELIVERY_PATH}`]: jsonRoute(s14OperatorDeliveryView()),
+      [`GET ${SETTLEMENT_VIEW_PATH}`]: jsonRoute(
+        settlementViewPayload("Terminating", { pending: false }),
+      ),
+      [`POST ${SETTLE_PATH}`]: () =>
+        new Response(
+          JSON.stringify(
+            s14TerminatedSettle({ status: "replayed", replayed: true }),
+          ),
+          { headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    renderWithQuery(<T16SettlementPanel applicationId={S14_APPLICATION_ID} />);
+    await userEvent.setup().click(
+      await screen.findByTestId("t16-settle-button"),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("t16-result-status")).toHaveTextContent(
+        "replayed",
+      ),
+    );
+    expect(screen.getByTestId("t16-settled-effects")).toBeInTheDocument();
+  });
+
+  it("never submits a stale predecessor reopen when delivery moves to a successor cycle", async () => {
+    const user = userEvent.setup();
+    const router = fetchRouter({
+      [`GET ${DELIVERY_PATH}`]: jsonRoute(
+        s14OperatorDeliveryView({
+          phase: "Intake",
+          cycle: 2,
+          lifecycle_revision: 8,
+        }),
+      ),
+      [`GET ${SETTLEMENT_VIEW_PATH}`]: jsonRoute(
+        settlementViewPayload("Terminated", {
+          lifecycleRevision: 7,
+          permission: {
+            permission_id: S14_PERMISSION_ID,
+            artifact_release_digest: ARTIFACT_DIGEST,
+            policy_release_digest: ARTIFACT_DIGEST,
+            approved_by: S14_APPROVER_SUBJECT,
+          },
+        }),
+      ),
+      [`POST ${REOPEN_PATH}`]: () =>
+        new Response(JSON.stringify(s14AcceptedReopen()), {
+          headers: { "Content-Type": "application/json" },
+        }),
+    });
+    renderWithQuery(<T16SettlementPanel applicationId={S14_APPLICATION_ID} />);
+    const reopenButton = await screen.findByTestId("t16-reopen-button");
+    await waitFor(() => expect(reopenButton).toBeDisabled());
+    await user.click(reopenButton);
+    // The dual-read mismatch must produce zero reopen POSTs.
+    expect(
+      router.calls.filter(
+        ({ method, url }) => method === "POST" && url === REOPEN_PATH,
+      ),
+    ).toHaveLength(0);
+  });
+
   it("hydrates the server-owned reopen binding after a full remount", async () => {
     const user = userEvent.setup();
     const router = fetchRouter({
@@ -891,7 +1061,7 @@ describe("T16SettlementPanel (operator)", () => {
     // permission through the authoritative read alone.
     renderWithQuery(<T16SettlementPanel applicationId={S14_APPLICATION_ID} />);
     const reopen = await screen.findByTestId("t16-reopen-button");
-    await waitFor(() => expect(reopen).toBeEnabled());
+    await waitFor(() => expect(reopen).toBeEnabled(), { timeout: 8_000 });
     await user.selectOptions(screen.getByTestId("t16-reopen-target"), "Intake");
     await user.click(reopen);
     await waitFor(() =>

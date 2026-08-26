@@ -103,6 +103,7 @@ class AdmissionResult:
     source_registration_digest: str | None = None
     source_revision: int | None = None
     request_id: str | None = None
+    cycle: int | None = None
     request_status: str | None = None
     batch_closed: bool | None = None
     request_progress_revision: int | None = None
@@ -2018,9 +2019,36 @@ class ControlledScenarioService:
                     envelope=envelope,
                 )
             if envelope.source_revision != 1:
-                predecessor_exists = any(
-                    receipt.source_revision == envelope.predecessor_revision
-                    for receipt in accepted
+                predecessor_receipt = next(
+                    (
+                        receipt
+                        for receipt in accepted
+                        if receipt.source_revision
+                        == envelope.predecessor_revision
+                    ),
+                    None,
+                )
+                predecessor_exists = predecessor_receipt is not None
+                # The late disposition stays bound to the application that
+                # owns the predecessor revision and to that application's
+                # current (sealed) rejection cycle, so the exact outcome
+                # remains visible in the owning application's history.
+                owning_application_id = (
+                    str(predecessor_receipt.application_id)
+                    if predecessor_receipt is not None
+                    and predecessor_receipt.application_id
+                    else None
+                )
+                owning_cycle = (
+                    int(
+                        self._store.applications.get(
+                            owning_application_id, {}
+                        ).get("cycle")
+                        or 0
+                    )
+                    or None
+                    if owning_application_id is not None
+                    else None
                 )
                 error = S02IntakeError(
                     "rejected" if predecessor_exists else "awaiting_predecessor",
@@ -2054,6 +2082,8 @@ class ControlledScenarioService:
                     principal=principal,
                     submission=submission,
                     envelope=envelope,
+                    application_id=owning_application_id,
+                    cycle=owning_cycle,
                 )
             if not self.audit_available:
                 return self._registered_rejected("intake.audit_unavailable")
@@ -18787,6 +18817,14 @@ class ControlledScenarioService:
                         if key != "evidence_revision"
                     }:
                         raise RuntimeError("attachment history is inconsistent")
+            # Original route fact per run: the Lifecycle-owned phase at the
+            # exact revision the run was frozen against.
+            phase_by_revision = {
+                int(event.get("revision") or 0): str(event.get("phase") or "")
+                for event in self._store.lifecycle_events
+                if event.get("application_id") == application_id
+                and isinstance(event.get("revision"), int)
+            }
             evidence_revision_cycles = {
                 int(run["evidence_revision"]): int(run["cycle"])
                 for run in runs
@@ -18796,6 +18834,10 @@ class ControlledScenarioService:
             for item in attachment_versions_by_id.values():
                 item["cycle"] = evidence_revision_cycles.get(
                     int(item["evidence_revision"])
+                )
+            for run_entry in runs:
+                run_entry["lifecycle_phase"] = phase_by_revision.get(
+                    int(run_entry["lifecycle_revision"])
                 )
             superseded_attachment_ids = {
                 item["supersedes_attachment_id"]
@@ -19104,14 +19146,20 @@ class ControlledScenarioService:
                     # The sealed original cycle is bound to the receipt via
                     # its supplement request record so no later cycle can
                     # claim (or leak) another cycle's late work.
-                    request_cycle = next(
-                        (
-                            int(record.get("cycle") or 0)
-                            for record in self._store.review_records
-                            if record.get("record_type") == "supplement_request"
-                            and record.get("request_id") == receipt.request_id
-                        ),
-                        None,
+                    request_cycle = (
+                        receipt.cycle
+                        if getattr(receipt, "cycle", None) is not None
+                        else next(
+                            (
+                                int(record.get("cycle") or 0)
+                                for record in self._store.review_records
+                                if record.get("record_type")
+                                == "supplement_request"
+                                and record.get("request_id")
+                                == receipt.request_id
+                            ),
+                            None,
+                        )
                     )
                     late_input_receipts.append(
                         {
@@ -22089,6 +22137,7 @@ class ControlledScenarioService:
         command_type: str = "submit_observation_result",
         application_id: str | None = None,
         request_id: str | None = None,
+        cycle: int | None = None,
     ) -> AdmissionResult:
         if not self.audit_available:
             return self._registered_rejected("intake.audit_unavailable")
@@ -22181,6 +22230,7 @@ class ControlledScenarioService:
                 source_revision=source_revision,
                 application_id=application_id,
                 request_id=request_id,
+                cycle=cycle,
             )
             staged = copy.deepcopy(self._store)
             staged.audit_events.append(

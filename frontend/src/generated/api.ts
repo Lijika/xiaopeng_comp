@@ -3736,6 +3736,8 @@ export interface components {
             invalidated_decision_ids: string[];
             /** Invalidated Exception Ids */
             invalidated_exception_ids: string[];
+            /** Lifecycle Phase */
+            lifecycle_phase?: string | null;
             /** Lifecycle Revision */
             lifecycle_revision: number;
             /** Manifest Digest */
@@ -12017,6 +12019,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S01ErrorResponse"];
                 };
             };
         };

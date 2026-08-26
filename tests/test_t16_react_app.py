@@ -863,6 +863,101 @@ def test_t16_shell_auth_precedes_availability_disclosure(
         ), path
 
 
+def test_t16_settlement_view_unavailable_contract(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    import task4_consistency.web.app as web
+
+    _install(monkeypatch, tmp_path)
+    client = TestClient(webapp_of())
+    view_url = (
+        "/controlled/s01/api/queries/applications/app_some/settlement"
+    )
+
+    monkeypatch.setattr(web, "S01_SERVICE", None)
+    unavailable = client.get(view_url, headers=_operator_auth())
+    assert unavailable.status_code == 503
+    assert unavailable.json()["detail"]["error"] == "S01_UNAVAILABLE"
+    assert unavailable.headers["cache-control"] == "no-store"
+    assert unavailable.headers["pragma"] == "no-cache"
+
+    live = webapp_of().openapi()["paths"][
+        "/controlled/s01/api/queries/applications/{application_id}/settlement"
+    ]["get"]["responses"]
+    schema = live["503"]["content"]["application/json"]["schema"]
+    assert schema["$ref"].endswith("S01ErrorResponse")
+
+
+def test_t16_registered_late_disposition_binds_application_cycle_and_history(
+    tmp_path: Path,
+) -> None:
+    """Public registered-source revision path: a revision-2 submission after
+    an accepted revision-1 keeps its late disposition bound to the owning
+    application and sealed rejection cycle, replays exactly, and surfaces in
+    the owning application's history."""
+    import copy as copy_module
+
+    from tests.test_s02_controlled import (
+        INTEGRATOR as REGISTERED_INTEGRATOR,
+        TENANT_SCOPE,
+        _registered_service,
+    )
+
+    service, submission = _registered_service(tmp_path)
+    first = service.submit_registered(
+        submission=submission,
+        idempotency_key="t16-r4-late-1",
+        principal=REGISTERED_INTEGRATOR,
+    )
+    assert first.disposition is AdmissionDisposition.ACCEPTED
+    assert first.application_id is not None
+    application_id = str(first.application_id)
+
+    revision2 = copy_module.deepcopy(submission)
+    revision2["envelope_id"] = "t16-r4-envelope-2"
+    revision2["source_revision"] = 2
+    revision2["predecessor_revision"] = 1
+    late = service.submit_registered(
+        submission=revision2,
+        idempotency_key="t16-r4-late-2",
+        principal=REGISTERED_INTEGRATOR,
+    )
+    assert late.disposition is AdmissionDisposition.REJECTED
+    assert late.reason_code == "evidence.late_input_requires_reopen"
+    # The disposition stays bound to the owning application and its current
+    # sealed rejection cycle instead of becoming an orphan receipt.
+    assert late.application_id == application_id
+    assert late.cycle == 1
+
+    replayed = service.submit_registered(
+        submission=revision2,
+        idempotency_key="t16-r4-late-2",
+        principal=REGISTERED_INTEGRATOR,
+    )
+    assert replayed.disposition is AdmissionDisposition.REJECTED
+    assert replayed.replayed is True
+    assert replayed.receipt_id == late.receipt_id
+    assert replayed.application_id == application_id
+    assert replayed.cycle == 1
+
+    history = service.application_history_view(
+        principal=S01CommandPrincipal(
+            subject=REGISTERED_INTEGRATOR.subject,
+            role="reviewer",
+            scope=TENANT_SCOPE,
+            source_id="t16-r4-review-console",
+        ),
+        application_id=application_id,
+    )
+    receipts = [
+        item
+        for item in history["late_input_receipts"]
+        if item.get("reason_code") == "evidence.late_input_requires_reopen"
+    ]
+    assert len(receipts) == 1
+    assert receipts[0]["cycle"] == 1
+
+
 def test_t16_notification_public_command_requires_target_binding(
     monkeypatch: Any, tmp_path: Path
 ) -> None:

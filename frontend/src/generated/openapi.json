@@ -4171,6 +4171,17 @@
             "title": "Invalidated Exception Ids",
             "type": "array"
           },
+          "lifecycle_phase": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lifecycle Phase"
+          },
           "lifecycle_revision": {
             "title": "Lifecycle Revision",
             "type": "integer"
@@ -23427,6 +23438,16 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S01ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "summary": "Controlled S14 Settlement View"

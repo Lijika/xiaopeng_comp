@@ -1963,6 +1963,7 @@ class S01HistoryEntityLinkDecisionPin(BaseModel):
 class S01HistoryRun(BaseModel):
     run_id: str
     status: str
+    lifecycle_phase: str | None = None
     authority_digest: str
     current: bool
     currentness_reason: str
@@ -4658,6 +4659,7 @@ def controlled_s14_process_notification(
     responses={
         403: {"model": S01ErrorResponse},
         404: {"model": S01ErrorResponse},
+        503: {"model": S01ErrorResponse},
     },
 )
 def controlled_s14_settlement_view(

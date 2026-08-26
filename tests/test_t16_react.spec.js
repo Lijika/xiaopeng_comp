@@ -225,6 +225,11 @@ for (const [label, viewport] of [
       operatorRequests.push({ method: request.method(), url: request.url() }),
     );
     operatorPage.on("pageerror", (error) => browserErrors.push(error.message));
+    // Console errors on the settlement console are part of the shared
+    // browser-quality gate, exactly like the integrator page.
+    operatorPage.on("console", (message) => {
+      if (message.type() === "error") browserErrors.push(message.text());
+    });
 
     // --- integrator: authoritative facts, explicit cancel ------------------
     await integratorPage.goto(

@@ -179,11 +179,14 @@ export default function T16LifecyclePanel({
 
   const data: CurrentRouteResponse = route.data;
   const phase = data.phase;
+  const cycleExplicitlySelected =
+    selectedCycle !== null && selectedCycle !== undefined;
+  // A non-null ?cycle= selection is historical/read-only intent from the
+  // first render: current-cycle commands stay hidden while the authoritative
+  // history read is pending, and after it fails, until it succeeds.
   const viewingHistoricalCycle =
-    selectedCycle !== null &&
-    selectedCycle !== undefined &&
-    history.data !== undefined &&
-    selectedCycle !== data.cycle;
+    cycleExplicitlySelected &&
+    (history.data === undefined || selectedCycle !== data.cycle);
   const cancellable =
     IS_TERMINAL_PHASE[phase] !== true &&
     !latched &&
@@ -240,11 +243,26 @@ export default function T16LifecyclePanel({
 
   return (
     <div data-testid="t16-lifecycle-panel">
-      {selectedCycle !== null &&
-        selectedCycle !== undefined &&
+      {viewingHistoricalCycle &&
+        (history.isError ? (
+          <QueryErrorState
+            error={history.error}
+            onReload={() => void history.refetch()}
+            isReloading={history.isFetching}
+          />
+        ) : (
+          <p
+            data-testid="t16-cycle-gate-loading"
+            role="status"
+            aria-live="polite"
+          >
+            正在加载所选周期的权威事实；写操作保持隐藏
+          </p>
+        ))}
+      {cycleExplicitlySelected &&
         history.data !== undefined && (
           <CycleHistoryView
-            cycle={selectedCycle}
+            cycle={selectedCycle as number}
             history={history.data}
           />
         )}
@@ -511,6 +529,15 @@ function CycleHistoryView({
                     <dd>{leafText(run.checker_build)}</dd>
                   </div>
                   <div>
+                    <dt>Original Phase</dt>
+                    <dd data-testid="t16-cycle-run-lifecycle-phase">
+                      {leafText(
+                        (run as { lifecycle_phase?: string | null })
+                          .lifecycle_phase,
+                      )}
+                    </dd>
+                  </div>
+                  <div>
                     <dt>Findings</dt>
                     <dd data-testid="t16-cycle-run-findings">
                       {(run.finding_ids ?? []).join(", ") || "—"}
@@ -766,8 +793,22 @@ export function T16SettlementPanel({
   // any prior local settle result.
   const pendingOperationId =
     settlementView.data?.pending_notification?.operation_id ?? null;
+  // Dual-read consistency: the settlement projection must describe the exact
+  // application/cycle/phase/revision the delivery view shows, and neither
+  // read may be in flight, before any bound command is offered.  A stale
+  // predecessor read can never authorize a successor-cycle POST.
+  const settlementMatchesCurrent =
+    settlementView.data !== undefined &&
+    settlementView.data.application_id === view.application_id &&
+    settlementView.data.cycle === view.cycle &&
+    settlementView.data.phase === view.phase &&
+    settlementView.data.lifecycle_revision === view.lifecycle_revision;
+  const readsSettled = !settlementView.isFetching && !delivery.isFetching;
   const pendingNotification =
-    phase === "Terminating" && pendingOperationId !== null;
+    phase === "Terminating" &&
+    pendingOperationId !== null &&
+    settlementMatchesCurrent &&
+    readsSettled;
 
   // The reopen binding is derived ONLY from the current application/cycle's
   // authoritative settlement read.  It is never stored locally, so an
@@ -838,7 +879,16 @@ export function T16SettlementPanel({
   };
 
   const handleReopen = () => {
-    if (anyPending || latched || binding === null || phase !== "Terminated") return;
+    if (
+      anyPending ||
+      latched ||
+      binding === null ||
+      phase !== "Terminated" ||
+      !settlementMatchesCurrent ||
+      !readsSettled
+    ) {
+      return;
+    }
     reopen.mutate(
       {
         expected_lifecycle_revision: view.lifecycle_revision,
@@ -865,10 +915,13 @@ export function T16SettlementPanel({
     try {
       await delivery.refetch({ throwOnError: true });
       // The authoritative settlement read refreshes alongside delivery so
-      // pending-effect and permission facts never lag the reload.
-      await queryClient.refetchQueries({
-        queryKey: S14_SETTLEMENT_VIEW_KEY(applicationId ?? ""),
-      });
+      // pending-effect and permission facts never lag the reload.  Its own
+      // failures must fail the reload too: no key rotation or latch release
+      // happens without a successful reconciliation of BOTH reads.
+      await queryClient.refetchQueries(
+        { queryKey: S14_SETTLEMENT_VIEW_KEY(applicationId ?? "") },
+        { throwOnError: true },
+      );
     } catch {
       return;
     }
@@ -1072,7 +1125,9 @@ export function T16SettlementPanel({
               anyPending ||
               latched ||
               binding === null ||
-              phase !== "Terminated"
+              phase !== "Terminated" ||
+              !settlementMatchesCurrent ||
+              !readsSettled
             }
           >
             {reopen.isPending ? "重开提交中…" : "重开新周期"}
