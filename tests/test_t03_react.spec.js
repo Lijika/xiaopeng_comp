@@ -465,49 +465,42 @@ async function runRevealCorrectionTracer(browser, viewport, label) {
     // selected finding (reg, pol, lease, inv).
     await expect(reviewer.getByTestId("review-evidence-link")).toHaveCount(4);
 
-    // Claim, then the reveal controls become available.
+    // Claim, then the reveal controls become available for the
+    // development fixture.  For the strict S15 G4 controlled path,
+    // C-DEMO synthetic is explicitly ineligible (REVEAL_TENANT_NOT_G4);
+    // the UI keeps the reveal masked and disabled, and the registered
+    // controlled path is verified via the existing Python-registered
+    // loopback (test_s15_policy_owner.py) and the direct-object/bulk
+    // negative probes below.
     await reviewer.getByRole("button", { name: "认领" }).click();
     await expect(reviewer.getByTestId("review-command-status")).toContainText(
       "认领已接受",
     );
     await expect(reviewer.getByTestId("review-status")).toHaveText("claimed");
 
-    // 2. Explicit reveal of exactly the requested field.
-    await reviewer.getByTestId("review-reveal-button").nth(3).click();
-    await expect(reviewer.getByTestId("review-command-status")).toContainText(
-      "揭示已接受",
-    );
-    expectByteEqual(
-      await reviewer.getByTestId("review-reveal-source").textContent(),
-      sourceValue,
-    );
-    await assertOnlyOneSentinelElement(reviewer, sourceValue);
-    // The other three observations stay masked.
-    const revealPosts = posts.filter((entry) =>
+    // S15: C-DEMO synthetic reveal is disabled (synthetic track cannot
+    // authorize S15).  The button must stay disabled and keep the value
+    // masked; no POST is issued and the registered S15 success is covered
+    // by the Python-registered loopback (test_s15_policy_owner).
+    const revealButtons = reviewer.getByTestId("review-reveal-button");
+    await expect(revealButtons.nth(3)).toBeDisabled();
+    await expect(reviewer.getByTestId("review-reveal-source")).toHaveCount(0);
+    const revealPostsBefore = posts.filter((entry) =>
       entry.url.endsWith("/reveal-field-observation"),
     );
-    expect(revealPosts.length).toBe(1);
-    expect(revealPosts[0].body.idempotency_key).toBe(uuid(3));
+    expect(revealPostsBefore.length).toBe(0);
 
     // Authoritative reload scrubs the reveal and returns to masked.
     await reviewer.getByRole("button", { name: "重新加载" }).click();
     await expect(reviewer.getByTestId("review-evidence-masked")).toHaveCount(4);
     await assertSentinelAbsentEverywhere(reviewer, sourceValue);
 
-    // 3. Reveal once more and submit one valid correction with the fixed
-    // idempotency key; the restricted reveal disappears as submission starts.
-    await reviewer.getByTestId("review-reveal-button").nth(3).click();
-    expectByteEqual(
-      await reviewer.getByTestId("review-reveal-source").textContent(),
-      sourceValue,
-    );
-    expect(
-      posts.filter((entry) => entry.url.endsWith("/reveal-field-observation")).length,
-    ).toBe(2);
-    expect(
-      posts.filter((entry) => entry.url.endsWith("/reveal-field-observation"))[1]
-        .body.idempotency_key,
-    ).toBe(uuid(6));
+    // 3. Submit one valid correction with the fixed idempotency key
+    // without relying on a C-DEMO reveal; the correction uses the known
+    // misread/synthetic values and the restricted value stays masked.
+    // The S15 registered reveal success is verified via the Python-
+    // registered loopback; the bulk/direct-object probes below verify
+    // that the reveal grant does not convey download/export etc.
     await reviewer.getByTestId("review-correct-button").nth(3).click();
     await expect(reviewer.getByTestId("review-correction-form")).toBeVisible();
     await setRestrictedInput(
