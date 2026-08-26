@@ -807,6 +807,62 @@ def test_t16_shell_errors_carry_no_store_cache_policy(
         ), path
 
 
+def test_t16_shell_auth_precedes_availability_disclosure(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """Unauthorized or invalid-credential callers see only the controlled
+    403 fence — never service or React-build availability — while authorized
+    callers receive the exact 503 for whichever dependency is unavailable."""
+    import task4_consistency.web.app as web
+
+    _install(monkeypatch, tmp_path)
+    client = TestClient(webapp_of())
+    shell_paths = (
+        "/controlled/s14",
+        "/controlled/s14/react",
+        "/controlled/s14/settlement",
+        "/controlled/s14/settlement/react",
+    )
+    unauthenticated_headers = (
+        {},
+        {"Authorization": "Bearer t16-not-a-credential"},
+        _operator_headers(T16_S13_OPERATOR_CREDENTIAL),
+    )
+
+    # Service unavailable: unauthorized callers stay fenced at 403.
+    monkeypatch.setattr(web, "S01_SERVICE", None)
+    for path in shell_paths:
+        for headers in unauthenticated_headers:
+            response = client.get(path, headers=headers)
+            assert response.status_code == 403, (path, headers)
+            assert response.json()["detail"]["error"] == "S01_FORBIDDEN", path
+            assert response.headers["cache-control"] == "no-store", path
+            assert response.headers["pragma"] == "no-cache", path
+
+    # Restored service but missing build: same fencing for unauthorized
+    # callers; authorized callers receive the exact build 503.
+    monkeypatch.setattr(web, "S01_SERVICE", _service(tmp_path))
+    missing = tmp_path / "missing-react-build-r3"
+    missing.mkdir()
+    monkeypatch.setattr(web, "S01_REACT_INDEX", missing / "index.html")
+    for path in shell_paths:
+        for headers in unauthenticated_headers:
+            response = client.get(path, headers=headers)
+            assert response.status_code == 403, (path, headers)
+            assert response.headers["cache-control"] == "no-store", path
+
+        authorized = client.get(
+            path,
+            headers=_operator_auth()
+            if "settlement" in path
+            else _demo_auth(),
+        )
+        assert authorized.status_code == 503, path
+        assert (
+            authorized.json()["detail"]["error"] == "S14_REACT_UNAVAILABLE"
+        ), path
+
+
 def test_t16_notification_public_command_requires_target_binding(
     monkeypatch: Any, tmp_path: Path
 ) -> None:

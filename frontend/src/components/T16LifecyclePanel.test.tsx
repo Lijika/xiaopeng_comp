@@ -90,10 +90,11 @@ function historyPayload(
       release_digest: ARTIFACT_DIGEST,
       checker_build: "checker-t16",
       finding_ids: ["finding_t16"],
-      cas_mismatches: [],
-      selected_observation_ids: [],
-      decision_ids: [],
-      exception_ids: [],
+      // Explicitly typed so fixture overrides stay checked assignments.
+      cas_mismatches: [] as string[],
+      selected_observation_ids: [] as string[],
+      decision_ids: [] as string[],
+      exception_ids: [] as string[],
       applicable_decision_ids: [],
       applicable_exception_ids: [],
       membership_decisions: [],
@@ -255,6 +256,80 @@ describe("T16LifecyclePanel (integrator cancellation)", () => {
     // The historical cycle view is read-only: no command surface.
     expect(screen.queryByTestId("t16-cancel-section")).not.toBeInTheDocument();
     expect(screen.queryByTestId("t16-cancel-button")).not.toBeInTheDocument();
+  });
+
+  it("renders cycle-scoped work and route facts that differ by selected cycle", async () => {
+    const workHistory = (cycle: number, runId: string, findingId: string) => {
+      const payload = historyPayload([{ cycle, run_id: runId }]);
+      const run = payload.runs[0];
+      // The generated S01HistoryRun types pin these arrays; the literal
+      // annotations keep the fixture assignments checked.
+      const findings: string[] = [findingId];
+      const decisions: string[] = [`decision_${cycle}`];
+      const casMismatches: string[] =
+        cycle === 1 ? [`cas_cycle${cycle}`] : [];
+      run.finding_ids = findings;
+      run.decision_ids = decisions;
+      run.cas_mismatches = casMismatches;
+      return payload;
+    };
+
+    // Cycle 1's immutable work pins...
+    fetchRouter({
+      [`GET ${ROUTE_PATH}`]: jsonRoute(s14CurrentRoute({ phase: "Terminated" })),
+      [`GET ${HISTORY_PATH}`]: jsonRoute(
+        workHistory(1, "run_cycle1", "finding_cycle1"),
+      ),
+    });
+    const first = renderWithQuery(
+      <T16LifecyclePanel applicationId={S14_APPLICATION_ID} selectedCycle={1} />,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("t16-cycle-run-findings")).toHaveTextContent(
+        "finding_cycle1",
+      ),
+    );
+    expect(screen.getByTestId("t16-cycle-run-cas-mismatches")).toHaveTextContent(
+      "cas_cycle1",
+    );
+    expect(screen.getByTestId("t16-cycle-run-currentness")).toHaveTextContent(
+      "CONTEXT_NOT_CURRENT",
+    );
+    first.unmount();
+
+    // ...are replaced by cycle 2's when the selection changes.
+    fetchRouter({
+      [`GET ${ROUTE_PATH}`]: jsonRoute(
+        s14CurrentRoute({
+          phase: "Intake",
+          cycle: 2,
+          lifecycle_revision: 8,
+          current_run_id: null,
+          currentness_reason: "NO_CURRENT_RUN",
+        }),
+      ),
+      [`GET ${HISTORY_PATH}`]: jsonRoute(
+        workHistory(2, "run_cycle2", "finding_cycle2"),
+      ),
+    });
+    renderWithQuery(
+      <T16LifecyclePanel applicationId={S14_APPLICATION_ID} selectedCycle={2} />,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("t16-cycle-run-findings")).toHaveTextContent(
+        "finding_cycle2",
+      ),
+    );
+    expect(
+      screen.getByTestId("t16-cycle-run-findings"),
+    ).not.toHaveTextContent("finding_cycle1");
+    // Cycle 2 carries no CAS mismatches and no cancellation of its own.
+    expect(screen.getByTestId("t16-cycle-run-cas-mismatches")).toHaveTextContent(
+      "none",
+    );
+    expect(
+      screen.queryByTestId("t16-cycle-cancellation"),
+    ).not.toBeInTheDocument();
   });
 
   it("does not leak cycle-1 late receipts into the cycle-2 view", async () => {
@@ -488,6 +563,9 @@ describe("T16SettlementPanel (operator)", () => {
   it("renders the operator-visible phase from the S13 delivery authority", async () => {
     fetchRouter({
       [`GET ${DELIVERY_PATH}`]: jsonRoute(s14OperatorDeliveryView()),
+      [`GET ${SETTLEMENT_VIEW_PATH}`]: jsonRoute(
+        settlementViewPayload("Terminating", { pending: false }),
+      ),
     });
     renderWithQuery(<T16SettlementPanel applicationId={S14_APPLICATION_ID} />);
     await waitFor(() =>
@@ -559,17 +637,33 @@ describe("T16SettlementPanel (operator)", () => {
 
   it("enables reopen only after the granted permission and posts its server-owned bindings once", async () => {
     const user = userEvent.setup();
-    let deliveryPhase: string = "Terminated";
+    let granted = false;
     const router = fetchRouter({
-      [`GET ${DELIVERY_PATH}`]: () =>
+      [`GET ${DELIVERY_PATH}`]: jsonRoute(
+        s14OperatorDeliveryView({ phase: "Terminated", lifecycle_revision: 7 }),
+      ),
+      [`GET ${SETTLEMENT_VIEW_PATH}`]: () =>
         new Response(
-          JSON.stringify(s14OperatorDeliveryView({ phase: deliveryPhase, lifecycle_revision: 7 })),
+          JSON.stringify(
+            settlementViewPayload("Terminated", {
+              permission: granted
+                ? {
+                    permission_id: S14_PERMISSION_ID,
+                    artifact_release_digest: ARTIFACT_DIGEST,
+                    policy_release_digest: ARTIFACT_DIGEST,
+                    approved_by: S14_APPROVER_SUBJECT,
+                  }
+                : null,
+            }),
+          ),
           { headers: { "Content-Type": "application/json" } },
         ),
-      [`POST ${GRANT_PATH}`]: () =>
-        new Response(JSON.stringify(s14AcceptedGrant()), {
+      [`POST ${GRANT_PATH}`]: () => {
+        granted = true;
+        return new Response(JSON.stringify(s14AcceptedGrant()), {
           headers: { "Content-Type": "application/json" },
-        }),
+        });
+      },
       [`POST ${REOPEN_PATH}`]: () =>
         new Response(JSON.stringify(s14AcceptedReopen()), {
           headers: { "Content-Type": "application/json" },
@@ -612,6 +706,9 @@ describe("T16SettlementPanel (operator)", () => {
     const user = userEvent.setup();
     fetchRouter({
       [`GET ${DELIVERY_PATH}`]: jsonRoute(s14OperatorDeliveryView()),
+      [`GET ${SETTLEMENT_VIEW_PATH}`]: jsonRoute(
+        settlementViewPayload("Terminating", { pending: false }),
+      ),
       [`POST ${SETTLE_PATH}`]: () =>
         new Response(
           JSON.stringify(
@@ -632,19 +729,31 @@ describe("T16SettlementPanel (operator)", () => {
 
   it("restores the server-owned reopen binding from a replayed grant", async () => {
     const user = userEvent.setup();
-    let grantCalls = 0;
+    let granted = false;
     const router = fetchRouter({
       [`GET ${DELIVERY_PATH}`]: jsonRoute(
         s14OperatorDeliveryView({ phase: "Terminated", lifecycle_revision: 7 }),
       ),
-      [`POST ${GRANT_PATH}`]: () => {
-        grantCalls += 1;
-        return new Response(
+      [`GET ${SETTLEMENT_VIEW_PATH}`]: () =>
+        new Response(
           JSON.stringify(
-            grantCalls === 1
-              ? s14AcceptedGrant()
-              : s14AcceptedGrant({ status: "replayed", replayed: true }),
+            settlementViewPayload("Terminated", {
+              permission: granted
+                ? {
+                    permission_id: S14_PERMISSION_ID,
+                    artifact_release_digest: ARTIFACT_DIGEST,
+                    policy_release_digest: ARTIFACT_DIGEST,
+                    approved_by: S14_APPROVER_SUBJECT,
+                  }
+                : null,
+            }),
           ),
+          { headers: { "Content-Type": "application/json" } },
+        ),
+      [`POST ${GRANT_PATH}`]: () => {
+        granted = true;
+        return new Response(
+          JSON.stringify(s14AcceptedGrant({ status: "replayed", replayed: true })),
           { headers: { "Content-Type": "application/json" } },
         );
       },
@@ -660,20 +769,34 @@ describe("T16SettlementPanel (operator)", () => {
       screen.getByTestId("t16-grant-permission-id"),
       S14_PERMISSION_ID,
     );
+    // A duplicate grant with the same key replays the original accepted
+    // result; the server-owned binding is restored through the authoritative
+    // settlement-view refetch either way.
     await user.click(screen.getByTestId("t16-grant-button"));
-    await waitFor(() =>
-      expect(screen.getByTestId("t16-result-status")).toHaveTextContent(
-        "accepted",
-      ),
-    );
-    // The second grant with the same key replays the original binding.
-    await user.click(screen.getByTestId("t16-grant-button"));
+    await waitFor(() => {
+      const grantPosts = router.calls.filter(
+        ({ method, url }) => method === "POST" && url === GRANT_PATH,
+      ).length;
+      if (grantPosts === 0) {
+        throw new Error(
+          `grant not posted; calls=${JSON.stringify(
+            router.calls.map((c) => `${c.method} ${c.url}`),
+          )} approver="${(
+            screen.getByTestId("t16-grant-approver") as HTMLInputElement
+          ).value}" permission="${(
+            screen.getByTestId("t16-grant-permission-id") as HTMLInputElement
+          ).value}"`,
+        );
+      }
+    });
     await waitFor(() =>
       expect(screen.getByTestId("t16-result-status")).toHaveTextContent(
         "replayed",
       ),
     );
-    // Reopen is enabled from the replayed server-owned binding.
+    expect(screen.getByTestId("t16-grant-binding")).toHaveTextContent(
+      S14_PERMISSION_ID,
+    );
     await user.selectOptions(screen.getByTestId("t16-reopen-target"), "Intake");
     await user.click(screen.getByTestId("t16-reopen-button"));
     await waitFor(() =>
@@ -686,6 +809,56 @@ describe("T16SettlementPanel (operator)", () => {
       | { reopen_policy?: { release_digest?: string } }
       | undefined;
     expect(reopenBody?.reopen_policy?.release_digest).toBe(ARTIFACT_DIGEST);
+  });
+
+  it.each([
+    [403, "t16-error-forbidden"],
+    [404, "t16-error-not-found"],
+    [503, "t16-error-unavailable"],
+  ])(
+    "renders sanitized settlement-read %i errors and gates every command",
+    async (status, expectedTestId) => {
+      fetchRouter({
+        [`GET ${DELIVERY_PATH}`]: jsonRoute(s14OperatorDeliveryView()),
+        [`GET ${SETTLEMENT_VIEW_PATH}`]: () =>
+          new Response(
+            JSON.stringify({ detail: { error: `S0X_${status}` } }),
+            { status, headers: { "Content-Type": "application/json" } },
+          ),
+      });
+      renderWithQuery(<T16SettlementPanel applicationId={S14_APPLICATION_ID} />);
+      // The shared transient-retry policy backs off on 503s before the
+      // sanitized error state surfaces.
+      await waitFor(
+        () => expect(screen.getByTestId(expectedTestId)).toBeInTheDocument(),
+        { timeout: status === 503 ? 8_000 : 5_000 },
+      );
+      // The authoritative failure is never presented as an ordinary
+      // ineligible control state: no command surface renders at all.
+      expect(screen.queryByTestId("t16-settle-button")).not.toBeInTheDocument();
+      expect(
+        screen.queryByTestId("t16-notification-button"),
+      ).not.toBeInTheDocument();
+      expect(screen.queryByTestId("t16-grant-button")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("t16-reopen-button")).not.toBeInTheDocument();
+    },
+  );
+
+  it("disables reopen when the authoritative read has no binding for the current application", async () => {
+    // Application B's settlement view carries no permission even though a
+    // prior mount granted one for application A.
+    fetchRouter({
+      [`GET ${DELIVERY_PATH}`]: jsonRoute(
+        s14OperatorDeliveryView({ phase: "Terminated", lifecycle_revision: 7 }),
+      ),
+      [`GET ${SETTLEMENT_VIEW_PATH}`]: jsonRoute(
+        settlementViewPayload("Terminated", { permission: null }),
+      ),
+    });
+    renderWithQuery(<T16SettlementPanel applicationId={S14_APPLICATION_ID} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("t16-reopen-button")).toBeDisabled(),
+    );
   });
 
   it("hydrates the server-owned reopen binding after a full remount", async () => {

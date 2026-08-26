@@ -389,6 +389,12 @@ for (const [label, viewport] of [
     await expect(integratorPage.getByTestId("t16-late-receipt")).toContainText(
       "evidence.late_input_requires_reopen",
     );
+    // Immutable work pins and route facts render for the selected cycle.
+    const lateFindings = integratorPage.getByTestId("t16-cycle-run-findings");
+    await expect(lateFindings.first()).not.toHaveText("—");
+    await expect(
+      integratorPage.getByTestId("t16-cycle-run-currentness"),
+    ).toBeVisible();
     await expect(integratorPage.getByTestId("t16-cancel-button")).toHaveCount(0);
 
     // Selecting the current reopened cycle shows no cycle-1 leakage.
@@ -404,8 +410,18 @@ for (const [label, viewport] of [
       integratorPage.getByTestId("t16-late-receipt"),
     ).toHaveCount(0);
 
+    // Back/forward navigation stays read-only.  The overflow and POST
+    // assertions run only after the forward URL and the required sections
+    // have settled, so React navigation is never raced.
     await integratorPage.goBack();
+    await expect(integratorPage).toHaveURL(/cycle=1/);
+    await expect(integratorPage.getByTestId("t16-cycle-view")).toBeVisible();
     await integratorPage.goForward();
+    await expect(integratorPage).toHaveURL(/cycle=2/);
+    await expect(integratorPage.getByTestId("t16-cycle-view")).toBeVisible();
+    await expect(
+      integratorPage.getByTestId("t16-late-receipts-empty"),
+    ).toContainText("No late-input receipts");
     const postsAfterReload = integratorPosts(integratorRequests);
     expect(postsAfterReload.length).toBe(postsBeforeReload);
     expect(postsAfterReload.every(({ url }) => url.endsWith("/cancel"))).toBe(true);

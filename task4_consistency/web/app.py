@@ -6416,9 +6416,28 @@ def _s14_shell_unavailable_response() -> Response:
 
 
 def _s14_session_shell_response(request: Request) -> Response:
-    """The T16 integrator workbench shell with the existing service gate and
-    session issuance, or the closed no-store S14 503 when the build is
-    missing or the controlled service is unavailable."""
+    """The T16 integrator workbench shell.  Ordering is authorization first:
+    the caller must present a registered operator credential or the demo
+    credential that can issue a session (403 otherwise) before any service
+    or React-build availability fact is disclosed; authorized callers then
+    receive the exact closed 503 for whichever dependency is unavailable."""
+    if not (
+        (
+            S01_OPERATOR_SUBJECT
+            and _s01_has_credential(request, S01_OPERATOR_CREDENTIAL)
+        )
+        or (
+            S01_DEMO_SUBJECT
+            and _s01_has_credential(request, S01_DEMO_CREDENTIAL)
+        )
+    ):
+        raise HTTPException(
+            403,
+            detail={
+                "error": "S01_FORBIDDEN",
+                "message": "Registered demo identity required",
+            },
+        )
     _s01_service()
     index_html = _s14_react_index_html_or_unavailable()
     if isinstance(index_html, Response):
@@ -6481,8 +6500,9 @@ def _s14_settlement_shell_response(request: Request) -> Response:
     authoritative read seam is the S13 delivery view plus typed S14 command
     results; no reviewer query can fire from this boundary."""
 
-    _s01_service()
+    # Authorization fences every availability disclosure.
     _s01_require_operator(request)
+    _s01_service()
     return _s14_react_shell()
 
 

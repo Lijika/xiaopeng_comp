@@ -493,12 +493,46 @@ function CycleHistoryView({
                     <dd>{leafText(run.status)}</dd>
                   </div>
                   <div>
+                    <dt>Currentness</dt>
+                    <dd data-testid="t16-cycle-run-currentness">
+                      {leafText(run.currentness_reason)}
+                    </dd>
+                  </div>
+                  <div>
                     <dt>Evidence Snapshot</dt>
                     <dd>{leafText(run.evidence_snapshot_id)}</dd>
                   </div>
                   <div>
                     <dt>Release Digest</dt>
                     <dd>{leafText(run.release_digest)}</dd>
+                  </div>
+                  <div>
+                    <dt>Checker Build</dt>
+                    <dd>{leafText(run.checker_build)}</dd>
+                  </div>
+                  <div>
+                    <dt>Findings</dt>
+                    <dd data-testid="t16-cycle-run-findings">
+                      {(run.finding_ids ?? []).join(", ") || "—"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Decisions</dt>
+                    <dd data-testid="t16-cycle-run-decisions">
+                      {(run.decision_ids ?? []).join(", ") || "—"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Exceptions</dt>
+                    <dd data-testid="t16-cycle-run-exceptions">
+                      {(run.exception_ids ?? []).join(", ") || "—"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>CAS Mismatches</dt>
+                    <dd data-testid="t16-cycle-run-cas-mismatches">
+                      {(run.cas_mismatches ?? []).join(", ") || "none"}
+                    </dd>
                   </div>
                 </dl>
               </li>
@@ -661,7 +695,6 @@ export function T16SettlementPanel({
   const [approverSubject, setApproverSubject] = useState("");
   const [permissionId, setPermissionId] = useState("");
   const [targetPhase, setTargetPhase] = useState<"Intake" | "Assembly">("Intake");
-  const [localBinding, setBinding] = useState<ReopenBinding | null>(null);
   const [latched, setLatched] = useState(false);
 
   if (!applicationId) {
@@ -694,6 +727,34 @@ export function T16SettlementPanel({
     );
   }
 
+  // The authoritative settlement read gates every command: its pending and
+  // error states are explicit sanitized outcomes, never an ordinary
+  // ineligible control state.
+  if (settlementView.isPending && settlementView.data === undefined) {
+    return (
+      <div data-testid="t16-settlement-panel">
+        <p
+          data-testid="t16-settlement-view-loading"
+          role="status"
+          aria-live="polite"
+        >
+          正在加载结算权威事实…
+        </p>
+      </div>
+    );
+  }
+  if (settlementView.isError) {
+    return (
+      <div data-testid="t16-settlement-panel">
+        <QueryErrorState
+          error={settlementView.error}
+          onReload={() => void settlementView.refetch()}
+          isReloading={settlementView.isFetching}
+        />
+      </div>
+    );
+  }
+
   const view = delivery.data;
   const phase = view.phase;
 
@@ -708,19 +769,19 @@ export function T16SettlementPanel({
   const pendingNotification =
     phase === "Terminating" && pendingOperationId !== null;
 
-  // The server-owned reopen binding hydrates from the authoritative read;
-  // local state only mirrors it until the next authoritative refetch.
+  // The reopen binding is derived ONLY from the current application/cycle's
+  // authoritative settlement read.  It is never stored locally, so an
+  // application switch or a successor cycle invalidates it by construction.
   const serverPermission = settlementView.data?.reopen_permission ?? null;
   const binding: ReopenBinding | null =
-    localBinding ??
-    (serverPermission !== null &&
+    serverPermission !== null &&
     serverPermission.permission_id !== "" &&
     serverPermission.artifact_release_digest !== ""
       ? {
           permissionId: serverPermission.permission_id,
           artifactDigest: serverPermission.artifact_release_digest,
         }
-      : null);
+      : null;
 
   const handleSettle = () => {
     if (anyPending || latched || phase !== "Terminating") return;
@@ -766,18 +827,8 @@ export function T16SettlementPanel({
       },
       {
         onSuccess: (data) => {
-          // A replayed grant carries the original accepted result: the
-          // server-owned binding is restored either way.
-          if (
-            (data.status === "accepted" || data.status === "replayed") &&
-            data.permission_id &&
-            data.artifact_release_digest
-          ) {
-            setBinding({
-              permissionId: data.permission_id,
-              artifactDigest: data.artifact_release_digest,
-            });
-          }
+          // accepted and replayed grants both restore the binding through
+          // the authoritative settlement-view refetch below.
           handleS14Outcome(data, () => setLatched(true), () =>
             setGrantKey(newIdempotencyKey()),
           );
