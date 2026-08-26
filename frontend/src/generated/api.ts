@@ -3355,6 +3355,8 @@ export interface components {
             lifecycle_revision: number;
             /** Reason Code */
             reason_code?: string | null;
+            /** Route */
+            route?: string | null;
         };
         /** S01HistoryCorrection */
         S01HistoryCorrection: {
@@ -3683,6 +3685,8 @@ export interface components {
             reopened_at?: number | null;
             /** Reopened By */
             reopened_by?: string | null;
+            /** Route */
+            route?: string | null;
             /** Target Phase */
             target_phase?: string | null;
         };
@@ -3795,6 +3799,8 @@ export interface components {
             lifecycle_revision: number;
             /** Notification Event Id */
             notification_event_id?: string | null;
+            /** Route */
+            route?: string | null;
             /** Settled Effects */
             settled_effects?: components["schemas"]["S14EffectItem"][];
             /** Terminated At */

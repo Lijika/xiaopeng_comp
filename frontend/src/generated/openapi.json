@@ -2789,6 +2789,17 @@
               }
             ],
             "title": "Reason Code"
+          },
+          "route": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Route"
           }
         },
         "required": [
@@ -3964,6 +3975,17 @@
             ],
             "title": "Reopened By"
           },
+          "route": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Route"
+          },
           "target_phase": {
             "anyOf": [
               {
@@ -4410,6 +4432,17 @@
               }
             ],
             "title": "Notification Event Id"
+          },
+          "route": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Route"
           },
           "settled_effects": {
             "items": {

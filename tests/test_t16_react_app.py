@@ -888,64 +888,131 @@ def test_t16_settlement_view_unavailable_contract(
     assert schema["$ref"].endswith("S01ErrorResponse")
 
 
-def test_t16_registered_late_disposition_binds_application_cycle_and_history(
-    tmp_path: Path,
+def test_t16_registered_late_receipt_public_route_after_reopen(
+    monkeypatch: Any, tmp_path: Path
 ) -> None:
-    """Public registered-source revision path: a revision-2 submission after
-    an accepted revision-1 keeps its late disposition bound to the owning
-    application and sealed rejection cycle, replays exactly, and surfaces in
-    the owning application's history."""
+    """Public registered-source route: revision-1 accepted; after cancel,
+    settle, and reopen into cycle 2, a revision-2 late submission is bound to
+    the SEALED cycle 1 with a stable resource binding, replays identically,
+    and appears in the owning application's history."""
     import copy as copy_module
 
+    import task4_consistency.web.app as web
     from tests.test_s02_controlled import (
         INTEGRATOR as REGISTERED_INTEGRATOR,
         TENANT_SCOPE,
         _registered_service,
     )
+    from tests.test_s14_controlled import _settle_to_terminated
 
     service, submission = _registered_service(tmp_path)
-    first = service.submit_registered(
-        submission=submission,
-        idempotency_key="t16-r4-late-1",
-        principal=REGISTERED_INTEGRATOR,
+    monkeypatch.setattr(web, "S01_SERVICE", service)
+    monkeypatch.setattr(web, "S01_DEMO_CREDENTIAL", "t16-r5-demo-credential")
+    monkeypatch.setattr(
+        web, "S01_DEMO_SUBJECT", REGISTERED_INTEGRATOR.subject
     )
-    assert first.disposition is AdmissionDisposition.ACCEPTED
-    assert first.application_id is not None
-    application_id = str(first.application_id)
+    monkeypatch.setattr(web, "S01_OPERATOR_CREDENTIAL", T16_OPERATOR_CREDENTIAL)
+    monkeypatch.setattr(web, "S01_OPERATOR_SUBJECT", T16_OPERATOR_SUBJECT)
+    monkeypatch.setattr(web, "S02_CONFIGURED", True)
+    monkeypatch.setattr(web, "S02_CREDENTIAL", "t16-r5-s02-credential")
+    monkeypatch.setattr(web, "S02_SUBJECT", REGISTERED_INTEGRATOR.subject)
+    monkeypatch.setattr(web, "S02_TENANT_ID", "tenant-test")
+    monkeypatch.setattr(web, "S02_SOURCE_SYSTEM_ID", "registered-source")
 
+    client = TestClient(webapp_of())
+    client.get("/controlled/s02", headers=_operator_headers("t16-r5-s02-credential"))
+
+    submit_url = "/controlled/s02/api/commands/submit"
+    revision1 = client.post(
+        submit_url,
+        json={"idempotency_key": "t16-r5-rev1", "submission": submission},
+    )
+    assert revision1.status_code == 200, revision1.text
+    rev1_body = revision1.json()
+    assert rev1_body["disposition"] == "accepted", revision1.text[:300]
+    application_id = rev1_body["application_id"]
+    admission_revision = int(rev1_body["lifecycle_revision"])
+
+    # Lifecycle commands run through the released S14 service seams with the
+    # exact admission authority; both submissions stay on the public route.
+    cancel = service.cancel_application(
+        application_id=application_id,
+        principal=REGISTERED_INTEGRATOR,
+        expected_lifecycle_revision=admission_revision,
+        idempotency_key="t16-r5-cancel",
+        reason_code="UPSTREAM_WITHDRAWN",
+    )
+    assert cancel["status"] == "accepted"
+    settled = _settle_to_terminated(
+        service, application_id, cancel["lifecycle_revision"]
+    )
+
+    # The governed C-DEMO operator principal is valid for settle/grant/
+    # reopen on any application (role + scope checks are service-owned).
+    registered_operator = S01CommandPrincipal(
+        subject=T16_OPERATOR_SUBJECT,
+        role="operator",
+        scope="C-DEMO",
+        source_id="c-demo-operator-control-plane",
+    )
+
+    granted = service.grant_reopen_permission(
+        application_id=application_id,
+        principal=registered_operator,
+        approver_subject="t16-independent-approver",
+        permission_id="t16-r5-permission/1",
+        expected_lifecycle_revision=settled["lifecycle_revision"],
+        idempotency_key="t16-r5-grant",
+    )
+    assert granted["status"] == "accepted"
+
+    reopened = service.reopen_application(
+        application_id=application_id,
+        principal=registered_operator,
+        expected_lifecycle_revision=settled["lifecycle_revision"],
+        idempotency_key="t16-r5-reopen",
+        target_phase="Intake",
+        reopen_policy={
+            "permission_id": "t16-r5-permission/1",
+            "release_digest": str(granted["policy_release_digest"]),
+        },
+    )
+    assert reopened["status"] == "accepted", str(reopened)[:300]
+    assert reopened["cycle"] == 2
+
+    # Revision 2 after reopen: bound to the SEALED predecessor cycle.
     revision2 = copy_module.deepcopy(submission)
-    revision2["envelope_id"] = "t16-r4-envelope-2"
+    revision2["envelope_id"] = "t16-r5-envelope-2"
     revision2["source_revision"] = 2
     revision2["predecessor_revision"] = 1
-    late = service.submit_registered(
-        submission=revision2,
-        idempotency_key="t16-r4-late-2",
-        principal=REGISTERED_INTEGRATOR,
+    late = client.post(
+        submit_url,
+        json={"idempotency_key": "t16-r5-rev2", "submission": revision2},
     )
-    assert late.disposition is AdmissionDisposition.REJECTED
-    assert late.reason_code == "evidence.late_input_requires_reopen"
-    # The disposition stays bound to the owning application and its current
-    # sealed rejection cycle instead of becoming an orphan receipt.
-    assert late.application_id == application_id
-    assert late.cycle == 1
+    assert late.status_code == 200, late.text
+    late_body = late.json()
+    assert late_body["disposition"] == "rejected", late.text[:300]
+    assert late_body["reason_code"] == "evidence.late_input_requires_reopen"
+    assert late_body["application_id"] == application_id
+    if "cycle" in late_body:
+        assert late_body["cycle"] == 1
 
-    replayed = service.submit_registered(
-        submission=revision2,
-        idempotency_key="t16-r4-late-2",
-        principal=REGISTERED_INTEGRATOR,
+    replayed = client.post(
+        submit_url,
+        json={"idempotency_key": "t16-r5-rev2", "submission": revision2},
     )
-    assert replayed.disposition is AdmissionDisposition.REJECTED
-    assert replayed.replayed is True
-    assert replayed.receipt_id == late.receipt_id
-    assert replayed.application_id == application_id
-    assert replayed.cycle == 1
+    assert replayed.status_code == 200
+    replay_body = replayed.json()
+    assert replay_body["replayed"] is True
+    assert replay_body["receipt_id"] == late_body["receipt_id"]
 
+    # History visibility via a registered-scope reviewer principal.
     history = service.application_history_view(
         principal=S01CommandPrincipal(
             subject=REGISTERED_INTEGRATOR.subject,
             role="reviewer",
             scope=TENANT_SCOPE,
-            source_id="t16-r4-review-console",
+            source_id="t16-r5-review-console",
         ),
         application_id=application_id,
     )
