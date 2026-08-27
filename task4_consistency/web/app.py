@@ -78,6 +78,35 @@ FIXTURES = ROOT / "fixtures" / "applications"
 STATIC = Path(__file__).resolve().parent / "static"
 S01_REACT_STATIC = STATIC / "react"
 S01_REACT_INDEX = S01_REACT_STATIC / "index.html"
+_LEGACY_SYNTHETIC_FIXTURES = {
+    fixture.stem: fixture for fixture in FIXTURES.glob("*.json")
+}
+
+
+def _legacy_synthetic_fixture(fixture_id: str) -> dict[str, Any]:
+    """Load one server-owned synthetic fixture by its fixed manifest ID."""
+    fixture = _LEGACY_SYNTHETIC_FIXTURES.get(fixture_id)
+    if fixture is None:
+        raise HTTPException(404, detail={"error": "SYNTHETIC_ONLY"})
+    try:
+        data = json.loads(fixture.read_text(encoding="utf-8"))
+    except Exception as error:
+        raise HTTPException(
+            503,
+            detail={
+                "error": "SYNTHETIC_UNAVAILABLE",
+                "message": "Synthetic fixture is unavailable",
+            },
+        ) from error
+    if not isinstance(data, dict):
+        raise HTTPException(
+            503,
+            detail={
+                "error": "SYNTHETIC_UNAVAILABLE",
+                "message": "Synthetic fixture is unavailable",
+            },
+        )
+    return data
 
 
 def _s01_demo_flag(name: str, *, default: bool) -> bool:
@@ -952,8 +981,9 @@ def _validate_rules_yaml(yaml_text: str) -> Any:
 
 
 class CheckBody(BaseModel):
-    application: dict[str, Any]
-    rules_path: str | None = None
+    model_config = ConfigDict(extra="forbid")
+
+    fixture_id: str = Field(min_length=1, max_length=200, strict=True)
 
 
 class RulesBody(BaseModel):
@@ -2378,22 +2408,24 @@ class S01ReviewRevealBody(S01ReviewFencedBody):
     """The S15 reveal command.  ``expected_fence`` is bounded at 1 because
     the domain rejects an unclaimed (fence 0) reveal as invalid; the wire
     status for that violation is the same 422 the domain raises today.
-    S15 adds the explicit bounded ``purpose``, ``reason`` and
-    ``classification`` as closed literals (``MANUAL_REVIEW``,
-    ``EVIDENCE_VERIFICATION`` and ``RESTRICTED``); any other value fails the
-    closed schema with a 422 and never reaches the domain.  An optional
-    ``expected_source_region`` must, when supplied, equal the authoritative
-    link's region exactly or the domain fails the command closed.  The
-    ``expected_source_region`` is required and must equal the public
-    projected locator (``region:<n>``) or the command is rejected before
-    any raw read."""
+    S15 adds bounded ``purpose``, ``reason`` and ``classification`` codes in
+    a closed request envelope.  The active C19 release authorizes their
+    values in the domain.  The ``expected_source_region`` is required and
+    must equal the public projected locator (``region:<n>``) before any raw
+    read."""
 
     expected_fence: int = Field(ge=1, strict=True)
     application_id: str = Field(min_length=1, max_length=200, strict=True)
     observation_id: str = Field(min_length=1, max_length=200, strict=True)
-    purpose: Literal["MANUAL_REVIEW"]
-    reason: Literal["EVIDENCE_VERIFICATION"]
-    classification: Literal["RESTRICTED"]
+    purpose: str = Field(
+        min_length=1, max_length=64, pattern=r"^[A-Z][A-Z0-9_]*$", strict=True
+    )
+    reason: str = Field(
+        min_length=1, max_length=64, pattern=r"^[A-Z][A-Z0-9_]*$", strict=True
+    )
+    classification: str = Field(
+        min_length=1, max_length=64, pattern=r"^[A-Z][A-Z0-9_]*$", strict=True
+    )
     expected_source_region: str = Field(
         min_length=1, max_length=500, pattern=r"^region:[0-9]+$", strict=True
     )
@@ -2436,9 +2468,15 @@ class S01RevealResult(BaseModel):
     source_location: S01RevealSourceLocation
     source_text: str
     revealed_at: int
-    purpose: Literal["MANUAL_REVIEW"]
-    reason: Literal["EVIDENCE_VERIFICATION"]
-    classification: Literal["RESTRICTED"]
+    purpose: str = Field(
+        min_length=1, max_length=64, pattern=r"^[A-Z][A-Z0-9_]*$", strict=True
+    )
+    reason: str = Field(
+        min_length=1, max_length=64, pattern=r"^[A-Z][A-Z0-9_]*$", strict=True
+    )
+    classification: str = Field(
+        min_length=1, max_length=64, pattern=r"^[A-Z][A-Z0-9_]*$", strict=True
+    )
     claim_expires_at: int
 
 
@@ -6219,8 +6257,20 @@ def get_fixture(name: str, request: Request, response: Response) -> dict[str, An
     return json.loads(fp.read_text(encoding="utf-8"))
 
 
-@app.post("/api/check")
-def api_check(body: CheckBody, request: Request, response: Response) -> dict[str, Any]:
+@app.post(
+    "/api/check",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": _inline_openapi_schema(CheckBody.model_json_schema())
+                }
+            },
+        }
+    },
+)
+async def api_check(request: Request, response: Response) -> dict[str, Any]:
     """Synthetic-only boundary: the remaining demo operation accepts only
     a server-whitelisted synthetic fixture identity and chooses the
     server-owned ruleset.  The legacy general raw-Application API is
@@ -6232,85 +6282,20 @@ def api_check(body: CheckBody, request: Request, response: Response) -> dict[str
         raise HTTPException(404, detail={"error": "SYNTHETIC_ONLY"})
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
-    # Retired general API: only the whitelisted synthetic fixture
-    # identities may be checked, and the ruleset is server-owned.
-    # An arbitrary raw Application or guessed path is hidden.
-    synthetic_identities = {p.stem for p in FIXTURES.glob("*.json")}
-    # The demo operation accepts a synthetic fixture identity via
-    # body.rules_path or body.application.application_id that must be
-    # whitelisted; otherwise the request is hidden.
-    app = body.application if isinstance(body.application, dict) else {}
-    app_id = app.get("application_id") if isinstance(app, dict) else None
-    rules_path = body.rules_path
-    allowed = False
-    if isinstance(app_id, str) and app_id in synthetic_identities:
-        allowed = True
-    if isinstance(rules_path, str) and Path(rules_path).stem in synthetic_identities:
-        allowed = True
-    # Fallback: allow the exact committed fixture payloads (byte-identical
-    # to a synthetic fixture) as the demo operation, but no arbitrary
-    # raw Application.
-    if not allowed:
-        # Check if the payload is byte-identical to a synthetic fixture.
-        try:
-            payload_bytes = json.dumps(app, sort_keys=True).encode()
-            for fp in FIXTURES.glob("*.json"):
-                if payload_bytes == fp.read_bytes():
-                    allowed = True
-                    break
-                # Also allow the wrapped Application.from_dict form
-                try:
-                    fixture_data = json.loads(fp.read_text(encoding="utf-8"))
-                    if app == fixture_data:
-                        allowed = True
-                        break
-                except Exception:
-                    continue
-        except Exception:
-            allowed = False
-    if not allowed:
-        raise HTTPException(404, detail={"error": "SYNTHETIC_ONLY"})
-    if not isinstance(body.application, dict):
-        raise HTTPException(
-            400,
-            detail={
-                "error": "invalid_application_type",
-                "message": "application 必须是 JSON 对象",
-                "hint": "顶层字段: application_id, documents[], 可选 expected_verdicts",
-            },
-        )
-    if "documents" not in body.application:
-        raise HTTPException(
-            400,
-            detail={
-                "error": "missing_documents",
-                "message": "application.documents 缺失",
-                "hint": "documents 为单据数组，每项含 doc_type 与 fields",
-            },
-        )
+    body = await _s03_command_body(request, CheckBody)
+    assert isinstance(body, CheckBody)
+    fixture = _legacy_synthetic_fixture(body.fixture_id)
     try:
-        app_obj = Application.from_dict(body.application)
+        app_obj = Application.from_dict(fixture)
     except Exception as e:
         raise HTTPException(
-            400,
+            503,
             detail={
-                "error": "invalid_application",
-                "message": f"申请单解析失败: {e}",
-                "hint": "检查 documents[].fields 值是否为 {{raw, confidence}} 或纯字符串",
+                "error": "SYNTHETIC_UNAVAILABLE",
+                "message": "Synthetic fixture is unavailable",
             },
         ) from e
-    rules_path = Path(body.rules_path) if body.rules_path else _active_rules_path()
-    if not rules_path.is_absolute():
-        rules_path = ROOT / rules_path
-    if not rules_path.exists():
-        raise HTTPException(
-            400,
-            detail={
-                "error": "rules_not_found",
-                "message": f"规则文件不存在: {rules_path}",
-                "hint": "省略 rules_path 使用当前激活规则包",
-            },
-        )
+    rules_path = _active_rules_path()
     try:
         report = _run_check(app_obj, rules_path)
     except Exception as e:
@@ -6333,31 +6318,47 @@ BATCH_CHECK_MAX_N = 50
 
 
 class BatchCheckBody(BaseModel):
-    """Run check on multiple applications (inline or fixture filenames).
+    """Run checks over server-owned synthetic fixture filenames.
 
     Soft limit: BATCH_CHECK_MAX_N (default 50). For full labeled metrics use CLI
     ``evaluate --suite main`` — there is no ``/api/evaluate/batch`` or job queue.
     """
 
-    applications: list[dict[str, Any]] | None = None
-    fixture_files: list[str] | None = None
+    model_config = ConfigDict(extra="forbid")
+
+    fixture_files: list[str] = Field(min_length=1)
 
 
-@app.post("/api/check/batch")
-def api_check_batch(body: BatchCheckBody) -> dict[str, Any]:
-    fixture_files = list(body.fixture_files or [])
-    apps: list[dict[str, Any]] = list(body.applications or [])
-    if not apps and not fixture_files:
-        raise HTTPException(400, "applications or fixture_files required")
+@app.post(
+    "/api/check/batch",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": _inline_openapi_schema(BatchCheckBody.model_json_schema())
+                }
+            },
+        }
+    },
+)
+async def api_check_batch(request: Request, response: Response) -> dict[str, Any]:
+    if _synthetic_boundary_denied(request):
+        raise HTTPException(404, detail={"error": "SYNTHETIC_ONLY"})
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    body = await _s03_command_body(request, BatchCheckBody)
+    assert isinstance(body, BatchCheckBody)
+    fixture_files = list(body.fixture_files)
     # Round26/plan invariant: the count cap is enforced before any fixture
     # read or check, so an over-cap batch is rejected without touching I/O.
-    if len(apps) + len(fixture_files) > BATCH_CHECK_MAX_N:
+    if len(fixture_files) > BATCH_CHECK_MAX_N:
         raise HTTPException(
             400,
             detail={
                 "error": "batch_too_large",
                 "message": (
-                    f"batch size {len(apps) + len(fixture_files)} exceeds "
+                    f"batch size {len(fixture_files)} exceeds "
                     f"max {BATCH_CHECK_MAX_N}"
                 ),
                 "hint": (
@@ -6369,13 +6370,10 @@ def api_check_batch(body: BatchCheckBody) -> dict[str, Any]:
                 "max_n": BATCH_CHECK_MAX_N,
             },
         )
-    for name in fixture_files:
-        if "/" in name or ".." in name:
-            raise HTTPException(400, f"invalid fixture name: {name}")
-        fp = FIXTURES / name
-        if not fp.exists():
-            raise HTTPException(404, f"fixture not found: {name}")
-        apps.append(json.loads(fp.read_text(encoding="utf-8")))
+    fixture_names = {fixture.name for fixture in _LEGACY_SYNTHETIC_FIXTURES.values()}
+    if any(name not in fixture_names for name in fixture_files):
+        raise HTTPException(404, detail={"error": "SYNTHETIC_ONLY"})
+    apps = [_legacy_synthetic_fixture(Path(name).stem) for name in fixture_files]
 
     eng = _engine()
     results = []
@@ -6882,7 +6880,7 @@ def create_s02_test_app() -> FastAPI:
     global S01_BACKGROUND_ENABLED, S01_REQUIRE_CONFIGURED_STARTUP
     global S01_SERVICE, S01_TEST_DRIVER, S08_SERVICE
     global S02_REGISTERED_SOURCES, S02_CONTROLLED_OBJECTS
-    global S02_CONFIGURATION_ERROR, S02_CONFIGURED
+    global S02_CONFIGURATION_ERROR, S02_CONFIGURED, S02_SESSION_TTL_SECONDS
     global S02_CREDENTIAL, S02_SUBJECT, S02_TENANT_ID, S02_SOURCE_SYSTEM_ID
 
     S02_CONFIGURATION_ERROR = None
@@ -6898,6 +6896,16 @@ def create_s02_test_app() -> FastAPI:
     S02_SUBJECT = os.environ.get("TASK4_S02_SUBJECT", "").strip()
     S02_TENANT_ID = os.environ.get("TASK4_S02_TENANT_ID", "").strip()
     S02_SOURCE_SYSTEM_ID = os.environ.get("TASK4_S02_SOURCE_SYSTEM_ID", "").strip()
+    try:
+        S02_SESSION_TTL_SECONDS = int(
+            os.environ.get("TASK4_S02_TEST_SESSION_TTL_SECONDS", "900")
+        )
+        if S02_SESSION_TTL_SECONDS < 1:
+            raise ValueError
+    except ValueError:
+        S02_CONFIGURATION_ERROR = "S02 test session TTL is invalid"
+        S02_CONFIGURED = False
+        return app
     S02_CONFIGURED = bool(
         S02_CONFIGURATION_ERROR is None
         and S02_REGISTERED_SOURCES

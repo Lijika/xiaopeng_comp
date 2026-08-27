@@ -1369,7 +1369,7 @@ function createRegisteredS02Submission() {
  * classification from the C19 eligibility projection, no raw in URL/storage/
  * history, and expiry/reload scrubbing.  Distinct-action boundary (no
  * direct-object/download/export/print/copy grant) is also asserted. */
-async function runRegisteredRevealLifetimeTracer(browser) {
+async function runRegisteredRevealLifetimeTracer(browser, viewport) {
   const resources = {};
   let failure;
   try {
@@ -1377,7 +1377,7 @@ async function runRegisteredRevealLifetimeTracer(browser) {
     resources.server = await startServer();
     const server = resources.server;
     resources.registeredContext = await browser.newContext({
-      viewport: { width: 1280, height: 800 },
+      viewport,
       extraHTTPHeaders: { Authorization: `Bearer ${S02_CREDENTIAL}` },
     });
     const page = await resources.registeredContext.newPage();
@@ -1440,8 +1440,99 @@ async function runRegisteredRevealLifetimeTracer(browser) {
     expect(history.ok()).toBeTruthy();
     const historyBody = await history.json();
     expect(JSON.stringify(historyBody).includes("TEST-VIN-A")).toBe(false);
-    // Expiry/reload scrubbing: hard refresh must remask.
+    await page.goBack();
+    await expect(page.getByTestId("review-panel")).toHaveCount(0);
+    await assertSentinelAbsentEverywhere(page, "TEST-VIN-A");
+    await page.goForward({ waitUntil: "networkidle" });
+    await expect(page.getByTestId("review-panel")).toBeVisible();
+    await expect(page.getByTestId("review-reveal-source")).toHaveCount(0);
+    await assertSentinelAbsentEverywhere(page, "TEST-VIN-A");
+    // A hard refresh never restores in-memory restricted state.
     await page.reload({ waitUntil: "networkidle" });
+    await expect(page.getByTestId("review-reveal-source")).toHaveCount(0);
+    await assertSentinelAbsentEverywhere(page, "TEST-VIN-A");
+    // A real release ends a second successful grant before the response
+    // completes, so raw never outlives the authoritative claim.
+    await page.getByTestId("review-reveal-button").first().click();
+    await expect(page.getByTestId("review-reveal-source")).toBeVisible();
+    await page.getByTestId("release-button").click();
+    await expect(page.getByTestId("review-reveal-source")).toHaveCount(0);
+    await assertSentinelAbsentEverywhere(page, "TEST-VIN-A");
+  } catch (error) {
+    failure = error;
+    throw error;
+  } finally {
+    try {
+      await settleCleanup([
+        resources.registeredContext ? () => resources.registeredContext.close() : () => Promise.resolve(),
+        resources.server ? () => stopServer(resources.server) : () => Promise.resolve(),
+      ]);
+    } catch (cleanupError) {
+      if (failure === undefined) throw cleanupError;
+    }
+  }
+}
+
+async function runRegisteredLateResponseExpiryTracer(browser, viewport) {
+  const resources = {};
+  let failure;
+  try {
+    const s02 = createRegisteredS02Submission();
+    resources.server = await startServer({
+      TASK4_S02_TEST_SESSION_TTL_SECONDS: "10",
+    });
+    const server = resources.server;
+    resources.registeredContext = await browser.newContext({
+      viewport,
+      extraHTTPHeaders: { Authorization: `Bearer ${S02_CREDENTIAL}` },
+    });
+    const page = await resources.registeredContext.newPage();
+    const session = await page.request.get(`${server.baseURL}/controlled/s02`, {
+      headers: { Authorization: `Bearer ${S02_CREDENTIAL}` },
+    });
+    expect(session.ok()).toBeTruthy();
+    const admission = await page.request.post(
+      `${server.baseURL}/controlled/s02/api/commands/submit`,
+      { data: { idempotency_key: "t03-registered-s15-late", submission: s02 } },
+    );
+    expect(admission.ok()).toBeTruthy();
+    const accepted = await admission.json();
+    const deadline = Date.now() + 20_000;
+    let item;
+    while (Date.now() < deadline) {
+      const queue = await page.request.get(`${server.baseURL}/controlled/s01/api/queries/queue`);
+      if (queue.ok()) {
+        const body = await queue.json();
+        item = (body.items || []).find((candidate) => candidate.application_id === accepted.application_id);
+        if (item) break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    expect(item).toBeDefined();
+    await page.goto(`${server.baseURL}/controlled/s01/react`, { waitUntil: "networkidle" });
+    await page.getByRole("link", { name: new RegExp(item.work_item_id) }).click();
+    await expect(page.getByTestId("review-panel")).toBeVisible();
+    await page.getByRole("button", { name: "认领" }).click();
+    await expect(page.getByTestId("review-status")).toHaveText("claimed");
+    let resolveIntercept;
+    const intercepted = new Promise((resolve) => {
+      resolveIntercept = resolve;
+    });
+    let delivery;
+    await page.route("**/reveal-field-observation", async (route) => {
+      delivery = (async () => {
+        const response = await route.fetch();
+        const payload = JSON.parse((await response.body()).toString("utf8"));
+        expect(typeof payload.claim_expires_at).toBe("number");
+        resolveIntercept();
+        await new Promise((resolve) => setTimeout(resolve, 11_000));
+        await route.fulfill({ response });
+      })();
+      await delivery;
+    });
+    await page.getByTestId("review-reveal-button").first().click();
+    await intercepted;
+    await delivery;
     await expect(page.getByTestId("review-reveal-source")).toHaveCount(0);
     await assertSentinelAbsentEverywhere(page, "TEST-VIN-A");
   } catch (error) {
@@ -1497,11 +1588,16 @@ if (process.env.T03_DEBUG_EXPORTS === "1") {
     await runStaleCorrectionReloadTracer(browser);
   });
 
-  test("S15 registered reveal lifetime and distinct-action boundary", async ({
-    browser,
-  }) => {
+  for (const viewport of VIEWPORTS) {
+    test(`S15 registered reveal lifetime and distinct-action boundary (${viewport.label})`, async ({ browser }) => {
+      test.setTimeout(180_000);
+      await runRegisteredRevealLifetimeTracer(browser, viewport);
+    });
+  }
+
+  test("S15 registered late response expires before display (mobile)", async ({ browser }) => {
     test.setTimeout(180_000);
-    await runRegisteredRevealLifetimeTracer(browser);
+    await runRegisteredLateResponseExpiryTracer(browser, VIEWPORTS[1]);
   });
 
   for (const viewport of VIEWPORTS) {

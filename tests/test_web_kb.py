@@ -50,9 +50,9 @@ def test_web_api_smoke():
 
     r = client.get(f"/api/fixtures/{name}")
     assert r.status_code == 200
-    app_json = r.json()
+    fixture_id = Path(name).stem
 
-    r = client.post("/api/check", json={"application": app_json})
+    r = client.post("/api/check", json={"fixture_id": fixture_id})
     assert r.status_code == 200
     body = r.json()
     assert "report" in body
@@ -196,13 +196,11 @@ rules:
     assert not runtime.exists()
 
 
-def test_web_check_missing_documents_tip():
+def test_web_check_unknown_fixture_is_hidden():
     client = TestClient(app)
-    r = client.post("/api/check", json={"application": {"application_id": "X"}})
-    assert r.status_code == 400
-    d = r.json()["detail"]
-    assert d["error"] == "missing_documents"
-    assert "hint" in d
+    r = client.post("/api/check", json={"fixture_id": "unknown-fixture"})
+    assert r.status_code == 404
+    assert r.json() == {"detail": {"error": "SYNTHETIC_ONLY"}}
 
 
 def test_attack_web_kb_gate_exit_1_on_any_open_result(monkeypatch):

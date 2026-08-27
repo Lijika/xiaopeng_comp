@@ -11381,7 +11381,6 @@ class ControlledScenarioService:
                     "purpose": purpose,
                     "verification_reason": reason,
                     "classification": classification,
-                    "idempotency_key": idempotency_key,
                     "idempotency_fingerprint": command_fingerprint,
                     "idempotency_binding": binding_key,
                     "context_digest": context_digest,
@@ -11620,6 +11619,25 @@ class ControlledScenarioService:
                     claim_expires_at=effective_reveal_expiry,
                     policy_decision=policy,
                 )
+            if previous is not None:
+                previous_expiry = previous_result.get("claim_expires_at")
+                if (
+                    isinstance(previous_expiry, bool)
+                    or not isinstance(previous_expiry, (int, float))
+                    or int(previous_expiry) <= reveal_time
+                ):
+                    return outcome(
+                        "stale",
+                        "REVEAL_TERM_EXPIRED",
+                        claim_expires_at=(
+                            int(previous_expiry)
+                            if isinstance(previous_expiry, (int, float))
+                            and not isinstance(previous_expiry, bool)
+                            else 0
+                        ),
+                        policy_decision=policy,
+                        store_result=False,
+                    )
             if (
                 app.get("phase") != "Manual Review"
                 or app.get("current_run_id") != work_item["run_id"]
@@ -18612,7 +18630,6 @@ class ControlledScenarioService:
             "verification_reason",
             "classification",
             "schema_version",
-            "idempotency_key",
             "idempotency_fingerprint",
             "idempotency_binding",
             "context_digest",

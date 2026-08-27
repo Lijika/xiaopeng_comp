@@ -354,8 +354,7 @@ def test_legacy_surfaces_unchanged():
     names = {i["file"] for i in f.json()["fixtures"]}
     assert "app_demo_step2_ok.json" in names
 
-    data = _demo_fixture("app_demo_step2_ok.json")
-    c = client.post("/api/check", json={"application": data})
+    c = client.post("/api/check", json={"fixture_id": "app_demo_step2_ok"})
     assert c.status_code == 200, c.text
     body = c.json()
     assert set(body.keys()) == {"report", "html", "rules_path"}

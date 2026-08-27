@@ -78,9 +78,12 @@ def test_s01_reveal_and_correction_openapi_contracts_are_closed(
         "reason",
     }
     assert reveal_body["properties"]["expected_fence"]["minimum"] == 1
-    assert reveal_body["properties"]["purpose"]["const"] == "MANUAL_REVIEW"
-    assert reveal_body["properties"]["reason"]["const"] == "EVIDENCE_VERIFICATION"
-    assert reveal_body["properties"]["classification"]["const"] == "RESTRICTED"
+    for field in ("purpose", "reason", "classification"):
+        vocabulary = reveal_body["properties"][field]
+        assert vocabulary["minLength"] == 1
+        assert vocabulary["maxLength"] == 64
+        assert vocabulary["pattern"] == "^[A-Z][A-Z0-9_]*$"
+        assert "const" not in vocabulary
     correction_body = correct["requestBody"]["content"]["application/json"]["schema"]
     assert set(correction_body["properties"]) == {
         "application_id",
@@ -136,9 +139,12 @@ def test_s01_reveal_and_correction_openapi_contracts_are_closed(
         "classification",
         "claim_expires_at",
     }
-    assert reveal_result["properties"]["purpose"]["const"] == "MANUAL_REVIEW"
-    assert reveal_result["properties"]["reason"]["const"] == "EVIDENCE_VERIFICATION"
-    assert reveal_result["properties"]["classification"]["const"] == "RESTRICTED"
+    for field in ("purpose", "reason", "classification"):
+        vocabulary = reveal_result["properties"][field]
+        assert vocabulary["minLength"] == 1
+        assert vocabulary["maxLength"] == 64
+        assert vocabulary["pattern"] == "^[A-Z][A-Z0-9_]*$"
+        assert "const" not in vocabulary
     correction_result = document["components"]["schemas"]["S01CorrectionResult"]
     assert correction_result.get("additionalProperties") is False
     assert {

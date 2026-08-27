@@ -14,6 +14,7 @@ from task4_consistency.controlled.s01 import (
     S01CommandPrincipal,
 )
 from task4_consistency.controlled.s08 import PolicyGovernanceService
+from task4_consistency.web.app import S01RevealResult, S01ReviewRevealBody
 from tests.test_s01_http import UvicornLoopback
 from tests.test_s02_http import _configured_http_source, _open_session
 from tests.test_s02_controlled import INTEGRATOR, ROOT, TENANT_SCOPE, _registered_service
@@ -131,6 +132,70 @@ def test_governed_c19_release_authorizes_registered_reveal_for_tenant_resource(t
     )
     assert result["status"] == "revealed"
     assert result["claim_expires_at"] == NOW + 900  # min(identity, claim, release term)
+
+
+def test_governed_c19_vocabulary_is_authoritative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, reviewer, application_id, work_item_id, work, claimed, link, now = (
+        _claimed_reveal_context(tmp_path)
+    )
+    decision = service._resolve_governed_c19_reveal_policy(
+        principal=reviewer,
+        app=service._store.applications[application_id],
+        now=now,
+    )
+    assert decision is not None
+    governed = {
+        **decision,
+        "purposes": ("CASE_TRIAGE",),
+        "reasons": ("SOURCE_CONFIRMATION",),
+        "classifications": ("LIMITED",),
+    }
+    monkeypatch.setattr(
+        service,
+        "_resolve_governed_c19_reveal_policy",
+        lambda **_kwargs: governed,
+    )
+    body = S01ReviewRevealBody.model_validate(
+        {
+            "application_id": application_id,
+            **_reveal_args(
+                work,
+                claimed,
+                link,
+                purpose="CASE_TRIAGE",
+                reason="SOURCE_CONFIRMATION",
+                classification="LIMITED",
+            ),
+        }
+    )
+    result = service.reveal_field_observation(
+        principal=reviewer,
+        application_id=body.application_id,
+        work_item_id=work_item_id,
+        observation_id=body.observation_id,
+        expected_fence=body.expected_fence,
+        expected_context=body.expected_context.model_dump(mode="json"),
+        idempotency_key=body.idempotency_key,
+        purpose=body.purpose,
+        reason=body.reason,
+        classification=body.classification,
+        expected_source_region=body.expected_source_region,
+        now=now,
+    )
+    assert result["status"] == "revealed"
+    assert (result["purpose"], result["reason"], result["classification"]) == (
+        "CASE_TRIAGE",
+        "SOURCE_CONFIRMATION",
+        "LIMITED",
+    )
+    response = S01RevealResult.model_validate(result)
+    assert (response.purpose, response.reason, response.classification) == (
+        "CASE_TRIAGE",
+        "SOURCE_CONFIRMATION",
+        "LIMITED",
+    )
 
 
 def test_c19_release_denial_and_term_bound_close_reveal(tmp_path: Path) -> None:
@@ -266,6 +331,55 @@ def test_failed_reveal_replay_and_conflict_keep_one_audit_fact(tmp_path: Path) -
     # failure + conflict (the same-fingerprint replay creates no second event)
     assert len(events) == 2
 
+
+def test_successful_reveal_replay_after_effective_expiry_returns_no_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        ControlledScenarioService, "_REVIEW_CLAIM_TTL_SECONDS", 3_600
+    )
+    service, reviewer, application_id, work_item_id, work, claimed, link, now = (
+        _claimed_reveal_context(tmp_path)
+    )
+    first = service.reveal_field_observation(
+        principal=reviewer,
+        application_id=application_id,
+        work_item_id=work_item_id,
+        now=now,
+        **_reveal_args(work, claimed, link, idempotency_key="s15-expired-success"),
+    )
+    replay = service.reveal_field_observation(
+        principal=reviewer,
+        application_id=application_id,
+        work_item_id=work_item_id,
+        now=now + 901,
+        **_reveal_args(work, claimed, link, idempotency_key="s15-expired-success"),
+    )
+    assert first["status"] == "revealed"
+    assert first["claim_expires_at"] == now + 900
+    assert replay["status"] == "stale"
+    assert replay["reason_code"] == "REVEAL_TERM_EXPIRED"
+    assert "source_text" not in replay
+
+
+def test_reveal_audit_projection_excludes_caller_idempotency_text(tmp_path: Path) -> None:
+    service, reviewer, application_id, work_item_id, work, claimed, link, now = (
+        _claimed_reveal_context(tmp_path)
+    )
+    marker = "idempotency-audit-sentinel"
+    result = service.reveal_field_observation(
+        principal=reviewer,
+        application_id=application_id,
+        work_item_id=work_item_id,
+        now=now,
+        **_reveal_args(work, claimed, link, idempotency_key=marker),
+    )
+    timeline = service.audit_timeline(
+        principal=_auditor(reviewer.scope), application_id=application_id
+    )
+    assert result["status"] == "revealed"
+    assert marker not in json.dumps(timeline, sort_keys=True)
+
 def test_registered_session_cannot_reach_legacy_raw_routes(tmp_path: Path) -> None:
     environment, _submission = _configured_http_source(tmp_path)
     with UvicornLoopback(environment, app_target="task4_consistency.web.app:create_s02_test_app", app_factory=True) as server:
@@ -283,36 +397,76 @@ def test_registered_session_cannot_reach_legacy_raw_routes(tmp_path: Path) -> No
             headers={"Cookie": cookie},
             use_session=False,
         )
+        malformed = server.raw_request(
+            "POST",
+            "/api/check",
+            body=b'{"fixture_id":',
+            headers={"Cookie": cookie},
+            use_session=False,
+        )
+        bulk = server.request(
+            "POST",
+            "/api/check/batch",
+            body={
+                "applications": [
+                    {"application_id": "cross-tenant-raw", "documents": []}
+                ]
+            },
+            headers={"Cookie": cookie},
+            use_session=False,
+        )
+        rules_path = server.request(
+            "POST",
+            "/api/check",
+            body={
+                "fixture_id": "app_r53_bad_engine",
+                "rules_path": "configs/rules_auto_lease.yaml",
+            },
+            headers={"Cookie": cookie},
+            use_session=False,
+        )
     assert fixture.status == 404
     assert arbitrary.status == 404
+    assert malformed.status == 404
+    assert bulk.status == 404
+    assert rules_path.status == 404
     assert fixture.json() == {"detail": {"error": "SYNTHETIC_ONLY"}}
     assert arbitrary.json() == {"detail": {"error": "SYNTHETIC_ONLY"}}
+    assert malformed.json() == {"detail": {"error": "SYNTHETIC_ONLY"}}
+    assert bulk.json() == {"detail": {"error": "SYNTHETIC_ONLY"}}
+    assert rules_path.json() == {"detail": {"error": "SYNTHETIC_ONLY"}}
     assert "cross-tenant-raw" not in arbitrary.text
 
 
 def test_legacy_demo_check_accepts_only_manifest_fixture_identity(tmp_path: Path) -> None:
     # The legacy route is retained only as a synthetic manifest adapter.
-    # The exact fixture payload is accepted; an arbitrary raw Application and
-    # caller-selected rules path are existence-hidden.
-    fixture_path = ROOT / "fixtures" / "applications" / "app_r53_bad_engine.json"
-    fixture_payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+    # The fixed fixture identity is accepted, an unknown identity is hidden,
+    # and the closed request envelope declines a caller-selected rules path.
     with UvicornLoopback() as server:
         accepted = server.request(
             "POST",
             "/api/check",
-            body={"application": fixture_payload},
+            body={"fixture_id": "app_r53_bad_engine"},
             use_session=False,
         )
-        arbitrary = server.request(
+        unknown = server.request(
+            "POST",
+            "/api/check",
+            body={"fixture_id": "arbitrary"},
+            use_session=False,
+        )
+        caller_rules = server.request(
             "POST",
             "/api/check",
             body={
-                "application": {"application_id": "arbitrary", "documents": []},
+                "fixture_id": "app_r53_bad_engine",
                 "rules_path": "configs/rules_auto_lease.yaml",
             },
             use_session=False,
         )
     assert accepted.status == 200
     assert accepted.headers.get("cache-control") == "no-store"
-    assert arbitrary.status == 404
-    assert arbitrary.json() == {"detail": {"error": "SYNTHETIC_ONLY"}}
+    assert unknown.status == 404
+    assert unknown.json() == {"detail": {"error": "SYNTHETIC_ONLY"}}
+    assert caller_rules.status == 422
+    assert "rules_auto_lease.yaml" not in caller_rules.text

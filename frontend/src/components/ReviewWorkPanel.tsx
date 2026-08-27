@@ -274,6 +274,7 @@ type RevealState = {
   tokenKey: string;
   observationId: string;
   sourceText: string;
+  expiresAt: number;
 };
 
 /** The source-backed correction target pinned to one workspace observation
@@ -2104,7 +2105,8 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     }
     const revealLive =
       revealed === null ||
-      revealed.tokenKey === liveTokenKey(revealed.observationId);
+      (revealed.tokenKey === liveTokenKey(revealed.observationId) &&
+        Date.now() / 1000 < revealed.expiresAt);
     const draftLive =
       correctionTarget === null ||
       correctionTarget.tokenKey === liveTokenKey(correctionTarget.observationId);
@@ -2154,6 +2156,19 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
     // closure is recreated each render and stays pure.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [work.data]);
+
+  useEffect(() => {
+    if (revealed === null) return;
+    const delayMs = revealed.expiresAt * 1000 - Date.now();
+    if (delayMs <= 0) {
+      expireReviewAuthority();
+      return;
+    }
+    const timer = setTimeout(() => expireReviewAuthority(), delayMs);
+    return () => clearTimeout(timer);
+    // The response deadline is the authoritative reveal lifetime.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revealed]);
 
   const anyPending =
     claim.isPending ||
@@ -2409,7 +2424,14 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
   const storeRevealIfIssued = (issuance: IssuedCommand, result: RevealResult) => {
     if (issuedRef.current !== issuance) return;
     const expectedKey = liveTokenKey(result.observation_id);
-    if (expectedKey === null || issuance.tokenKey !== expectedKey) {
+    const effectiveExpiry = result.claim_expires_at;
+    if (
+      expectedKey === null ||
+      issuance.tokenKey !== expectedKey ||
+      typeof effectiveExpiry !== "number" ||
+      !Number.isFinite(effectiveExpiry) ||
+      Date.now() / 1000 >= effectiveExpiry
+    ) {
       invalidateRestricted();
       return;
     }
@@ -2419,6 +2441,7 @@ export default function ReviewWorkPanel({ workId }: { workId: string }) {
       tokenKey: issuance.tokenKey,
       observationId: result.observation_id,
       sourceText: result.source_text,
+      expiresAt: effectiveExpiry,
     });
     reveal.reset();
   };

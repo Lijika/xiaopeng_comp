@@ -2419,6 +2419,38 @@ describe("ReviewWorkPanel controlled reveal (T03)", () => {
     expect(router.calls.filter((call) => call.method === "POST").length).toBe(1);
   });
 
+  it("uses the reveal response effective expiry before the longer claim expiry", async () => {
+    const responseExpiry = Math.floor(Date.now() / 1000) + 3;
+    const router = fetchRouter({
+      ...baseRoutes(),
+      [`GET ${WORK_PATH}`]: () =>
+        jsonResponse(
+          workPayload({
+            status: "claimed",
+            claim_subject: "t02-reviewer",
+            claim_fence: 1,
+            claim_expires_at: Math.floor(Date.now() / 1000) + 30,
+          }),
+        ),
+      [`GET ${WORKSPACE_PATH}`]: () => jsonResponse(t03WorkspacePayload()),
+      [`POST ${REVEAL_PATH}`]: () =>
+        jsonResponse(revealResultPayload({ claim_expires_at: responseExpiry })),
+    });
+    renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+    await waitForReviewReady();
+    await userEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
+    await findRestrictedElements("review-reveal-source");
+    await vi.waitFor(
+      () => expectRestrictedElementsAbsent("review-reveal-source"),
+      { timeout: 8_000 },
+    );
+    expectRestrictedAbsent(
+      restrictedElement("review-panel").textContent,
+      SOURCE_SENTINEL,
+    );
+    expect(router.calls.filter((call) => call.method === "POST").length).toBe(1);
+  });
+
   it("discards a late reveal response that resolves after the claim expires", async () => {
     const nearExpiry = Math.floor(Date.now() / 1000) + 3;
     let resolveReveal: ((response: Response) => void) | undefined;

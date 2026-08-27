@@ -193,8 +193,7 @@ def test_web_check_demo_step2_ok_via_fixture_api():
     name = "app_demo_step2_ok.json"
     fx = client.get(f"/api/fixtures/{name}")
     assert fx.status_code == 200
-    app = fx.json()
-    r = client.post("/api/check", json={"application": app})
+    r = client.post("/api/check", json={"fixture_id": Path(name).stem})
     assert r.status_code == 200, r.text
     body = r.json()
     report = body.get("report") or body

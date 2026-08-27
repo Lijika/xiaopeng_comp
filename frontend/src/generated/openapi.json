@@ -1,67 +1,6 @@
 {
   "components": {
     "schemas": {
-      "BatchCheckBody": {
-        "description": "Run check on multiple applications (inline or fixture filenames).\n\nSoft limit: BATCH_CHECK_MAX_N (default 50). For full labeled metrics use CLI\n``evaluate --suite main`` — there is no ``/api/evaluate/batch`` or job queue.",
-        "properties": {
-          "applications": {
-            "anyOf": [
-              {
-                "items": {
-                  "additionalProperties": true,
-                  "type": "object"
-                },
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Applications"
-          },
-          "fixture_files": {
-            "anyOf": [
-              {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Fixture Files"
-          }
-        },
-        "title": "BatchCheckBody",
-        "type": "object"
-      },
-      "CheckBody": {
-        "properties": {
-          "application": {
-            "additionalProperties": true,
-            "title": "Application",
-            "type": "object"
-          },
-          "rules_path": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Rules Path"
-          }
-        },
-        "required": [
-          "application"
-        ],
-        "title": "CheckBody",
-        "type": "object"
-      },
       "DemoBatchCheckResponse": {
         "additionalProperties": false,
         "properties": {
@@ -6065,7 +6004,9 @@
             "type": "integer"
           },
           "classification": {
-            "const": "RESTRICTED",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Z][A-Z0-9_]*$",
             "title": "Classification",
             "type": "string"
           },
@@ -6074,12 +6015,16 @@
             "type": "string"
           },
           "purpose": {
-            "const": "MANUAL_REVIEW",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Z][A-Z0-9_]*$",
             "title": "Purpose",
             "type": "string"
           },
           "reason": {
-            "const": "EVIDENCE_VERIFICATION",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Z][A-Z0-9_]*$",
             "title": "Reason",
             "type": "string"
           },
@@ -19229,7 +19174,20 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/CheckBody"
+                "additionalProperties": false,
+                "properties": {
+                  "fixture_id": {
+                    "maxLength": 200,
+                    "minLength": 1,
+                    "title": "Fixture Id",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "fixture_id"
+                ],
+                "title": "CheckBody",
+                "type": "object"
               }
             }
           },
@@ -19247,16 +19205,6 @@
               }
             },
             "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           }
         },
         "summary": "Api Check"
@@ -19269,7 +19217,23 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/BatchCheckBody"
+                "additionalProperties": false,
+                "description": "Run checks over server-owned synthetic fixture filenames.\n\nSoft limit: BATCH_CHECK_MAX_N (default 50). For full labeled metrics use CLI\n``evaluate --suite main`` — there is no ``/api/evaluate/batch`` or job queue.",
+                "properties": {
+                  "fixture_files": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "minItems": 1,
+                    "title": "Fixture Files",
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "fixture_files"
+                ],
+                "title": "BatchCheckBody",
+                "type": "object"
               }
             }
           },
@@ -19287,16 +19251,6 @@
               }
             },
             "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           }
         },
         "summary": "Api Check Batch"
@@ -22969,7 +22923,7 @@
             "application/json": {
               "schema": {
                 "additionalProperties": false,
-                "description": "The S15 reveal command.  ``expected_fence`` is bounded at 1 because\nthe domain rejects an unclaimed (fence 0) reveal as invalid; the wire\nstatus for that violation is the same 422 the domain raises today.\nS15 adds the explicit bounded ``purpose``, ``reason`` and\n``classification`` as closed literals (``MANUAL_REVIEW``,\n``EVIDENCE_VERIFICATION`` and ``RESTRICTED``); any other value fails the\nclosed schema with a 422 and never reaches the domain.  An optional\n``expected_source_region`` must, when supplied, equal the authoritative\nlink's region exactly or the domain fails the command closed.  The\n``expected_source_region`` is required and must equal the public\nprojected locator (``region:<n>``) or the command is rejected before\nany raw read.",
+                "description": "The S15 reveal command.  ``expected_fence`` is bounded at 1 because\nthe domain rejects an unclaimed (fence 0) reveal as invalid; the wire\nstatus for that violation is the same 422 the domain raises today.\nS15 adds bounded ``purpose``, ``reason`` and ``classification`` codes in\na closed request envelope.  The active C19 release authorizes their\nvalues in the domain.  The ``expected_source_region`` is required and\nmust equal the public projected locator (``region:<n>``) before any raw\nread.",
                 "properties": {
                   "application_id": {
                     "maxLength": 200,
@@ -22978,7 +22932,9 @@
                     "type": "string"
                   },
                   "classification": {
-                    "const": "RESTRICTED",
+                    "maxLength": 64,
+                    "minLength": 1,
+                    "pattern": "^[A-Z][A-Z0-9_]*$",
                     "title": "Classification",
                     "type": "string"
                   },
@@ -23040,12 +22996,16 @@
                     "type": "string"
                   },
                   "purpose": {
-                    "const": "MANUAL_REVIEW",
+                    "maxLength": 64,
+                    "minLength": 1,
+                    "pattern": "^[A-Z][A-Z0-9_]*$",
                     "title": "Purpose",
                     "type": "string"
                   },
                   "reason": {
-                    "const": "EVIDENCE_VERIFICATION",
+                    "maxLength": 64,
+                    "minLength": 1,
+                    "pattern": "^[A-Z][A-Z0-9_]*$",
                     "title": "Reason",
                     "type": "string"
                   }

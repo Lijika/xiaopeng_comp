@@ -2463,30 +2463,6 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
-        /**
-         * BatchCheckBody
-         * @description Run check on multiple applications (inline or fixture filenames).
-         *
-         *     Soft limit: BATCH_CHECK_MAX_N (default 50). For full labeled metrics use CLI
-         *     ``evaluate --suite main`` — there is no ``/api/evaluate/batch`` or job queue.
-         */
-        BatchCheckBody: {
-            /** Applications */
-            applications?: {
-                [key: string]: unknown;
-            }[] | null;
-            /** Fixture Files */
-            fixture_files?: string[] | null;
-        };
-        /** CheckBody */
-        CheckBody: {
-            /** Application */
-            application: {
-                [key: string]: unknown;
-            };
-            /** Rules Path */
-            rules_path?: string | null;
-        };
         /** DemoBatchCheckResponse */
         DemoBatchCheckResponse: {
             /** Completed */
@@ -4416,23 +4392,14 @@ export interface components {
             application_id: string;
             /** Claim Expires At */
             claim_expires_at: number;
-            /**
-             * Classification
-             * @constant
-             */
-            classification: "RESTRICTED";
+            /** Classification */
+            classification: string;
             /** Observation Id */
             observation_id: string;
-            /**
-             * Purpose
-             * @constant
-             */
-            purpose: "MANUAL_REVIEW";
-            /**
-             * Reason
-             * @constant
-             */
-            reason: "EVIDENCE_VERIFICATION";
+            /** Purpose */
+            purpose: string;
+            /** Reason */
+            reason: string;
             /** Replayed */
             replayed: boolean;
             /** Revealed At */
@@ -9024,7 +8991,10 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["CheckBody"];
+                "application/json": {
+                    /** Fixture Id */
+                    fixture_id: string;
+                };
             };
         };
         responses: {
@@ -9037,15 +9007,6 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -9059,7 +9020,10 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["BatchCheckBody"];
+                "application/json": {
+                    /** Fixture Files */
+                    fixture_files: string[];
+                };
             };
         };
         responses: {
@@ -9072,15 +9036,6 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -11619,11 +11574,8 @@ export interface operations {
                 "application/json": {
                     /** Application Id */
                     application_id: string;
-                    /**
-                     * Classification
-                     * @constant
-                     */
-                    classification: "RESTRICTED";
+                    /** Classification */
+                    classification: string;
                     /**
                      * S01ReviewCommandContext
                      * @description The closed review command context.  The domain compares it by exact
@@ -11651,16 +11603,10 @@ export interface operations {
                     idempotency_key: string;
                     /** Observation Id */
                     observation_id: string;
-                    /**
-                     * Purpose
-                     * @constant
-                     */
-                    purpose: "MANUAL_REVIEW";
-                    /**
-                     * Reason
-                     * @constant
-                     */
-                    reason: "EVIDENCE_VERIFICATION";
+                    /** Purpose */
+                    purpose: string;
+                    /** Reason */
+                    reason: string;
                 };
             };
         };
