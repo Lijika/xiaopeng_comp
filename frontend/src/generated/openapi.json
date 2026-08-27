@@ -5984,7 +5984,7 @@
       },
       "S01RevealEligibility": {
         "additionalProperties": false,
-        "description": "The S15 reveal eligibility projection — derived from the canonical\nC19 policy (configs/c19_reveal_policy.json) and the current\ntenant/resource assignment.  The UI must not hand-write purpose/\nreason/classification; it consumes this authorized projection, and the\ndomain re-validates the same policy at command time.  When the policy\nis unavailable or the tenant is not G4, eligible is false and the\nreveal remains closed.",
+        "description": "The S15 reveal eligibility projection — derived from the active,\napproved S08 immutable release and the current tenant/resource\nassignment.  The UI must not hand-write purpose/reason/classification;\nit consumes this authorized projection, and the domain resolves the\nsame governed decision at command time.  When the release is unavailable\nor the tenant is not G4, eligible is false and reveal remains closed.",
         "properties": {
           "classification": {
             "anyOf": [
@@ -19223,7 +19223,7 @@
     },
     "/api/check": {
       "post": {
-        "description": "Synthetic-only boundary: runs the local RuleEngine on synthetic\ninput and never creates a controlled S01 processing cycle, evidence\nrevision or audit fact.  Controlled sessions are existence-hidden.",
+        "description": "Synthetic-only boundary: the remaining demo operation accepts only\na server-whitelisted synthetic fixture identity and chooses the\nserver-owned ruleset.  The legacy general raw-Application API is\nretired; arbitrary bodies, guessed direct-object paths and bulk\npayloads are existence-hidden.  Controlled sessions are hidden before\nany parsing.",
         "operationId": "api_check_api_check_post",
         "requestBody": {
           "content": {
@@ -19563,7 +19563,7 @@
     },
     "/api/fixtures/{name}": {
       "get": {
-        "description": "Synthetic-only boundary: serves only preloaded synthetic fixtures and\nnever reads the controlled S01 store.  Controlled sessions are\nexistence-hidden (404) and the route cannot serve controlled application\ndata; it is not part of the S15 reveal data plane.",
+        "description": "Synthetic-only boundary: serves only preloaded synthetic fixtures and\nnever reads the controlled S01 store.  Controlled sessions (both S01\ndemo with registered scope and S02 registered) are existence-hidden\nbefore any fixture lookup; the response is no-store as defense in\ndepth.",
         "operationId": "get_fixture_api_fixtures__name__get",
         "parameters": [
           {
@@ -22952,7 +22952,7 @@
     },
     "/controlled/s01/api/commands/review-work-items/{work_item_id}/reveal-field-observation": {
       "post": {
-        "operationId": "controlled_s04_demo_reveal_field_observation_controlled_s01_api_commands_review_work_items__work_item_id__reveal_field_observation_post",
+        "operationId": "controlled_s15_reveal_field_observation_controlled_s01_api_commands_review_work_items__work_item_id__reveal_field_observation_post",
         "parameters": [
           {
             "in": "path",
@@ -23130,7 +23130,7 @@
             "description": "Service Unavailable"
           }
         },
-        "summary": "Controlled S04 Demo Reveal Field Observation"
+        "summary": "Controlled S15 Reveal Field Observation"
       }
     },
     "/controlled/s01/api/commands/review-work-items/{work_item_id}/submit": {

@@ -1433,8 +1433,10 @@ async function runRegisteredRevealLifetimeTracer(browser) {
     await expect(page.getByTestId("review-reveal-source")).toBeVisible();
     expectByteEqual(await page.getByTestId("review-reveal-source").textContent(), "TEST-VIN-A");
     await assertOnlyOneSentinelElement(page, "TEST-VIN-A");
-    // No direct-object/download/export/print/copy grant.
-    const history = await page.request.get(`${server.baseURL}/controlled/s01/api/queries/applications/${encodeURIComponent(applicationId)}/history`);
+      // No raw in history.
+      const history = await page.request.get(
+        `${server.baseURL}/controlled/s02/api/queries/applications/${encodeURIComponent(applicationId)}/history`,
+    );
     expect(history.ok()).toBeTruthy();
     const historyBody = await history.json();
     expect(JSON.stringify(historyBody).includes("TEST-VIN-A")).toBe(false);

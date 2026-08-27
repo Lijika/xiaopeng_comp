@@ -52,9 +52,12 @@ export interface paths {
         put?: never;
         /**
          * Api Check
-         * @description Synthetic-only boundary: runs the local RuleEngine on synthetic
-         *     input and never creates a controlled S01 processing cycle, evidence
-         *     revision or audit fact.  Controlled sessions are existence-hidden.
+         * @description Synthetic-only boundary: the remaining demo operation accepts only
+         *     a server-whitelisted synthetic fixture identity and chooses the
+         *     server-owned ruleset.  The legacy general raw-Application API is
+         *     retired; arbitrary bodies, guessed direct-object paths and bulk
+         *     payloads are existence-hidden.  Controlled sessions are hidden before
+         *     any parsing.
          */
         post: operations["api_check_api_check_post"];
         delete?: never;
@@ -221,9 +224,10 @@ export interface paths {
         /**
          * Get Fixture
          * @description Synthetic-only boundary: serves only preloaded synthetic fixtures and
-         *     never reads the controlled S01 store.  Controlled sessions are
-         *     existence-hidden (404) and the route cannot serve controlled application
-         *     data; it is not part of the S15 reveal data plane.
+         *     never reads the controlled S01 store.  Controlled sessions (both S01
+         *     demo with registered scope and S02 registered) are existence-hidden
+         *     before any fixture lookup; the response is no-store as defense in
+         *     depth.
          */
         get: operations["get_fixture_api_fixtures__name__get"];
         put?: never;
@@ -820,8 +824,8 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Controlled S04 Demo Reveal Field Observation */
-        post: operations["controlled_s04_demo_reveal_field_observation_controlled_s01_api_commands_review_work_items__work_item_id__reveal_field_observation_post"];
+        /** Controlled S15 Reveal Field Observation */
+        post: operations["controlled_s15_reveal_field_observation_controlled_s01_api_commands_review_work_items__work_item_id__reveal_field_observation_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -4376,13 +4380,12 @@ export interface components {
         };
         /**
          * S01RevealEligibility
-         * @description The S15 reveal eligibility projection — derived from the canonical
-         *     C19 policy (configs/c19_reveal_policy.json) and the current
-         *     tenant/resource assignment.  The UI must not hand-write purpose/
-         *     reason/classification; it consumes this authorized projection, and the
-         *     domain re-validates the same policy at command time.  When the policy
-         *     is unavailable or the tenant is not G4, eligible is false and the
-         *     reveal remains closed.
+         * @description The S15 reveal eligibility projection — derived from the active,
+         *     approved S08 immutable release and the current tenant/resource
+         *     assignment.  The UI must not hand-write purpose/reason/classification;
+         *     it consumes this authorized projection, and the domain resolves the
+         *     same governed decision at command time.  When the release is unavailable
+         *     or the tenant is not G4, eligible is false and reveal remains closed.
          */
         S01RevealEligibility: {
             /** Classification */
@@ -11602,7 +11605,7 @@ export interface operations {
             };
         };
     };
-    controlled_s04_demo_reveal_field_observation_controlled_s01_api_commands_review_work_items__work_item_id__reveal_field_observation_post: {
+    controlled_s15_reveal_field_observation_controlled_s01_api_commands_review_work_items__work_item_id__reveal_field_observation_post: {
         parameters: {
             query?: never;
             header?: never;

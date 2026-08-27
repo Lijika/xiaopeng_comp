@@ -6932,6 +6932,18 @@ def create_s02_test_app() -> FastAPI:
             raise OSError("injected S03 test fault")
 
     try:
+        S08_SERVICE = PolicyGovernanceService(
+            state_path=state_path,
+            audit_available=True,
+            storage_available=True,
+            source_rules_path=DEFAULT_RULES,
+            source_kb_path=S08_DEFAULT_KB_PATH,
+            corpus_root=FIXTURES,
+            clock=lambda: int(S01_SESSION_CLOCK()),
+            lifecycle_snapshot_provider=_s09_lifecycle_impact_snapshot,
+            diagnostic_snapshot_provider=_s09_lifecycle_diagnostic_snapshot,
+        )
+        S08_SERVICE.bootstrap_once()
         S01_SERVICE = ControlledScenarioService(
             fixture_root=FIXTURES,
             rules_path=DEFAULT_RULES,
@@ -6944,10 +6956,11 @@ def create_s02_test_app() -> FastAPI:
             scenario_id=scenario_value or "app_r53_bad_engine.json",
             # Keep the S01 fault-injected work item isolated from the
             # S02-governed policy that the registered browser slice
-            # exercises.  Sharing the same SQLite file would let the S02
+            # exercises when this server is used for the S01 audit-fault
+            # regression.  Sharing the same SQLite file would let the S02
             # bootstrap's active generation invalidate the already-created
-            # S01 run via S09.
-            policy_governance=None,
+            # S01 run via S09, turning the expected 503 into 409.
+            policy_governance=None if s03_fault_point else S08_SERVICE,
             downstream_registry=build_c_demo_registry(
                 extra_registrations=(
                     [
@@ -6962,22 +6975,6 @@ def create_s02_test_app() -> FastAPI:
                 )
             ),
         )
-        # S15 R2: registered browser slice exercises governance via the
-        # pooled S02 store, but that store must not be the same global
-        # S08 that the unrelated S01 loopback test shares.  Keep S08
-        # bound to its own state.
-        S08_SERVICE = PolicyGovernanceService(
-            state_path=state_path,
-            audit_available=True,
-            storage_available=True,
-            source_rules_path=DEFAULT_RULES,
-            source_kb_path=S08_DEFAULT_KB_PATH,
-            corpus_root=FIXTURES,
-            clock=lambda: int(S01_SESSION_CLOCK()),
-            lifecycle_snapshot_provider=_s09_lifecycle_impact_snapshot,
-            diagnostic_snapshot_provider=_s09_lifecycle_diagnostic_snapshot,
-        )
-        S08_SERVICE.bootstrap_once()
         S01_TEST_DRIVER = None
     except Exception:
         S01_SERVICE = None
