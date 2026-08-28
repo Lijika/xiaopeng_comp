@@ -8,9 +8,7 @@ import {
   type S16QueryResponse,
 } from "../api/client";
 import {
-  S16_REQUEST_KEY,
   clearApplicationScopedCache,
-  s16RequestQueryFn,
   useS16Approve,
   useS16Cancel,
   useS16Commit,
@@ -132,9 +130,14 @@ function LegalHoldSection({
               {hold.expiry !== null && hold.expiry !== undefined
                 ? ` · 期限 ${hold.expiry}`
                 : ""}
-              {hold.released ? " · 已释放" : " · 生效中"}
+              {" "}
+              {hold.state === "expired"
+                ? " · 已过期"
+                : hold.released
+                  ? " · 已释放"
+                  : " · 生效中"}
             </dd>
-            {!hold.released && (
+            {hold.state !== "expired" && !hold.released && (
               <button
                 type="button"
                 data-testid={`s16-release-hold-${hold.hold_id}`}
@@ -314,11 +317,14 @@ function ApprovalSection({
           onApproved();
         },
         onError: (error) => {
-          // R3 (P1-15): an approver-surface 403 invalidates only the
-          // approver identity — token, index and any previous approval
-          // error are cleared so the stale approver can never be reused.
+          // R3 (P1-15) + R4 (P2-1): an approver-surface 403 invalidates
+          // only the approver identity — token, index (reset to the next
+          // expected approver), unknown and mutation state are cleared so
+          // a new subject never inherits the stale subject's ordinal or
+          // idempotency key.
           if (error instanceof HttpError && error.status === 403) {
             setApproverToken("");
+            setApproverIndex(approved + 1);
             setUnknown(false);
             approve.reset();
             return;
@@ -575,6 +581,19 @@ function ReceiptSection({
   onIdentityDenied: () => void;
 }) {
   const receipt = useS16Receipt(requestId);
+  const identityDeniedRef = useRef(false);
+  useEffect(() => {
+    // R4 (P2-3): the 403 invalidation is a side effect, never a render
+    // mutation; the guard keeps one cleanup per failure across re-renders.
+    if (
+      receipt.error instanceof HttpError &&
+      receipt.error.status === 403 &&
+      !identityDeniedRef.current
+    ) {
+      identityDeniedRef.current = true;
+      onIdentityDenied();
+    }
+  }, [receipt.error, onIdentityDenied]);
   if (receipt.isPending) {
     return (
       <p role="status" aria-live="polite" data-testid="s16-receipt-loading">
@@ -583,12 +602,6 @@ function ReceiptSection({
     );
   }
   if (receipt.error !== null) {
-    if (
-      receipt.error instanceof HttpError &&
-      receipt.error.status === 403
-    ) {
-      onIdentityDenied();
-    }
     return <S16ErrorState error={receipt.error} />;
   }
   const data = receipt.data;
@@ -638,70 +651,98 @@ function ReceiptSection({
  * rendered; every request carries its own idempotency key and a lost
  * response keeps the key for exact replay.
  */
-export default function S16GovernedDeletionPanel() {
+function CompletedSurface({
+  requestId,
+  onIdentityDenied,
+}: {
+  requestId: string;
+  onIdentityDenied: (error?: Error) => void;
+}) {
+  // R4 (P1-5): the completed surface mounts NO application-scoped S16
+  // query — the request/hold/manifest/approval queries were removed and
+  // their observer unmounted with the active surface.  Only the
+  // value-free receipt key is live here.
+  return (
+    <section className="panel" data-testid="s16-governed-deletion" aria-labelledby="s16-title">
+      <h2 id="s16-title">合规删除（服务端权威）</h2>
+      <p data-testid="s16-complete-only" role="status">
+        删除已完成：仅保留无原值凭证。
+      </p>
+      <section className="panel" data-testid="s16-job" aria-labelledby="s16-job-title">
+        <h3 id="s16-job-title">持久删除任务</h3>
+        <dl className="facts">
+          <div>
+            <dt>状态</dt>
+            <dd data-testid="s16-job-status">complete</dd>
+          </div>
+        </dl>
+      </section>
+      <ReceiptSection requestId={requestId} onIdentityDenied={onIdentityDenied} />
+    </section>
+  );
+}
+
+function ActiveSurface({
+  onComplete,
+  onIdentityDenied,
+}: {
+  onComplete: (requestId: string) => void;
+  onIdentityDenied: (error?: Error) => void;
+}) {
   const [reference, setReference] = useState("");
   const [requestId, setRequestId] = useState<string | null>(null);
   const [preflight, setPreflight] = useState<S16PreflightResponse | null>(null);
   const [preflightUnknown, setPreflightUnknown] = useState(false);
   const [cancelled, setCancelled] = useState(false);
   const [approvedCount, setApprovedCount] = useState(0);
-  const [receiptEpoch, setReceiptEpoch] = useState(0);
   const queryClient = useQueryClient();
   const preflightMutation = useS16Preflight();
   const query = useS16Query(requestId);
 
-  // After a completed deletion every application-scoped cache is dropped
-  // and the S16 plane is refetched from the authority.
-  const cacheClearedRef = useRef(false);
-  const cacheKeyRef = useRef<string | null>(null);
+  // R4 (P1-5): completion is detected here; the application-scoped S16
+  // caches are REMOVED and never refilled, then the surface unmounts so
+  // its request query observer cannot re-create the cache entry.
+  const completionHandledRef = useRef(false);
+  const completionKeyRef = useRef<string | null>(null);
   useEffect(() => {
-    if (cacheKeyRef.current !== requestId) {
-      cacheKeyRef.current = requestId;
-      cacheClearedRef.current = false;
+    if (completionKeyRef.current !== requestId) {
+      completionKeyRef.current = requestId;
+      completionHandledRef.current = false;
     }
     if (
       requestId !== null &&
       query.data?.job?.status === "complete" &&
-      !cacheClearedRef.current
+      !completionHandledRef.current
     ) {
-      cacheClearedRef.current = true;
+      completionHandledRef.current = true;
       clearApplicationScopedCache(queryClient);
-      // R3 (P1-7): the S16 caches were removed; the request query is
-      // deterministically re-populated from the authority, and the
-      // receipt observer is re-mounted so the value-free receipt
-      // refetches instead of lingering in a removed-query limbo.
-      void queryClient.fetchQuery({
-        queryKey: S16_REQUEST_KEY(requestId),
-        queryFn: s16RequestQueryFn(requestId),
-      });
-      setReceiptEpoch((current) => current + 1);
+      onComplete(requestId);
     }
-  }, [query.data?.job?.status, queryClient, requestId]);
+  }, [query.data?.job?.status, queryClient, requestId, onComplete]);
 
-  // Identity invalidation (R2 P1-14): a governance-surface 403 clears the
-  // local S16 state and every S16/application-scoped cache so no previous
-  // identity's manifest, reference or approval survives; the panel shows
-  // only the authorization error.  Approver-surface 403s (the approval
-  // section's own hook) leave the governance state intact.
-  const [identityDenied, setIdentityDenied] = useState(false);
+  // Identity invalidation (R2 P1-14, R4 P2-3): a governance-surface 403
+  // clears every S16/application-scoped cache and hands the error to the
+  // parent once; the parent unmounts this surface so no stale observer
+  // survives.
+  const deniedRef = useRef(false);
   const governance403 =
-    identityDenied ||
     (query.error instanceof HttpError && query.error.status === 403) ||
     (preflightMutation.error instanceof HttpError &&
       preflightMutation.error.status === 403);
   useEffect(() => {
-    if (!governance403) return;
-    setIdentityDenied(true);
-    setReference("");
-    setPreflight(null);
-    setRequestId(null);
-    setCancelled(false);
-    setApprovedCount(0);
-    setPreflightUnknown(false);
+    if (!governance403 || deniedRef.current) return;
+    deniedRef.current = true;
     queryClient.removeQueries({ queryKey: ["s16", "deletions"] });
     queryClient.removeQueries({ queryKey: ["s16", "legal-holds"] });
     clearApplicationScopedCache(queryClient);
-  }, [governance403, queryClient]);
+    const error =
+      query.error instanceof HttpError
+        ? query.error
+        : preflightMutation.error instanceof HttpError
+          ? preflightMutation.error
+          : new HttpError(403, { error: "S16_FORBIDDEN" });
+    onIdentityDenied(error);
+  }, [governance403, queryClient, query.error, preflightMutation.error, onIdentityDenied]);
 
   useEffect(() => {
     if (preflight !== null) return;
@@ -729,50 +770,6 @@ export default function S16GovernedDeletionPanel() {
       },
     );
   };
-
-  // R2 (P1-14): an invalidated governance identity renders ONLY the
-  // authorization error — no reference, manifest, hold, approval or commit
-  // surface survives.
-  if (governance403) {
-    return (
-      <section className="panel" data-testid="s16-governed-deletion" aria-labelledby="s16-title">
-        <h2 id="s16-title">合规删除（服务端权威）</h2>
-        {query.error instanceof HttpError ? (
-          <S16ErrorState error={query.error} />
-        ) : preflightMutation.error instanceof HttpError ? (
-          <S16ErrorState error={preflightMutation.error} />
-        ) : (
-          <S16ErrorState error={new HttpError(403, { error: "S16_FORBIDDEN" })} />
-        )}
-      </section>
-    );
-  }
-
-  // R2 (P1-13): after completion the page renders ONLY the value-free
-  // receipt and its summary — every preflight, hold, approval, commit and
-  // repair surface is unloaded.
-  const jobComplete = query.data?.job?.status === "complete";
-  if (jobComplete && requestId !== null && query.data !== undefined) {
-    return (
-      <section className="panel" data-testid="s16-governed-deletion" aria-labelledby="s16-title">
-        <h2 id="s16-title">合规删除（服务端权威）</h2>
-        <p data-testid="s16-complete-only" role="status">
-          删除已完成：仅保留无原值凭证。
-        </p>
-        {/* R3 (P1-7): the terminal job surface stays mounted with the
-            final "complete" status beside the value-free receipt. */}
-        <JobSection
-          query={query.data}
-          onIdentityDenied={() => setIdentityDenied(true)}
-        />
-        <ReceiptSection
-          key={receiptEpoch}
-          requestId={requestId}
-          onIdentityDenied={() => setIdentityDenied(true)}
-        />
-      </section>
-    );
-  }
 
   return (
     <section className="panel" data-testid="s16-governed-deletion" aria-labelledby="s16-title">
@@ -839,17 +836,73 @@ export default function S16GovernedDeletionPanel() {
           requestId={preflight.request_id}
           earlyDeletion={preflight.early_deletion}
           approvedCount={approvedCount}
-          onIdentityDenied={() => setIdentityDenied(true)}
+          onIdentityDenied={() => onIdentityDenied()}
         />
       )}
 
       {query.data !== undefined && query.data.job !== null && (
         <JobSection
           query={query.data}
-          onIdentityDenied={() => setIdentityDenied(true)}
+          onIdentityDenied={() => onIdentityDenied()}
         />
       )}
       {query.error !== null && <S16ErrorState error={query.error} />}
     </section>
+  );
+}
+
+/**
+ * The S16 governed-deletion surface mounted only for ``/controlled/s16``
+ * (and its alias).  Sequence: submit an application reference -> read the
+ * nine-class dry-run manifest -> (early deletion) two approvers -> explicit
+ * commit -> bounded worker attempts -> repair when required -> value-free
+ * receipt.  No raw value, object reference or internal path is ever
+ * rendered; every request carries its own idempotency key and a lost
+ * response keeps the key for exact replay.
+ */
+export default function S16GovernedDeletionPanel() {
+  const queryClient = useQueryClient();
+  const [identityDenied, setIdentityDenied] = useState(false);
+  const [deniedError, setDeniedError] = useState<Error | null>(null);
+  const [completedRequestId, setCompletedRequestId] = useState<
+    string | null
+  >(null);
+
+  const handleIdentityDenied = (error?: Error) => {
+    setDeniedError(error ?? null);
+    clearApplicationScopedCache(queryClient);
+    setIdentityDenied(true);
+  };
+
+  if (identityDenied) {
+    // R2 (P1-14): an invalidated governance identity renders ONLY the
+    // authorization error — no reference, manifest, hold, approval or
+    // commit surface survives.
+    return (
+      <section className="panel" data-testid="s16-governed-deletion" aria-labelledby="s16-title">
+        <h2 id="s16-title">合规删除（服务端权威）</h2>
+        {deniedError !== null ? (
+          <S16ErrorState error={deniedError} />
+        ) : (
+          <S16ErrorState error={new HttpError(403, { error: "S16_FORBIDDEN" })} />
+        )}
+      </section>
+    );
+  }
+
+  if (completedRequestId !== null) {
+    return (
+      <CompletedSurface
+        requestId={completedRequestId}
+        onIdentityDenied={handleIdentityDenied}
+      />
+    );
+  }
+
+  return (
+    <ActiveSurface
+      onComplete={setCompletedRequestId}
+      onIdentityDenied={handleIdentityDenied}
+    />
   );
 }

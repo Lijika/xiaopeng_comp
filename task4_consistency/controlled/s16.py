@@ -1478,7 +1478,6 @@ class BackupDeletionOwner:
                     identities_json TEXT NOT NULL DEFAULT '[]',
                     PRIMARY KEY (operation_id, fence)
                 )
-                
                 """
             )
             try:
@@ -1589,9 +1588,77 @@ class BackupDeletionOwner:
             manifests.append(value)
         return manifests
 
+    def _backup_reconciliation(self) -> dict[str, Any]:
+        """Value-free bidirectional backup integrity check (R4 P1-4):
+        every manifest entry must be backed by a registry row whose handle
+        stays inside the backup root with a matching captured file and
+        content digest, and every registry row must be referenced by a
+        manifest.  Orphans, missing rows, missing files, schema or digest
+        mismatches raise a stable ``S16Unavailable`` so inventory,
+        ``owner_healthy``, commit preflight and readiness all fail closed."""
+        manifests = self._load_manifests()
+        with self._registry_connect() as connection:
+            rows = connection.execute(
+                "SELECT connector_identity, handle, content_sha256 "
+                "FROM backup_registry"
+            ).fetchall()
+        registry = {str(r[0]): (str(r[1]), str(r[2])) for r in rows}
+        referenced: set[str] = set()
+        for manifest in manifests:
+            files = manifest.get("files")
+            if not isinstance(files, list):
+                raise S16Unavailable(
+                    "S16 backup manifest schema is invalid"
+                )
+            if _digest(files) != str(manifest.get("entries_digest") or ""):
+                raise S16Unavailable(
+                    "S16 backup manifest entries digest mismatch"
+                )
+            for file_entry in files:
+                if not isinstance(file_entry, dict):
+                    raise S16Unavailable(
+                        "S16 backup manifest schema is invalid"
+                    )
+                identity = str(file_entry.get("connector_identity") or "")
+                if not identity:
+                    raise S16Unavailable(
+                        "S16 backup manifest schema is invalid"
+                    )
+                referenced.add(identity)
+                registry_row = registry.get(identity)
+                if registry_row is None:
+                    raise S16Unavailable(
+                        "S16 backup manifest references a missing registry row"
+                    )
+                handle, expected_digest = registry_row
+                if expected_digest != str(
+                    file_entry.get("content_sha256") or ""
+                ):
+                    raise S16Unavailable(
+                        "S16 backup registry digest mismatch"
+                    )
+                target = self._capture_target(handle)
+                if not target.is_file():
+                    raise S16Unavailable(
+                        "S16 backup captured file is missing"
+                    )
+                if (
+                    hashlib.sha256(target.read_bytes()).hexdigest()
+                    != expected_digest
+                ):
+                    raise S16Unavailable(
+                        "S16 backup captured file digest mismatch"
+                    )
+        orphans = sorted(set(registry) - referenced)
+        if orphans:
+            raise S16Unavailable(
+                "S16 backup registry contains orphan rows"
+            )
+        return {"manifests": manifests, "registry_rows": registry}
+
     def inventory(self, scope_fingerprint: str) -> list[CopyInventoryEntry]:
         entries: list[CopyInventoryEntry] = []
-        for manifest in self._load_manifests():
+        for manifest in self._backup_reconciliation()["manifests"]:
             if manifest.get("scope_fingerprint") != scope_fingerprint:
                 continue
             file_digest = _digest(manifest["files"])
@@ -1742,6 +1809,23 @@ class BackupDeletionOwner:
                 fingerprints, scope_fingerprint=scope_fingerprint
             )
             if not manifests:
+                # R4 (P1-3): even the already-absent outcome writes the
+                # operation binding so the worker/replay verify can prove
+                # the binding instead of a scope-only scan.
+                connection.execute(
+                    "INSERT INTO backup_deletion_bindings("
+                    "operation_id, fence, scope_fingerprint, "
+                    "fingerprints_digest, status, completed_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        operation_id,
+                        int(fence),
+                        scope_fingerprint,
+                        fingerprints_digest,
+                        "complete",
+                        int(self._clock()),
+                    ),
+                )
                 connection.execute("COMMIT")
                 return {
                     "status": "complete",
@@ -1918,8 +2002,78 @@ class BackupDeletionOwner:
         operation_id: str | None = None,
         fence: int | None = None,
     ) -> dict[str, Any]:
-        del operation_id, fence
         fingerprints = set(copy_fingerprints)
+        if operation_id is not None and fence is not None:
+            # R4 (P1-3): worker/replay absence proofs are BINDING proofs —
+            # the exact operation + fence must own this scope and
+            # fingerprints digest; a stale fence is a stable stale outcome
+            # and a mismatched binding is a stable conflict.  A staged
+            # (uncommitted) deletion intent is never verified.
+            with self._registry_connect() as connection:
+                binding = connection.execute(
+                    "SELECT scope_fingerprint, fingerprints_digest "
+                    "FROM backup_deletion_bindings "
+                    "WHERE operation_id = ? AND fence = ?",
+                    (operation_id, int(fence)),
+                ).fetchone()
+                if binding is not None:
+                    if (
+                        str(binding[0]) != scope_fingerprint
+                        or str(binding[1])
+                        != self._bindings_digest(fingerprints)
+                    ):
+                        raise S16OwnerFailure(
+                            self.owner_id,
+                            S16_OWNER_BINDING_CONFLICT,
+                            retryable=False,
+                            responsible_party="runtime_operations_owner",
+                            recovery_action=(
+                                "reconcile_scope_binding_and_resume"
+                            ),
+                        )
+                    return {
+                        "owner_id": self.owner_id,
+                        "status": "verified",
+                    }
+                highest = connection.execute(
+                    "SELECT MAX(fence) FROM backup_deletion_bindings "
+                    "WHERE operation_id = ?",
+                    (operation_id,),
+                ).fetchone()
+                if highest[0] is not None and int(highest[0]) > int(fence):
+                    raise S16OwnerFailure(
+                        self.owner_id,
+                        S16_OWNER_STALE_FENCE,
+                        retryable=False,
+                        responsible_party="runtime_operations_owner",
+                        recovery_action="reconcile_operation_fence_and_resume",
+                    )
+                staged = connection.execute(
+                    "SELECT status FROM backup_deletion_intents "
+                    "WHERE operation_id = ? AND fence = ?",
+                    (operation_id, int(fence)),
+                ).fetchone()
+                if staged is not None:
+                    raise S16OwnerFailure(
+                        self.owner_id,
+                        S16_VERIFY_FAILED,
+                        retryable=True,
+                        responsible_party="backup_operations_owner",
+                        recovery_action=(
+                            "resume_the_staged_backup_deletion"
+                        ),
+                    )
+            raise S16OwnerFailure(
+                self.owner_id,
+                S16_VERIFY_FAILED,
+                retryable=True,
+                responsible_party="backup_operations_owner",
+                recovery_action="verify_backup_absence_and_resume_the_same_job",
+            )
+        # Readiness scope probe (no operation/fence): the shared
+        # reconciliation first — integrity damage closes readiness — then
+        # the scope manifest scan.
+        self._backup_reconciliation()
         remaining = self._manifests_for_fingerprints(
             fingerprints, scope_fingerprint=scope_fingerprint
         )
@@ -1959,8 +2113,7 @@ class BackupDeletionOwner:
 
     def owner_healthy(self) -> bool:
         try:
-            with self._registry_connect() as connection:
-                connection.execute("SELECT COUNT(*) FROM backup_registry")
+            self._backup_reconciliation()
             return True
         except Exception:
             return False
@@ -2582,10 +2735,16 @@ class GovernedDeletionService:
                     self._ledger._append_event(
                         connection, preflight_event, self._now()
                     )
+                    # R4 (P1-1): the persistent binding stores ONLY the
+                    # value-free preflight snapshot — never the application
+                    # reference or any recoverable locator.  The authorized
+                    # in-memory response echoes the reference; a same-key
+                    # replay rebuilds the no-value response from this
+                    # snapshot plus the caller-supplied reference.
                     stored_response = self._preflight_response(
                         manifest=manifest,
                         request_id=request_id,
-                        application_reference=application_reference,
+                        application_reference=None,
                     )
                     self._ledger._binding_insert(
                         connection,
@@ -2616,13 +2775,12 @@ class GovernedDeletionService:
         *,
         manifest: dict[str, Any],
         request_id: str,
-        application_reference: str,
+        application_reference: str | None = None,
         replayed: bool = False,
     ) -> dict[str, Any]:
-        return {
+        response: dict[str, Any] = {
             "status": "accepted",
             "request_id": request_id,
-            "application_reference": application_reference,
             "scope_fingerprint": manifest["scope_fingerprint"],
             "manifest_digest": manifest["manifest_digest"],
             "entries_digest": manifest["entries_digest"],
@@ -2659,6 +2817,9 @@ class GovernedDeletionService:
             ],
             "replayed": replayed,
         }
+        if application_reference is not None:
+            response["application_reference"] = application_reference
+        return response
 
     def _build_manifest(
         self,
@@ -3049,7 +3210,10 @@ class GovernedDeletionService:
                     role=self.GOVERNANCE_ROLE,
                     scope_fingerprint=scope_fingerprint,
                     reason_code="legal_hold_released",
-                    request_id=str(hold.get("request_id") or ""),
+                    # R4 (P1-2): the audit fact reconciles with the release
+                    # event and the HTTP response — never the impose
+                    # request id.
+                    request_id=release_request_id,
                 )
                 connection.commit()
             self._reload()
@@ -3058,7 +3222,7 @@ class GovernedDeletionService:
             "status": "accepted",
             "hold_id": hold_id,
             "request_id": release_request_id,
-            "generation": self._hold_generation(scope_fingerprint),
+            "generation": release_generation,
         }
 
     # -- approvals ----------------------------------------------------------
@@ -4215,6 +4379,34 @@ class GovernedDeletionService:
                         item.get("event_type") == "legal_hold_released"
                         and item.get("hold_id") == event.get("hold_id")
                         for item in self._events
+                    ),
+                    # R4 (P2-2): the query reports an explicit terminal
+                    # state — active, released or expired — so the UI and
+                    # commit's active union never disagree.  Expiry is
+                    # judged from the ledger transition OR the clock; the
+                    # state never maps expired back to released/active.
+                    "state": (
+                        "expired"
+                        if any(
+                            item.get("event_type") == "legal_hold_expired"
+                            and item.get("hold_id") == event.get("hold_id")
+                            for item in self._events
+                        )
+                        or (
+                            isinstance(event.get("expiry"), (int, float))
+                            and not isinstance(event.get("expiry"), bool)
+                            and int(event.get("expiry")) <= self._now()
+                        )
+                        else (
+                            "released"
+                            if any(
+                                item.get("event_type") == "legal_hold_released"
+                                and item.get("hold_id")
+                                == event.get("hold_id")
+                                for item in self._events
+                            )
+                            else "active"
+                        )
                     ),
                 }
                 for event in self._events_of("legal_hold_imposed")

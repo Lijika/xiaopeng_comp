@@ -589,6 +589,17 @@ def test_s16_legal_hold_http_command_surface(
     )
     assert replayed.status_code == 200
     assert replayed.json()["replayed"] is True
+    # R4 (P2-2): the query reports the explicit terminal hold state.
+    query = client.get(
+        f"/controlled/s16/api/deletions/{preflight.json()['request_id']}",
+        headers=_auth(GOVERNANCE_CREDENTIAL),
+    )
+    assert query.status_code == 200
+    holds = query.json()["legal_holds"]
+    assert holds and all(
+        hold["state"] in {"active", "released", "expired"} for hold in holds
+    )
+    assert all(hold["hold_id"] != hold_id or hold["state"] == "released" for hold in holds)
     # Unknown hold id existence-hides.
     unknown_hold = client.post(
         "/controlled/s16/api/legal-holds/hold_unknown/release",

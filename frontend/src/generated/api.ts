@@ -8947,6 +8947,11 @@ export interface components {
             reason_code: string;
             /** Released */
             released: boolean;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "active" | "released" | "expired";
         };
         /** S16ManifestEntry */
         S16ManifestEntry: {

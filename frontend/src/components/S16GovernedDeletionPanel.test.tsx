@@ -320,6 +320,7 @@ describe("S16 legal hold controls", () => {
                   effective_time: 1_800_000_000,
                   expiry: null,
                   released: false,
+                  state: "active" as const,
                 },
               ],
             }),
@@ -506,11 +507,17 @@ describe("R2 completion and identity-invalidation states", () => {
     const user = userEvent.setup();
     await user.type(screen.getByTestId("s16-reference"), "APP-REFERENCE-1");
     await user.click(screen.getByTestId("s16-preflight-button"));
-    // R3 (P1-15): the receipt 403 invalidates the whole governance surface.
+    // R3 (P1-15) + R4 (P2-3): the receipt 403 invalidates the whole
+    // governance surface through a side effect — the old reference,
+    // preflight and request id are gone and the receipt is fetched
+    // exactly once (repeated renders never re-fire the mutation).
     await screen.findByTestId("s16-error-forbidden");
     expect(screen.queryByTestId("s16-reference")).toBeNull();
     expect(screen.queryByTestId("s16-receipt")).toBeNull();
-    expect(router.calls.some((call) => call.url === RECEIPT_PATH)).toBe(true);
+    expect(screen.queryByTestId("s16-preflight-button")).toBeNull();
+    expect(
+      router.calls.filter((call) => call.url === RECEIPT_PATH),
+    ).toHaveLength(1);
   });
 
   it("invalidates the governance identity on a process mutation 403", async () => {
@@ -599,14 +606,170 @@ describe("R2 completion and identity-invalidation states", () => {
     await screen.findByTestId("s16-approver-token");
     await user.type(screen.getByTestId("s16-approver-token"), "stale-approver");
     await user.click(screen.getByTestId("s16-approve-button"));
-    // R3 (P1-15): the approver surface 403 clears the approver token and
-    // any previous approval error, but the governance surface stays intact.
+    // R3 (P1-15) + R4 (P2-1): the approver surface 403 clears the approver
+    // token, resets the approver index to approved + 1 and clears any
+    // previous error/mutation state, but the governance surface stays
+    // intact.
     await waitFor(() => {
       expect((screen.getByTestId("s16-approver-token") as HTMLInputElement).value).toBe("");
     });
     expect(screen.queryByTestId("s16-error-code")).toBeNull();
     expect(screen.queryByTestId("s16-commit")).not.toBeNull();
     expect(screen.queryByTestId("s16-error-forbidden")).toBeNull();
-    expect(router.calls.some((call) => call.url === APPROVE_PATH)).toBe(true);
+    expect(
+      screen.getByTestId("s16-approve-button").textContent,
+    ).toContain("以第 1 名审批人批准");
+    expect(
+      router.calls.filter((call) => call.url === APPROVE_PATH),
+    ).toHaveLength(1);
+  });
+
+  it("removes every S16 request/hold query after completion (receipt only)", async () => {
+    const router = fetchRouter({
+      [`POST ${PREFLIGHT_PATH}`]: () =>
+        new Response(
+          JSON.stringify(s16PreflightPayload()),
+          { headers: { "Content-Type": "application/json" } },
+        ),
+      [`GET ${QUERY_PATH}`]: () =>
+        new Response(
+          JSON.stringify(
+            s16QueryPayload({
+              job: {
+                job_id: "s16job_1",
+                status: "complete",
+                attempt: 1,
+                fence: 1,
+                lease_owner: null,
+                pending_owner_fingerprints: { s01: 4 },
+                owner_results: { s01: "complete" },
+                stable_failure: null,
+                completed_at: 1_800_000_001,
+              },
+              legal_holds: [
+                {
+                  hold_id: "hold_1",
+                  generation: 1,
+                  reason_code: "litigation",
+                  owner: "all",
+                  effective_time: 1_800_000_000,
+                  expiry: null,
+                  released: false,
+                  state: "active" as const,
+                },
+              ],
+            }),
+          ),
+          { headers: { "Content-Type": "application/json" } },
+        ),
+      [`GET ${RECEIPT_PATH}`]: () =>
+        new Response(
+          JSON.stringify({
+            receipt_id: "s16receipt_1",
+            schema_version: "s16-receipt/1",
+            action: "governed_deletion",
+            policy: "s16-governed-deletion/1",
+            scope_fingerprint: "c".repeat(64),
+            completed_at: 1_800_000_001,
+            authority: "s16-governance",
+            result: "deleted",
+            owner_counts: { s01: 4 },
+            restore_replay_status: "pending",
+            subject: "s16-deletion-worker",
+            role: "system",
+          }),
+          { headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    const { client } = renderWithQuery(<S16GovernedDeletionPanel />);
+    const user = userEvent.setup();
+    await user.type(screen.getByTestId("s16-reference"), "APP-REFERENCE-1");
+    await user.click(screen.getByTestId("s16-preflight-button"));
+    await screen.findByTestId("s16-receipt");
+    // R4 (P1-5): the completed page shows the fixed receipt-safe job
+    // summary and the value-free receipt; the QueryClient holds NO
+    // application-scoped S16 request/hold/manifest/approval query.
+    expect(screen.getByTestId("s16-job-status")).toHaveTextContent(
+      "complete",
+    );
+    expect(screen.queryByTestId("s16-legal-holds")).toBeNull();
+    expect(screen.queryByTestId("s16-approvals")).toBeNull();
+    expect(screen.queryByTestId("s16-manifest")).toBeNull();
+    const keys = client
+      .getQueryCache()
+      .getAll()
+      .map((entry) => entry.queryKey);
+    // The exact application-scoped request key ["s16","deletions",<id>]
+    // must NOT be in the cache after completion.
+    expect(
+      keys.some(
+        (key) =>
+          key[0] === "s16" &&
+          key[1] === "deletions" &&
+          key.length === 3 &&
+          key[2] === "s16req_test_00000001",
+      ),
+    ).toBe(false);
+    expect(
+      keys.some((key) => key[0] === "s16" && key[1] === "legal-holds"),
+    ).toBe(false);
+    const receiptEntry = client
+      .getQueryCache()
+      .getAll()
+      .find((entry) => {
+        const key = entry.queryKey;
+        return (
+          key[0] === "s16" &&
+          key[1] === "deletions" &&
+          key[3] === "receipt"
+        );
+      });
+    expect(receiptEntry?.state.data).toBeDefined();
+    expect(router.calls.some((call) => call.url === RECEIPT_PATH)).toBe(
+      true,
+    );
+  });
+
+  it("shows an expired legal hold as terminal without a release action", async () => {
+    const router = fetchRouter({
+      [`POST ${PREFLIGHT_PATH}`]: () =>
+        new Response(
+          JSON.stringify(s16PreflightPayload()),
+          { headers: { "Content-Type": "application/json" } },
+        ),
+      [`GET ${QUERY_PATH}`]: () =>
+        new Response(
+          JSON.stringify(
+            s16QueryPayload({
+              job: null,
+              legal_holds: [
+                {
+                  hold_id: "hold_expired",
+                  generation: 2,
+                  reason_code: "regulatory",
+                  owner: "s01",
+                  effective_time: 1_799_999_999,
+                  expiry: 1_800_000_000,
+                  released: false,
+                  state: "expired" as const,
+                },
+              ],
+            }),
+          ),
+          { headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    renderWithQuery(<S16GovernedDeletionPanel />);
+    const user = userEvent.setup();
+    await user.type(screen.getByTestId("s16-reference"), "APP-REFERENCE-1");
+    await user.click(screen.getByTestId("s16-preflight-button"));
+    await screen.findByTestId("s16-hold-entry");
+    // R4 (P2-2): the expired hold is terminal — labeled 已过期 with no
+    // release action; an active hold keeps its release button.
+    expect(screen.getByTestId("s16-hold-entry")).toHaveTextContent(
+      "已过期",
+    );
+    expect(screen.queryByTestId("s16-release-hold-hold_expired")).toBeNull();
+    expect(router.calls.some((call) => call.url === QUERY_PATH)).toBe(true);
   });
 });

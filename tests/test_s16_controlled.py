@@ -28,6 +28,7 @@ from task4_consistency.controlled.s01 import (
 from task4_consistency.controlled.s12 import EvaluationService
 from task4_consistency.controlled.s16 import (
     S16_AUDIT_SEAM_UNAVAILABLE,
+    S16_OWNER_BINDING_CONFLICT,
     S16_HOLD_GENERATION_CHANGED,
     S16_OWNER_REGISTRY_STALE,
     S16_OWNER_STALE_FENCE,
@@ -1666,12 +1667,15 @@ def test_backup_capture_path_boundary_and_delete_verification(
     assert manifest["manifest_id"] != manifest2["manifest_id"]
     assert len(backup._load_manifests()) == 2
 
-    # Digest mismatch fails the delete and keeps the manifest.
-    captured.write_bytes(b"tampered-bytes")
+    # Digest mismatch: the shared reconciliation fails closed first
+    # (R4 P1-4), then the delete fails and keeps the manifest.
     fingerprints = {
         entry.identity_fingerprint
         for entry in backup.inventory(scope_fingerprint)
     }
+    captured.write_bytes(b"tampered-bytes")
+    with pytest.raises(S16Unavailable, match="digest mismatch"):
+        backup.inventory(scope_fingerprint)
     with pytest.raises(S16OwnerFailure) as excinfo:
         backup.delete(fingerprints, scope_fingerprint=scope_fingerprint, operation_id="o", fence=1)
     assert excinfo.value.reason_code == S16_VERIFY_FAILED
@@ -2924,3 +2928,339 @@ def test_partial_s16_configuration_fails_closed(tmp_path: Path) -> None:
         timeout=120,
     )
     assert run.stdout.strip() == "True True True"
+
+
+
+# ---------------------------------------------------------------------------
+# R4 (P1/P2) regressions
+# ---------------------------------------------------------------------------
+
+
+def test_preflight_binding_never_persists_application_reference(
+    tmp_path: Path,
+) -> None:
+    """R4 P1-1: the persistent idempotency binding stores ONLY the
+    value-free preflight snapshot — the upstream reference, application id
+    and caller key must not appear in s16_bindings.result, while the
+    in-memory replay response still carries the reference and the same
+    manifest digest."""
+    service, submission, application_id = _registered_terminated(tmp_path)
+    reference = str(submission["upstream_application_ref"])
+    s16 = _s16_service(tmp_path, service, governance_scope=TENANT_SCOPE)
+    first = _preflight(s16, reference, scope=TENANT_SCOPE)
+    replayed = s16.preflight(
+        application_reference=reference,
+        principal=S01CommandPrincipal(
+            subject=GOVERNANCE.subject,
+            role="operator",
+            scope=TENANT_SCOPE,
+            source_id="s16-governance-console",
+        ),
+        idempotency_key=f"preflight-{reference}-{TENANT_SCOPE}",
+    )
+    assert replayed["replayed"] is True
+    assert replayed["application_reference"] == reference
+    assert replayed["manifest_digest"] == first["manifest_digest"]
+    with sqlite3.connect(tmp_path / "s16.sqlite3") as connection:
+        rows = connection.execute(
+            "SELECT result FROM s16_bindings"
+        ).fetchall()
+    assert rows
+    serialized = json.dumps(rows)
+    for forbidden in (
+        reference,
+        application_id,
+        "upstream-application",
+        "target.sqlite3",
+        "tenant-test",
+        "result-object",
+        "page-object",
+        "s16-registered-intake",
+        "t17-governance",
+        "application_reference",
+    ):
+        assert forbidden not in serialized, forbidden
+    stored = json.loads(rows[0][0])
+    assert stored["request_id"] == first["request_id"]
+    assert stored["manifest_digest"] == first["manifest_digest"]
+    assert stored["scope_fingerprint"] == first["scope_fingerprint"]
+
+
+def test_release_audit_fact_reconciles_with_release_request(
+    tmp_path: Path,
+) -> None:
+    """R4 P1-2: the release security-audit fact fingerprints the RELEASE
+    request id — identical to the release event and the service response,
+    and different from the impose request id."""
+    import hashlib
+
+    service = _c_demo_service(tmp_path)
+    _admit_c_demo(service, key="s16-release-audit-intake")
+    _terminate(service, _app_of(service))
+    recorded: list[dict[str, Any]] = []
+
+    def writer(record: dict[str, Any]) -> bool:
+        recorded.append(record)
+        return True
+
+    s16 = _s16_service(
+        tmp_path,
+        service,
+        security_audit_writer=writer,
+    )
+    result = _preflight(s16, "APP-R53-BAD-ENGINE")
+    hold = s16.impose_legal_hold(
+        scope_fingerprint=result["scope_fingerprint"],
+        principal=GOVERNANCE,
+        reason_code="litigation",
+        owner="all",
+        effective_time=_now(),
+        idempotency_key="rel-audit-hold",
+    )
+    released = s16.release_legal_hold(
+        hold_id=hold["hold_id"],
+        principal=GOVERNANCE,
+        idempotency_key="rel-audit-1",
+    )
+    release_events = [
+        event
+        for event in s16._events
+        if event.get("event_type") == "legal_hold_released"
+    ]
+    assert release_events
+    assert release_events[0]["request_id"] == released["request_id"]
+    # The ledger security-audit fact fingerprints the RELEASE request id.
+    audit_facts = [
+        event
+        for event in s16._events
+        if event.get("event_type") == "security_audit"
+        and event.get("action") == "legal_hold_released"
+    ]
+    assert audit_facts
+    assert audit_facts[0]["request_id_fingerprint"] == hashlib.sha256(
+        released["request_id"].encode("utf-8")
+    ).hexdigest()
+    assert audit_facts[0]["request_id_fingerprint"] != hashlib.sha256(
+        hold["request_id"].encode("utf-8")
+    ).hexdigest()
+    assert released["request_id"] != hold["request_id"]
+    # The replicated WORM copy stays value-free (no request id fingerprint).
+    assert recorded
+    assert all(
+        "request_id_fingerprint" not in record for record in recorded
+    )
+
+
+def test_backup_verify_binds_operation_fence_and_digest(
+    tmp_path: Path,
+) -> None:
+    """R4 P1-3: backup absence proofs are binding proofs — the exact
+    operation + fence must own the scope and fingerprints digest; stale
+    fences are stable stale, mismatched digests are stable conflicts, and
+    an operation with no binding never verifies."""
+    backup_root = tmp_path / "backups"
+    backup = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
+    scope = "5" * 64
+    saved = backup_root / "target.sqlite3"
+    saved.write_bytes(b"binding-capture")
+    digest = hashlib.sha256(b"binding-capture").hexdigest()
+    backup.capture(scope_fingerprint=scope, copy_files=[("target.sqlite3", digest)])
+    fingerprints = {
+        entry.identity_fingerprint
+        for entry in backup.inventory(scope_fingerprint=scope)
+    }
+    assert backup.delete(
+        fingerprints,
+        scope_fingerprint=scope,
+        operation_id="op-bind",
+        fence=1,
+    )["status"] == "complete"
+    # Same binding replays verified.
+    assert backup.verify_absent(
+        fingerprints, scope_fingerprint=scope, operation_id="op-bind", fence=1
+    )["status"] == "verified"
+    assert backup.verify_absent(
+        fingerprints, scope_fingerprint=scope, operation_id="op-bind", fence=1
+    )["status"] == "verified"
+    # Wrong digest under the SAME binding: stable conflict.
+    with pytest.raises(S16OwnerFailure) as excinfo:
+        backup.verify_absent(
+            {"fp-other"},
+            scope_fingerprint=scope,
+            operation_id="op-bind",
+            fence=1,
+        )
+    assert excinfo.value.reason_code == S16_OWNER_BINDING_CONFLICT
+    assert excinfo.value.retryable is False
+    # Stale fence: stable stale outcome.
+    with pytest.raises(S16OwnerFailure) as excinfo:
+        backup.verify_absent(
+            fingerprints,
+            scope_fingerprint=scope,
+            operation_id="op-bind",
+            fence=0,
+        )
+    assert excinfo.value.reason_code == S16_OWNER_STALE_FENCE
+    assert excinfo.value.retryable is False
+    # An operation with no binding at all never proves absence.
+    with pytest.raises(S16OwnerFailure) as excinfo:
+        backup.verify_absent(
+            fingerprints,
+            scope_fingerprint=scope,
+            operation_id="op-never-ran",
+            fence=1,
+        )
+    assert excinfo.value.reason_code == S16_VERIFY_FAILED
+    # The already-absent outcome also writes the binding: verify passes.
+    assert backup.delete(
+        fingerprints,
+        scope_fingerprint=scope,
+        operation_id="op-absent",
+        fence=1,
+    )["already_absent"] is True
+    assert backup.verify_absent(
+        fingerprints,
+        scope_fingerprint=scope,
+        operation_id="op-absent",
+        fence=1,
+    )["status"] == "verified"
+
+
+@pytest.mark.parametrize(
+    "damage,repair",
+    [
+        (
+            "manifest_deleted",
+            "recapture",
+        ),
+        (
+            "registry_deleted",
+            "recapture",
+        ),
+        (
+            "digest_tampered",
+            "restore_file",
+        ),
+        (
+            "file_missing",
+            "restore_file",
+        ),
+    ],
+)
+def test_backup_reconciliation_fails_closed_and_repairs_forward(
+    tmp_path: Path,
+    damage: str,
+    repair: str,
+) -> None:
+    """R4 P1-4: manifest/registry/file bidirectional damage makes the
+    owner unhealthy, closes inventory and preflight with a stable
+    unavailable, and a repaired owner moves forward again."""
+    backup_root = tmp_path / "backups"
+    backup = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
+    scope = "6" * 64
+    saved = backup_root / "target.sqlite3"
+    saved.write_bytes(b"reconcile-capture")
+    digest = hashlib.sha256(b"reconcile-capture").hexdigest()
+    backup.capture(scope_fingerprint=scope, copy_files=[("target.sqlite3", digest)])
+    assert backup.owner_healthy() is True
+    assert backup.inventory(scope_fingerprint=scope)
+
+    if damage == "manifest_deleted":
+        for manifest in backup._load_manifests():
+            backup._manifest_path(str(manifest["manifest_id"])).unlink()
+    elif damage == "registry_deleted":
+        with backup._registry_connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("DELETE FROM backup_registry")
+            connection.commit()
+    elif damage == "digest_tampered":
+        saved.write_bytes(b"tampered")
+    elif damage == "file_missing":
+        saved.unlink()
+
+    assert backup.owner_healthy() is False
+    with pytest.raises(S16Unavailable):
+        backup.inventory(scope_fingerprint=scope)
+
+    # Preflight through the orchestrator fails closed with the same root.
+    service, submission, application_id = _registered_terminated(tmp_path)
+    s16 = _s16_service(
+        tmp_path, service, backup_root=backup_root, governance_scope=TENANT_SCOPE
+    )
+    with pytest.raises(S16Unavailable):
+        s16.preflight(
+            application_reference=str(submission["upstream_application_ref"]),
+            principal=S01CommandPrincipal(
+                subject=GOVERNANCE.subject,
+                role="operator",
+                scope=TENANT_SCOPE,
+                source_id="s16-governance-console",
+            ),
+            idempotency_key="reconcile-preflight",
+        )
+
+    # Repair restores integrity; the owner moves forward.
+    if repair == "recapture":
+        if not saved.exists():
+            saved.write_bytes(b"reconcile-capture")
+        backup.capture(
+            scope_fingerprint=scope,
+            copy_files=[("target.sqlite3", digest)],
+        )
+    else:
+        saved.write_bytes(b"reconcile-capture")
+    assert backup.owner_healthy() is True
+    assert backup.inventory(scope_fingerprint=scope)
+
+
+def test_expired_hold_query_state_and_active_union(tmp_path: Path) -> None:
+    """R4 P2-2: the query reports an explicit expired state for a hold
+    whose expiry passed (or whose expiry transition was recorded), and the
+    active hold union — which gates commit — excludes it."""
+    service, submission, application_id = _registered_terminated(tmp_path)
+    s16 = _s16_service(tmp_path, service, governance_scope=TENANT_SCOPE)
+    result = _preflight(
+        s16, str(submission["upstream_application_ref"]), scope=TENANT_SCOPE
+    )
+    scope = result["scope_fingerprint"]
+    now = _now()
+    active = s16.impose_legal_hold(
+        scope_fingerprint=scope,
+        principal=GOVERNANCE_REGISTERED,
+        reason_code="litigation",
+        owner="all",
+        effective_time=now,
+        idempotency_key="hold-exp-active",
+        expiry=now + 5000,
+    )
+    expired = s16.impose_legal_hold(
+        scope_fingerprint=scope,
+        principal=GOVERNANCE_REGISTERED,
+        reason_code="regulatory",
+        owner="s01",
+        effective_time=now - 10,
+        idempotency_key="hold-exp-expired",
+        expiry=now - 1,
+    )
+    query = s16.query(
+        request_id=result["request_id"], principal=GOVERNANCE_REGISTERED
+    )
+    by_id = {hold["hold_id"]: hold for hold in query["legal_holds"]}
+    assert by_id[active["hold_id"]]["state"] == "active"
+    assert by_id[expired["hold_id"]]["state"] == "expired"
+    assert by_id[expired["hold_id"]]["released"] is False
+    assert s16._active_hold_union(scope)  # the active hold still gates
+    # Releasing the ACTIVE hold turns it terminal; the expired hold stays
+    # expired and the union empties.
+    s16.release_legal_hold(
+        hold_id=active["hold_id"],
+        principal=GOVERNANCE_REGISTERED,
+        idempotency_key="hold-exp-release",
+    )
+    query = s16.query(
+        request_id=result["request_id"], principal=GOVERNANCE_REGISTERED
+    )
+    by_id = {hold["hold_id"]: hold for hold in query["legal_holds"]}
+    assert by_id[active["hold_id"]]["state"] == "released"
+    assert by_id[expired["hold_id"]]["state"] == "expired"
+    assert not s16._active_hold_union(scope)

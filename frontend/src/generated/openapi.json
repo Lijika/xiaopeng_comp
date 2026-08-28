@@ -18579,6 +18579,15 @@
           "released": {
             "title": "Released",
             "type": "boolean"
+          },
+          "state": {
+            "enum": [
+              "active",
+              "released",
+              "expired"
+            ],
+            "title": "State",
+            "type": "string"
           }
         },
         "required": [
@@ -18587,7 +18596,8 @@
           "reason_code",
           "owner",
           "effective_time",
-          "released"
+          "released",
+          "state"
         ],
         "title": "S16LegalHoldSummary",
         "type": "object"

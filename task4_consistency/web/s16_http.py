@@ -356,6 +356,7 @@ class S16LegalHoldSummary(BaseModel):
     effective_time: int = Field(ge=0)
     expiry: int | None = None
     released: bool
+    state: Literal["active", "released", "expired"]
 
 
 class S16JobSummary(BaseModel):
