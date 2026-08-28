@@ -6011,7 +6011,10 @@ def test_backup_binding_replay_requires_shared_source_digest(
             fence=1,
         )
     assert excinfo.value.reason_code == S16_VERIFY_FAILED
-    assert _backup_bookkeeping(backup) == before
+    after = _backup_bookkeeping(backup)
+    assert after["registry"] == before["registry"]
+    assert after["refs"] == before["refs"]
+    assert after["bindings"] == [("op-replay-proof", 1, "unverified")]
     saved.write_bytes(payload)
     saved.unlink()
     with pytest.raises(S16OwnerFailure) as unlink_exc:
@@ -6295,3 +6298,247 @@ def test_backup_worker_retry_exhaustion_then_repair_forward(
     assert old_intent is not None and old_intent[0] == "superseded"
     assert active is not None and int(active[0]) == 3
     assert int(active[1]) == 1
+
+
+def test_backup_completed_binding_unverified_until_shared_source_restored(
+    tmp_path: Path,
+) -> None:
+    """R15 P1-1: after a complete job, later shared-source rewrite marks
+    the binding unverified; restore replay stays fail-closed until digest
+    matches, then the same operation/fence recompletes once."""
+    import shutil
+
+    service, submission, application_id = _registered_terminated(tmp_path)
+    backup_root = tmp_path / "backups"
+    s16 = _s16_service(
+        tmp_path, service, backup_root=backup_root, governance_scope=TENANT_SCOPE
+    )
+    backup = s16._owners["backup"]
+    state_path = tmp_path / "target.sqlite3"
+    saved = backup_root / "target.sqlite3"
+    shutil.copy2(state_path, saved)
+    payload = saved.read_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    result = _preflight(
+        s16, str(submission["upstream_application_ref"]), scope=TENANT_SCOPE
+    )
+    scope_a = result["scope_fingerprint"]
+    scope_b = "b" * 64
+    backup.capture(
+        scope_fingerprint=scope_a, copy_files=[(saved.name, digest)]
+    )
+    result2 = s16.preflight(
+        application_reference=str(submission["upstream_application_ref"]),
+        principal=S01CommandPrincipal(
+            subject=GOVERNANCE.subject,
+            role="operator",
+            scope=TENANT_SCOPE,
+            source_id="s16-governance-console",
+        ),
+        idempotency_key="r15-combo-preflight",
+    )
+    committed = s16.commit(
+        request_id=result2["request_id"],
+        principal=GOVERNANCE_REGISTERED,
+        idempotency_key="r15-combo-commit",
+    )
+    assert committed["status"] == "accepted"
+    backup.capture(
+        scope_fingerprint=scope_b, copy_files=[(saved.name, digest)]
+    )
+    outcome = s16.process_next_deletion_job(worker_id="w1", now=_now() + 1)
+    assert outcome["status"] == "complete", outcome
+    job = s16._job_for_request(result2["request_id"])
+    assert job is not None
+    job_id = str(job["job_id"])
+    assert s16.ready() is True
+    saved.write_bytes(b"r15-post-complete-tamper")
+    assert s16.ready() is False
+    with pytest.raises(S16OwnerFailure) as replay_exc:
+        backup.delete(
+            set(job.get("pending_owner_fingerprints", {}).get("backup") or []),
+            scope_fingerprint=scope_a,
+            operation_id=job_id,
+            fence=1,
+        )
+    assert replay_exc.value.reason_code == S16_VERIFY_FAILED
+    with backup._registry_connect() as connection:
+        status = connection.execute(
+            "SELECT status FROM backup_deletion_bindings "
+            "WHERE operation_id = ? AND fence = 1",
+            (job_id,),
+        ).fetchone()
+        refs_a = connection.execute(
+            "SELECT COUNT(*) FROM backup_registry_refs "
+            "WHERE scope_fingerprint = ?",
+            (scope_a,),
+        ).fetchone()[0]
+        refs_b = connection.execute(
+            "SELECT COUNT(*) FROM backup_registry_refs "
+            "WHERE scope_fingerprint = ?",
+            (scope_b,),
+        ).fetchone()[0]
+    assert status is not None and status[0] == "unverified"
+    assert refs_a == 0
+    assert refs_b == 1
+    idle = s16.process_next_deletion_job(worker_id="w2", now=_now() + 2)
+    assert idle["status"] == "idle"
+    receipt = s16.receipt(
+        request_id=result2["request_id"], principal=GOVERNANCE_REGISTERED
+    )
+    assert receipt["result"] == "deleted"
+    with pytest.raises(S16OwnerFailure):
+        s16.replay_restore_if_needed()
+    saved.write_bytes(payload)
+    repaired = backup.delete(
+        set(job.get("pending_owner_fingerprints", {}).get("backup") or []),
+        scope_fingerprint=scope_a,
+        operation_id=job_id,
+        fence=1,
+    )
+    assert repaired["status"] == "complete"
+    assert repaired.get("already_absent") is True
+    with backup._registry_connect() as connection:
+        status = connection.execute(
+            "SELECT status FROM backup_deletion_bindings "
+            "WHERE operation_id = ? AND fence = 1",
+            (job_id,),
+        ).fetchone()
+        active = connection.execute(
+            "SELECT active_fence, source_fence FROM backup_operation_fences "
+            "WHERE operation_id = ?",
+            (job_id,),
+        ).fetchone()
+    assert status is not None and status[0] == "complete"
+    assert active is not None and int(active[0]) == 1
+    assert int(active[1]) == 1
+    assert s16.ready() is True
+    again = s16.replay_restore_if_needed()
+    assert again["status"] == "replayed"
+    _assert_locator_free(receipt, backup_root, "target.sqlite3", ".s16_deletion")
+
+
+def test_backup_worker_before_return_shared_tamper_invalidates_binding(
+    tmp_path: Path,
+) -> None:
+    """R15 P1-1: before_return shared rewrite after SQLite commit invalidates
+    the binding; worker stays pending until digest restore and fence-2
+    takeover completes one effect."""
+    import shutil
+
+    service, submission, application_id = _registered_terminated(tmp_path)
+    backup_root = tmp_path / "backups"
+    s16 = _s16_service(
+        tmp_path, service, backup_root=backup_root, governance_scope=TENANT_SCOPE
+    )
+    backup = s16._owners["backup"]
+    state_path = tmp_path / "target.sqlite3"
+    saved = backup_root / "target.sqlite3"
+    shutil.copy2(state_path, saved)
+    payload = saved.read_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    result = _preflight(
+        s16, str(submission["upstream_application_ref"]), scope=TENANT_SCOPE
+    )
+    scope_a = result["scope_fingerprint"]
+    scope_b = "b" * 64
+    backup.capture(
+        scope_fingerprint=scope_a, copy_files=[(saved.name, digest)]
+    )
+    result2 = s16.preflight(
+        application_reference=str(submission["upstream_application_ref"]),
+        principal=S01CommandPrincipal(
+            subject=GOVERNANCE.subject,
+            role="operator",
+            scope=TENANT_SCOPE,
+            source_id="s16-governance-console",
+        ),
+        idempotency_key="r15-return-preflight",
+    )
+    committed = s16.commit(
+        request_id=result2["request_id"],
+        principal=GOVERNANCE_REGISTERED,
+        idempotency_key="r15-return-commit",
+    )
+    assert committed["status"] == "accepted"
+    backup.capture(
+        scope_fingerprint=scope_b, copy_files=[(saved.name, digest)]
+    )
+
+    def hook(point: str) -> None:
+        if point == "before_return":
+            saved.write_bytes(b"r15-return-tamper")
+
+    backup._crash_hook = hook
+    first = s16.process_next_deletion_job(worker_id="w1", now=_now() + 1)
+    backup._crash_hook = None
+    assert first["status"] == "pending", first
+    job = s16._job_for_request(result2["request_id"])
+    assert job is not None
+    job_id = str(job["job_id"])
+    with backup._registry_connect() as connection:
+        status = connection.execute(
+            "SELECT status FROM backup_deletion_bindings "
+            "WHERE operation_id = ? AND fence = 1",
+            (job_id,),
+        ).fetchone()
+        refs_a = connection.execute(
+            "SELECT COUNT(*) FROM backup_registry_refs "
+            "WHERE scope_fingerprint = ?",
+            (scope_a,),
+        ).fetchone()[0]
+        refs_b = connection.execute(
+            "SELECT COUNT(*) FROM backup_registry_refs "
+            "WHERE scope_fingerprint = ?",
+            (scope_b,),
+        ).fetchone()[0]
+    assert status is not None and status[0] == "unverified"
+    assert refs_a == 0
+    assert refs_b == 1
+    query = s16.query(
+        request_id=result2["request_id"], principal=GOVERNANCE_REGISTERED
+    )
+    assert query["job"]["status"] == "pending"
+    saved.write_bytes(payload)
+    second = s16.process_next_deletion_job(
+        worker_id="w2", now=_now() + 1 + LEASE_SECONDS + 1
+    )
+    assert second["status"] == "complete", second
+    receipt = s16.receipt(
+        request_id=result2["request_id"], principal=GOVERNANCE_REGISTERED
+    )
+    assert receipt["result"] == "deleted"
+    _assert_locator_free(receipt, backup_root, "target.sqlite3")
+    with backup._registry_connect() as connection:
+        fence1 = connection.execute(
+            "SELECT status FROM backup_deletion_bindings "
+            "WHERE operation_id = ? AND fence = 1",
+            (job_id,),
+        ).fetchone()
+        fence2 = connection.execute(
+            "SELECT status FROM backup_deletion_bindings "
+            "WHERE operation_id = ? AND fence = 2",
+            (job_id,),
+        ).fetchone()
+        old_intent = connection.execute(
+            "SELECT status FROM backup_deletion_intents "
+            "WHERE operation_id = ? AND fence = 1",
+            (job_id,),
+        ).fetchone()
+        active = connection.execute(
+            "SELECT active_fence, source_fence FROM backup_operation_fences "
+            "WHERE operation_id = ?",
+            (job_id,),
+        ).fetchone()
+        refs_b = connection.execute(
+            "SELECT COUNT(*) FROM backup_registry_refs "
+            "WHERE scope_fingerprint = ?",
+            (scope_b,),
+        ).fetchone()[0]
+    assert fence1 is not None and fence1[0] == "unverified"
+    assert fence2 is not None and fence2[0] == "complete"
+    assert old_intent is not None and old_intent[0] == "committed"
+    assert active is not None and int(active[0]) == 2
+    assert int(active[1]) == 1
+    assert refs_b == 1
+    assert saved.exists()

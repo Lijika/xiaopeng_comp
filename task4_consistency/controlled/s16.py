@@ -1531,6 +1531,18 @@ class BackupDeletionOwner:
                 )
                 """
             )
+            for _column in (
+                "identities_json TEXT NOT NULL DEFAULT '[]'",
+                "manifest_ids_json TEXT NOT NULL DEFAULT '[]'",
+                "source_fence INTEGER",
+            ):
+                try:
+                    connection.execute(
+                        "ALTER TABLE backup_deletion_bindings ADD COLUMN "
+                        + _column
+                    )
+                except sqlite3.OperationalError:
+                    pass
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS backup_deletion_intents (
@@ -1792,13 +1804,23 @@ class BackupDeletionOwner:
 
         Exclusive identities must remain absent. Shared identities must
         keep a matching capture at the registry handle with no quarantine.
+        Proof data is taken from the immutable binding row when present,
+        otherwise from the matching intent.
         """
+        binding_proof = connection.execute(
+            "SELECT identities_json, manifest_ids_json, source_fence "
+            "FROM backup_deletion_bindings "
+            "WHERE operation_id = ? AND fence = ?",
+            (operation_id, int(fence)),
+        ).fetchone()
         intent = connection.execute(
             "SELECT identities_json, manifest_ids_json, source_fence "
             "FROM backup_deletion_intents "
             "WHERE operation_id = ? AND fence = ?",
             (operation_id, int(fence)),
         ).fetchone()
+        if binding_proof is not None and str(binding_proof[0] or "[]") not in {"", "[]"}:
+            intent = binding_proof
         if intent is None:
             try:
                 self._backup_reconciliation()
@@ -1858,6 +1880,40 @@ class BackupDeletionOwner:
         except (TypeError, ValueError, OSError, S16Unavailable, json.JSONDecodeError):
             self._fail_unproven_purge()
 
+    def _mark_binding_unverified(self, operation_id: str, fence: int) -> None:
+        with self._registry_connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "UPDATE backup_deletion_bindings SET status = ? "
+                "WHERE operation_id = ? AND fence = ? AND status = ?",
+                ("unverified", operation_id, int(fence), "complete"),
+            )
+            connection.execute("COMMIT")
+
+    def _mark_binding_complete(self, operation_id: str, fence: int) -> None:
+        with self._registry_connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "UPDATE backup_deletion_bindings SET status = ? "
+                "WHERE operation_id = ? AND fence = ? AND status = ?",
+                ("complete", operation_id, int(fence), "unverified"),
+            )
+            connection.execute("COMMIT")
+
+    def _prove_or_invalidate_binding(
+        self,
+        connection: sqlite3.Connection,
+        operation_id: str,
+        fence: int,
+    ) -> None:
+        try:
+            self._assert_completed_binding_proof(
+                connection, operation_id, int(fence)
+            )
+        except S16OwnerFailure:
+            self._mark_binding_unverified(operation_id, int(fence))
+            raise
+
     def _purge_quarantine(
         self,
         operation_id: str,
@@ -1908,7 +1964,6 @@ class BackupDeletionOwner:
             "ON CONFLICT(operation_id) DO UPDATE SET "
             "high_water = excluded.high_water, "
             "active_fence = excluded.active_fence, "
-            "source_fence = excluded.source_fence, "
             "scope_fingerprint = excluded.scope_fingerprint, "
             "fingerprints_digest = excluded.fingerprints_digest "
             "WHERE excluded.high_water >= backup_operation_fences.high_water",
@@ -2342,9 +2397,10 @@ class BackupDeletionOwner:
                             recovery_action="retry_backup_quarantine_purge",
                         )
                     with self._registry_connect() as proof:
-                        self._assert_completed_binding_proof(
+                        self._prove_or_invalidate_binding(
                             proof, operation_id, int(fence)
                         )
+                    self._mark_binding_complete(operation_id, int(fence))
                     return {
                         "status": "complete",
                         "deleted_counts": {},
@@ -2638,8 +2694,9 @@ class BackupDeletionOwner:
                 connection.execute(
                     "INSERT INTO backup_deletion_bindings("
                     "operation_id, fence, scope_fingerprint, "
-                    "fingerprints_digest, status, completed_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    "fingerprints_digest, status, completed_at, "
+                    "identities_json, manifest_ids_json, source_fence) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         operation_id,
                         int(fence),
@@ -2647,7 +2704,18 @@ class BackupDeletionOwner:
                         fingerprints_digest,
                         "complete",
                         int(self._clock()),
+                        "[]",
+                        "[]",
+                        int(fence),
                     ),
+                )
+                self._bump_operation_fence(
+                    connection,
+                    operation_id,
+                    int(fence),
+                    int(fence),
+                    scope_fingerprint,
+                    fingerprints_digest,
                 )
                 connection.execute("COMMIT")
                 return {
@@ -2732,8 +2800,9 @@ class BackupDeletionOwner:
             connection.execute(
                 "INSERT OR REPLACE INTO backup_deletion_bindings("
                 "operation_id, fence, scope_fingerprint, "
-                "fingerprints_digest, status, completed_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "fingerprints_digest, status, completed_at, "
+                "identities_json, manifest_ids_json, source_fence) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     operation_id,
                     int(fence),
@@ -2741,6 +2810,9 @@ class BackupDeletionOwner:
                     self._bindings_digest(fingerprints),
                     "complete",
                     int(self._clock()),
+                    "[]",
+                    "[]",
+                    int(fence),
                 ),
             )
             connection.execute("COMMIT")
@@ -3177,7 +3249,8 @@ class BackupDeletionOwner:
         connection.execute(
             "INSERT OR REPLACE INTO backup_deletion_bindings("
             "operation_id, fence, scope_fingerprint, fingerprints_digest, "
-            "status, completed_at) VALUES (?, ?, ?, ?, ?, ?)",
+            "status, completed_at, identities_json, manifest_ids_json, "
+            "source_fence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 operation_id,
                 int(fence),
@@ -3185,10 +3258,21 @@ class BackupDeletionOwner:
                 fingerprints_digest,
                 "complete",
                 int(self._clock()),
+                json.dumps(sorted(identities), separators=(",", ":")),
+                json.dumps(sorted(staged_manifest_ids), separators=(",", ":")),
+                int(source_fence),
             ),
         )
         connection.execute("COMMIT")
         self._run_crash_hook("before_return")
+        with self._registry_connect() as proof:
+            try:
+                self._assert_completed_binding_proof(
+                    proof, operation_id, int(fence)
+                )
+            except S16OwnerFailure:
+                self._mark_binding_unverified(operation_id, int(fence))
+                raise
         return {
             "status": "complete",
             "deleted_counts": {"replica": deleted},
@@ -3247,9 +3331,10 @@ class BackupDeletionOwner:
                                 "verify_backup_absence_and_resume_the_same_job"
                             ),
                         )
-                    self._assert_completed_binding_proof(
+                    self._prove_or_invalidate_binding(
                         connection, operation_id, int(fence)
                     )
+                    self._mark_binding_complete(operation_id, int(fence))
                     return {
                         "owner_id": self.owner_id,
                         "status": "verified",
@@ -5175,6 +5260,10 @@ class GovernedDeletionService:
                     )
                 except S16OwnerFailure:
                     owner_results.pop(owner_id, None)
+                    if owner_id == "backup":
+                        self._owners["backup"]._mark_binding_unverified(
+                            job_id, int(job.get("fence") or 0)
+                        )
                     raise
             return self._publish_success(
                 job, owner_results, worker, observed_now
