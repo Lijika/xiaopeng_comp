@@ -36,6 +36,7 @@ from task4_consistency.controlled.s16 import (
     S16_POLICY_STALE,
     S16_STALE_WORKER,
     S16_VERIFY_FAILED,
+    LEASE_SECONDS,
     S16OwnerFailure,
     BackupDeletionOwner,
     CopyInventoryEntry,
@@ -4578,7 +4579,11 @@ def _assert_locator_free(payload: Any, backup_root: Path, *names: str) -> None:
         "before_transition",
         "after_transition",
         "before_marker_commit",
+        "before_purge",
+        "during_purge",
+        "after_purge",
         "before_final_commit",
+        "before_return",
     ],
 )
 def test_backup_delete_repairs_forward_from_each_production_crash_point(
@@ -4633,6 +4638,7 @@ def test_backup_delete_repairs_forward_from_each_production_crash_point(
             ("op-points", 1),
         ).fetchone()
     assert binding is not None and binding[0] == "complete"
+    assert backup._quarantine_has_residue() is False
 
 
 def test_backup_resume_rejects_wrong_fence_quarantine(
@@ -5013,3 +5019,222 @@ def test_backup_resume_rejects_corrupt_identities_json(
     assert excinfo.value.reason_code == S16_VERIFY_FAILED
     assert saved.exists()
     assert _backup_bookkeeping(backup) == before
+
+
+
+def test_backup_purge_oserror_blocks_complete_binding(
+    tmp_path: Path,
+) -> None:
+    """R10 P1-1: quarantine unlink OSError is retryable; complete binding
+    and receipt stay unreachable."""
+    backup_root = tmp_path / "backups"
+    backup = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
+    scope = "x" * 64
+    saved = backup_root / "purge.bin"
+    saved.write_bytes(b"purge-capture")
+    digest = hashlib.sha256(b"purge-capture").hexdigest()
+    backup.capture(
+        scope_fingerprint=scope, copy_files=[("purge.bin", digest)]
+    )
+    fingerprint = _replica_fingerprint(backup, scope)
+
+    def hook(point: str) -> None:
+        if point == "during_purge":
+            raise OSError("injected purge failure")
+
+    backup._crash_hook = hook
+    with pytest.raises(S16OwnerFailure) as excinfo:
+        backup.delete(
+            {fingerprint},
+            scope_fingerprint=scope,
+            operation_id="op-purge",
+            fence=1,
+        )
+    backup._crash_hook = None
+    assert excinfo.value.reason_code == S16_VERIFY_FAILED
+    assert excinfo.value.retryable is True
+    with backup._registry_connect() as connection:
+        bindings = connection.execute(
+            "SELECT COUNT(*) FROM backup_deletion_bindings "
+            "WHERE operation_id = ?",
+            ("op-purge",),
+        ).fetchone()[0]
+        intent = connection.execute(
+            "SELECT status FROM backup_deletion_intents "
+            "WHERE operation_id = ? AND fence = ?",
+            ("op-purge", 1),
+        ).fetchone()
+    assert bindings == 0
+    assert intent is not None and intent[0] == "transitioned"
+    assert backup._quarantine_has_residue() is True
+    result = backup.delete(
+        {fingerprint},
+        scope_fingerprint=scope,
+        operation_id="op-purge",
+        fence=1,
+    )
+    assert result["status"] == "complete", result
+    assert backup._quarantine_has_residue() is False
+
+
+def test_backup_fresh_unknown_missing_is_zero_change(
+    tmp_path: Path,
+) -> None:
+    """R10 P1-3: no current-fence intent and an external manifest loss
+    must not write a complete binding."""
+    backup_root = tmp_path / "backups"
+    backup = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
+    scope = "y" * 64
+    saved = backup_root / "fresh.bin"
+    saved.write_bytes(b"fresh-capture")
+    digest = hashlib.sha256(b"fresh-capture").hexdigest()
+    backup.capture(
+        scope_fingerprint=scope, copy_files=[("fresh.bin", digest)]
+    )
+    fingerprint = _replica_fingerprint(backup, scope)
+    staged_manifest = backup._load_manifests()[0]
+    backup._manifest_path(str(staged_manifest["manifest_id"])).unlink()
+    before = _backup_bookkeeping(backup)
+    with pytest.raises(S16OwnerFailure) as excinfo:
+        backup.delete(
+            {fingerprint},
+            scope_fingerprint=scope,
+            operation_id="op-fresh",
+            fence=1,
+        )
+    assert excinfo.value.reason_code == S16_VERIFY_FAILED
+    assert saved.exists()
+    assert _backup_bookkeeping(backup) == before
+
+
+def test_backup_worker_lease_takeover_completes_prior_fence_quarantine(
+    tmp_path: Path,
+) -> None:
+    """R10 P1-2: fence 1 crashes after transition; lease expiry lets
+    fence 2 finish the same job through process_next_deletion_job."""
+    import shutil
+
+    service, submission, application_id = _registered_terminated(tmp_path)
+    backup_root = tmp_path / "backups"
+    s16 = _s16_service(
+        tmp_path, service, backup_root=backup_root, governance_scope=TENANT_SCOPE
+    )
+    backup = s16._owners["backup"]
+    state_path = tmp_path / "target.sqlite3"
+    saved = backup_root / "target.sqlite3"
+    shutil.copy2(state_path, saved)
+    result = _preflight(
+        s16, str(submission["upstream_application_ref"]), scope=TENANT_SCOPE
+    )
+    scope = result["scope_fingerprint"]
+    backup.capture(
+        scope_fingerprint=scope,
+        copy_files=[(saved.name, hashlib.sha256(saved.read_bytes()).hexdigest())],
+    )
+    result2 = s16.preflight(
+        application_reference=str(submission["upstream_application_ref"]),
+        principal=S01CommandPrincipal(
+            subject=GOVERNANCE.subject,
+            role="operator",
+            scope=TENANT_SCOPE,
+            source_id="s16-governance-console",
+        ),
+        idempotency_key="r10-takeover-preflight",
+    )
+    committed = s16.commit(
+        request_id=result2["request_id"],
+        principal=GOVERNANCE_REGISTERED,
+        idempotency_key="r10-takeover-commit",
+    )
+    assert committed["status"] == "accepted"
+
+    def hook(point: str) -> None:
+        if point == "after_transition":
+            raise RuntimeError("injected fence-1 crash")
+
+    backup._crash_hook = hook
+    first = s16.process_next_deletion_job(worker_id="w1", now=_now() + 1)
+    backup._crash_hook = None
+    assert first["status"] == "pending", first
+    job = s16._job_for_request(result2["request_id"])
+    assert job is not None
+    job_id = str(job["job_id"])
+    second = s16.process_next_deletion_job(
+        worker_id="w2", now=_now() + 1 + LEASE_SECONDS + 1
+    )
+    assert second["status"] == "complete", second
+    late = backup.delete(
+        set(),
+        scope_fingerprint=scope,
+        operation_id=job_id,
+        fence=1,
+    )
+    assert late["status"] == "stale", late
+    receipt = s16.receipt(
+        request_id=result2["request_id"], principal=GOVERNANCE_REGISTERED
+    )
+    assert receipt["result"] == "deleted"
+    _assert_locator_free(receipt, backup_root, "target.sqlite3", ".s16_deletion")
+    assert not saved.exists()
+    assert backup._quarantine_has_residue() is False
+    third = s16.process_next_deletion_job(
+        worker_id="w3", now=_now() + 1 + 2 * LEASE_SECONDS
+    )
+    assert third["status"] == "idle"
+    again = s16.process_next_deletion_job(
+        worker_id="w2", now=_now() + 1 + 2 * LEASE_SECONDS
+    )
+    assert again["status"] == "idle"
+
+
+def test_backup_worker_fresh_missing_before_stage_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """R10 P1-3: external manifest loss after commit, before the first
+    owner stage, does not write a complete binding or receipt."""
+    import shutil
+
+    service, submission, application_id = _registered_terminated(tmp_path)
+    backup_root = tmp_path / "backups"
+    s16 = _s16_service(
+        tmp_path, service, backup_root=backup_root, governance_scope=TENANT_SCOPE
+    )
+    backup = s16._owners["backup"]
+    state_path = tmp_path / "target.sqlite3"
+    saved = backup_root / "target.sqlite3"
+    shutil.copy2(state_path, saved)
+    result = _preflight(
+        s16, str(submission["upstream_application_ref"]), scope=TENANT_SCOPE
+    )
+    scope = result["scope_fingerprint"]
+    backup.capture(
+        scope_fingerprint=scope,
+        copy_files=[(saved.name, hashlib.sha256(saved.read_bytes()).hexdigest())],
+    )
+    result2 = s16.preflight(
+        application_reference=str(submission["upstream_application_ref"]),
+        principal=S01CommandPrincipal(
+            subject=GOVERNANCE.subject,
+            role="operator",
+            scope=TENANT_SCOPE,
+            source_id="s16-governance-console",
+        ),
+        idempotency_key="r10-fresh-preflight",
+    )
+    committed = s16.commit(
+        request_id=result2["request_id"],
+        principal=GOVERNANCE_REGISTERED,
+        idempotency_key="r10-fresh-commit",
+    )
+    assert committed["status"] == "accepted"
+    for manifest in backup._load_manifests():
+        backup._manifest_path(str(manifest["manifest_id"])).unlink()
+    before = _backup_bookkeeping(backup)
+    outcome = s16.process_next_deletion_job(worker_id="w", now=_now() + 1)
+    assert outcome["status"] in {"pending", "repair_required"}, outcome
+    assert _backup_bookkeeping(backup)["bindings"] == before["bindings"]
+    query = s16.query(
+        request_id=result2["request_id"], principal=GOVERNANCE_REGISTERED
+    )
+    assert query["job"]["status"] != "complete"
+    assert query.get("receipt") in (None, {})

@@ -1578,6 +1578,25 @@ class BackupDeletionOwner:
             except sqlite3.OperationalError:
                 # Column already present on a migrated database.
                 pass
+            try:
+                connection.execute(
+                    "ALTER TABLE backup_deletion_intents "
+                    "ADD COLUMN source_fence INTEGER"
+                )
+            except sqlite3.OperationalError:
+                pass
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS backup_operation_fences (
+                    operation_id TEXT PRIMARY KEY,
+                    high_water INTEGER NOT NULL,
+                    active_fence INTEGER NOT NULL,
+                    source_fence INTEGER NOT NULL,
+                    scope_fingerprint TEXT NOT NULL,
+                    fingerprints_digest TEXT NOT NULL
+                )
+                """
+            )
             # R5 (P1-2): backfill reference rows for pre-R5 captures so old
             # backups keep reconciling under the ref-aware contract.
             for manifest in self._load_manifests():
@@ -1670,24 +1689,114 @@ class BackupDeletionOwner:
         manifest_ids: Iterable[str],
         identities: Iterable[str] = (),
     ) -> None:
+        self._run_crash_hook("during_purge")
         for manifest_id in manifest_ids:
             path = self._quarantine_manifest_path(
                 operation_id, int(fence), str(manifest_id)
             )
-            try:
-                if path.is_file():
-                    path.unlink()
-            except OSError:
-                continue
+            if path.is_file():
+                path.unlink()
         for identity in identities:
             path = self._quarantine_capture_path(
                 operation_id, int(fence), str(identity)
             )
-            try:
-                if path.is_file():
-                    path.unlink()
-            except OSError:
-                continue
+            if path.is_file():
+                path.unlink()
+
+    def _quarantine_has_residue(self) -> bool:
+        root = self._quarantine_root()
+        if not root.is_dir():
+            return False
+        try:
+            return any(path.is_file() for path in root.iterdir())
+        except OSError:
+            return True
+
+    def _purge_quarantine(
+        self,
+        operation_id: str,
+        source_fence: int,
+        manifest_ids: Iterable[str],
+        identities: Iterable[str],
+    ) -> None:
+        """Remove this pass's quarantine objects and prove source+quarantine
+        absence. OSError is a retryable owner failure; complete stays
+        unreachable."""
+        self._run_crash_hook("before_purge")
+        try:
+            self._cleanup_quarantine(
+                operation_id, int(source_fence), manifest_ids, identities
+            )
+        except OSError as error:
+            raise S16OwnerFailure(
+                self.owner_id,
+                S16_VERIFY_FAILED,
+                retryable=True,
+                responsible_party="backup_operations_owner",
+                recovery_action="retry_backup_quarantine_purge",
+            ) from error
+        for manifest_id in manifest_ids:
+            if self._manifest_path(str(manifest_id)).exists():
+                raise S16OwnerFailure(
+                    self.owner_id,
+                    S16_VERIFY_FAILED,
+                    retryable=True,
+                    responsible_party="backup_operations_owner",
+                    recovery_action="retry_backup_quarantine_purge",
+                )
+            if self._quarantine_manifest_path(
+                operation_id, int(source_fence), str(manifest_id)
+            ).exists():
+                raise S16OwnerFailure(
+                    self.owner_id,
+                    S16_VERIFY_FAILED,
+                    retryable=True,
+                    responsible_party="backup_operations_owner",
+                    recovery_action="retry_backup_quarantine_purge",
+                )
+        for identity in identities:
+            if self._quarantine_capture_path(
+                operation_id, int(source_fence), str(identity)
+            ).exists():
+                raise S16OwnerFailure(
+                    self.owner_id,
+                    S16_VERIFY_FAILED,
+                    retryable=True,
+                    responsible_party="backup_operations_owner",
+                    recovery_action="retry_backup_quarantine_purge",
+                )
+        self._run_crash_hook("after_purge")
+
+    def _bump_operation_fence(
+        self,
+        connection: sqlite3.Connection,
+        operation_id: str,
+        fence: int,
+        source_fence: int,
+        scope_fingerprint: str,
+        fingerprints_digest: str,
+    ) -> None:
+        connection.execute(
+            "INSERT INTO backup_operation_fences("
+            "operation_id, high_water, active_fence, source_fence, "
+            "scope_fingerprint, fingerprints_digest) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(operation_id) DO UPDATE SET "
+            "high_water = excluded.high_water, "
+            "active_fence = excluded.active_fence, "
+            "source_fence = excluded.source_fence, "
+            "scope_fingerprint = excluded.scope_fingerprint, "
+            "fingerprints_digest = excluded.fingerprints_digest "
+            "WHERE excluded.high_water >= backup_operation_fences.high_water",
+            (
+                operation_id,
+                int(fence),
+                int(fence),
+                int(source_fence),
+                scope_fingerprint,
+                fingerprints_digest,
+            ),
+        )
 
     def _staged_identities_have_residue(
         self,
@@ -2067,6 +2176,14 @@ class BackupDeletionOwner:
         fingerprints_digest = self._bindings_digest(fingerprints)
         with self._registry_connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            high = connection.execute(
+                "SELECT high_water FROM backup_operation_fences "
+                "WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            if high is not None and int(fence) < int(high[0]):
+                connection.execute("COMMIT")
+                return {"status": "stale", "deleted_counts": {}}
             binding = connection.execute(
                 "SELECT status, scope_fingerprint, fingerprints_digest "
                 "FROM backup_deletion_bindings "
@@ -2092,6 +2209,14 @@ class BackupDeletionOwner:
                     fingerprints, scope_fingerprint=scope_fingerprint
                 )
                 if not resurrected:
+                    if self._quarantine_has_residue():
+                        raise S16OwnerFailure(
+                            self.owner_id,
+                            S16_VERIFY_FAILED,
+                            retryable=True,
+                            responsible_party="backup_operations_owner",
+                            recovery_action="retry_backup_quarantine_purge",
+                        )
                     return {
                         "status": "complete",
                         "deleted_counts": {},
@@ -2117,7 +2242,7 @@ class BackupDeletionOwner:
             staged = connection.execute(
                 "SELECT scope_fingerprint, fingerprints_digest, "
                 "identities_json, manifest_ids_json, manifests_json, "
-                "unlinked_manifest_ids_json "
+                "unlinked_manifest_ids_json, source_fence "
                 "FROM backup_deletion_intents "
                 "WHERE operation_id = ? AND fence = ?",
                 (operation_id, int(fence)),
@@ -2135,6 +2260,7 @@ class BackupDeletionOwner:
                     }
                 staged_manifest_ids = set(json.loads(staged[3] or "[]"))
                 unlinked_marker = set(json.loads(staged[5] or "[]"))
+                source_fence = int(staged[6]) if staged[6] is not None else int(fence)
                 current_scope_manifests = [
                     manifest
                     for manifest in self._load_manifests()
@@ -2182,7 +2308,7 @@ class BackupDeletionOwner:
                     - current_scope_ids
                     - unlinked_marker
                     - self._pass_converted_manifest_ids(
-                        operation_id, int(fence), staged_manifest_ids
+                        operation_id, source_fence, staged_manifest_ids
                     )
                 )
                 if missing_unproven:
@@ -2245,14 +2371,136 @@ class BackupDeletionOwner:
                         connection, scope_fingerprint, fingerprints_digest,
                         operation_id, fence, identities, manifest_ids,
                         snapshots, unlinked_marker, resume=True,
+                        source_fence=source_fence,
+                    )
+            prior = connection.execute(
+                "SELECT fence, scope_fingerprint, fingerprints_digest, "
+                "identities_json, manifest_ids_json, manifests_json, "
+                "unlinked_manifest_ids_json, source_fence, status "
+                "FROM backup_deletion_intents "
+                "WHERE operation_id = ? AND status IN ('staged', 'transitioned') "
+                "ORDER BY fence DESC",
+                (operation_id,),
+            ).fetchone()
+            if prior is not None and int(prior[0]) != int(fence):
+                if (
+                    str(prior[1]) != scope_fingerprint
+                    or str(prior[2]) != fingerprints_digest
+                ):
+                    connection.execute("COMMIT")
+                    return {
+                        "status": "conflict",
+                        "deleted_counts": {},
+                        "reason_code": "S16_OWNER_BINDING_CONFLICT",
+                    }
+                snapshots = json.loads(prior[5] or "[]")
+                manifest_ids = json.loads(prior[4] or "[]")
+                if not snapshots or set(
+                    str(s.get("manifest_id") or "") for s in snapshots
+                ) != set(manifest_ids):
+                    connection.execute("COMMIT")
+                    raise S16OwnerFailure(
+                        self.owner_id,
+                        S16_VERIFY_FAILED,
+                        retryable=False,
+                        responsible_party="backup_operations_owner",
+                        recovery_action=(
+                            "repair_backup_capture_and_resume_the_same_job"
+                        ),
+                    )
+                source_fence = (
+                    int(prior[7]) if prior[7] is not None else int(prior[0])
+                )
+                connection.execute(
+                    "INSERT OR REPLACE INTO backup_deletion_intents("
+                    "operation_id, fence, scope_fingerprint, "
+                    "fingerprints_digest, status, staged_at, identities_json, "
+                    "manifest_ids_json, manifests_json, "
+                    "unlinked_manifest_ids_json, source_fence) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        operation_id,
+                        int(fence),
+                        scope_fingerprint,
+                        fingerprints_digest,
+                        str(prior[8] or "staged"),
+                        int(self._clock()),
+                        prior[3],
+                        prior[4],
+                        prior[5],
+                        prior[6],
+                        source_fence,
+                    ),
+                )
+                self._bump_operation_fence(
+                    connection,
+                    operation_id,
+                    int(fence),
+                    source_fence,
+                    scope_fingerprint,
+                    fingerprints_digest,
+                )
+                identities = set(json.loads(prior[3] or "[]"))
+                unlinked_marker = set(json.loads(prior[6] or "[]"))
+                connection.commit()
+                with self._registry_connect() as connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    return self._backup_delete_commit(
+                        connection, scope_fingerprint, fingerprints_digest,
+                        operation_id, fence, identities, manifest_ids,
+                        snapshots, unlinked_marker, resume=True,
+                        source_fence=source_fence,
                     )
             manifests = self._manifests_for_fingerprints(
                 fingerprints, scope_fingerprint=scope_fingerprint
             )
             if not manifests:
-                # R4 (P1-3): even the already-absent outcome writes the
-                # operation binding so the worker/replay verify can prove
-                # the binding instead of a scope-only scan.
+                try:
+                    self._backup_reconciliation()
+                except S16Unavailable:
+                    connection.execute("ROLLBACK")
+                    raise S16OwnerFailure(
+                        self.owner_id,
+                        S16_VERIFY_FAILED,
+                        retryable=False,
+                        responsible_party="backup_operations_owner",
+                        recovery_action=(
+                            "repair_backup_capture_and_resume_the_same_job"
+                        ),
+                    )
+                if self._quarantine_has_residue():
+                    connection.execute("ROLLBACK")
+                    raise S16OwnerFailure(
+                        self.owner_id,
+                        S16_VERIFY_FAILED,
+                        retryable=False,
+                        responsible_party="backup_operations_owner",
+                        recovery_action=(
+                            "repair_backup_capture_and_resume_the_same_job"
+                        ),
+                    )
+                scope_refs = connection.execute(
+                    "SELECT COUNT(*) FROM backup_registry_refs "
+                    "WHERE scope_fingerprint = ?",
+                    (scope_fingerprint,),
+                ).fetchone()[0]
+                open_intents = connection.execute(
+                    "SELECT COUNT(*) FROM backup_deletion_intents "
+                    "WHERE (operation_id = ? OR scope_fingerprint = ?) "
+                    "AND status IN ('staged', 'transitioned')",
+                    (operation_id, scope_fingerprint),
+                ).fetchone()[0]
+                if scope_refs or open_intents:
+                    connection.execute("ROLLBACK")
+                    raise S16OwnerFailure(
+                        self.owner_id,
+                        S16_VERIFY_FAILED,
+                        retryable=False,
+                        responsible_party="backup_operations_owner",
+                        recovery_action=(
+                            "repair_backup_capture_and_resume_the_same_job"
+                        ),
+                    )
                 connection.execute(
                     "INSERT INTO backup_deletion_bindings("
                     "operation_id, fence, scope_fingerprint, "
@@ -2323,6 +2571,30 @@ class BackupDeletionOwner:
             for manifest in current_manifests
         ]
         if not current_manifests:
+            try:
+                self._backup_reconciliation()
+            except S16Unavailable:
+                connection.execute("ROLLBACK")
+                raise S16OwnerFailure(
+                    self.owner_id,
+                    S16_VERIFY_FAILED,
+                    retryable=False,
+                    responsible_party="backup_operations_owner",
+                    recovery_action=(
+                        "repair_backup_capture_and_resume_the_same_job"
+                    ),
+                )
+            if self._quarantine_has_residue():
+                connection.execute("ROLLBACK")
+                raise S16OwnerFailure(
+                    self.owner_id,
+                    S16_VERIFY_FAILED,
+                    retryable=False,
+                    responsible_party="backup_operations_owner",
+                    recovery_action=(
+                        "repair_backup_capture_and_resume_the_same_job"
+                    ),
+                )
             connection.execute(
                 "INSERT OR REPLACE INTO backup_deletion_bindings("
                 "operation_id, fence, scope_fingerprint, "
@@ -2355,8 +2627,8 @@ class BackupDeletionOwner:
             "INSERT OR REPLACE INTO backup_deletion_intents("
             "operation_id, fence, scope_fingerprint, fingerprints_digest, "
             "status, staged_at, identities_json, manifest_ids_json, "
-            "manifests_json, unlinked_manifest_ids_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "manifests_json, unlinked_manifest_ids_json, source_fence) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 operation_id,
                 int(fence),
@@ -2368,7 +2640,16 @@ class BackupDeletionOwner:
                 json.dumps(manifest_ids, separators=(",", ":")),
                 json.dumps(manifest_snapshots, separators=(",", ":")),
                 "[]",
+                int(fence),
             ),
+        )
+        self._bump_operation_fence(
+            connection,
+            operation_id,
+            int(fence),
+            int(fence),
+            scope_fingerprint,
+            self._bindings_digest(fingerprints),
         )
         connection.commit()
         with self._registry_connect() as connection:
@@ -2378,6 +2659,7 @@ class BackupDeletionOwner:
                 self._bindings_digest(fingerprints),
                 operation_id, fence, identities, manifest_ids,
                 manifest_snapshots, set(), resume=False,
+                source_fence=int(fence),
             )
 
     def _run_crash_hook(self, point: str) -> None:
@@ -2400,6 +2682,7 @@ class BackupDeletionOwner:
         unlinked_manifest_ids: set[str],
         *,
         resume: bool,
+        source_fence: int | None = None,
     ) -> dict[str, Any]:
         """Complete a staged deletion inside the open registry transaction.
 
@@ -2416,6 +2699,7 @@ class BackupDeletionOwner:
 
         Any integrity mismatch rolls back and raises an owner failure
         (R3 P1-14 crash-recoverable deletion)."""
+        source_fence = int(fence if source_fence is None else source_fence)
         staged_manifest_ids = set(manifest_ids)
         current_manifests = self._load_manifests()
         current_scope_manifests = [
@@ -2483,8 +2767,14 @@ class BackupDeletionOwner:
                 # R8/R9 (P1-1): missing is tolerated only when THIS pass's
                 # owner-private quarantine proves the conversion. Marker
                 # or resume=True without that FS fact is unproven.
-                if self._controlled_transition_proven(
-                    operation_id, int(fence), staged_id
+                q_exists = self._controlled_transition_proven(
+                    operation_id, source_fence, staged_id
+                )
+                src_exists = self._manifest_path(staged_id).exists()
+                if q_exists or (
+                    staged_id in unlinked_manifest_ids
+                    and not src_exists
+                    and not q_exists
                 ):
                     continue
                 connection.execute("ROLLBACK")
@@ -2576,7 +2866,7 @@ class BackupDeletionOwner:
                     )
                 if not still_referenced:
                     dst = self._quarantine_capture_path(
-                        operation_id, int(fence), identity
+                        operation_id, source_fence, identity
                     )
                     if dst.exists():
                         connection.execute("ROLLBACK")
@@ -2618,7 +2908,13 @@ class BackupDeletionOwner:
                     recovery_action="restore_and_verify_the_captured_copy",
                 )
             elif self._capture_transition_proven(
-                operation_id, int(fence), identity
+                operation_id, source_fence, identity
+            ) or (
+                bool(unlinked_manifest_ids)
+                and not target.exists()
+                and not self._capture_transition_proven(
+                    operation_id, source_fence, identity
+                )
             ):
                 deleted += 1
             else:
@@ -2633,7 +2929,7 @@ class BackupDeletionOwner:
         for manifest_id in sorted(staged_manifest_ids):
             src = self._manifest_path(manifest_id)
             dst = self._quarantine_manifest_path(
-                operation_id, int(fence), manifest_id
+                operation_id, source_fence, manifest_id
             )
             if src.exists():
                 if dst.exists():
@@ -2666,7 +2962,13 @@ class BackupDeletionOwner:
                         recovery_action="verify_the_backup_manifest_removal",
                     )
             elif self._controlled_transition_proven(
-                operation_id, int(fence), manifest_id
+                operation_id, source_fence, manifest_id
+            ) or (
+                manifest_id in unlinked_manifest_ids
+                and not src.exists()
+                and not self._controlled_transition_proven(
+                    operation_id, source_fence, manifest_id
+                )
             ):
                 continue
             else:
@@ -2685,15 +2987,23 @@ class BackupDeletionOwner:
         )
         connection.execute(
             "UPDATE backup_deletion_intents "
-            "SET unlinked_manifest_ids_json = ? "
+            "SET unlinked_manifest_ids_json = ?, status = ?, source_fence = ? "
             "WHERE operation_id = ? AND fence = ?",
             (
                 json.dumps(combined_marker, separators=(",", ":")),
+                "transitioned",
+                int(source_fence),
                 operation_id,
                 int(fence),
             ),
         )
         connection.execute("COMMIT")
+        self._purge_quarantine(
+            operation_id,
+            source_fence,
+            staged_manifest_ids,
+            identities,
+        )
         connection.execute("BEGIN IMMEDIATE")
         # Reference rows of the staged manifests are removed; registry
         # rows are removed only for identities with no remaining refs.
@@ -2737,9 +3047,7 @@ class BackupDeletionOwner:
         )
         self._run_crash_hook("before_final_commit")
         connection.execute("COMMIT")
-        self._cleanup_quarantine(
-            operation_id, int(fence), staged_manifest_ids, identities
-        )
+        self._run_crash_hook("before_return")
         return {
             "status": "complete",
             "deleted_counts": {"replica": deleted},
@@ -2790,7 +3098,7 @@ class BackupDeletionOwner:
                     remaining = self._manifests_for_fingerprints(
                         fingerprints, scope_fingerprint=scope_fingerprint
                     )
-                    if remaining:
+                    if remaining or self._quarantine_has_residue():
                         raise S16OwnerFailure(
                             self.owner_id,
                             S16_VERIFY_FAILED,
@@ -2846,7 +3154,7 @@ class BackupDeletionOwner:
         remaining = self._manifests_for_fingerprints(
             fingerprints, scope_fingerprint=scope_fingerprint
         )
-        if remaining:
+        if remaining or self._quarantine_has_residue():
             raise S16OwnerFailure(
                 self.owner_id,
                 S16_VERIFY_FAILED,
@@ -2883,6 +3191,8 @@ class BackupDeletionOwner:
     def owner_healthy(self) -> bool:
         try:
             self._backup_reconciliation()
+            if self._quarantine_has_residue():
+                return False
             return True
         except Exception:
             return False
