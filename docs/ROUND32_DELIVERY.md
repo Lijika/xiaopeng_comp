@@ -5,7 +5,8 @@
 ## 固定基线与最终 HEAD
 
 - 固定静态分析基线：`e9e9cbb27326b99b38edc81e4da3d1a793db7a43`（实现前 `git rev-parse HEAD` 确认一致）。
-- 最终 HEAD：待提交后回填（见文末提交记录）。
+- 最终 HEAD：`17c49effb5cc245aca6b3b08ae102b757eaff6d4`（`feat(s16): governed deletion ledger, workers, HTTP and React panel`，直接提交于固定基线之上；28 files changed, 16161 insertions(+), 4337 deletions(-)）。
+- 工作树：仅保留 25 项既有未跟踪条目（AGENTS.md、docs/、out/、data/、fixtures/ 等），无任何 S16 相关未提交改动。
 
 ## 流程调用
 
