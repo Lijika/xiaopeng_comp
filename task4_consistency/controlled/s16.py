@@ -1880,23 +1880,78 @@ class BackupDeletionOwner:
         except (TypeError, ValueError, OSError, S16Unavailable, json.JSONDecodeError):
             self._fail_unproven_purge()
 
+    def _stale_operation_fence(
+        self, connection: sqlite3.Connection, operation_id: str, fence: int
+    ) -> bool:
+        row = connection.execute(
+            "SELECT high_water, active_fence FROM backup_operation_fences "
+            "WHERE operation_id = ?",
+            (operation_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        return int(fence) < int(row[0]) or int(fence) != int(row[1])
+
+    def _raise_stale_fence(self) -> None:
+        raise S16OwnerFailure(
+            self.owner_id,
+            S16_OWNER_STALE_FENCE,
+            retryable=False,
+            responsible_party="runtime_operations_owner",
+            recovery_action="reconcile_operation_fence_and_resume",
+        )
+
+    def _active_fence_cas_sql(self) -> str:
+        return (
+            " AND ("
+            "NOT EXISTS ("
+            "SELECT 1 FROM backup_operation_fences "
+            "WHERE operation_id = ?"
+            ") OR fence = ("
+            "SELECT active_fence FROM backup_operation_fences "
+            "WHERE operation_id = ?"
+            "))"
+        )
+
     def _mark_binding_unverified(self, operation_id: str, fence: int) -> None:
         with self._registry_connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if self._stale_operation_fence(connection, operation_id, int(fence)):
+                connection.execute("COMMIT")
+                return
             connection.execute(
                 "UPDATE backup_deletion_bindings SET status = ? "
-                "WHERE operation_id = ? AND fence = ? AND status = ?",
-                ("unverified", operation_id, int(fence), "complete"),
+                "WHERE operation_id = ? AND fence = ? AND status = ?"
+                + self._active_fence_cas_sql(),
+                (
+                    "unverified",
+                    operation_id,
+                    int(fence),
+                    "complete",
+                    operation_id,
+                    operation_id,
+                ),
             )
             connection.execute("COMMIT")
 
     def _mark_binding_complete(self, operation_id: str, fence: int) -> None:
         with self._registry_connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if self._stale_operation_fence(connection, operation_id, int(fence)):
+                connection.execute("COMMIT")
+                return
             connection.execute(
                 "UPDATE backup_deletion_bindings SET status = ? "
-                "WHERE operation_id = ? AND fence = ? AND status = ?",
-                ("complete", operation_id, int(fence), "unverified"),
+                "WHERE operation_id = ? AND fence = ? AND status = ?"
+                + self._active_fence_cas_sql(),
+                (
+                    "complete",
+                    operation_id,
+                    int(fence),
+                    "unverified",
+                    operation_id,
+                    operation_id,
+                ),
             )
             connection.execute("COMMIT")
 
@@ -3294,6 +3349,10 @@ class BackupDeletionOwner:
             # and a mismatched binding is a stable conflict.  A staged
             # (uncommitted) deletion intent is never verified.
             with self._registry_connect() as connection:
+                if self._stale_operation_fence(
+                    connection, operation_id, int(fence)
+                ):
+                    self._raise_stale_fence()
                 binding = connection.execute(
                     "SELECT scope_fingerprint, fingerprints_digest "
                     "FROM backup_deletion_bindings "

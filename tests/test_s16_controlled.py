@@ -5170,6 +5170,17 @@ def test_backup_worker_lease_takeover_completes_prior_fence_quarantine(
         fence=1,
     )
     assert late["status"] == "stale", late
+    before_verify = _backup_bookkeeping(backup)
+    fps = set((job.get("pending_owner_fingerprints") or {}).get("backup") or [])
+    with pytest.raises(S16OwnerFailure) as stale_exc:
+        backup.verify_absent(
+            fps,
+            scope_fingerprint=scope,
+            operation_id=job_id,
+            fence=1,
+        )
+    assert stale_exc.value.reason_code == S16_OWNER_STALE_FENCE
+    assert _backup_bookkeeping(backup) == before_verify
     with backup._registry_connect() as connection:
         old_intent = connection.execute(
             "SELECT status FROM backup_deletion_intents "
@@ -6542,3 +6553,36 @@ def test_backup_worker_before_return_shared_tamper_invalidates_binding(
     assert int(active[1]) == 1
     assert refs_b == 1
     assert saved.exists()
+    before_verify = _backup_bookkeeping(backup)
+    fps = set((job.get("pending_owner_fingerprints") or {}).get("backup") or [])
+    with pytest.raises(S16OwnerFailure) as stale_exc:
+        backup.verify_absent(
+            fps,
+            scope_fingerprint=scope_a,
+            operation_id=job_id,
+            fence=1,
+        )
+    assert stale_exc.value.reason_code == S16_OWNER_STALE_FENCE
+    assert _backup_bookkeeping(backup) == before_verify
+    with backup._registry_connect() as connection:
+        still_unverified = connection.execute(
+            "SELECT status FROM backup_deletion_bindings "
+            "WHERE operation_id = ? AND fence = 1",
+            (job_id,),
+        ).fetchone()
+        still_complete = connection.execute(
+            "SELECT status FROM backup_deletion_bindings "
+            "WHERE operation_id = ? AND fence = 2",
+            (job_id,),
+        ).fetchone()
+        still_active = connection.execute(
+            "SELECT high_water, active_fence, source_fence "
+            "FROM backup_operation_fences WHERE operation_id = ?",
+            (job_id,),
+        ).fetchone()
+    assert still_unverified is not None and still_unverified[0] == "unverified"
+    assert still_complete is not None and still_complete[0] == "complete"
+    assert still_active is not None
+    assert int(still_active[0]) == 2
+    assert int(still_active[1]) == 2
+    assert int(still_active[2]) == 1
