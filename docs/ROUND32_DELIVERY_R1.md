@@ -6,7 +6,7 @@
 
 - 固定基线：`e9e9cbb27326b99b38edc81e4da3d1a793db7a43`（与 R1 review 一致）。
 - R1 起始 HEAD（R0 交付）：`6fd13fb6aacb52b9f6341e3d0c9f0972ceec83f7`。
-- R1 最终 HEAD：待提交后回填。
+- R1 最终 HEAD：`3f5302f7e70bcc76fa90e030f77aa10b80b3b071`（`fix(s16): R1 review — readiness gate, owner fencing, audit seam, holds`，19 files changed；R0 交付 `6fd13fb` 之上）。
 
 ## Review finding 修复状态（逐项）
 
