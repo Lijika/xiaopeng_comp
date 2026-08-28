@@ -2886,10 +2886,45 @@ class EvaluationService:
         self,
         fingerprints: Iterable[str],
         scope_fingerprint: str = "",
+        *,
+        operation_id: str | None = None,
+        fence: int | None = None,
     ) -> dict[str, Any]:
         """Scope-aware absence proof (R2 P1-11): the rows must be gone AND
-        any recorded deletion binding must belong to the given scope."""
+        any recorded deletion binding must belong to the given scope.
+
+        R5 (P1-1): with an operation/fence the proof is a BINDING proof —
+        the exact owner binding must own this scope and fingerprints
+        digest; a mismatched binding is ``conflict``, a lower fence is
+        ``stale`` and an unknown operation never verifies.  Scope-only
+        calls remain the explicit readiness probe."""
         target = set(fingerprints)
+        if operation_id is not None and fence is not None:
+            fingerprints_digest = hashlib.sha256(
+                "\0".join(sorted(target)).encode("utf-8")
+            ).hexdigest()
+            with contextlib.closing(self._store._connect()) as connection:
+                binding = connection.execute(
+                    "SELECT scope_fingerprint, fingerprints_digest "
+                    "FROM s12_deletion_bindings "
+                    "WHERE operation_id = ? AND fence = ?",
+                    (operation_id, int(fence)),
+                ).fetchone()
+                if binding is not None:
+                    if (
+                        str(binding[0]) != str(scope_fingerprint)
+                        or str(binding[1]) != fingerprints_digest
+                    ):
+                        return {"binding": "conflict"}
+                    return {"binding": "verified", "absent": True}
+                highest = connection.execute(
+                    "SELECT MAX(fence) FROM s12_deletion_bindings "
+                    "WHERE operation_id = ?",
+                    (operation_id,),
+                ).fetchone()
+                if highest[0] is not None and int(highest[0]) > int(fence):
+                    return {"binding": "stale"}
+                return {"binding": "missing", "absent": False}
         with self._lock:
             self._store.reload()
             remaining = self._s16_rows_by_fingerprint(

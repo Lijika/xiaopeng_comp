@@ -102,9 +102,12 @@ def _s16_service(request: Request) -> Any:
 
 
 def _s16_governance_principal(request: Request) -> Any:
-    """The one registered data-governance owner identity for the S16 plane."""
+    """The one registered data-governance owner identity for the S16 plane.
+
+    R5 (P2-1): the credential check runs FIRST — an unauthorized caller
+    always receives the stable 403, never a 503 that leaks configuration
+    or restore state.  Readiness (503) applies only to authorized callers."""
     module = _s16_app_module(request)
-    service = _s16_service(request)
     credential = getattr(module, "S16_GOVERNANCE_CREDENTIAL", "")
     subject = getattr(module, "S16_GOVERNANCE_SUBJECT", "")
     if not subject or not module._s01_has_credential(request, credential):  # type: ignore[attr-defined]
@@ -116,6 +119,8 @@ def _s16_governance_principal(request: Request) -> Any:
             },
             headers=_S16_NO_STORE_HEADERS,
         )
+    service = _s16_service(request)
+    del service
     scope = getattr(module, "S16_GOVERNANCE_SCOPE", "C-DEMO")
     principal_type = getattr(module, "S01CommandPrincipal", None)
     if principal_type is None or not isinstance(scope, str) or not scope:
@@ -137,9 +142,11 @@ def _s16_governance_principal(request: Request) -> Any:
 
 
 def _s16_approver_principal(request: Request) -> Any:
-    """One of the two registered early-deletion approver identities."""
+    """One of the two registered early-deletion approver identities.
+
+    R5 (P2-1): the approver credential is judged before any readiness
+    check — unauthorized callers get the stable 403 in every state."""
     module = _s16_app_module(request)
-    _s16_service(request)
     # The approver presents her own credential either on the standard
     # Authorization header (API clients) or on the dedicated approver-token
     # header (the governed panel: the browser context already carries the
@@ -171,6 +178,7 @@ def _s16_approver_principal(request: Request) -> Any:
                     },
                     headers=_S16_NO_STORE_HEADERS,
                 )
+            _s16_service(request)
             return principal_type(
                 subject=subject,
                 role="operator",

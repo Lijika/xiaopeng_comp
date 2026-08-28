@@ -1193,6 +1193,11 @@ class S16RestoreReadinessGate(BaseHTTPMiddleware):
         if (
             closed
             and request.url.path.startswith("/controlled/")
+            # R5 (P2-1): the S16 command routes judge their governance /
+            # approver credential BEFORE applying readiness, so the
+            # middleware never leaks S16 state to an unauthorized caller;
+            # the other restricted controlled reads keep the shared gate.
+            and not request.url.path.startswith("/controlled/s16")
         ):
             response = JSONResponse(
                 status_code=503,
@@ -7258,15 +7263,9 @@ def _s16_react_shell() -> Response:
 
 
 def _s16_require_governance(request: Request) -> None:
-    if S16_SERVICE is None:
-        raise HTTPException(
-            503,
-            detail={
-                "error": "S16_UNAVAILABLE",
-                "message": "Controlled S16 governed-deletion plane is unavailable",
-            },
-            headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
-        )
+    # R5 (P2-1): the shell judges the governance credential BEFORE any
+    # plane-state check — an unauthorized caller gets the stable 403 in
+    # every configuration/restore state.
     if (
         not S16_GOVERNANCE_SUBJECT
         or not _s01_has_credential(request, S16_GOVERNANCE_CREDENTIAL)
@@ -7276,6 +7275,15 @@ def _s16_require_governance(request: Request) -> None:
             detail={
                 "error": "S16_FORBIDDEN",
                 "message": "Registered S16 governance owner identity required",
+            },
+            headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+        )
+    if S16_SERVICE is None:
+        raise HTTPException(
+            503,
+            detail={
+                "error": "S16_UNAVAILABLE",
+                "message": "Controlled S16 governed-deletion plane is unavailable",
             },
             headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
         )

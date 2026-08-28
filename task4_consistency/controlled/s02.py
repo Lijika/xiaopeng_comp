@@ -686,11 +686,46 @@ class RegisteredSourceBoundary:
         self,
         fingerprints: Iterable[str],
         scope_fingerprint: str = "",
+        *,
+        operation_id: str | None = None,
+        fence: int | None = None,
     ) -> dict[str, Any]:
         """Scope-aware absence proof against the persisted absence store
         (restart-proof, R2 P1-11): every recorded fingerprint must belong to
-        the given scope and no live mapping may remain."""
+        the given scope and no live mapping may remain.
+
+        R5 (P1-1): with an operation/fence the proof is a BINDING proof —
+        the exact owner binding must own this scope and fingerprints
+        digest; a mismatched binding is ``conflict``, a lower fence is
+        ``stale`` and an unknown operation never verifies.  Scope-only
+        calls remain the explicit readiness probe."""
         target = set(fingerprints)
+        if operation_id is not None and fence is not None:
+            fingerprints_digest = _digest(sorted(target))
+            with sqlite3.connect(
+                self.absence_store_path, timeout=10.0
+            ) as connection:
+                binding = connection.execute(
+                    "SELECT scope_fingerprint, fingerprints_digest "
+                    "FROM s02_deletion_bindings "
+                    "WHERE operation_id = ? AND fence = ?",
+                    (operation_id, int(fence)),
+                ).fetchone()
+                if binding is not None:
+                    if (
+                        str(binding[0]) != str(scope_fingerprint)
+                        or str(binding[1]) != fingerprints_digest
+                    ):
+                        return {"binding": "conflict"}
+                    return {"binding": "verified", "absent": True}
+                highest = connection.execute(
+                    "SELECT MAX(fence) FROM s02_deletion_bindings "
+                    "WHERE operation_id = ?",
+                    (operation_id,),
+                ).fetchone()
+                if highest[0] is not None and int(highest[0]) > int(fence):
+                    return {"binding": "stale"}
+                return {"binding": "missing", "absent": False}
         persisted: dict[str, str] = {}
         if self.absence_store_path is not None:
             with sqlite3.connect(

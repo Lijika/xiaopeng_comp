@@ -559,14 +559,6 @@ class S16Ledger:
                     int(time.time()),
                 ),
             )
-            try:
-                connection.execute(
-                    "ALTER TABLE backup_deletion_intents "
-                    "ADD COLUMN identities_json TEXT NOT NULL DEFAULT '[]'"
-                )
-            except sqlite3.OperationalError:
-                # Column already present on a migrated database.
-                pass
             connection.commit()
 
     @staticmethod
@@ -1210,8 +1202,37 @@ class S02DeletionOwner:
     ) -> dict[str, Any]:
         fingerprints = sorted(set(copy_fingerprints))
         result = self._boundary.s02_verify_absent(
-            fingerprints, scope_fingerprint=scope_fingerprint
+            fingerprints,
+            scope_fingerprint=scope_fingerprint,
+            operation_id=operation_id,
+            fence=fence,
         )
+        # R5 (P1-1): a binding proof outcome is judged by the binding
+        # itself — conflict and stale are stable terminal outcomes.
+        if result.get("binding") == "conflict":
+            raise S16OwnerFailure(
+                self.owner_id,
+                S16_OWNER_BINDING_CONFLICT,
+                retryable=False,
+                responsible_party="runtime_operations_owner",
+                recovery_action="reconcile_scope_binding_and_resume",
+            )
+        if result.get("binding") == "stale":
+            raise S16OwnerFailure(
+                self.owner_id,
+                S16_OWNER_STALE_FENCE,
+                retryable=False,
+                responsible_party="runtime_operations_owner",
+                recovery_action="reconcile_operation_fence_and_resume",
+            )
+        if result.get("binding") == "missing":
+            raise S16OwnerFailure(
+                self.owner_id,
+                S16_VERIFY_FAILED,
+                retryable=True,
+                responsible_party="platform_storage_owner",
+                recovery_action="verify_object_absence_and_resume_the_same_job",
+            )
         if result.get("scope_mismatch"):
             raise S16OwnerFailure(
                 self.owner_id,
@@ -1356,8 +1377,37 @@ class S12DeletionOwner:
     ) -> dict[str, Any]:
         fingerprints = sorted(set(copy_fingerprints))
         result = self._service.s16_verify_absent(
-            fingerprints, scope_fingerprint=scope_fingerprint
+            fingerprints,
+            scope_fingerprint=scope_fingerprint,
+            operation_id=operation_id,
+            fence=fence,
         )
+        # R5 (P1-1): a binding proof outcome is judged by the binding
+        # itself — conflict and stale are stable terminal outcomes.
+        if result.get("binding") == "conflict":
+            raise S16OwnerFailure(
+                self.owner_id,
+                S16_OWNER_BINDING_CONFLICT,
+                retryable=False,
+                responsible_party="runtime_operations_owner",
+                recovery_action="reconcile_scope_binding_and_resume",
+            )
+        if result.get("binding") == "stale":
+            raise S16OwnerFailure(
+                self.owner_id,
+                S16_OWNER_STALE_FENCE,
+                retryable=False,
+                responsible_party="runtime_operations_owner",
+                recovery_action="reconcile_operation_fence_and_resume",
+            )
+        if result.get("binding") == "missing":
+            raise S16OwnerFailure(
+                self.owner_id,
+                S16_VERIFY_FAILED,
+                retryable=True,
+                responsible_party="evaluation_plane_owner",
+                recovery_action="verify_evaluation_absence_and_resume_the_same_job",
+            )
         if result.get("scope_mismatch"):
             raise S16OwnerFailure(
                 self.owner_id,
@@ -1453,6 +1503,20 @@ class BackupDeletionOwner:
                 )
                 """
             )
+            # R5 (P1-2): manifest -> identity reference rows.  The registry
+            # row itself is identity-keyed and NEVER replaced; the refs
+            # record which capture manifests reference each identity so a
+            # cross-scope shared copy survives a single-scope deletion.
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS backup_registry_refs (
+                    connector_identity TEXT NOT NULL,
+                    scope_fingerprint TEXT NOT NULL,
+                    manifest_id TEXT NOT NULL,
+                    PRIMARY KEY (connector_identity, manifest_id)
+                )
+                """
+            )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS backup_deletion_bindings (
@@ -1488,6 +1552,33 @@ class BackupDeletionOwner:
             except sqlite3.OperationalError:
                 # Column already present on a migrated database.
                 pass
+            try:
+                connection.execute(
+                    "ALTER TABLE backup_deletion_intents "
+                    "ADD COLUMN manifest_ids_json TEXT NOT NULL DEFAULT '[]'"
+                )
+            except sqlite3.OperationalError:
+                # Column already present on a migrated database.
+                pass
+            # R5 (P1-2): backfill reference rows for pre-R5 captures so old
+            # backups keep reconciling under the ref-aware contract.
+            for manifest in self._load_manifests():
+                manifest_id = str(manifest.get("manifest_id") or "")
+                scope = str(manifest.get("scope_fingerprint") or "")
+                if not manifest_id or not scope:
+                    continue
+                for file_entry in manifest.get("files") or []:
+                    if not isinstance(file_entry, dict):
+                        continue
+                    identity = str(file_entry.get("connector_identity") or "")
+                    if not identity:
+                        continue
+                    connection.execute(
+                        "INSERT OR IGNORE INTO backup_registry_refs("
+                        "connector_identity, scope_fingerprint, manifest_id) "
+                        "VALUES (?, ?, ?)",
+                        (identity, scope, manifest_id),
+                    )
             connection.commit()
 
     def _manifest_path(self, manifest_id: str) -> Path:
@@ -1542,11 +1633,23 @@ class BackupDeletionOwner:
         try:
             with self._registry_connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
+                # R5 (P1-2): registry rows are identity-keyed and NEVER
+                # replaced — a later capture of the same handle+digest must
+                # not clobber an existing row another scope still references.
                 connection.executemany(
-                    "INSERT OR REPLACE INTO backup_registry("
+                    "INSERT OR IGNORE INTO backup_registry("
                     "connector_identity, handle, content_sha256, captured_at) "
                     "VALUES (?, ?, ?, ?)",
                     registry_rows,
+                )
+                connection.executemany(
+                    "INSERT OR IGNORE INTO backup_registry_refs("
+                    "connector_identity, scope_fingerprint, manifest_id) "
+                    "VALUES (?, ?, ?)",
+                    [
+                        (identity, scope_fingerprint, manifest_id)
+                        for identity, _handle, _digest, _at in registry_rows
+                    ],
                 )
                 connection.commit()
         except Exception:
@@ -1602,7 +1705,18 @@ class BackupDeletionOwner:
                 "SELECT connector_identity, handle, content_sha256 "
                 "FROM backup_registry"
             ).fetchall()
+            ref_rows = connection.execute(
+                "SELECT connector_identity, scope_fingerprint, manifest_id "
+                "FROM backup_registry_refs"
+            ).fetchall()
         registry = {str(r[0]): (str(r[1]), str(r[2])) for r in rows}
+        refs = {
+            (str(r[0]), str(r[1]), str(r[2])) for r in ref_rows
+        }
+        manifests_by_id = {
+            str(manifest.get("manifest_id") or ""): manifest
+            for manifest in manifests
+        }
         referenced: set[str] = set()
         for manifest in manifests:
             files = manifest.get("files")
@@ -1649,18 +1763,70 @@ class BackupDeletionOwner:
                     raise S16Unavailable(
                         "S16 backup captured file digest mismatch"
                     )
+                # R5 (P1-2): every manifest identity must carry a matching
+                # reference row, and every reference row must point at an
+                # existing manifest that actually contains the identity.
+                manifest_id = str(manifest.get("manifest_id") or "")
+                manifest_scope = str(manifest.get("scope_fingerprint") or "")
+                if (
+                    identity,
+                    manifest_scope,
+                    manifest_id,
+                ) not in refs:
+                    raise S16Unavailable(
+                        "S16 backup manifest reference row is missing"
+                    )
+                referenced.add(identity)
+        for identity, scope, manifest_id in refs:
+            manifest = manifests_by_id.get(manifest_id)
+            if manifest is None:
+                raise S16Unavailable(
+                    "S16 backup reference points at a missing manifest"
+                )
+            if str(manifest.get("scope_fingerprint") or "") != scope:
+                raise S16Unavailable(
+                    "S16 backup reference scope mismatch"
+                )
+            if identity not in referenced:
+                raise S16Unavailable(
+                    "S16 backup reference identity is not in the manifest"
+                )
         orphans = sorted(set(registry) - referenced)
         if orphans:
             raise S16Unavailable(
                 "S16 backup registry contains orphan rows"
             )
-        return {"manifests": manifests, "registry_rows": registry}
+        return {
+            "manifests": manifests,
+            "registry_rows": registry,
+            "refs": refs,
+        }
 
     def inventory(self, scope_fingerprint: str) -> list[CopyInventoryEntry]:
+        reconciled = self._backup_reconciliation()
+        manifests = reconciled["manifests"]
+        # R5 (P1-2): an identity referenced by manifests of more than one
+        # scope is a cross-scope shared copy; every replica entry that
+        # references such an identity is marked shared so preflight and
+        # commit block with S16_SHARED_COPY_REQUIRES_REPACK.
+        identity_scopes: dict[str, set[str]] = {}
+        for manifest in manifests:
+            scope = str(manifest.get("scope_fingerprint") or "")
+            for file_entry in manifest.get("files") or []:
+                if not isinstance(file_entry, dict):
+                    continue
+                identity = str(file_entry.get("connector_identity") or "")
+                if identity:
+                    identity_scopes.setdefault(identity, set()).add(scope)
         entries: list[CopyInventoryEntry] = []
-        for manifest in self._backup_reconciliation()["manifests"]:
+        for manifest in manifests:
             if manifest.get("scope_fingerprint") != scope_fingerprint:
                 continue
+            shared = any(
+                len(identity_scopes.get(str(entry.get("connector_identity") or ""), set())) > 1
+                for entry in manifest.get("files") or []
+                if isinstance(entry, dict)
+            )
             file_digest = _digest(manifest["files"])
             replica_fingerprint = copy_identity_fingerprint(
                 self.owner_id, COPY_CLASS_REPLICA, file_digest
@@ -1671,6 +1837,12 @@ class BackupDeletionOwner:
                     copy_class=COPY_CLASS_REPLICA,
                     content_sha256=file_digest,
                     identity_fingerprint=replica_fingerprint,
+                    shared_state="shared" if shared else "exclusive",
+                    planned_action=(
+                        S16_SHARED_COPY_REQUIRES_REPACK
+                        if shared
+                        else "delete"
+                    ),
                     count=len(manifest["files"]),
                 )
             )
@@ -1780,7 +1952,8 @@ class BackupDeletionOwner:
                 return {"status": "stale", "deleted_counts": {}}
             staged = connection.execute(
                 "SELECT scope_fingerprint, fingerprints_digest, "
-                "identities_json FROM backup_deletion_intents "
+                "identities_json, manifest_ids_json "
+                "FROM backup_deletion_intents "
                 "WHERE operation_id = ? AND fence = ?",
                 (operation_id, int(fence)),
             ).fetchone()
@@ -1795,15 +1968,45 @@ class BackupDeletionOwner:
                         "deleted_counts": {},
                         "reason_code": "S16_OWNER_BINDING_CONFLICT",
                     }
+                staged_manifest_ids = set(json.loads(staged[3] or "[]"))
+                current_scope_ids = {
+                    str(manifest["manifest_id"])
+                    for manifest in self._load_manifests()
+                    if str(manifest.get("scope_fingerprint") or "")
+                    == scope_fingerprint
+                }
+                if current_scope_ids - staged_manifest_ids:
+                    # R5 (P1-3) repair-forward: a capture landed after the
+                    # stale intent was staged.  The stale intent is
+                    # replaced by a fresh stage over the CURRENT scope
+                    # manifest set; the same job then completes with the
+                    # whole set (nothing was unlinked by the failed pass).
+                    connection.execute(
+                        "DELETE FROM backup_deletion_intents "
+                        "WHERE operation_id = ? AND fence = ?",
+                        (operation_id, int(fence)),
+                    )
+                    connection.execute("COMMIT")
+                    connection.execute("BEGIN IMMEDIATE")
+                    return self._resume_or_fresh_delete(
+                        connection,
+                        fingerprints,
+                        scope_fingerprint,
+                        operation_id,
+                        fence,
+                        staged_manifest_ids=None,
+                    )
                 # Resume a crashed deletion: some files were already
                 # unlinked; complete idempotently from the staged intent.
                 identities = set(json.loads(staged[2] or "[]"))
+                manifest_ids = json.loads(staged[3] or "[]")
                 connection.commit()
                 with self._registry_connect() as connection:
                     connection.execute("BEGIN IMMEDIATE")
                     return self._backup_delete_commit(
                         connection, scope_fingerprint, fingerprints_digest,
-                        operation_id, fence, identities, resume=True,
+                        operation_id, fence, identities, manifest_ids,
+                        resume=True,
                     )
             manifests = self._manifests_for_fingerprints(
                 fingerprints, scope_fingerprint=scope_fingerprint
@@ -1832,40 +2035,89 @@ class BackupDeletionOwner:
                     "deleted_counts": {},
                     "already_absent": True,
                 }
-            # Stage the durable intent BEFORE any unlink (T16 P1-14).
-            identities = {
-                str(file_entry["connector_identity"])
-                for manifest in manifests
-                for file_entry in manifest["files"]
-            }
+            # Stage the durable intent BEFORE any unlink (R3 P1-14, R5
+            # P1-3): the staged manifest ids and identities FIX the
+            # deletion set over the FULL current scope manifest set — a
+            # capture added after this moment is never unlinked or deleted
+            # by this operation without a fresh re-stage.
+            return self._resume_or_fresh_delete(
+                connection,
+                fingerprints,
+                scope_fingerprint,
+                operation_id,
+                fence,
+                staged_manifest_ids=None,
+            )
+    def _resume_or_fresh_delete(
+        self,
+        connection: sqlite3.Connection,
+        fingerprints: set[str],
+        scope_fingerprint: str,
+        operation_id: str,
+        fence: int,
+        staged_manifest_ids: set[str] | None,
+    ) -> dict[str, Any]:
+        """Stage the FULL current scope manifest set (R5 P1-3) and start
+        the completion phase.  The worker retry after a capture race
+        replaces the stale intent here; the fresh path stages once.  The
+        caller owns the transaction (already BEGIN IMMEDIATE)."""
+        current_manifests = [
+            manifest
+            for manifest in self._load_manifests()
+            if str(manifest.get("scope_fingerprint") or "") == scope_fingerprint
+        ]
+        if not current_manifests:
             connection.execute(
-                "INSERT INTO backup_deletion_intents("
-                "operation_id, fence, scope_fingerprint, fingerprints_digest, "
-                "status, staged_at, identities_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO backup_deletion_bindings("
+                "operation_id, fence, scope_fingerprint, "
+                "fingerprints_digest, status, completed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     operation_id,
                     int(fence),
                     scope_fingerprint,
-                    fingerprints_digest,
-                    "staged",
+                    self._bindings_digest(fingerprints),
+                    "complete",
                     int(self._clock()),
-                    json.dumps(sorted(identities), separators=(",", ":")),
                 ),
             )
-            try:
-                connection.execute(
-                    "ALTER TABLE backup_deletion_intents "
-                    "ADD COLUMN identities_json TEXT NOT NULL DEFAULT '[]'"
-                )
-            except sqlite3.OperationalError:
-                # Column already present on a migrated database.
-                pass
-            connection.commit()
+            connection.execute("COMMIT")
+            return {
+                "status": "complete",
+                "deleted_counts": {},
+                "already_absent": True,
+            }
+        identities = {
+            str(file_entry["connector_identity"])
+            for manifest in current_manifests
+            for file_entry in manifest["files"]
+        }
+        manifest_ids = sorted(
+            str(manifest["manifest_id"]) for manifest in current_manifests
+        )
+        connection.execute(
+            "INSERT INTO backup_deletion_intents("
+            "operation_id, fence, scope_fingerprint, fingerprints_digest, "
+            "status, staged_at, identities_json, manifest_ids_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                operation_id,
+                int(fence),
+                scope_fingerprint,
+                self._bindings_digest(fingerprints),
+                "staged",
+                int(self._clock()),
+                json.dumps(sorted(identities), separators=(",", ":")),
+                json.dumps(manifest_ids, separators=(",", ":")),
+            ),
+        )
+        connection.commit()
         with self._registry_connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             return self._backup_delete_commit(
-                connection, scope_fingerprint, fingerprints_digest,
-                operation_id, fence, identities, resume=False,
+                connection, scope_fingerprint,
+                self._bindings_digest(fingerprints),
+                operation_id, fence, identities, manifest_ids, resume=False,
             )
 
     def _backup_delete_commit(
@@ -1876,17 +2128,52 @@ class BackupDeletionOwner:
         operation_id: str,
         fence: int,
         identities: set[str],
+        manifest_ids: list[str],
         *,
         resume: bool,
     ) -> dict[str, Any]:
-        """Complete a staged deletion inside the open registry transaction:
-        every captured file is digest-verified and removed (a resume
-        tolerates files the crashed pass already removed), manifests are
-        removed, then registry rows, the intent and the operation binding
-        commit together.  Any integrity mismatch rolls back and raises an
-        owner failure (R3 P1-14 crash-recoverable deletion)."""
+        """Complete a staged deletion inside the open registry transaction.
+
+        R5 (P1-3): the staged manifest ids FIX the deletion set — the
+        current scope manifests are reconciled against the staged set
+        BEFORE any unlink; a capture added or changed after staging is a
+        stable owner failure that keeps the new capture untouched and puts
+        the job into repair_required.
+
+        R5 (P1-2): identity cleanup is reference-aware — a file and its
+        registry row are removed only when NO manifest outside the staged
+        set still references the identity; a cross-scope shared copy
+        survives a single-scope deletion and stays verifiable.
+
+        Any integrity mismatch rolls back and raises an owner failure
+        (R3 P1-14 crash-recoverable deletion)."""
+        staged_manifest_ids = set(manifest_ids)
+        current_manifests = self._load_manifests()
+        current_scope_manifests = [
+            manifest
+            for manifest in current_manifests
+            if str(manifest.get("scope_fingerprint") or "") == scope_fingerprint
+        ]
+        current_ids = {
+            str(manifest["manifest_id"]) for manifest in current_scope_manifests
+        }
+        new_ids = current_ids - staged_manifest_ids
+        if new_ids:
+            # R5 (P1-3): a manifest appeared since staging.  Nothing is
+            # unlinked; the new capture is preserved and the worker
+            # records a stable failure (repair-forward reruns the same
+            # job with the current set).  Staged manifests that are
+            # already gone are the crashed pass's own unlinks (resume),
+            # never a set change.
+            connection.execute("ROLLBACK")
+            raise S16OwnerFailure(
+                self.owner_id,
+                S16_VERIFY_FAILED,
+                retryable=False,
+                responsible_party="backup_operations_owner",
+                recovery_action="repair_backup_capture_and_resume_the_same_job",
+            )
         deleted = 0
-        manifest_ids: set[str] = set()
         for identity in sorted(identities):
             row = connection.execute(
                 "SELECT handle, content_sha256 FROM backup_registry "
@@ -1904,6 +2191,16 @@ class BackupDeletionOwner:
                 )
             handle = str(row[0])
             expected_digest = str(row[1])
+            # R5 (P1-2): keep the file when another manifest (any scope)
+            # still references this identity.
+            remaining_refs = connection.execute(
+                "SELECT manifest_id FROM backup_registry_refs "
+                "WHERE connector_identity = ?",
+                (identity,),
+            ).fetchall()
+            still_referenced = any(
+                str(ref[0]) not in staged_manifest_ids for ref in remaining_refs
+            )
             target = self._capture_target(handle)
             if target.is_file():
                 if (
@@ -1918,18 +2215,19 @@ class BackupDeletionOwner:
                         responsible_party="backup_operations_owner",
                         recovery_action="repair_the_captured_copy_digest",
                     )
-                target.unlink()
-                if target.exists():
-                    connection.execute("ROLLBACK")
-                    raise S16OwnerFailure(
-                        self.owner_id,
-                        S16_VERIFY_FAILED,
-                        retryable=True,
-                        responsible_party="backup_operations_owner",
-                        recovery_action="verify_the_captured_copy_removal",
-                    )
-                deleted += 1
-            elif not resume:
+                if not still_referenced:
+                    target.unlink()
+                    if target.exists():
+                        connection.execute("ROLLBACK")
+                        raise S16OwnerFailure(
+                            self.owner_id,
+                            S16_VERIFY_FAILED,
+                            retryable=True,
+                            responsible_party="backup_operations_owner",
+                            recovery_action="verify_the_captured_copy_removal",
+                        )
+                    deleted += 1
+            elif not resume and not still_referenced:
                 connection.execute("ROLLBACK")
                 raise S16OwnerFailure(
                     self.owner_id,
@@ -1938,11 +2236,7 @@ class BackupDeletionOwner:
                     responsible_party="backup_operations_owner",
                     recovery_action="restore_and_verify_the_captured_copy",
                 )
-        for manifest in self._load_manifests():
-            if str(manifest.get("scope_fingerprint") or "") != scope_fingerprint:
-                continue
-            manifest_ids.add(str(manifest["manifest_id"]))
-        for manifest_id in sorted(manifest_ids):
+        for manifest_id in sorted(staged_manifest_ids):
             manifest_path = self._manifest_path(manifest_id)
             if manifest_path.exists():
                 manifest_path.unlink()
@@ -1964,12 +2258,28 @@ class BackupDeletionOwner:
                     responsible_party="backup_operations_owner",
                     recovery_action="restore_and_verify_the_backup_manifest",
                 )
-        # Every file and manifest verified gone: commit the registry
-        # deletions, the intent completion and the operation binding.
+        # Reference rows of the staged manifests are removed; registry
+        # rows are removed only for identities with no remaining refs.
         connection.executemany(
-            "DELETE FROM backup_registry WHERE connector_identity = ?",
-            ((identity,) for identity in sorted(identities)),
+            "DELETE FROM backup_registry_refs "
+            "WHERE connector_identity = ? AND manifest_id = ?",
+            [
+                (identity, manifest_id)
+                for identity in sorted(identities)
+                for manifest_id in sorted(staged_manifest_ids)
+            ],
         )
+        for identity in sorted(identities):
+            remaining_refs = connection.execute(
+                "SELECT manifest_id FROM backup_registry_refs "
+                "WHERE connector_identity = ?",
+                (identity,),
+            ).fetchall()
+            if not remaining_refs:
+                connection.execute(
+                    "DELETE FROM backup_registry WHERE connector_identity = ?",
+                    (identity,),
+                )
         connection.execute(
             "UPDATE backup_deletion_intents SET status = ? "
             "WHERE operation_id = ? AND fence = ?",

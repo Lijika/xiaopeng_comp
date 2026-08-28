@@ -136,6 +136,9 @@ def test_s16_routes_fail_closed_without_configuration(
     monkeypatch.setattr(web, "S16_GOVERNANCE_SUBJECT", "")
     client = TestClient(web.app)
 
+    # R5 (P2-1): without a configured governance subject NO caller is
+    # authorized — every S16 surface returns the stable 403 in the
+    # unconfigured state instead of a 503 that leaks configuration state.
     for method, path, body in (
         ("post", "/controlled/s16/api/deletions/preflight", {"application_reference": PREFERRED, "idempotency_key": "x"}),
         ("post", "/controlled/s16/api/deletions/req/cancel", {"idempotency_key": "x"}),
@@ -148,8 +151,8 @@ def test_s16_routes_fail_closed_without_configuration(
         if body is not None:
             kwargs["json"] = body
         response = getattr(client, method)(path, **kwargs)
-        assert response.status_code == 503, (method, path, response.text)
-        assert response.json()["detail"]["error"] == "S16_UNAVAILABLE"
+        assert response.status_code == 403, (method, path, response.text)
+        assert response.json()["detail"]["error"] == "S16_FORBIDDEN"
         assert response.headers["cache-control"] == "no-store"
     # Other planes stay reachable.
     assert client.get("/api/health").status_code == 200
@@ -752,3 +755,118 @@ def test_s16_factory_wires_real_audit_seam_and_fails_closed_without_writer(
             idempotency_key="factory-no-writer",
         )
     assert str(excinfo.value) == S16_AUDIT_SEAM_UNAVAILABLE
+
+
+def test_s16_readiness_identity_matrix_three_states(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """R5 P2-1: the identity boundary is judged BEFORE readiness — in
+    every plane state (ready, configured-but-unavailable, restore-closed)
+    an unauthorized caller receives the stable 403, while an authorized
+    governance/approver caller receives the plane 503 only when the plane
+    is actually unavailable.  All branches carry no-store."""
+    import shutil
+
+    import task4_consistency.web.app as web
+
+    fixture = _install(monkeypatch, tmp_path)
+    client = TestClient(_webapp())
+    state_path = tmp_path / "target.sqlite3"
+    original_db = tmp_path / "original.sqlite3"
+    shutil.copy2(state_path, original_db)
+
+    non_governance = (
+        None,
+        OPERATOR_CREDENTIAL,
+        DEMO_CREDENTIAL,
+        S08_ADMIN_CREDENTIAL,
+        REVIEWER_CREDENTIAL,
+        APPROVER1_CREDENTIAL,
+    )
+
+    # State 1: READY — governance works, everyone else is 403.
+    ok = client.post(
+        "/controlled/s16/api/deletions/preflight",
+        headers=_auth(GOVERNANCE_CREDENTIAL),
+        json={"application_reference": PREFERRED, "idempotency_key": "matrix-ready"},
+    )
+    assert ok.status_code == 200
+    for credential in non_governance:
+        headers = _auth(credential) if credential is not None else {}
+        denied = client.post(
+            "/controlled/s16/api/deletions/preflight",
+            headers=headers,
+            json={"application_reference": PREFERRED, "idempotency_key": f"m-{credential}"},
+        )
+        assert denied.status_code == 403, (credential, denied.text)
+        assert denied.json()["detail"]["error"] == "S16_FORBIDDEN"
+        assert denied.headers["cache-control"] == "no-store"
+    request_id = ok.json()["request_id"]
+
+    # State 2: CONFIGURED-BUT-UNAVAILABLE — the authorized governance
+    # caller sees the stable 503; everyone else still sees 403.
+    monkeypatch.setattr(web, "S16_SERVICE", None)
+    monkeypatch.setattr(web, "S16_CONFIGURED", True)
+    for method, path, body in (
+        (
+            "post",
+            "/controlled/s16/api/deletions/preflight",
+            {"application_reference": PREFERRED, "idempotency_key": "matrix-unavail"},
+        ),
+        ("get", f"/controlled/s16/api/deletions/{request_id}", None),
+        ("get", f"/controlled/s16/api/deletions/{request_id}/receipt", None),
+    ):
+        kwargs = {"headers": _auth(GOVERNANCE_CREDENTIAL)}
+        if body is not None:
+            kwargs["json"] = body
+        response = getattr(client, method)(path, **kwargs)
+        assert response.status_code == 503, (method, path, response.text)
+        assert response.json()["detail"]["error"] == "S16_UNAVAILABLE"
+        assert response.headers["cache-control"] == "no-store"
+    for credential in non_governance:
+        headers = _auth(credential) if credential is not None else {}
+        denied = client.post(
+            "/controlled/s16/api/deletions/preflight",
+            headers=headers,
+            json={"application_reference": PREFERRED, "idempotency_key": f"mu-{credential}"},
+        )
+        assert denied.status_code == 403, (credential, denied.text)
+        assert denied.json()["detail"]["error"] == "S16_FORBIDDEN"
+        assert denied.headers["cache-control"] == "no-store"
+
+    # State 3: RESTORE-CLOSED — authorized callers get the readiness 503,
+    # unauthorized callers still get 403 (no state leak).
+    web.S16_SERVICE = _build_s16_service(tmp_path, web.S01_SERVICE)
+    committed = client.post(
+        f"/controlled/s16/api/deletions/{request_id}/commit",
+        headers=_auth(GOVERNANCE_CREDENTIAL),
+        json={"idempotency_key": "matrix-commit"},
+    )
+    assert committed.status_code == 200
+    processed = client.post(
+        "/controlled/s16/api/process",
+        headers=_auth(GOVERNANCE_CREDENTIAL),
+    )
+    assert processed.status_code == 200
+    assert processed.json()["status"] == "complete"
+    shutil.copy2(original_db, state_path)
+    assert web.S16_SERVICE.ready() is False
+    closed = client.get(
+        f"/controlled/s16/api/deletions/{request_id}",
+        headers=_auth(GOVERNANCE_CREDENTIAL),
+    )
+    assert closed.status_code == 503
+    assert (
+        closed.json()["detail"]["error"]
+        == "S16_RESTORE_READINESS_UNAVAILABLE"
+    )
+    assert closed.headers["cache-control"] == "no-store"
+    for credential in non_governance:
+        headers = _auth(credential) if credential is not None else {}
+        denied = client.get(
+            f"/controlled/s16/api/deletions/{request_id}",
+            headers=headers,
+        )
+        assert denied.status_code == 403, (credential, denied.text)
+        assert denied.json()["detail"]["error"] == "S16_FORBIDDEN"
+        assert denied.headers["cache-control"] == "no-store"
