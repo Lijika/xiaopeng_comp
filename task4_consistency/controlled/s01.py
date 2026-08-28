@@ -786,6 +786,13 @@ class ControlledScenarioService:
         self._source_provenance_manifest = self._load_source_provenance_manifest()
         self._manifest = self._build_artifact_manifest()
 
+    @property
+    def audit_writer(self) -> Callable[[dict[str, Any]], bool] | None:
+        """The registered audit writer (R2 P1-5): the narrow seam the S16
+        security-audit owner uses for its post-commit full copy.  ``None``
+        means no independent writer is configured."""
+        return self._audit_writer
+
     def _legacy_release(self) -> dict[str, Any]:
         """Lazily load the pre-cutover singleton baseline (legacy seam only;
         governed runtimes resolve the Registry instead and never read the
@@ -18816,6 +18823,7 @@ class ControlledScenarioService:
         include_s13: bool = False,
     ) -> dict[str, Any]:
         """Return an authorized, minimized timeline from immutable audit facts."""
+        self.s16_require_read_ready(application_id)
         if (
             principal.role != "auditor"
             or not self.is_controlled_scope(principal.scope)
@@ -18968,6 +18976,7 @@ class ControlledScenarioService:
         finding_id: str | None = None,
     ) -> dict[str, Any]:
         """Return finding-first minimized workspace data for an in-scope Reviewer."""
+        self.s16_require_read_ready(application_id)
         if role != "reviewer" or not self.is_controlled_scope(scope):
             raise QueryNotFound(application_id)
         with self._lock:
@@ -19886,6 +19895,7 @@ class ControlledScenarioService:
         principal: S01CommandPrincipal,
         application_id: str,
     ) -> dict[str, Any]:
+        self.s16_require_read_ready(application_id)
         if not self._valid_reviewer_principal(principal, now=float(self._clock())):
             raise QueryNotFound(application_id)
         app = self._store.applications.get(application_id)
@@ -21005,6 +21015,7 @@ class ControlledScenarioService:
         Returns the current obligation (if any), delivery status, attempt
         summaries and watermarks without exposing raw values or credentials.
         """
+        self.s16_require_read_ready(application_id)
         with self._lock:
             self._reload_store()
             # Scope is derived from the authoritative application, not the
@@ -28058,14 +28069,43 @@ class ControlledScenarioService:
         except Exception:
             return False
 
-    def s16_tombstone_verified(self, scope_fingerprint: str) -> bool:
+    def s16_tombstone_verified(
+        self,
+        scope_fingerprint: str,
+        *,
+        operation_id: str | None = None,
+        fence: int | None = None,
+    ) -> bool:
+        """Tombstone absence proof (R2 P1-12): the tombstone row carries the
+        operation id and fence of the deletion binding; a caller asking
+        about a stale operation never sees already-absent."""
         with self._lock:
             self._reload_store()
-            return any(
-                item.get("schema_version") == "s16-tombstone/1"
-                and item.get("scope_fingerprint") == scope_fingerprint
-                for item in self._store.s16_governed_deletions
-            )
+            for item in self._store.s16_governed_deletions:
+                if not (
+                    item.get("schema_version") == "s16-tombstone/1"
+                    and item.get("scope_fingerprint") == scope_fingerprint
+                ):
+                    continue
+                if operation_id is not None and item.get("operation_id") != operation_id:
+                    continue
+                if fence is not None and int(item.get("fence") or -1) != int(fence):
+                    continue
+                return True
+            return False
+
+    def s16_require_read_ready(self, application_id: str) -> None:
+        """The shared domain completion/readiness gate (R2 P1-12): every
+        public S01 retrieval consults the injected S16 readiness provider;
+        a closed restore window existence-hides the application."""
+        gate = getattr(self, "s16_read_gate", None)
+        if gate is not None:
+            try:
+                ready = bool(gate())
+            except Exception:
+                ready = False
+            if not ready:
+                raise QueryNotFound(application_id)
 
     def s16_referenced_object_digests(self, application_id: str) -> frozenset[str]:
         """Content digests this application references on the registered

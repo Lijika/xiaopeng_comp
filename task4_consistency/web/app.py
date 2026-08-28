@@ -675,24 +675,41 @@ def _s16_service_factory() -> GovernedDeletionService | None:
     )
     clock = lambda: int(time.time())
     retention = RetentionPolicy(retention_seconds=_s16_retention_seconds())
-    # R1 (P1): the independent security-audit owner seam.  When configured,
-    # protected commands write value-free audit facts and the writer
-    # receives the post-commit full copy; an unavailable seam closes
-    # protected commands with zero state change.
+    # R2 (P1-5): the independent security-audit owner seam.  A real narrow
+    # writer is required: S01's registered audit writer is the seam owner
+    # (never the legacy JSONL log itself), and availability is exactly
+    # "writer configured AND callable".  When the writer is missing, the
+    # seam is unavailable and protected commands fail closed BEFORE any
+    # ledger write.
     def _s16_security_audit_writer(record: dict[str, Any]) -> bool:
         audit_writer = getattr(S01_SERVICE, "audit_writer", None)
-        if audit_writer is None:
+        if audit_writer is None or not callable(audit_writer):
             return False
         try:
             return bool(audit_writer(record))
         except Exception:
             return False
 
-    security_audit_writer = (
-        _s16_security_audit_writer
-        if _s01_demo_flag("TASK4_S16_SECURITY_AUDIT_AVAILABLE", default=True)
-        else None
+    security_audit_available = bool(
+        _s01_demo_flag("TASK4_S16_SECURITY_AUDIT_AVAILABLE", default=True)
+        and S01_SERVICE is not None
+        and getattr(S01_SERVICE, "audit_writer", None) is not None
     )
+    security_audit_writer = (
+        _s16_security_audit_writer if security_audit_available else None
+    )
+    # R2 (P1-12): the shared domain read gate — every S01 public retrieval
+    # consults it; the HTTP middleware remains the outer boundary.
+    def _s16_domain_read_gate() -> bool:
+        return bool(
+            (not globals().get("S16_CONFIGURED"))
+            or (
+                globals().get("S16_SERVICE") is not None
+                and globals().get("S16_SERVICE").ready()
+            )
+        )
+
+    S01_SERVICE.s16_read_gate = _s16_domain_read_gate  # type: ignore[attr-defined]
     return GovernedDeletionService(
         ledger_path=state_path,
         owners={
@@ -717,9 +734,7 @@ def _s16_service_factory() -> GovernedDeletionService | None:
         audit_available=_s01_demo_flag(
             "TASK4_S01_AUDIT_AVAILABLE", default=True
         ),
-        security_audit_available=_s01_demo_flag(
-            "TASK4_S16_SECURITY_AUDIT_AVAILABLE", default=True
-        ),
+        security_audit_available=security_audit_available,
         security_audit_writer=security_audit_writer,
         storage_available=_s01_demo_flag(
             "TASK4_S01_STORAGE_AVAILABLE", default=True
@@ -733,6 +748,17 @@ try:
 except Exception as error:
     S16_SERVICE = None
     S16_CONFIGURATION_ERROR = str(error)
+
+# R2 (P0-2): "configured" is a stable static fact; "available" is the live
+# service.  A configured-but-unavailable S16 (construction or restore
+# replay failure) must fail the shared restore-readiness gate closed,
+# while a genuinely unconfigured deployment keeps every other plane open.
+S16_CONFIGURED = bool(
+    _s16_identities_configured()
+    and not _s16_identities_alias_controlled()
+    and os.environ.get("TASK4_S16_STATE_PATH", "").strip()
+    and os.environ.get("TASK4_S16_BACKUP_ROOT", "").strip()
+)
 
 S01_TEST_DRIVER: ControlledScenarioTestDriver | None = None
 S01_BACKGROUND_ENABLED = _s01_demo_flag(
@@ -1129,11 +1155,16 @@ class S16RestoreReadinessGate(BaseHTTPMiddleware):
     per-owner tombstone logic is duplicated anywhere."""
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        service = globals().get("S16_SERVICE")
+        module = globals()
+        service = module.get("S16_SERVICE")
+        configured = module.get("S16_CONFIGURED")
+        closed = bool(
+            (configured and service is None)
+            or (service is not None and not service.ready())
+        )
         if (
-            service is not None
+            closed
             and request.url.path.startswith("/controlled/")
-            and not service.ready()
         ):
             response = JSONResponse(
                 status_code=503,

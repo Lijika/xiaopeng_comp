@@ -1655,15 +1655,22 @@ def test_backup_capture_path_boundary_and_delete_verification(
         backup.delete(fingerprints, scope_fingerprint=scope_fingerprint, operation_id="o", fence=1)
     assert excinfo.value.reason_code == S16_VERIFY_FAILED
     # The failing manifest is preserved (fail-closed): the delete never
-    # removes a manifest whose captured copy could not be verified.
-    assert any(
-        manifest.get("files", [{}])[0].get("handle") == "captured.bin"
-        for manifest in backup._load_manifests()
-    )
+    # removes a manifest whose captured copy could not be verified.  The
+    # manifest itself is locator-free (R2 P1-1): it carries only connector
+    # identities and digests, never handles or paths.
+    for manifest in backup._load_manifests():
+        for file_entry in manifest["files"]:
+            assert "connector_identity" in file_entry
+            assert "handle" not in file_entry
+            assert "content_sha256" in file_entry
     assert captured.exists()
 
     # Correct digest deletes the files, verifies removal, then manifests.
+    # The failed attempt may already have removed one verified copy, so
+    # restore every captured artifact before the retry.
     captured.write_bytes(b"captured-bytes")
+    if not captured2.exists():
+        captured2.write_bytes(b"captured-bytes")
     outcome = backup.delete(
         fingerprints, scope_fingerprint=scope_fingerprint, operation_id="o", fence=1
     )
@@ -1723,7 +1730,10 @@ def test_s02_absence_persistence_failure_keeps_memory_intact_and_retryable(
         object_ref="result-object",
     )
     assert boundary.s02_inventory()["objects"]
-    assert boundary.s02_verify_absent(fingerprints)["absent"] is False
+    assert boundary.s02_verify_absent(
+        fingerprints,
+        scope_fingerprint=scope_fingerprint_for(application_id),
+    )["absent"] is False
 
     # The retry after the outage persists absence atomically.
     outcome = boundary.s02_delete(
@@ -1733,7 +1743,10 @@ def test_s02_absence_persistence_failure_keeps_memory_intact_and_retryable(
         scope_fingerprint=scope_fingerprint_for(application_id),
     )
     assert outcome["status"] == "complete"
-    assert boundary.s02_verify_absent(fingerprints)["absent"] is True
+    assert boundary.s02_verify_absent(
+        fingerprints,
+        scope_fingerprint=scope_fingerprint_for(application_id),
+    )["absent"] is True
     # Replaying the same operation/fence returns the original result.
     replayed = boundary.s02_delete(
         fingerprints,
@@ -1909,18 +1922,29 @@ def test_security_audit_facts_and_outage_zero_state_change(
         security_audit_available=False,
         ledger_path=tmp_path / "audit-c" / "s16.sqlite3",
     )
-    result_c = _preflight(s16c, "APP-R53-BAD-ENGINE")
+    # R2 (P1-6): preflight is a protected command — the audit outage blocks
+    # it before any ledger fact is written (zero state change).
     with pytest.raises(S16Blocked) as excinfo:
-        s16c.commit(request_id=result_c["request_id"], principal=GOVERNANCE, idempotency_key="audit-commit-c")
+        _preflight(s16c, "APP-R53-BAD-ENGINE")
     assert excinfo.value.reason_code == S16_AUDIT_SEAM_UNAVAILABLE
     assert _s01_fact_counts(service3)["applications"] == 1
-    assert s16c.query(request_id=result_c["request_id"], principal=GOVERNANCE)["job"] is None
+    with sqlite3.connect(tmp_path / "audit-c" / "s16.sqlite3") as connection:
+        events = connection.execute("SELECT COUNT(*) FROM s16_events").fetchone()[0]
+        bindings = connection.execute(
+            "SELECT COUNT(*) FROM s16_bindings"
+        ).fetchone()[0]
+    assert events == 0
+    assert bindings == 0
 
 
 def test_receipt_append_only_and_replay_facts_immutable(tmp_path: Path) -> None:
     service = _c_demo_service(tmp_path)
     application_id = _admit_c_demo(service, key="s16-receipt-intake")
     _terminate(service, application_id)
+    import shutil as _shutil
+
+    original_db = tmp_path / "original.sqlite3"
+    _shutil.copy2(tmp_path / "target.sqlite3", original_db)
     s16 = _s16_service(tmp_path, service)
     result = _preflight(s16, "APP-R53-BAD-ENGINE")
     s16.commit(request_id=result["request_id"], principal=GOVERNANCE, idempotency_key="receipt-commit")
@@ -1933,8 +1957,9 @@ def test_receipt_append_only_and_replay_facts_immutable(tmp_path: Path) -> None:
     assert len(receipt_rows) == 1
     receipt_id, original_payload, original_digest = receipt_rows[0]
 
-    # Restart replays and appends immutable replay facts; the original
-    # receipt row is byte-identical.
+    # Restart without a restore: no owner holds copies, so no replay fact
+    # is needed and the immutable receipt stays byte-identical with the
+    # pending replay state (R2 P0-1: replay facts follow actual restores).
     restarted = _s16_service(
         tmp_path,
         service,
@@ -1948,15 +1973,32 @@ def test_receipt_append_only_and_replay_facts_immutable(tmp_path: Path) -> None:
         replay_rows = connection.execute(
             "SELECT replay_id, payload FROM s16_replays"
         ).fetchall()
-        replay_events = connection.execute(
-            "SELECT payload FROM s16_events WHERE payload LIKE '%restore_replay%'"
-        ).fetchall()
     assert after_rows == [(receipt_id, original_payload, original_digest)]
-    assert len(replay_rows) >= 1
-    assert len(replay_events) >= 1
+    assert replay_rows == []
     assert restarted.receipt(request_id=result["request_id"], principal=GOVERNANCE)[
         "restore_replay_status"
-    ] == "verified"
+    ] == "pending"
+
+    # An actual old-backup restore under the RUNNING service appends one
+    # immutable replay fact after every owner verifies absence; readiness
+    # reopens and the receipt reports verified.
+    _shutil.copy2(original_db, tmp_path / "target.sqlite3")
+    assert restarted.ready() is False
+    replayed = restarted.replay_restore_if_needed()
+    assert replayed["jobs"] >= 1
+    assert restarted.ready() is True
+    with sqlite3.connect(tmp_path / "s16.sqlite3") as connection:
+        replay_rows = connection.execute(
+            "SELECT replay_id, payload FROM s16_replays"
+        ).fetchall()
+        after_rows = connection.execute(
+            "SELECT receipt_id, payload, integrity_sha256 FROM s16_receipts"
+        ).fetchall()
+    assert len(replay_rows) >= 1
+    assert after_rows == [(receipt_id, original_payload, original_digest)]
+    assert restarted.receipt(
+        request_id=result["request_id"], principal=GOVERNANCE
+    )["restore_replay_status"] == "verified"
 
     # Tampering the immutable receipt is detected on the next load.
     with sqlite3.connect(tmp_path / "s16.sqlite3") as connection:
@@ -2001,3 +2043,218 @@ def test_runtime_restore_replay_reopens_readiness(tmp_path: Path) -> None:
     assert service.s16_resolve_by_scope_fingerprint(
         scope_fingerprint_for(application_id)
     ) is None
+
+
+# ---------------------------------------------------------------------------
+# R2 targeted regressions
+# ---------------------------------------------------------------------------
+
+
+def test_cross_instance_claim_cas_grants_one_lease(
+    tmp_path: Path,
+) -> None:
+    """Two service instances over one ledger: the database claim CAS grants
+    the lease to exactly one worker; the other observes the advanced row."""
+    service = _c_demo_service(tmp_path)
+    _admit_c_demo(service, key="s16-cross-intake")
+    _terminate(service, _app_of(service))
+    ledger_path = tmp_path / "s16-cross.sqlite3"
+    instance_a = _s16_service(tmp_path, service, ledger_path=ledger_path)
+    instance_b = _s16_service(tmp_path, service, ledger_path=ledger_path)
+    result = _preflight(instance_a, "APP-R53-BAD-ENGINE")
+    instance_a.commit(
+        request_id=result["request_id"],
+        principal=GOVERNANCE,
+        idempotency_key="cross-commit",
+    )
+    first = instance_a._claim_job("worker-a", _now() + 1)
+    assert first is not None and int(first["fence"]) == 1
+    # The second instance observes the leased row and abandons the claim.
+    second = instance_b._claim_job("worker-b", _now() + 1)
+    assert second is None
+    # The leased worker keeps the confirmed fence.
+    job = instance_a._job_for_request(result["request_id"])
+    assert job is not None and int(job["fence"]) == 1
+    assert job["lease_owner"] == "worker-a"
+
+
+def test_single_owner_restore_closes_readiness_until_replayed(
+    tmp_path: Path,
+) -> None:
+    """P0-1: only the BACKUP owner holding copies again (a single-owner
+    restore) closes the shared readiness gate and drives a per-owner replay."""
+    import shutil
+
+    service = _c_demo_service(tmp_path)
+    application_id = _admit_c_demo(service, key="s16-owner-restore-intake")
+    _terminate(service, application_id)
+    state_path = tmp_path / "target.sqlite3"
+    original_db = tmp_path / "original.sqlite3"
+    shutil.copy2(state_path, original_db)
+    backup_root = tmp_path / "backups"
+    backup = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
+    saved = backup_root / "target.sqlite3"
+    shutil.copy2(state_path, saved)
+    s16 = _s16_service(tmp_path, service, backup_root=backup_root)
+    probe = _preflight(s16, "APP-R53-BAD-ENGINE")
+    backup.capture(
+        scope_fingerprint=probe["scope_fingerprint"],
+        copy_files=[(saved.name, hashlib.sha256(saved.read_bytes()).hexdigest())],
+    )
+    result = s16.preflight(
+        application_reference="APP-R53-BAD-ENGINE",
+        principal=GOVERNANCE,
+        idempotency_key="s16-owner-restore-preflight-2",
+    )
+    s16.commit(
+        request_id=result["request_id"],
+        principal=GOVERNANCE,
+        idempotency_key="owner-restore-commit",
+    )
+    outcome = s16.process_next_deletion_job(worker_id="w", now=_now() + 1)
+    assert outcome["status"] == "complete", outcome
+    assert s16.ready() is True
+
+    # Single-owner restore: the business DB stays deleted, but a captured
+    # backup copy and its manifest reappear on the backup owner (the same
+    # deterministic connector identity).  The gate closes.
+    shutil.copy2(original_db, saved)
+    backup.capture(
+        scope_fingerprint=result["scope_fingerprint"],
+        copy_files=[(saved.name, hashlib.sha256(saved.read_bytes()).hexdigest())],
+    )
+    assert s16.ready() is False
+    replayed = s16.replay_restore_if_needed()
+    assert replayed["jobs"] >= 1
+    assert s16.ready() is True
+    assert not saved.exists()
+
+
+def test_hold_release_has_own_request_and_generation(
+    tmp_path: Path,
+) -> None:
+    service = _c_demo_service(tmp_path)
+    _admit_c_demo(service, key="s16-release-intake")
+    _terminate(service, _app_of(service))
+    s16 = _s16_service(tmp_path, service)
+    result = _preflight(s16, "APP-R53-BAD-ENGINE")
+    hold = s16.impose_legal_hold(
+        scope_fingerprint=result["scope_fingerprint"],
+        principal=GOVERNANCE,
+        reason_code="litigation",
+        owner="s01",
+        effective_time=_now(),
+        idempotency_key="rel-hold",
+    )
+    generation_after_impose = s16._hold_generation(result["scope_fingerprint"])
+    released = s16.release_legal_hold(
+        hold_id=hold["hold_id"],
+        principal=GOVERNANCE,
+        idempotency_key="rel-1",
+    )
+    # R2 P1-7: release has its own request id and advances the generation.
+    assert released["request_id"]
+    assert released["request_id"] != hold["request_id"]
+    generation_after_release = s16._hold_generation(result["scope_fingerprint"])
+    assert generation_after_release > generation_after_impose
+    # The release request id is an independent fact in the ledger.
+    release_events = [
+        event
+        for event in s16._events
+        if event.get("event_type") == "legal_hold_released"
+    ]
+    assert release_events
+    assert release_events[0]["request_id"] == released["request_id"]
+
+
+def test_terminal_approval_replay_binds_current_key(
+    tmp_path: Path,
+) -> None:
+    service = _c_demo_service(tmp_path)
+    _admit_c_demo(service, key="s16-terminal-key-intake")
+    _terminate(service, _app_of(service))
+    s16 = _s16_service(tmp_path, service)
+    result = _preflight(s16, "APP-R53-BAD-ENGINE")
+
+    first = s16.approve(
+        request_id=result["request_id"],
+        manifest_digest=result["manifest_digest"],
+        principal=APPROVER_1,
+        idempotency_key="term-ap-1",
+    )
+    assert first["status"] == "accepted"
+    # A NEW key for the same terminal fact is recorded and replayed.
+    second = s16.approve(
+        request_id=result["request_id"],
+        manifest_digest=result["manifest_digest"],
+        principal=APPROVER_1,
+        idempotency_key="term-ap-2",
+    )
+    assert second["status"] == "replayed"
+    # The second key now replays via its own binding; a DIFFERENT content
+    # under the same key is a conflict.
+    third = s16.approve(
+        request_id=result["request_id"],
+        manifest_digest=result["manifest_digest"],
+        principal=APPROVER_1,
+        idempotency_key="term-ap-2",
+    )
+    assert third["replayed"] is True
+    with pytest.raises(S16Conflict):
+        s16.approve(
+            request_id=result["request_id"],
+            manifest_digest="0" * 64,
+            principal=APPROVER_1,
+            idempotency_key="term-ap-2",
+        )
+
+
+def test_backup_binding_rejects_scope_or_digest_mismatch(
+    tmp_path: Path,
+) -> None:
+    backup_root = tmp_path / "backups"
+    backup = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
+    scope_a = "a" * 64
+    scope_b = "b" * 64
+    captured = backup_root / "captured.bin"
+    captured.write_bytes(b"captured-bytes")
+    digest = hashlib.sha256(b"captured-bytes").hexdigest()
+    backup.capture(scope_fingerprint=scope_a, copy_files=[(captured.name, digest)])
+    fingerprints = {
+        entry.identity_fingerprint
+        for entry in backup.inventory(scope_a)
+    }
+    # First deletion binds operation/fence/scope/digest.
+    done = backup.delete(
+        fingerprints,
+        scope_fingerprint=scope_a,
+        operation_id="op-b",
+        fence=1,
+    )
+    assert done["status"] == "complete"
+    # Same operation/fence with a different scope is a stable conflict.
+    conflict = backup.delete(
+        fingerprints,
+        scope_fingerprint=scope_b,
+        operation_id="op-b",
+        fence=1,
+    )
+    assert conflict["status"] == "conflict"
+    # Same scope and digest replays the original result.
+    replayed = backup.delete(
+        fingerprints,
+        scope_fingerprint=scope_a,
+        operation_id="op-b",
+        fence=1,
+    )
+    assert replayed["replayed"] is True
+    # A lower fence is a stable stale outcome.
+    captured.write_bytes(b"captured-bytes")
+    backup.capture(scope_fingerprint=scope_a, copy_files=[(captured.name, digest)])
+    stale = backup.delete(
+        fingerprints,
+        scope_fingerprint=scope_a,
+        operation_id="op-b",
+        fence=0,
+    )
+    assert stale["status"] == "stale"

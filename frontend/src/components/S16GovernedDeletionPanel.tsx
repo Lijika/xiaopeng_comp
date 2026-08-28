@@ -358,10 +358,12 @@ function CommitSection({
   requestId,
   earlyDeletion,
   approvedCount,
+  onIdentityDenied,
 }: {
   requestId: string;
   earlyDeletion: boolean;
   approvedCount: number;
+  onIdentityDenied: () => void;
 }) {
   const [confirmed, setConfirmed] = useState(false);
   const [unknown, setUnknown] = useState(false);
@@ -375,6 +377,10 @@ function CommitSection({
       { requestId, idempotencyKey: `s16-commit-${requestId}` },
       {
         onError: (error) => {
+          if (error instanceof HttpError && error.status === 403) {
+            onIdentityDenied();
+            return;
+          }
           if (!isDefinitiveS16Rejection(error)) setUnknown(true);
         },
       },
@@ -422,6 +428,10 @@ function CommitSection({
               { requestId, idempotencyKey: `s16-cancel-${requestId}` },
               {
                 onError: (error) => {
+                  if (error instanceof HttpError && error.status === 403) {
+                    onIdentityDenied();
+                    return;
+                  }
                   if (!isDefinitiveS16Rejection(error)) setUnknown(true);
                 },
               },
@@ -436,7 +446,13 @@ function CommitSection({
   );
 }
 
-function JobSection({ query }: { query: S16QueryResponse }) {
+function JobSection({
+  query,
+  onIdentityDenied,
+}: {
+  query: S16QueryResponse;
+  onIdentityDenied: () => void;
+}) {
   const process = useS16Process();
   const repair = useS16Repair();
   const [repairFact, setRepairFact] = useState("");
@@ -500,6 +516,10 @@ function JobSection({ query }: { query: S16QueryResponse }) {
                 },
                 {
                   onError: (error) => {
+                    if (error instanceof HttpError && error.status === 403) {
+                      onIdentityDenied();
+                      return;
+                    }
                     if (!isDefinitiveS16Rejection(error)) {
                       void process; // keep the authoritative state observable
                     }
@@ -609,15 +629,30 @@ export default function S16GovernedDeletionPanel() {
     }
   }, [query.data?.job?.status, queryClient, requestId]);
 
-  // Identity invalidation (403) also clears application-scoped caches.
+  // Identity invalidation (R2 P1-14): a governance-surface 403 clears the
+  // local S16 state and every S16/application-scoped cache so no previous
+  // identity's manifest, reference or approval survives; the panel shows
+  // only the authorization error.  Approver-surface 403s (the approval
+  // section's own hook) leave the governance state intact.
+  const [identityDenied, setIdentityDenied] = useState(false);
+  const governance403 =
+    identityDenied ||
+    (query.error instanceof HttpError && query.error.status === 403) ||
+    (preflightMutation.error instanceof HttpError &&
+      preflightMutation.error.status === 403);
   useEffect(() => {
-    if (
-      query.error instanceof HttpError &&
-      query.error.status === 403
-    ) {
-      clearApplicationScopedCache(queryClient);
-    }
-  }, [query.error, queryClient]);
+    if (!governance403) return;
+    setIdentityDenied(true);
+    setReference("");
+    setPreflight(null);
+    setRequestId(null);
+    setCancelled(false);
+    setApprovedCount(0);
+    setPreflightUnknown(false);
+    queryClient.removeQueries({ queryKey: ["s16", "deletions"] });
+    queryClient.removeQueries({ queryKey: ["s16", "legal-holds"] });
+    clearApplicationScopedCache(queryClient);
+  }, [governance403, queryClient]);
 
   useEffect(() => {
     if (preflight !== null) return;
@@ -645,6 +680,40 @@ export default function S16GovernedDeletionPanel() {
       },
     );
   };
+
+  // R2 (P1-14): an invalidated governance identity renders ONLY the
+  // authorization error — no reference, manifest, hold, approval or commit
+  // surface survives.
+  if (governance403) {
+    return (
+      <section className="panel" data-testid="s16-governed-deletion" aria-labelledby="s16-title">
+        <h2 id="s16-title">合规删除（服务端权威）</h2>
+        {query.error instanceof HttpError ? (
+          <S16ErrorState error={query.error} />
+        ) : preflightMutation.error instanceof HttpError ? (
+          <S16ErrorState error={preflightMutation.error} />
+        ) : (
+          <S16ErrorState error={new HttpError(403, { error: "S16_FORBIDDEN" })} />
+        )}
+      </section>
+    );
+  }
+
+  // R2 (P1-13): after completion the page renders ONLY the value-free
+  // receipt and its summary — every preflight, hold, approval, commit and
+  // repair surface is unloaded.
+  const jobComplete = query.data?.job?.status === "complete";
+  if (jobComplete && requestId !== null) {
+    return (
+      <section className="panel" data-testid="s16-governed-deletion" aria-labelledby="s16-title">
+        <h2 id="s16-title">合规删除（服务端权威）</h2>
+        <p data-testid="s16-complete-only" role="status">
+          删除已完成：仅保留无原值凭证。
+        </p>
+        <ReceiptSection requestId={requestId} />
+      </section>
+    );
+  }
 
   return (
     <section className="panel" data-testid="s16-governed-deletion" aria-labelledby="s16-title">
@@ -711,17 +780,17 @@ export default function S16GovernedDeletionPanel() {
           requestId={preflight.request_id}
           earlyDeletion={preflight.early_deletion}
           approvedCount={approvedCount}
+          onIdentityDenied={() => setIdentityDenied(true)}
         />
       )}
 
       {query.data !== undefined && query.data.job !== null && (
-        <JobSection query={query.data} />
+        <JobSection
+          query={query.data}
+          onIdentityDenied={() => setIdentityDenied(true)}
+        />
       )}
       {query.error !== null && <S16ErrorState error={query.error} />}
-
-      {requestId !== null && query.data?.job?.status === "complete" && (
-        <ReceiptSection requestId={requestId} />
-      )}
     </section>
   );
 }

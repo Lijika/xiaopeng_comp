@@ -372,3 +372,99 @@ describe("S16 legal hold controls", () => {
     );
   });
 });
+
+describe("R2 completion and identity-invalidation states", () => {
+  it("unloads every preflight surface after completion (receipt only)", async () => {
+    let jobStatus = "complete";
+    const router = fetchRouter({
+      [`POST ${PREFLIGHT_PATH}`]: () =>
+        new Response(
+          JSON.stringify(s16PreflightPayload()),
+          { headers: { "Content-Type": "application/json" } },
+        ),
+      [`GET ${QUERY_PATH}`]: () =>
+        new Response(
+          JSON.stringify(
+            s16QueryPayload({
+              job: {
+                job_id: "s16job_1",
+                status: jobStatus,
+                attempt: 1,
+                fence: 1,
+                lease_owner: null,
+                pending_owner_fingerprints: { s01: 4 },
+                owner_results: { s01: "complete" },
+                stable_failure: null,
+                completed_at: 1_800_000_001,
+              },
+            }),
+          ),
+          { headers: { "Content-Type": "application/json" } },
+        ),
+      [`GET ${RECEIPT_PATH}`]: () =>
+        new Response(
+          JSON.stringify({
+            receipt_id: "s16receipt_1",
+            schema_version: "s16-receipt/1",
+            action: "governed_deletion",
+            policy: "s16-governed-deletion/1",
+            scope_fingerprint: "c".repeat(64),
+            completed_at: 1_800_000_001,
+            authority: "s16-governance",
+            result: "deleted",
+            owner_counts: { s01: 4 },
+            restore_replay_status: "pending",
+            subject: "s16-deletion-worker",
+            role: "system",
+          }),
+          { headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    renderWithQuery(<S16GovernedDeletionPanel />);
+    const user = userEvent.setup();
+    await user.type(screen.getByTestId("s16-reference"), "APP-REFERENCE-1");
+    await user.click(screen.getByTestId("s16-preflight-button"));
+    await screen.findByTestId("s16-receipt");
+    // R2 P1-13: only the receipt remains.
+    expect(screen.queryByTestId("s16-manifest")).toBeNull();
+    expect(screen.queryByTestId("s16-legal-holds")).toBeNull();
+    expect(screen.queryByTestId("s16-approvals")).toBeNull();
+    expect(screen.queryByTestId("s16-commit")).toBeNull();
+    expect(screen.queryByTestId("s16-reference")).toBeNull();
+    expect(screen.queryByTestId("s16-application-reference")).toBeNull();
+    expect(screen.getByTestId("s16-complete-only")).toBeVisible();
+    expect(screen.getByTestId("s16-receipt-result")).toHaveTextContent("deleted");
+    expect(router.calls.length).toBeGreaterThan(0);
+  });
+
+  it("clears local S16 state on a governance 403 and shows only the error", async () => {
+    const router = fetchRouter({
+      [`POST ${PREFLIGHT_PATH}`]: () =>
+        new Response(
+          JSON.stringify(s16PreflightPayload()),
+          { headers: { "Content-Type": "application/json" } },
+        ),
+      [`GET ${QUERY_PATH}`]: () =>
+        new Response(
+          JSON.stringify({
+            detail: { error: "S16_FORBIDDEN", message: "identity invalid" },
+          }),
+          { status: 403, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    const { client } = renderWithQuery(<S16GovernedDeletionPanel />);
+    const user = userEvent.setup();
+    await user.type(screen.getByTestId("s16-reference"), "APP-REFERENCE-1");
+    await user.click(screen.getByTestId("s16-preflight-button"));
+    await screen.findByTestId("s16-error-forbidden");
+    // R2 P1-14: the manifest, reference, approvals and commit surfaces are
+    // gone; only the authorization error remains.
+    expect(screen.queryByTestId("s16-manifest")).toBeNull();
+    expect(screen.queryByTestId("s16-reference")).toBeNull();
+    expect(screen.queryByTestId("s16-legal-holds")).toBeNull();
+    expect(screen.queryByTestId("s16-approvals")).toBeNull();
+    expect(screen.queryByTestId("s16-commit")).toBeNull();
+    expect(client.getQueryData(["s16", "deletions", "s16req_test_00000001"])).toBeUndefined();
+    expect(router.calls.some((call) => call.url === QUERY_PATH)).toBe(true);
+  });
+});

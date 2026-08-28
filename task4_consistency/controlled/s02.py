@@ -508,10 +508,18 @@ class RegisteredSourceBoundary:
                 CREATE TABLE IF NOT EXISTS s02_object_absence (
                     fingerprint TEXT PRIMARY KEY,
                     deleted_at INTEGER NOT NULL,
-                    schema_version TEXT NOT NULL
+                    schema_version TEXT NOT NULL,
+                    scope_fingerprint TEXT NOT NULL DEFAULT ''
                 )
                 """
             )
+            try:
+                connection.execute(
+                    "ALTER TABLE s02_object_absence "
+                    "ADD COLUMN scope_fingerprint TEXT NOT NULL DEFAULT ''"
+                )
+            except sqlite3.OperationalError:
+                pass
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS s02_deletion_bindings (
@@ -582,12 +590,22 @@ class RegisteredSourceBoundary:
         with sqlite3.connect(self.absence_store_path, timeout=10.0) as connection:
             connection.execute("BEGIN IMMEDIATE")
             binding = connection.execute(
-                "SELECT status FROM s02_deletion_bindings "
+                "SELECT status, scope_fingerprint, fingerprints_digest "
+                "FROM s02_deletion_bindings "
                 "WHERE operation_id = ? AND fence = ?",
                 (operation_id, int(fence)),
             ).fetchone()
             if binding is not None:
                 connection.execute("COMMIT")
+                if (
+                    str(binding[1]) != str(scope_fingerprint)
+                    or str(binding[2]) != fingerprints_digest
+                ):
+                    return {
+                        "status": "conflict",
+                        "deleted_counts": {},
+                        "reason_code": "S16_OWNER_BINDING_CONFLICT",
+                    }
                 return {
                     "status": "complete",
                     "deleted_counts": {},
@@ -603,7 +621,7 @@ class RegisteredSourceBoundary:
                 connection.execute("COMMIT")
                 return {"status": "stale", "deleted_counts": {}}
             absent_rows = [
-                (fingerprint, now, "s02-object-absence/1")
+                (fingerprint, now, "s02-object-absence/1", scope_fingerprint)
                 for fingerprint in sorted(target)
                 if fingerprint
                 not in {
@@ -615,7 +633,8 @@ class RegisteredSourceBoundary:
             ]
             connection.executemany(
                 "INSERT OR REPLACE INTO s02_object_absence("
-                "fingerprint, deleted_at, schema_version) VALUES (?, ?, ?)",
+                "fingerprint, deleted_at, schema_version, scope_fingerprint) "
+                "VALUES (?, ?, ?, ?)",
                 absent_rows,
             )
             connection.execute(
@@ -663,26 +682,43 @@ class RegisteredSourceBoundary:
             scope_fingerprint=scope_fingerprint,
         )
 
-    def s02_verify_absent(self, fingerprints: Iterable[str]) -> dict[str, Any]:
-        """Absence proof against the persisted absence store (restart-proof):
-        an object is absent only when its identity fingerprint is durably
-        recorded and no live mapping remains."""
+    def s02_verify_absent(
+        self,
+        fingerprints: Iterable[str],
+        scope_fingerprint: str = "",
+    ) -> dict[str, Any]:
+        """Scope-aware absence proof against the persisted absence store
+        (restart-proof, R2 P1-11): every recorded fingerprint must belong to
+        the given scope and no live mapping may remain."""
         target = set(fingerprints)
-        persisted: set[str] = set()
+        persisted: dict[str, str] = {}
         if self.absence_store_path is not None:
             with sqlite3.connect(
                 self.absence_store_path, timeout=10.0
             ) as connection:
                 rows = connection.execute(
-                    "SELECT fingerprint FROM s02_object_absence"
+                    "SELECT fingerprint, scope_fingerprint "
+                    "FROM s02_object_absence"
                 ).fetchall()
-            persisted = {str(row[0]) for row in rows}
+            persisted = {str(row[0]): str(row[1]) for row in rows}
         live = {
             self._identity_fingerprint(item.content)
             for item in self._objects.values()
         }
-        absent = bool(target) and target.issubset(persisted) and not (target & live)
-        return {"absent": absent, "absent_count": len(target & persisted)}
+        scope_mismatch = bool(
+            target & {key for key, scope in persisted.items() if scope != scope_fingerprint}
+        )
+        absent = (
+            bool(target)
+            and target.issubset(persisted.keys())
+            and not scope_mismatch
+            and not (target & live)
+        )
+        return {
+            "absent": absent,
+            "absent_count": len(target & persisted.keys()),
+            "scope_mismatch": scope_mismatch,
+        }
 
     def s02_replay(
         self,

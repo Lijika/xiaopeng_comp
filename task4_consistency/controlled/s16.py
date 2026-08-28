@@ -96,6 +96,7 @@ S16_REPAIR_NOT_VERIFIED = "S16_REPAIR_NOT_VERIFIED"
 S16_RETAINED_VALUE = "S16_RETAINED_VALUE_FOUND"
 S16_STALE_WORKER = "S16_STALE_WORKER"
 S16_OWNER_STALE_FENCE = "S16_OWNER_STALE_FENCE"
+S16_OWNER_BINDING_CONFLICT = "S16_OWNER_BINDING_CONFLICT"
 S16_AUDIT_SEAM_UNAVAILABLE = "S16_AUDIT_SEAM_UNAVAILABLE"
 S16_RESTORE_READINESS_UNAVAILABLE = "S16_RESTORE_READINESS_UNAVAILABLE"
 
@@ -473,6 +474,31 @@ class S16Ledger:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS s16_bindings (
+                    binding_key TEXT PRIMARY KEY,
+                    fingerprint TEXT NOT NULL,
+                    result TEXT NOT NULL,
+                    appended_at INTEGER NOT NULL
+                )
+                """
+            )
+            # R2 (P1-9): the worker lease columns live beside the payload so
+            # claim/publish run as database compare-and-set, never as a
+            # process lock.  Older databases get the columns added.
+            for column_sql in (
+                "ALTER TABLE s16_jobs ADD COLUMN status TEXT",
+                "ALTER TABLE s16_jobs ADD COLUMN lease_owner TEXT",
+                "ALTER TABLE s16_jobs ADD COLUMN lease_expires_at INTEGER",
+                "ALTER TABLE s16_jobs ADD COLUMN fence INTEGER",
+                "ALTER TABLE s16_jobs ADD COLUMN attempt INTEGER",
+            ):
+                try:
+                    connection.execute(column_sql)
+                except sqlite3.OperationalError:
+                    # Duplicate column on an already-migrated database.
+                    pass
             connection.commit()
 
     @staticmethod
@@ -520,10 +546,24 @@ class S16Ledger:
         self, connection: sqlite3.Connection, job: dict[str, Any], now: int
     ) -> None:
         connection.execute(
-            "INSERT INTO s16_jobs(job_id, payload, updated_at) VALUES (?, ?, ?) "
+            "INSERT INTO s16_jobs("
+            "job_id, payload, updated_at, status, lease_owner, "
+            "lease_expires_at, fence, attempt) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(job_id) DO UPDATE SET payload = excluded.payload, "
-            "updated_at = excluded.updated_at",
-            (str(job["job_id"]), _canonical(job), now),
+            "updated_at = excluded.updated_at, status = excluded.status, "
+            "lease_owner = excluded.lease_owner, "
+            "lease_expires_at = excluded.lease_expires_at, "
+            "fence = excluded.fence, attempt = excluded.attempt",
+            (
+                str(job["job_id"]),
+                _canonical(job),
+                now,
+                str(job.get("status") or ""),
+                job.get("lease_owner"),
+                job.get("lease_expires_at"),
+                int(job.get("fence") or 0),
+                int(job.get("attempt") or 0),
+            ),
         )
 
     def _cas_publish_job(
@@ -553,10 +593,85 @@ class S16Ledger:
         ):
             return False
         connection.execute(
-            "UPDATE s16_jobs SET payload = ?, updated_at = ? WHERE job_id = ?",
-            (_canonical(new_job), now, job_id),
+            "UPDATE s16_jobs SET payload = ?, updated_at = ?, status = ?, "
+            "lease_owner = ?, lease_expires_at = ?, fence = ?, attempt = ? "
+            "WHERE job_id = ?",
+            (
+                _canonical(new_job),
+                now,
+                str(new_job.get("status") or ""),
+                new_job.get("lease_owner"),
+                new_job.get("lease_expires_at"),
+                int(new_job.get("fence") or 0),
+                int(new_job.get("attempt") or 0),
+                job_id,
+            ),
         )
         return True
+
+    def _claim_job_cas(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        job_id: str,
+        worker: str,
+        now: int,
+        lease_seconds: int,
+        claimed_payload: dict[str, Any],
+        claimed_fence: int,
+        claimed_attempt: int,
+    ) -> bool:
+        """Database-level claim CAS (R2 P1-9): only one worker may advance
+        a job's lease/fence/attempt; a concurrent claim observes the updated
+        row and fails the conditional update."""
+        updated = connection.execute(
+            "UPDATE s16_jobs SET "
+            "payload = ?, updated_at = ?, status = ?, lease_owner = ?, "
+            "lease_expires_at = ?, fence = ?, attempt = ? "
+            "WHERE job_id = ? "
+            "AND status IN ('pending', 'running') "
+            "AND (lease_expires_at IS NULL OR lease_expires_at <= ?)",
+            (
+                _canonical(claimed_payload),
+                now,
+                "running",
+                worker,
+                now + lease_seconds,
+                claimed_fence,
+                claimed_attempt,
+                job_id,
+                now,
+            ),
+        )
+        return updated.rowcount == 1
+
+    def _binding_read(
+        self, connection: sqlite3.Connection, binding_key: str
+    ) -> tuple[str, dict[str, Any]] | None:
+        row = connection.execute(
+            "SELECT fingerprint, result FROM s16_bindings WHERE binding_key = ?",
+            (binding_key,),
+        ).fetchone()
+        if row is None:
+            return None
+        return str(row[0]), json.loads(row[1])
+
+    def _binding_insert(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        binding_key: str,
+        fingerprint: str,
+        result: dict[str, Any],
+        now: int,
+    ) -> str:
+        """Insert-if-absent; returns 'inserted' or 'existing'."""
+        cursor = connection.execute(
+            "INSERT OR IGNORE INTO s16_bindings("
+            "binding_key, fingerprint, result, appended_at) VALUES (?, ?, ?, ?)",
+            (binding_key, fingerprint, _canonical(result), now),
+        )
+        return "inserted" if cursor.rowcount == 1 else "existing"
 
     def _append_receipt(
         self, connection: sqlite3.Connection, receipt: dict[str, Any], now: int
@@ -836,7 +951,12 @@ class S01DeletionOwner:
         return {"owner_id": self.owner_id, "status": "verified"}
 
     def replay(
-        self, copy_fingerprints: Iterable[str], *, scope_fingerprint: str
+        self,
+        copy_fingerprints: Iterable[str],
+        *,
+        scope_fingerprint: str,
+        operation_id: str = "s16-replay",
+        fence: int = 0,
     ) -> dict[str, Any]:
         if not set(copy_fingerprints):
             return {"owner_id": self.owner_id, "status": "replayed"}
@@ -862,8 +982,8 @@ class S01DeletionOwner:
         self._service.s16_apply_deletion(
             application_id,
             receipt,
-            operation_id=f"s16-replay:{scope_fingerprint[:24]}",
-            fence=0,
+            operation_id=operation_id,
+            fence=fence,
             scope_fingerprint=scope_fingerprint,
         )
         return {"owner_id": self.owner_id, "status": "replayed"}
@@ -956,6 +1076,14 @@ class S02DeletionOwner:
             fence=fence,
             scope_fingerprint=scope_fingerprint,
         )
+        if result.get("status") == "conflict":
+            raise S16OwnerFailure(
+                self.owner_id,
+                S16_OWNER_BINDING_CONFLICT,
+                retryable=False,
+                responsible_party="runtime_operations_owner",
+                recovery_action="reconcile_scope_binding_and_resume",
+            )
         if result.get("status") == "stale":
             raise S16OwnerFailure(
                 self.owner_id,
@@ -973,9 +1101,18 @@ class S02DeletionOwner:
     def verify_absent(
         self, copy_fingerprints: Iterable[str], *, scope_fingerprint: str
     ) -> dict[str, Any]:
-        del scope_fingerprint
         fingerprints = sorted(set(copy_fingerprints))
-        result = self._boundary.s02_verify_absent(fingerprints)
+        result = self._boundary.s02_verify_absent(
+            fingerprints, scope_fingerprint=scope_fingerprint
+        )
+        if result.get("scope_mismatch"):
+            raise S16OwnerFailure(
+                self.owner_id,
+                S16_OWNER_BINDING_CONFLICT,
+                retryable=False,
+                responsible_party="runtime_operations_owner",
+                recovery_action="reconcile_scope_binding_and_resume",
+            )
         if not result.get("absent"):
             raise S16OwnerFailure(
                 self.owner_id,
@@ -1067,6 +1204,14 @@ class S12DeletionOwner:
             fence=fence,
             scope_fingerprint=scope_fingerprint,
         )
+        if result.get("status") == "conflict":
+            raise S16OwnerFailure(
+                self.owner_id,
+                S16_OWNER_BINDING_CONFLICT,
+                retryable=False,
+                responsible_party="runtime_operations_owner",
+                recovery_action="reconcile_scope_binding_and_resume",
+            )
         if result.get("status") == "stale":
             raise S16OwnerFailure(
                 self.owner_id,
@@ -1084,9 +1229,18 @@ class S12DeletionOwner:
     def verify_absent(
         self, copy_fingerprints: Iterable[str], *, scope_fingerprint: str
     ) -> dict[str, Any]:
-        del scope_fingerprint
         fingerprints = sorted(set(copy_fingerprints))
-        result = self._service.s16_verify_absent(fingerprints)
+        result = self._service.s16_verify_absent(
+            fingerprints, scope_fingerprint=scope_fingerprint
+        )
+        if result.get("scope_mismatch"):
+            raise S16OwnerFailure(
+                self.owner_id,
+                S16_OWNER_BINDING_CONFLICT,
+                retryable=False,
+                responsible_party="runtime_operations_owner",
+                recovery_action="reconcile_scope_binding_and_resume",
+            )
         if not result.get("absent"):
             raise S16OwnerFailure(
                 self.owner_id,
@@ -1122,15 +1276,17 @@ class S12DeletionOwner:
 class BackupDeletionOwner:
     """Scope-scoped backup copies + restore manifests (backup owner).
 
-    ``capture`` is called by the backup system at backup time and stores a
-    value-free manifest (scope fingerprint + content digests only).  The
-    manifest identity is unique per capture (connector identity or random
-    suffix); a repeated identity is rejected instead of overwriting an
-    earlier capture.  ``delete`` verifies every file by digest, unlinks it,
-    re-verifies absence and only then removes the manifest; any failure
-    keeps the manifest and raises an owner failure.  ``replay`` re-deletes
-    after an old backup restore so readiness stays gated until absence is
-    verified."""
+    ``capture`` is called by the backup system at backup time.  The manifest
+    (the only record the ledger/audit ever sees) stores value-free
+    connector identities and content digests only — never handles, paths or
+    locators (R2 P1-1).  The identity-to-object mapping lives in an
+    owner-internal registry beside the backup root.  ``delete`` binds the
+    operation id + fence + scope + fingerprints digest in one SQLite
+    transaction, verifies every file by digest, unlinks it, re-verifies
+    absence and only then removes the manifest and the registry rows; any
+    failure keeps the manifest and raises an owner failure.  ``verify_absent``
+    is scope-aware.  ``replay`` re-deletes after an old backup restore so
+    readiness stays gated until absence is verified."""
 
     owner_id = "backup"
 
@@ -1138,9 +1294,50 @@ class BackupDeletionOwner:
         self._root = Path(root).resolve()
         self._root.mkdir(parents=True, exist_ok=True)
         self._clock = clock
+        self._registry_path = self._root / "backup_owner.sqlite3"
+        self._ensure_registry_schema()
+
+    def _registry_connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self._registry_path, timeout=10.0)
+        connection.isolation_level = None
+        return connection
+
+    def _ensure_registry_schema(self) -> None:
+        with self._registry_connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS backup_registry (
+                    connector_identity TEXT PRIMARY KEY,
+                    handle TEXT NOT NULL,
+                    content_sha256 TEXT NOT NULL,
+                    captured_at INTEGER NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS backup_deletion_bindings (
+                    operation_id TEXT NOT NULL,
+                    fence INTEGER NOT NULL,
+                    scope_fingerprint TEXT NOT NULL,
+                    fingerprints_digest TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    completed_at INTEGER NOT NULL,
+                    PRIMARY KEY (operation_id, fence)
+                )
+                """
+            )
+            connection.commit()
 
     def _manifest_path(self, manifest_id: str) -> Path:
         return self._root / f"{manifest_id}.json"
+
+    @classmethod
+    def _connector_identity(cls, handle: str, content_sha256: str) -> str:
+        """Value-free connector identity: digest of the capture handle and
+        content digest — no path, name or locator is recoverable."""
+        return _digest({"handle": handle, "content_sha256": content_sha256})
 
     def capture(
         self,
@@ -1150,13 +1347,17 @@ class BackupDeletionOwner:
     ) -> dict[str, Any]:
         """Record one scope-scoped backup: safe file handle + content digest
         pairs.  Absolute paths, separators and root-escape targets are
-        rejected; the manifest stores no paths, values, application ids or
-        references — only digests and the value-free scope fingerprint."""
+        rejected; the manifest stores connector identities and digests only."""
         files: list[dict[str, str]] = []
+        registry_rows: list[tuple[str, str, str, int]] = []
         for name, content_sha256 in sorted(copy_files):
             handle = self._validate_capture_handle(name)
+            identity = self._connector_identity(handle, content_sha256)
             files.append(
-                {"handle": handle, "content_sha256": content_sha256}
+                {"connector_identity": identity, "content_sha256": content_sha256}
+            )
+            registry_rows.append(
+                (identity, handle, content_sha256, int(self._clock()))
             )
         if not files:
             raise ValueError("S16 backup capture requires at least one file")
@@ -1178,6 +1379,20 @@ class BackupDeletionOwner:
             "entries_digest": _digest(files),
         }
         manifest_path.write_text(_canonical(manifest), encoding="utf-8")
+        try:
+            with self._registry_connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.executemany(
+                    "INSERT OR REPLACE INTO backup_registry("
+                    "connector_identity, handle, content_sha256, captured_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    registry_rows,
+                )
+                connection.commit()
+        except Exception:
+            if manifest_path.exists():
+                manifest_path.unlink()
+            raise
         return manifest
 
     @classmethod
@@ -1260,22 +1475,33 @@ class BackupDeletionOwner:
         return entries
 
     def _manifests_for_fingerprints(
-        self, copy_fingerprints: set[str]
+        self, copy_fingerprints: set[str], scope_fingerprint: str = ""
     ) -> list[dict[str, Any]]:
         if not copy_fingerprints:
             return []
         return [
             manifest
             for manifest in self._load_manifests()
-            if copy_identity_fingerprint(
-                self.owner_id, COPY_CLASS_REPLICA, _digest(manifest["files"])
+            if (
+                not scope_fingerprint
+                or manifest.get("scope_fingerprint") == scope_fingerprint
             )
-            in copy_fingerprints
-            or copy_identity_fingerprint(
-                self.owner_id, COPY_CLASS_BACKUP_MANIFEST, _digest(manifest)
+            and (
+                copy_identity_fingerprint(
+                    self.owner_id, COPY_CLASS_REPLICA, _digest(manifest["files"])
+                )
+                in copy_fingerprints
+                or copy_identity_fingerprint(
+                    self.owner_id, COPY_CLASS_BACKUP_MANIFEST, _digest(manifest)
+                )
+                in copy_fingerprints
             )
-            in copy_fingerprints
         ]
+
+    def _bindings_digest(self, fingerprints: Iterable[str]) -> str:
+        return hashlib.sha256(
+            "\0".join(sorted(set(fingerprints))).encode("utf-8")
+        ).hexdigest()
 
     def delete(
         self,
@@ -1285,74 +1511,162 @@ class BackupDeletionOwner:
         operation_id: str,
         fence: int,
     ) -> dict[str, Any]:
-        del scope_fingerprint, operation_id, fence
         fingerprints = set(copy_fingerprints)
-        manifests = self._manifests_for_fingerprints(fingerprints)
-        if not manifests:
-            return {
-                "status": "complete",
-                "deleted_counts": {},
-                "already_absent": True,
-            }
-        deleted = 0
-        for manifest in manifests:
-            for file_entry in manifest["files"]:
-                handle = self._validate_capture_handle(
-                    str(file_entry["handle"])
-                )
-                target = self._capture_target(handle)
-                if not target.is_file():
-                    # The file is missing entirely: keep the manifest and
-                    # fail so the operator can reconcile the backup state.
-                    raise S16OwnerFailure(
-                        self.owner_id,
-                        S16_VERIFY_FAILED,
-                        retryable=True,
-                        responsible_party="backup_operations_owner",
-                        recovery_action="restore_and_verify_the_captured_copy",
-                    )
+        fingerprints_digest = self._bindings_digest(fingerprints)
+        # Owner-level binding CAS inside the registry transaction (R2 P1-2):
+        # the binding check runs BEFORE any manifest lookup so a replayed
+        # or conflicting operation is stable even when the target is absent.
+        with self._registry_connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            binding = connection.execute(
+                "SELECT status, scope_fingerprint, fingerprints_digest "
+                "FROM backup_deletion_bindings "
+                "WHERE operation_id = ? AND fence = ?",
+                (operation_id, int(fence)),
+            ).fetchone()
+            if binding is not None:
+                connection.execute("COMMIT")
                 if (
-                    hashlib.sha256(target.read_bytes()).hexdigest()
-                    != str(file_entry["content_sha256"])
+                    str(binding[1]) != scope_fingerprint
+                    or str(binding[2]) != fingerprints_digest
                 ):
+                    return {
+                        "status": "conflict",
+                        "deleted_counts": {},
+                        "reason_code": "S16_OWNER_BINDING_CONFLICT",
+                    }
+                return {
+                    "status": "complete",
+                    "deleted_counts": {},
+                    "already_absent": True,
+                    "replayed": True,
+                }
+            highest = connection.execute(
+                "SELECT MAX(fence) FROM backup_deletion_bindings "
+                "WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            if highest[0] is not None and int(highest[0]) > int(fence):
+                connection.execute("COMMIT")
+                return {"status": "stale", "deleted_counts": {}}
+            manifests = self._manifests_for_fingerprints(
+                fingerprints, scope_fingerprint=scope_fingerprint
+            )
+            if not manifests:
+                connection.execute("COMMIT")
+                return {
+                    "status": "complete",
+                    "deleted_counts": {},
+                    "already_absent": True,
+                }
+            identities = {
+                str(file_entry["connector_identity"])
+                for manifest in manifests
+                for file_entry in manifest["files"]
+            }
+            deleted = 0
+            for manifest in manifests:
+                for file_entry in manifest["files"]:
+                    identity = str(file_entry["connector_identity"])
+                    row = connection.execute(
+                        "SELECT handle, content_sha256 FROM backup_registry "
+                        "WHERE connector_identity = ?",
+                        (identity,),
+                    ).fetchone()
+                    if row is None:
+                        connection.execute("ROLLBACK")
+                        raise S16OwnerFailure(
+                            self.owner_id,
+                            S16_VERIFY_FAILED,
+                            retryable=True,
+                            responsible_party="backup_operations_owner",
+                            recovery_action="restore_the_captured_copy_registry",
+                        )
+                    handle = str(row[0])
+                    expected_digest = str(row[1])
+                    if expected_digest != str(file_entry["content_sha256"]):
+                        connection.execute("ROLLBACK")
+                        raise S16OwnerFailure(
+                            self.owner_id,
+                            S16_VERIFY_FAILED,
+                            retryable=True,
+                            responsible_party="backup_operations_owner",
+                            recovery_action="repair_the_captured_copy_digest",
+                        )
+                    target = self._capture_target(handle)
+                    if not target.is_file():
+                        connection.execute("ROLLBACK")
+                        raise S16OwnerFailure(
+                            self.owner_id,
+                            S16_VERIFY_FAILED,
+                            retryable=True,
+                            responsible_party="backup_operations_owner",
+                            recovery_action="restore_and_verify_the_captured_copy",
+                        )
+                    if (
+                        hashlib.sha256(target.read_bytes()).hexdigest()
+                        != expected_digest
+                    ):
+                        connection.execute("ROLLBACK")
+                        raise S16OwnerFailure(
+                            self.owner_id,
+                            S16_VERIFY_FAILED,
+                            retryable=True,
+                            responsible_party="backup_operations_owner",
+                            recovery_action="repair_the_captured_copy_digest",
+                        )
+                    target.unlink()
+                    if target.exists():
+                        connection.execute("ROLLBACK")
+                        raise S16OwnerFailure(
+                            self.owner_id,
+                            S16_VERIFY_FAILED,
+                            retryable=True,
+                            responsible_party="backup_operations_owner",
+                            recovery_action="verify_the_captured_copy_removal",
+                        )
+                    deleted += 1
+            for manifest in manifests:
+                manifest_path = self._manifest_path(str(manifest["manifest_id"]))
+                manifest_path.unlink()
+                if manifest_path.exists():
+                    connection.execute("ROLLBACK")
                     raise S16OwnerFailure(
                         self.owner_id,
                         S16_VERIFY_FAILED,
                         retryable=True,
                         responsible_party="backup_operations_owner",
-                        recovery_action="repair_the_captured_copy_digest",
+                        recovery_action="verify_the_backup_manifest_removal",
                     )
-                target.unlink()
-                if target.exists():
-                    raise S16OwnerFailure(
-                        self.owner_id,
-                        S16_VERIFY_FAILED,
-                        retryable=True,
-                        responsible_party="backup_operations_owner",
-                        recovery_action="verify_the_captured_copy_removal",
-                    )
-                deleted += 1
-            # Every captured file verified gone: only now remove the
-            # manifest so the deletion fact and the manifest commit
-            # together or not at all.
-            manifest_path = self._manifest_path(str(manifest["manifest_id"]))
-            manifest_path.unlink()
-            if manifest_path.exists():
-                raise S16OwnerFailure(
-                    self.owner_id,
-                    S16_VERIFY_FAILED,
-                    retryable=True,
-                    responsible_party="backup_operations_owner",
-                    recovery_action="verify_the_backup_manifest_removal",
-                )
+            # Every file and manifest verified gone: commit the registry
+            # deletions and the operation binding together.
+            connection.executemany(
+                "DELETE FROM backup_registry WHERE connector_identity = ?",
+                ((identity,) for identity in sorted(identities)),
+            )
+            connection.execute(
+                "INSERT INTO backup_deletion_bindings("
+                "operation_id, fence, scope_fingerprint, fingerprints_digest, "
+                "status, completed_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    operation_id,
+                    int(fence),
+                    scope_fingerprint,
+                    fingerprints_digest,
+                    "complete",
+                    int(self._clock()),
+                ),
+            )
+            connection.execute("COMMIT")
         return {"status": "complete", "deleted_counts": {"replica": deleted}}
 
     def verify_absent(
         self, copy_fingerprints: Iterable[str], *, scope_fingerprint: str
     ) -> dict[str, Any]:
-        del scope_fingerprint
         fingerprints = set(copy_fingerprints)
-        remaining = self._manifests_for_fingerprints(fingerprints)
+        remaining = self._manifests_for_fingerprints(
+            fingerprints, scope_fingerprint=scope_fingerprint
+        )
         if remaining:
             raise S16OwnerFailure(
                 self.owner_id,
@@ -1364,13 +1678,18 @@ class BackupDeletionOwner:
         return {"owner_id": self.owner_id, "status": "verified"}
 
     def replay(
-        self, copy_fingerprints: Iterable[str], *, scope_fingerprint: str
+        self,
+        copy_fingerprints: Iterable[str],
+        *,
+        scope_fingerprint: str,
+        operation_id: str = "s16-backup-replay",
+        fence: int = 0,
     ) -> dict[str, Any]:
         return self.delete(
             copy_fingerprints,
             scope_fingerprint=scope_fingerprint,
-            operation_id="s16-backup-replay",
-            fence=0,
+            operation_id=operation_id,
+            fence=fence,
         )
 
     def verify_repair(self, owner_id: str, repair_fact: str) -> bool:
@@ -1547,11 +1866,17 @@ class GovernedDeletionService:
         return holds
 
     def _hold_generation(self, scope_fingerprint: str) -> int:
+        """Monotonic Legal Hold generation: every impose, release and expiry
+        transition advances the generation so stale manifests never survive
+        a hold change (R2 P1-7)."""
         return len(
             [
                 event
                 for event in self._events
-                if event.get("event_type") == "legal_hold_imposed"
+                if event.get("event_type") in {
+                    "legal_hold_imposed",
+                    "legal_hold_released",
+                }
                 and event.get("scope_fingerprint") == scope_fingerprint
             ]
         )
@@ -1753,6 +2078,9 @@ class GovernedDeletionService:
             raise S16Blocked("S16_INVALID_REFERENCE")
         if not isinstance(idempotency_key, str) or not idempotency_key:
             raise S16Blocked("S16_INVALID_IDEMPOTENCY_KEY")
+        # R2 (P1-6): preflight is a protected command; the audit seam must
+        # be available before any ledger fact is written.
+        self._require_security_audit()
         request_id = request_id or _stable_id(
             "s16req", f"{subject}:{application_reference}:{secrets.token_hex(4)}"
         )
@@ -1773,85 +2101,106 @@ class GovernedDeletionService:
         )
         with self._lock:
             self._reload()
-            previous = self._idempotency_binding(binding_key)
-            if previous is not None:
-                previous_fingerprint, event = previous
-                if previous_fingerprint == command_fingerprint:
-                    # Same key + same content: return the original outcome.
-                    # The ledger stores only the value-free facts; the
-                    # manifest itself is re-derived from the same scope so
-                    # the caller can continue approvals in this session.
-                    stored = event.get("result") or {}
-                    replayed_request_id = str(stored.get("request_id") or "")
+            with self._ledger._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    binding_outcome, stored_result = self._bind_or_replay(
+                        connection,
+                        binding_key=binding_key,
+                        command_fingerprint=command_fingerprint,
+                        result={"status": "accepted", "request_id": request_id},
+                    )
+                    if binding_outcome == "conflict":
+                        connection.rollback()
+                        raise S16Conflict(
+                            "S16 idempotency conflict: same key different content"
+                        )
+                    if binding_outcome == "replayed":
+                        connection.commit()
+                        # Same key + same content: return the original
+                        # outcome.  The manifest is re-derived from the same
+                        # scope so the caller can continue in this session.
+                        replayed_request_id = str(
+                            (stored_result or {}).get("request_id") or ""
+                        )
+                        scope_fingerprint = self._owners[
+                            "s01"
+                        ].resolve_application_reference(
+                            application_reference, self._governance_scope
+                        )
+                        if scope_fingerprint is None:
+                            raise S16NotFound(application_reference)
+                        manifest = self._build_manifest(scope_fingerprint)
+                        return self._preflight_response(
+                            manifest=manifest,
+                            request_id=replayed_request_id,
+                            application_reference=application_reference,
+                            replayed=True,
+                        )
                     scope_fingerprint = self._owners[
                         "s01"
                     ].resolve_application_reference(
                         application_reference, self._governance_scope
                     )
                     if scope_fingerprint is None:
+                        connection.rollback()
                         raise S16NotFound(application_reference)
                     manifest = self._build_manifest(scope_fingerprint)
-                    return self._preflight_response(
-                        manifest=manifest,
-                        request_id=replayed_request_id,
-                        application_reference=application_reference,
-                        replayed=True,
+                    request_event = {
+                        "event_type": "request",
+                        "request_id": request_id,
+                        "subject": subject,
+                        "role": self.GOVERNANCE_ROLE,
+                        "scope": self._governance_scope,
+                        "source_id": self.GOVERNANCE_SOURCE_ID,
+                        "action": "preflight",
+                        "application_reference_fingerprint": hashlib.sha256(
+                            application_reference.encode("utf-8")
+                        ).hexdigest(),
+                        "scope_fingerprint": manifest["scope_fingerprint"],
+                        "appended_at": self._now(),
+                        "event_id": self._event_id("request", request_id),
+                    }
+                    preflight_event = {
+                        "event_type": "preflight",
+                        "request_id": request_id,
+                        "scope_fingerprint": manifest["scope_fingerprint"],
+                        "manifest_digest": manifest["manifest_digest"],
+                        "entries_digest": manifest["entries_digest"],
+                        "owner_registry_digest": manifest[
+                            "owner_registry_digest"
+                        ],
+                        "policy_id": manifest["policy_id"],
+                        "policy_version": manifest["policy_version"],
+                        "policy_digest": manifest["policy_digest"],
+                        "hold_generation": manifest["hold_generation"],
+                        "s01_revision": manifest["s01_revision"],
+                        "s12_revision": manifest["s12_revision"],
+                        "retention_due": manifest["retention_due"],
+                        "early_deletion": manifest["early_deletion"],
+                        "retained_scan_clean": manifest["retained_scan_clean"],
+                        "retained_scan_digest": manifest[
+                            "retained_scan_digest"
+                        ],
+                        "appended_at": self._now(),
+                        "event_id": self._event_id("preflight", request_id),
+                    }
+                    self._ledger._append_event(
+                        connection, request_event, self._now()
                     )
-                raise S16Conflict(
-                    "S16 idempotency conflict: same key different content"
-                )
-            scope_fingerprint = self._owners["s01"].resolve_application_reference(
-                application_reference, self._governance_scope
-            )
-            if scope_fingerprint is None:
-                raise S16NotFound(application_reference)
-            manifest = self._build_manifest(scope_fingerprint)
-            request_event = {
-                "event_type": "request",
-                "request_id": request_id,
-                "subject": subject,
-                "role": self.GOVERNANCE_ROLE,
-                "scope": self._governance_scope,
-                "source_id": self.GOVERNANCE_SOURCE_ID,
-                "action": "preflight",
-                "application_reference_fingerprint": hashlib.sha256(
-                    application_reference.encode("utf-8")
-                ).hexdigest(),
-                "scope_fingerprint": manifest["scope_fingerprint"],
-                "appended_at": self._now(),
-                "event_id": self._event_id("request", request_id),
-            }
-            preflight_event = {
-                "event_type": "preflight",
-                "request_id": request_id,
-                "scope_fingerprint": manifest["scope_fingerprint"],
-                "manifest_digest": manifest["manifest_digest"],
-                "entries_digest": manifest["entries_digest"],
-                "owner_registry_digest": manifest["owner_registry_digest"],
-                "policy_id": manifest["policy_id"],
-                "policy_version": manifest["policy_version"],
-                "policy_digest": manifest["policy_digest"],
-                "hold_generation": manifest["hold_generation"],
-                "s01_revision": manifest["s01_revision"],
-                "s12_revision": manifest["s12_revision"],
-                "retention_due": manifest["retention_due"],
-                "early_deletion": manifest["early_deletion"],
-                "retained_scan_clean": manifest["retained_scan_clean"],
-                "retained_scan_digest": manifest["retained_scan_digest"],
-                "appended_at": self._now(),
-                "event_id": self._event_id("preflight", request_id),
-            }
-            with self._ledger._connect() as connection:
-                connection.execute("BEGIN IMMEDIATE")
-                self._ledger._append_event(connection, request_event, self._now())
-                self._ledger._append_event(connection, preflight_event, self._now())
-                self._record_idempotency(
-                    connection,
-                    key=binding_key,
-                    fingerprint=command_fingerprint,
-                    result={"status": "accepted", "request_id": request_id},
-                )
-                connection.commit()
+                    self._ledger._append_event(
+                        connection, preflight_event, self._now()
+                    )
+                    connection.commit()
+                except S16Blocked:
+                    connection.rollback()
+                    raise
+                except S16Conflict:
+                    connection.rollback()
+                    raise
+                except Exception:
+                    connection.rollback()
+                    raise
             self._reload()
         return self._preflight_response(
             manifest=manifest,
@@ -2078,18 +2427,29 @@ class GovernedDeletionService:
         )
         with self._lock:
             self._reload()
-            previous = self._idempotency_binding(binding_key)
-            if previous is not None:
-                previous_fingerprint, event = previous
-                if previous_fingerprint == command_fingerprint:
-                    return {**event.get("result", {}), "replayed": True}
-                raise S16Conflict(
-                    "S16 idempotency conflict: same key different content"
-                )
             generation = self._hold_generation(scope_fingerprint) + 1
             hold_id = _stable_id("hold", f"{scope_fingerprint}:{generation}")
             with self._ledger._connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
+                binding_outcome, stored_result = self._bind_or_replay(
+                    connection,
+                    binding_key=binding_key,
+                    command_fingerprint=command_fingerprint,
+                    result={
+                        "status": "accepted",
+                        "hold_id": hold_id,
+                        "generation": generation,
+                        "request_id": request_id,
+                    },
+                )
+                if binding_outcome == "conflict":
+                    connection.rollback()
+                    raise S16Conflict(
+                        "S16 idempotency conflict: same key different content"
+                    )
+                if binding_outcome == "replayed":
+                    connection.commit()
+                    return {**stored_result, "replayed": True}
                 event = {
                     "event_type": "legal_hold_imposed",
                     "event_id": self._event_id("hold", hold_id),
@@ -2113,16 +2473,6 @@ class GovernedDeletionService:
                     scope_fingerprint=scope_fingerprint,
                     reason_code=reason_code,
                     request_id=request_id,
-                )
-                self._record_idempotency(
-                    connection,
-                    key=binding_key,
-                    fingerprint=command_fingerprint,
-                    result={
-                        "status": "accepted",
-                        "hold_id": hold_id,
-                        "generation": generation,
-                    },
                 )
                 connection.commit()
             self._reload()
@@ -2159,16 +2509,11 @@ class GovernedDeletionService:
                 "source_id": self.GOVERNANCE_SOURCE_ID,
             }
         )
+        release_request_id = _stable_id(
+            "s16release", f"{subject}:{hold_id}:{secrets.token_hex(4)}"
+        )
         with self._lock:
             self._reload()
-            previous = self._idempotency_binding(binding_key)
-            if previous is not None:
-                previous_fingerprint, event = previous
-                if previous_fingerprint == command_fingerprint:
-                    return {**event.get("result", {}), "replayed": True}
-                raise S16Conflict(
-                    "S16 idempotency conflict: same key different content"
-                )
             hold = next(
                 (
                     event
@@ -2180,22 +2525,49 @@ class GovernedDeletionService:
             )
             if hold is None:
                 raise S16NotFound(hold_id)
-            already_released = any(
-                event.get("event_type") == "legal_hold_released"
-                and event.get("hold_id") == hold_id
-                for event in self._events
-            )
-            if already_released:
-                return {"status": "replayed", "hold_id": hold_id}
             scope_fingerprint = str(hold.get("scope_fingerprint") or "")
             with self._ledger._connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
+                release_generation = self._hold_generation(scope_fingerprint) + 1
+                binding_outcome, stored_result = self._bind_or_replay(
+                    connection,
+                    binding_key=binding_key,
+                    command_fingerprint=command_fingerprint,
+                    result={
+                        "status": "accepted",
+                        "hold_id": hold_id,
+                        "generation": release_generation,
+                        "request_id": release_request_id,
+                    },
+                )
+                if binding_outcome == "conflict":
+                    connection.rollback()
+                    raise S16Conflict(
+                        "S16 idempotency conflict: same key different content"
+                    )
+                if binding_outcome == "replayed":
+                    connection.commit()
+                    return {**stored_result, "replayed": True}
+                already_released = any(
+                    event.get("event_type") == "legal_hold_released"
+                    and event.get("hold_id") == hold_id
+                    for event in self._events
+                )
+                if already_released:
+                    # Terminal action bound to the CURRENT key (R2 P1-8).
+                    connection.commit()
+                    return {
+                        **stored_result,
+                        "status": "replayed",
+                        "replayed": True,
+                    }
                 event = {
                     "event_type": "legal_hold_released",
                     "event_id": self._event_id("hold_release", hold_id),
-                    "request_id": str(hold.get("request_id") or ""),
+                    "request_id": release_request_id,
                     "hold_id": hold_id,
                     "scope_fingerprint": scope_fingerprint,
+                    "generation": release_generation,
                     "released_by": subject,
                     "appended_at": self._now(),
                 }
@@ -2209,16 +2581,15 @@ class GovernedDeletionService:
                     reason_code="legal_hold_released",
                     request_id=str(hold.get("request_id") or ""),
                 )
-                self._record_idempotency(
-                    connection,
-                    key=binding_key,
-                    fingerprint=command_fingerprint,
-                    result={"status": "accepted", "hold_id": hold_id},
-                )
                 connection.commit()
             self._reload()
         self._replicate_security_audit(audit_fact)
-        return {"status": "accepted", "hold_id": hold_id}
+        return {
+            "status": "accepted",
+            "hold_id": hold_id,
+            "request_id": release_request_id,
+            "generation": self._hold_generation(scope_fingerprint),
+        }
 
     # -- approvals ----------------------------------------------------------
 
@@ -2252,65 +2623,86 @@ class GovernedDeletionService:
         )
         with self._lock:
             self._reload()
-            previous = self._idempotency_binding(binding_key)
-            if previous is not None:
-                previous_fingerprint, event = previous
-                if previous_fingerprint == command_fingerprint:
-                    return {**event.get("result", {}), "replayed": True}
-                raise S16Conflict(
-                    "S16 idempotency conflict: same key different content"
-                )
             requests = self._request_events(request_id)
             if not requests:
                 raise S16NotFound(request_id)
             requester = str(requests[0].get("subject") or "")
             if subject == requester:
                 raise S16Forbidden("an approver must differ from the requester")
-            preflights = self._preflight_events(request_id)
-            if not preflights or preflights[0].get("manifest_digest") != manifest_digest:
-                raise S16Blocked(S16_MANIFEST_STALE)
-            existing = [
-                event
-                for event in self._events_of("approval", request_id)
-                if event.get("subject") == subject
-            ]
-            if existing:
-                return {"status": "replayed", "request_id": request_id, "approved_by": subject}
-            event = {
-                "event_type": "approval",
-                "event_id": self._event_id("approval", request_id),
+            approval_result = {
+                "status": "accepted",
                 "request_id": request_id,
-                "subject": subject,
-                "role": self.APPROVER_ROLE,
-                "manifest_digest": manifest_digest,
-                "scope_fingerprint": str(preflights[0].get("scope_fingerprint") or ""),
-                "appended_at": self._now(),
+                "approved_by": subject,
             }
             with self._ledger._connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
-                self._ledger._append_event(connection, event, self._now())
-                audit_fact = self._write_security_audit(
-                    connection,
-                    action="approval",
-                    subject=subject,
-                    role=self.APPROVER_ROLE,
-                    scope_fingerprint=str(
-                        preflights[0].get("scope_fingerprint") or ""
-                    ),
-                    reason_code="deletion_approval",
-                    request_id=request_id,
-                )
-                self._record_idempotency(
-                    connection,
-                    key=binding_key,
-                    fingerprint=command_fingerprint,
-                    result={
-                        "status": "accepted",
+                try:
+                    binding_outcome, stored_result = self._bind_or_replay(
+                        connection,
+                        binding_key=binding_key,
+                        command_fingerprint=command_fingerprint,
+                        result=approval_result,
+                    )
+                    if binding_outcome == "conflict":
+                        connection.rollback()
+                        raise S16Conflict(
+                            "S16 idempotency conflict: same key different content"
+                        )
+                    if binding_outcome == "replayed":
+                        connection.commit()
+                        return {**stored_result, "replayed": True}
+                    preflights = self._preflight_events(request_id)
+                    if (
+                        not preflights
+                        or preflights[0].get("manifest_digest")
+                        != manifest_digest
+                    ):
+                        connection.rollback()
+                        raise S16Blocked(S16_MANIFEST_STALE)
+                    existing = [
+                        event
+                        for event in self._events_of("approval", request_id)
+                        if event.get("subject") == subject
+                    ]
+                    if existing:
+                        # Terminal action bound to the CURRENT key.
+                        connection.commit()
+                        return {
+                            **approval_result,
+                            "status": "replayed",
+                            "replayed": True,
+                        }
+                    event = {
+                        "event_type": "approval",
+                        "event_id": self._event_id("approval", request_id),
                         "request_id": request_id,
-                        "approved_by": subject,
-                    },
-                )
-                connection.commit()
+                        "subject": subject,
+                        "role": self.APPROVER_ROLE,
+                        "manifest_digest": manifest_digest,
+                        "scope_fingerprint": str(
+                            preflights[0].get("scope_fingerprint") or ""
+                        ),
+                        "appended_at": self._now(),
+                    }
+                    self._ledger._append_event(connection, event, self._now())
+                    audit_fact = self._write_security_audit(
+                        connection,
+                        action="approval",
+                        subject=subject,
+                        role=self.APPROVER_ROLE,
+                        scope_fingerprint=str(
+                            preflights[0].get("scope_fingerprint") or ""
+                        ),
+                        reason_code="deletion_approval",
+                        request_id=request_id,
+                    )
+                    connection.commit()
+                except S16Conflict:
+                    connection.rollback()
+                    raise
+                except Exception:
+                    connection.rollback()
+                    raise
             self._reload()
         self._replicate_security_audit(audit_fact)
         return {
@@ -2347,58 +2739,76 @@ class GovernedDeletionService:
         )
         with self._lock:
             self._reload()
-            previous = self._idempotency_binding(binding_key)
-            if previous is not None:
-                previous_fingerprint, event = previous
-                if previous_fingerprint == command_fingerprint:
-                    return {**event.get("result", {}), "replayed": True}
-                raise S16Conflict(
-                    "S16 idempotency conflict: same key different content"
-                )
             job = self._job_for_request(request_id)
             if job is not None:
                 # Commit is the irreversible boundary.
                 raise S16Conflict(S16_ALREADY_COMMITTED)
             if not self._request_events(request_id):
                 raise S16NotFound(request_id)
-            if any(
-                event.get("event_type") == "cancel"
-                and event.get("request_id") == request_id
-                for event in self._events
-            ):
-                return {"status": "replayed", "request_id": request_id}
-            event = {
-                "event_type": "cancel",
-                "event_id": self._event_id("cancel", request_id),
-                "request_id": request_id,
-                "subject": subject,
-                "role": self.GOVERNANCE_ROLE,
-                "appended_at": self._now(),
-            }
             with self._ledger._connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
-                self._ledger._append_event(connection, event, self._now())
-                audit_fact = self._write_security_audit(
-                    connection,
-                    action="cancel",
-                    subject=subject,
-                    role=self.GOVERNANCE_ROLE,
-                    scope_fingerprint=str(
-                        (
-                            self._preflight_events(request_id) or [{}]
-                        )[0].get("scope_fingerprint")
-                        or ""
-                    ),
-                    reason_code="deletion_cancel",
-                    request_id=request_id,
-                )
-                self._record_idempotency(
-                    connection,
-                    key=binding_key,
-                    fingerprint=command_fingerprint,
-                    result={"status": "accepted", "request_id": request_id},
-                )
-                connection.commit()
+                try:
+                    cancel_result = {
+                        "status": "accepted",
+                        "request_id": request_id,
+                    }
+                    binding_outcome, stored_result = self._bind_or_replay(
+                        connection,
+                        binding_key=binding_key,
+                        command_fingerprint=command_fingerprint,
+                        result=cancel_result,
+                    )
+                    if binding_outcome == "conflict":
+                        connection.rollback()
+                        raise S16Conflict(
+                            "S16 idempotency conflict: same key different content"
+                        )
+                    if binding_outcome == "replayed":
+                        connection.commit()
+                        return {**stored_result, "replayed": True}
+                    already_cancelled = any(
+                        event.get("event_type") == "cancel"
+                        and event.get("request_id") == request_id
+                        for event in self._events
+                    )
+                    if already_cancelled:
+                        # Terminal action bound to the CURRENT key.
+                        connection.commit()
+                        return {
+                            **cancel_result,
+                            "status": "replayed",
+                            "replayed": True,
+                        }
+                    event = {
+                        "event_type": "cancel",
+                        "event_id": self._event_id("cancel", request_id),
+                        "request_id": request_id,
+                        "subject": subject,
+                        "role": self.GOVERNANCE_ROLE,
+                        "appended_at": self._now(),
+                    }
+                    self._ledger._append_event(connection, event, self._now())
+                    audit_fact = self._write_security_audit(
+                        connection,
+                        action="cancel",
+                        subject=subject,
+                        role=self.GOVERNANCE_ROLE,
+                        scope_fingerprint=str(
+                            (
+                                self._preflight_events(request_id) or [{}]
+                            )[0].get("scope_fingerprint")
+                            or ""
+                        ),
+                        reason_code="deletion_cancel",
+                        request_id=request_id,
+                    )
+                    connection.commit()
+                except S16Conflict:
+                    connection.rollback()
+                    raise
+                except Exception:
+                    connection.rollback()
+                    raise
             self._reload()
         self._replicate_security_audit(audit_fact)
         return {"status": "accepted", "request_id": request_id}
@@ -2431,14 +2841,6 @@ class GovernedDeletionService:
         )
         with self._lock:
             self._reload()
-            previous = self._idempotency_binding(binding_key)
-            if previous is not None:
-                previous_fingerprint, event = previous
-                if previous_fingerprint == command_fingerprint:
-                    return {**event.get("result", {}), "replayed": True}
-                raise S16Conflict(
-                    "S16 idempotency conflict: same key different content"
-                )
             if not self._request_events(request_id):
                 raise S16NotFound(request_id)
             cancelled = any(
@@ -2449,12 +2851,6 @@ class GovernedDeletionService:
             if cancelled:
                 raise S16Blocked(S16_ALREADY_CANCELLED)
             existing_job = self._job_for_request(request_id)
-            if existing_job is not None:
-                return {
-                    "status": "replayed",
-                    "request_id": request_id,
-                    "job_id": str(existing_job["job_id"]),
-                }
             preflights = self._preflight_events(request_id)
             if not preflights:
                 raise S16NotFound(request_id)
@@ -2464,6 +2860,37 @@ class GovernedDeletionService:
             with self._ledger._connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 try:
+                    commit_result = {
+                        "status": "accepted",
+                        "request_id": request_id,
+                        "job_id": (
+                            str(existing_job["job_id"])
+                            if existing_job is not None
+                            else None
+                        ),
+                    }
+                    binding_outcome, stored_result = self._bind_or_replay(
+                        connection,
+                        binding_key=binding_key,
+                        command_fingerprint=command_fingerprint,
+                        result=commit_result,
+                    )
+                    if binding_outcome == "conflict":
+                        connection.rollback()
+                        raise S16Conflict(
+                            "S16 idempotency conflict: same key different content"
+                        )
+                    if binding_outcome == "replayed":
+                        connection.commit()
+                        return {**stored_result, "replayed": True}
+                    if existing_job is not None:
+                        # Terminal action bound to the CURRENT key.
+                        connection.commit()
+                        return {
+                            **commit_result,
+                            "status": "replayed",
+                            "replayed": True,
+                        }
                     ledger_facts = self._ledger_facts_in_transaction(
                         connection, request_id
                     )
@@ -2524,16 +2951,6 @@ class GovernedDeletionService:
                         reason_code="deletion_commit",
                         request_id=request_id,
                         job_id=job_id,
-                    )
-                    self._record_idempotency(
-                        connection,
-                        key=binding_key,
-                        fingerprint=command_fingerprint,
-                        result={
-                            "status": "accepted",
-                            "request_id": request_id,
-                            "job_id": job_id,
-                        },
                     )
                     connection.commit()
                 except S16Blocked:
@@ -2596,7 +3013,8 @@ class GovernedDeletionService:
             [
                 event
                 for event in events
-                if event.get("event_type") == "legal_hold_imposed"
+                if event.get("event_type")
+                in {"legal_hold_imposed", "legal_hold_released"}
                 and event.get("scope_fingerprint") == scope_fingerprint
             ]
         )
@@ -2877,6 +3295,9 @@ class GovernedDeletionService:
     def _claim_job(
         self, worker: str, now: int
     ) -> dict[str, Any] | None:
+        """Claim at most one job with a database CAS (R2 P1-9): the
+        conditional update on the original status/lease/fence/attempt is
+        the cross-process arbitration; the process lock is not the lease."""
         with self._lock:
             self._reload()
             candidate = None
@@ -2899,18 +3320,34 @@ class GovernedDeletionService:
             if candidate is None:
                 return None
             job_id = str(candidate["job_id"])
+            claimed_fence = int(candidate.get("fence") or 0) + 1
+            claimed_attempt = int(candidate.get("attempt") or 0) + 1
             claimed = {
                 **candidate,
                 "status": "running",
                 "lease_owner": worker,
                 "lease_expires_at": now + LEASE_SECONDS,
-                "fence": int(candidate.get("fence") or 0) + 1,
-                "attempt": int(candidate.get("attempt") or 0) + 1,
+                "fence": claimed_fence,
+                "attempt": claimed_attempt,
                 "updated_at": now,
             }
             with self._ledger._connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
-                self._ledger._upsert_job(connection, claimed, now)
+                claimed_ok = self._ledger._claim_job_cas(
+                    connection,
+                    job_id=job_id,
+                    worker=worker,
+                    now=now,
+                    lease_seconds=LEASE_SECONDS,
+                    claimed_payload=claimed,
+                    claimed_fence=claimed_fence,
+                    claimed_attempt=claimed_attempt,
+                )
+                if not claimed_ok:
+                    # Another worker already advanced the lease/fence:
+                    # re-read and abandon the claim.
+                    connection.execute("ROLLBACK")
+                    return None
                 connection.commit()
             self._reload()
             return claimed
@@ -3131,14 +3568,6 @@ class GovernedDeletionService:
         )
         with self._lock:
             self._reload()
-            previous = self._idempotency_binding(binding_key)
-            if previous is not None:
-                previous_fingerprint, event = previous
-                if previous_fingerprint == command_fingerprint:
-                    return {**event.get("result", {}), "replayed": True}
-                raise S16Conflict(
-                    "S16 idempotency conflict: same key different content"
-                )
             job = self._job_for_request(request_id)
             if job is None:
                 raise S16NotFound(request_id)
@@ -3155,39 +3584,56 @@ class GovernedDeletionService:
             }
             with self._ledger._connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
-                event = {
-                    "event_type": "repair",
-                    "event_id": self._event_id("repair", request_id),
-                    "request_id": request_id,
-                    "job_id": str(job["job_id"]),
-                    "owner_id": owner_id,
-                    "subject": subject,
-                    "role": self.GOVERNANCE_ROLE,
-                    "appended_at": self._now(),
-                }
-                self._ledger._append_event(connection, event, self._now())
-                self._ledger._upsert_job(connection, updated, self._now())
-                audit_fact = self._write_security_audit(
-                    connection,
-                    action="repair",
-                    subject=subject,
-                    role=self.GOVERNANCE_ROLE,
-                    scope_fingerprint=str(job.get("scope_fingerprint") or ""),
-                    reason_code="deletion_repair",
-                    request_id=request_id,
-                    job_id=str(job["job_id"]),
-                )
-                self._record_idempotency(
-                    connection,
-                    key=binding_key,
-                    fingerprint=command_fingerprint,
-                    result={
-                        "status": "accepted",
+                try:
+                    binding_outcome, stored_result = self._bind_or_replay(
+                        connection,
+                        binding_key=binding_key,
+                        command_fingerprint=command_fingerprint,
+                        result={
+                            "status": "accepted",
+                            "request_id": request_id,
+                            "job_id": str(job["job_id"]),
+                        },
+                    )
+                    if binding_outcome == "conflict":
+                        connection.rollback()
+                        raise S16Conflict(
+                            "S16 idempotency conflict: same key different content"
+                        )
+                    if binding_outcome == "replayed":
+                        connection.commit()
+                        return {**stored_result, "replayed": True}
+                    event = {
+                        "event_type": "repair",
+                        "event_id": self._event_id("repair", request_id),
                         "request_id": request_id,
                         "job_id": str(job["job_id"]),
-                    },
-                )
-                connection.commit()
+                        "owner_id": owner_id,
+                        "subject": subject,
+                        "role": self.GOVERNANCE_ROLE,
+                        "appended_at": self._now(),
+                    }
+                    self._ledger._append_event(connection, event, self._now())
+                    self._ledger._upsert_job(connection, updated, self._now())
+                    audit_fact = self._write_security_audit(
+                        connection,
+                        action="repair",
+                        subject=subject,
+                        role=self.GOVERNANCE_ROLE,
+                        scope_fingerprint=str(
+                            job.get("scope_fingerprint") or ""
+                        ),
+                        reason_code="deletion_repair",
+                        request_id=request_id,
+                        job_id=str(job["job_id"]),
+                    )
+                    connection.commit()
+                except S16Conflict:
+                    connection.rollback()
+                    raise
+                except Exception:
+                    connection.rollback()
+                    raise
             self._reload()
         self._replicate_security_audit(audit_fact)
         return {
@@ -3319,14 +3765,40 @@ class GovernedDeletionService:
 
     # -- readiness / restore replay ----------------------------------------
 
+    def _replay_operation_id(self, job_id: str, owner_id: str, scope_fingerprint: str) -> str:
+        """Per-scope replay operation identity (R2 P1-4): bound to the
+        completed job, the scope and the owner, so multiple restored scopes
+        never share one owner binding."""
+        return f"s16-replay:{job_id}:{scope_fingerprint[:16]}:{owner_id}"
+
+    def _owner_copies_present(
+        self, job: dict[str, Any], owner_id: str
+    ) -> bool:
+        """True when an owner still holds copies for a completed scope:
+        absence verification failed, i.e. a restore window is open on this
+        owner (R2 P0-1: every owner participates in readiness)."""
+        fingerprints = (job.get("pending_owner_fingerprints") or {}).get(
+            owner_id, []
+        )
+        if not fingerprints:
+            return False
+        try:
+            self._owners[owner_id].verify_absent(
+                fingerprints,
+                scope_fingerprint=str(job.get("scope_fingerprint") or ""),
+            )
+            return False
+        except S16OwnerFailure:
+            return True
+
     def ready(self) -> bool:
-        """Restore readiness (shared gate): the plane is closed exactly when
-        a completed manifest's scope is live again on the business owner
-        (an old backup restore window).  After a normal completion the
-        scope stays absent, so the receipt and query remain readable; after
-        a restore the gate closes every restricted read until the runtime
-        replay re-deletes and re-verifies the scope (startup replay covers
-        the construction path)."""
+        """Restore readiness (shared gate, R2 P0-1): the plane is closed
+        exactly when ANY owner of a completed manifest still holds copies
+        (an old backup or single-owner restore window).  After a normal
+        completion every owner proves absence, so the receipt and query
+        remain readable; after a restore the gate closes every restricted
+        read until the runtime replay re-deletes and re-verifies each owner
+        (startup replay covers the construction path)."""
         try:
             self._reload()
             if not self._events:
@@ -3334,77 +3806,91 @@ class GovernedDeletionService:
             for job in self._jobs.values():
                 if job.get("status") != "complete":
                     continue
-                scope_fingerprint = str(job.get("scope_fingerprint") or "")
-                if self._owners["s01"].scope_exists(scope_fingerprint):
-                    return False
+                for owner_id in EXECUTION_ORDER:
+                    if owner_id == "s17-disabled":
+                        continue
+                    if self._owner_copies_present(job, owner_id):
+                        return False
             return True
         except Exception:
             return False
 
+    def _replay_job_owners(self, job: dict[str, Any]) -> int:
+        """Replay every owner that still holds copies of a completed scope;
+        returns the number of owners replayed.  The replay fact is appended
+        only after EVERY owner verifies absence (R2 P1-4)."""
+        job_id = str(job["job_id"])
+        scope_fingerprint = str(job.get("scope_fingerprint") or "")
+        fingerprints_by_owner = job.get("pending_owner_fingerprints") or {}
+        pending_owners = [
+            owner_id
+            for owner_id in EXECUTION_ORDER
+            if owner_id != "s17-disabled"
+            and (fingerprints_by_owner.get(owner_id) or [])
+            and self._owner_copies_present(job, owner_id)
+        ]
+        if not pending_owners:
+            return 0
+        for owner_id in pending_owners:
+            self._owners[owner_id].replay(
+                fingerprints_by_owner[owner_id],
+                scope_fingerprint=scope_fingerprint,
+                operation_id=self._replay_operation_id(
+                    job_id, owner_id, scope_fingerprint
+                ),
+                fence=0,
+            )
+        for owner_id in pending_owners:
+            self._owners[owner_id].verify_absent(
+                fingerprints_by_owner[owner_id],
+                scope_fingerprint=scope_fingerprint,
+            )
+        replay = {
+            "replay_id": _stable_id("s16replay", f"{job_id}:{self._now()}"),
+            "schema_version": "s16-restore-replay/1",
+            "job_id": job_id,
+            "request_id": str(job.get("request_id") or ""),
+            "scope_fingerprint": scope_fingerprint,
+            "result": "verified",
+            "replayed_at": self._now(),
+        }
+        with self._ledger._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            event = {
+                "event_type": "restore_replay",
+                "event_id": self._event_id("restore_replay", job_id),
+                "request_id": str(job.get("request_id") or ""),
+                "job_id": job_id,
+                "scope_fingerprint": scope_fingerprint,
+                "result": "verified",
+                "appended_at": self._now(),
+            }
+            self._ledger._append_event(connection, event, self._now())
+            self._ledger._append_replay(connection, replay, self._now())
+            connection.commit()
+        return len(pending_owners)
+
     def replay_restore_if_needed(self) -> dict[str, Any]:
-        """Idempotent runtime restore replay: re-deletes completed scopes
-        that became live again (old backup restored under a running
-        process).  Returns the number of jobs replayed; the shared
-        readiness gate stays closed until every such scope is verified."""
+        """Idempotent runtime restore replay (R2 P0-1): re-deletes every
+        completed scope whose OWNERS hold copies again (old backup or
+        single-owner restore under a running process).  Returns the number
+        of jobs replayed; the shared readiness gate stays closed until every
+        owner of every such scope is verified."""
         with self._lock:
             self._reload()
             replayed = 0
             for job in self._jobs.values():
                 if job.get("status") != "complete":
                     continue
-                job_id = str(job["job_id"])
-                scope_fingerprint = str(job.get("scope_fingerprint") or "")
-                if not self._owners["s01"].scope_exists(scope_fingerprint):
-                    continue
-                fingerprints_by_owner = job.get("pending_owner_fingerprints") or {}
-                for owner_id, fingerprints in fingerprints_by_owner.items():
-                    if owner_id == "s17-disabled" or not fingerprints:
-                        continue
-                    self._owners[owner_id].replay(
-                        fingerprints,
-                        scope_fingerprint=scope_fingerprint,
-                    )
-                for owner_id, fingerprints in fingerprints_by_owner.items():
-                    if owner_id == "s17-disabled" or not fingerprints:
-                        continue
-                    self._owners[owner_id].verify_absent(
-                        fingerprints,
-                        scope_fingerprint=scope_fingerprint,
-                    )
-                replay = {
-                    "replay_id": _stable_id(
-                        "s16replay", f"{job_id}:{self._now()}"
-                    ),
-                    "schema_version": "s16-restore-replay/1",
-                    "job_id": job_id,
-                    "request_id": str(job.get("request_id") or ""),
-                    "scope_fingerprint": scope_fingerprint,
-                    "result": "verified",
-                    "replayed_at": self._now(),
-                }
-                with self._ledger._connect() as connection:
-                    connection.execute("BEGIN IMMEDIATE")
-                    event = {
-                        "event_type": "restore_replay",
-                        "event_id": self._event_id("restore_replay", job_id),
-                        "request_id": str(job.get("request_id") or ""),
-                        "job_id": job_id,
-                        "scope_fingerprint": scope_fingerprint,
-                        "result": "verified",
-                        "appended_at": self._now(),
-                    }
-                    self._ledger._append_event(connection, event, self._now())
-                    self._ledger._append_replay(connection, replay, self._now())
-                    connection.commit()
-                replayed += 1
+                replayed += self._replay_job_owners(job)
             self._reload()
         return {"status": "replayed", "jobs": replayed}
 
     def _replay_restore(self) -> None:
-        """Startup restore replay: re-delete every completed manifest's copies
-        on every owner, then verify absence; readiness stays closed until
-        every completed manifest has a verified append-only replay fact
-        (ADR-0008)."""
+        """Startup restore replay (R2 P0-1/P1-4): every completed manifest's
+        owners are verified; owners that still hold copies are replayed with
+        per-scope operations, and the append-only replay fact lands only
+        after every owner verifies absence (ADR-0008)."""
         with self._lock:
             for job in self._jobs.values():
                 if job.get("status") != "complete":
@@ -3412,47 +3898,12 @@ class GovernedDeletionService:
                 job_id = str(job["job_id"])
                 if self._replay_status_for_job(job_id) == "verified":
                     continue
-                fingerprints_by_owner = job.get("pending_owner_fingerprints") or {}
-                for owner_id, fingerprints in fingerprints_by_owner.items():
-                    if owner_id == "s17-disabled" or not fingerprints:
-                        continue
-                    self._owners[owner_id].replay(
-                        fingerprints,
-                        scope_fingerprint=str(job.get("scope_fingerprint") or ""),
-                    )
-                for owner_id, fingerprints in fingerprints_by_owner.items():
-                    if owner_id == "s17-disabled" or not fingerprints:
-                        continue
-                    self._owners[owner_id].verify_absent(
-                        fingerprints,
-                        scope_fingerprint=str(job.get("scope_fingerprint") or ""),
-                    )
-                replay = {
-                    "replay_id": _stable_id("s16replay", f"{job_id}:{self._now()}"),
-                    "schema_version": "s16-restore-replay/1",
-                    "job_id": job_id,
-                    "request_id": str(job.get("request_id") or ""),
-                    "scope_fingerprint": str(job.get("scope_fingerprint") or ""),
-                    "result": "verified",
-                    "replayed_at": self._now(),
-                }
-                with self._ledger._connect() as connection:
-                    connection.execute("BEGIN IMMEDIATE")
-                    event = {
-                        "event_type": "restore_replay",
-                        "event_id": self._event_id("restore_replay", job_id),
-                        "request_id": str(job.get("request_id") or ""),
-                        "job_id": job_id,
-                        "scope_fingerprint": str(job.get("scope_fingerprint") or ""),
-                        "result": "verified",
-                        "appended_at": self._now(),
-                    }
-                    self._ledger._append_event(connection, event, self._now())
-                    self._ledger._append_replay(connection, replay, self._now())
-                    connection.commit()
+                self._replay_job_owners(job)
             self._reload()
 
     def _idempotency_binding(self, key: str) -> tuple[str, dict[str, Any]] | None:
+        """Snapshot read (preflight replay only).  Command entry points use
+        the database table inside their own transaction (R2 P1-10)."""
         for event in self._events:
             if (
                 event.get("event_type") == "idempotency_binding"
@@ -3460,6 +3911,44 @@ class GovernedDeletionService:
             ):
                 return str(event.get("fingerprint") or ""), event
         return None
+
+    def _bind_or_replay(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        binding_key: str,
+        command_fingerprint: str,
+        result: dict[str, Any],
+    ) -> tuple[str, dict[str, Any] | None]:
+        """Database-backed idempotency: insert-if-absent inside the command
+        transaction and read back.  Same key + same fingerprint replays the
+        stored result; same key + different content conflicts (R2 P1-10)."""
+        existing = self._ledger._binding_read(connection, binding_key)
+        if existing is not None:
+            existing_fingerprint, existing_result = existing
+            if existing_fingerprint == command_fingerprint:
+                return "replayed", existing_result
+            return "conflict", None
+        self._ledger._binding_insert(
+            connection,
+            binding_key=binding_key,
+            fingerprint=command_fingerprint,
+            result=result,
+            now=self._now(),
+        )
+        self._ledger._append_event(
+            connection,
+            {
+                "event_type": "idempotency_binding",
+                "binding_key": binding_key,
+                "fingerprint": command_fingerprint,
+                "result": result,
+                "event_id": self._event_id("idempotency", binding_key),
+                "appended_at": self._now(),
+            },
+            self._now(),
+        )
+        return "recorded", None
 
     def _record_idempotency(
         self,

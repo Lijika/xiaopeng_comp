@@ -513,12 +513,22 @@ class _EvalStore:
         with contextlib.closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             binding = connection.execute(
-                "SELECT status FROM s12_deletion_bindings "
+                "SELECT status, scope_fingerprint, fingerprints_digest "
+                "FROM s12_deletion_bindings "
                 "WHERE operation_id = ? AND fence = ?",
                 (operation_id, int(fence)),
             ).fetchone()
             if binding is not None:
                 connection.execute("ROLLBACK")
+                if (
+                    str(binding[1]) != str(scope_fingerprint)
+                    or str(binding[2]) != fingerprints_digest
+                ):
+                    return {
+                        "status": "conflict",
+                        "deleted_counts": {},
+                        "reason_code": "S16_OWNER_BINDING_CONFLICT",
+                    }
                 return {
                     "status": "complete",
                     "deleted_counts": {},
@@ -2817,13 +2827,31 @@ class EvaluationService:
             if prediction_id in opportunity_ids
         }
 
-    def s16_verify_absent(self, fingerprints: Iterable[str]) -> dict[str, Any]:
+    def s16_verify_absent(
+        self,
+        fingerprints: Iterable[str],
+        scope_fingerprint: str = "",
+    ) -> dict[str, Any]:
+        """Scope-aware absence proof (R2 P1-11): the rows must be gone AND
+        any recorded deletion binding must belong to the given scope."""
         target = set(fingerprints)
         with self._lock:
             self._store.reload()
             remaining = self._s16_rows_by_fingerprint(target)
             absent = not any(remaining.values())
-            return {"absent": absent}
+            scope_mismatch = False
+            if absent and scope_fingerprint and target:
+                with contextlib.closing(self._store._connect()) as connection:
+                    rows = connection.execute(
+                        "SELECT scope_fingerprint FROM s12_deletion_bindings"
+                    ).fetchall()
+                scope_mismatch = bool(
+                    rows and any(str(row[0]) != scope_fingerprint for row in rows)
+                )
+            return {
+                "absent": absent and not scope_mismatch,
+                "scope_mismatch": scope_mismatch,
+            }
 
     def s16_replay_scope(
         self,

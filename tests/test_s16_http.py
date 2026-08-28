@@ -651,3 +651,79 @@ def test_s16_restore_readiness_gate_closes_all_restricted_reads(
     )
     assert reopened.status_code == 200
     assert reopened.json()["result"] == "deleted"
+
+
+def test_s16_factory_wires_real_audit_seam_and_fails_closed_without_writer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """R2 P1-5: the production factory's security-audit availability equals
+    'writer configured AND callable'; a missing writer fails protected
+    commands closed before any ledger write."""
+    import task4_consistency.web.app as web
+    from task4_consistency.controlled.s01 import ControlledScenarioService as _S
+    from task4_consistency.controlled.s12 import EvaluationService as _E
+
+    recorded: list[dict[str, Any]] = []
+
+    def audit_writer(record: dict[str, Any]) -> bool:
+        recorded.append(record)
+        return True
+
+    service = ControlledScenarioService(
+        fixture_root=FIXTURES,
+        rules_path=RULES,
+        state_path=tmp_path / "factory.sqlite3",
+        audit_writer=audit_writer,
+    )
+    monkeypatch.setattr(web, "S01_SERVICE", service)
+    monkeypatch.setattr(web, "S12_SERVICE", _E(
+        state_path=tmp_path / "factory-eval.sqlite3",
+        clock=lambda: 1_800_000_000,
+        snapshot_provider=lambda *_: None,
+        release_provider=lambda *_: None,
+        label_manifest_provider=lambda *_: None,
+        business_state_provider=lambda: {},
+        business_publication_guard=lambda revisions: None,
+    ))
+    monkeypatch.setattr(web, "S16_GOVERNANCE_CREDENTIAL", GOVERNANCE_CREDENTIAL)
+    monkeypatch.setattr(web, "S16_GOVERNANCE_SUBJECT", GOVERNANCE_SUBJECT)
+    monkeypatch.setattr(web, "S16_APPROVER1_CREDENTIAL", APPROVER1_CREDENTIAL)
+    monkeypatch.setattr(web, "S16_APPROVER1_SUBJECT", APPROVER1_SUBJECT)
+    monkeypatch.setattr(web, "S16_APPROVER2_CREDENTIAL", APPROVER2_CREDENTIAL)
+    monkeypatch.setattr(web, "S16_APPROVER2_SUBJECT", APPROVER2_SUBJECT)
+    independent_root = tmp_path.parent / f"{tmp_path.name}-backups"
+    monkeypatch.setenv("TASK4_S16_STATE_PATH", str(tmp_path / "ledger.sqlite3"))
+    monkeypatch.setenv("TASK4_S16_BACKUP_ROOT", str(independent_root))
+    monkeypatch.setenv("TASK4_S16_SECURITY_AUDIT_AVAILABLE", "true")
+
+    factory_service = web._s16_service_factory()
+    assert factory_service is not None
+    assert factory_service.security_audit_available is True
+    assert factory_service._security_audit_writer is not None
+
+    # Without a writer the seam is unavailable: protected commands fail
+    # closed before any ledger fact.
+    service_no_writer = ControlledScenarioService(
+        fixture_root=FIXTURES,
+        rules_path=RULES,
+        state_path=tmp_path / "factory-nowriter.sqlite3",
+    )
+    monkeypatch.setattr(web, "S01_SERVICE", service_no_writer)
+    monkeypatch.setenv("TASK4_S16_STATE_PATH", str(tmp_path / "ledger2.sqlite3"))
+    closed = web._s16_service_factory()
+    assert closed is not None
+    assert closed.security_audit_available is False
+    from task4_consistency.controlled.s16 import S16_AUDIT_SEAM_UNAVAILABLE
+
+    with pytest.raises(Exception) as excinfo:
+        closed.preflight(
+            application_reference=PREFERRED,
+            principal=S01CommandPrincipal(
+                subject=GOVERNANCE_SUBJECT,
+                role="operator",
+                scope="C-DEMO",
+                source_id="s16-governance-console",
+            ),
+            idempotency_key="factory-no-writer",
+        )
+    assert str(excinfo.value) == S16_AUDIT_SEAM_UNAVAILABLE
