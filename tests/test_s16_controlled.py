@@ -5972,3 +5972,326 @@ def test_backup_worker_shared_source_tamper_at_final_commit(
     assert active is not None and int(active[0]) == 2
     assert int(active[1]) == 1
     assert saved.exists()
+
+
+def test_backup_binding_replay_requires_shared_source_digest(
+    tmp_path: Path,
+) -> None:
+    """R14 P1-1: after complete binding, shared source rewrite/unlink/OSError
+    keep already-absent unreachable until the registry digest is restored."""
+    backup_root = tmp_path / "backups"
+    backup = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
+    scope_a = "a" * 64
+    scope_b = "b" * 64
+    saved = backup_root / "shared.bin"
+    payload = b"shared-replay-proof"
+    saved.write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    backup.capture(
+        scope_fingerprint=scope_a, copy_files=[("shared.bin", digest)]
+    )
+    backup.capture(
+        scope_fingerprint=scope_b, copy_files=[("shared.bin", digest)]
+    )
+    fingerprint_a = _replica_fingerprint(backup, scope_a)
+    complete = backup.delete(
+        {fingerprint_a},
+        scope_fingerprint=scope_a,
+        operation_id="op-replay-proof",
+        fence=1,
+    )
+    assert complete["status"] == "complete"
+    before = _backup_bookkeeping(backup)
+    saved.write_bytes(b"shared-replay-tampered")
+    with pytest.raises(S16OwnerFailure) as excinfo:
+        backup.delete(
+            {fingerprint_a},
+            scope_fingerprint=scope_a,
+            operation_id="op-replay-proof",
+            fence=1,
+        )
+    assert excinfo.value.reason_code == S16_VERIFY_FAILED
+    assert _backup_bookkeeping(backup) == before
+    saved.write_bytes(payload)
+    saved.unlink()
+    with pytest.raises(S16OwnerFailure) as unlink_exc:
+        backup.delete(
+            {fingerprint_a},
+            scope_fingerprint=scope_a,
+            operation_id="op-replay-proof",
+            fence=1,
+        )
+    assert unlink_exc.value.reason_code == S16_VERIFY_FAILED
+    saved.write_bytes(payload)
+    real_read = Path.read_bytes
+
+    def wrapped(self: Path) -> bytes:
+        if self.name == "shared.bin":
+            raise OSError("injected replay read")
+        return real_read(self)
+
+    Path.read_bytes = wrapped  # type: ignore[method-assign]
+    try:
+        with pytest.raises(S16OwnerFailure) as read_exc:
+            backup.delete(
+                {fingerprint_a},
+                scope_fingerprint=scope_a,
+                operation_id="op-replay-proof",
+                fence=1,
+            )
+    finally:
+        Path.read_bytes = real_read  # type: ignore[method-assign]
+    assert read_exc.value.reason_code == S16_VERIFY_FAILED
+    replay = backup.delete(
+        {fingerprint_a},
+        scope_fingerprint=scope_a,
+        operation_id="op-replay-proof",
+        fence=1,
+    )
+    assert replay["status"] == "complete"
+    assert replay.get("already_absent") is True
+    _assert_locator_free(replay, backup_root, "shared.bin")
+    with backup._registry_connect() as connection:
+        refs_b = connection.execute(
+            "SELECT COUNT(*) FROM backup_registry_refs "
+            "WHERE scope_fingerprint = ?",
+            (scope_b,),
+        ).fetchone()[0]
+        binding = connection.execute(
+            "SELECT status FROM backup_deletion_bindings "
+            "WHERE operation_id = ? AND fence = 1",
+            ("op-replay-proof",),
+        ).fetchone()
+    assert refs_b == 1
+    assert binding is not None and binding[0] == "complete"
+
+
+def test_backup_worker_restore_readiness_after_shared_source_corruption(
+    tmp_path: Path,
+) -> None:
+    """R14 P2-S1: completed job + later shared source rewrite closes
+    ready() until digest is restored; restore replay then verifies."""
+    import shutil
+
+    service, submission, application_id = _registered_terminated(tmp_path)
+    backup_root = tmp_path / "backups"
+    s16 = _s16_service(
+        tmp_path, service, backup_root=backup_root, governance_scope=TENANT_SCOPE
+    )
+    backup = s16._owners["backup"]
+    state_path = tmp_path / "target.sqlite3"
+    saved = backup_root / "target.sqlite3"
+    shutil.copy2(state_path, saved)
+    payload = saved.read_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    result = _preflight(
+        s16, str(submission["upstream_application_ref"]), scope=TENANT_SCOPE
+    )
+    scope_a = result["scope_fingerprint"]
+    scope_b = "b" * 64
+    backup.capture(
+        scope_fingerprint=scope_a, copy_files=[(saved.name, digest)]
+    )
+    result2 = s16.preflight(
+        application_reference=str(submission["upstream_application_ref"]),
+        principal=S01CommandPrincipal(
+            subject=GOVERNANCE.subject,
+            role="operator",
+            scope=TENANT_SCOPE,
+            source_id="s16-governance-console",
+        ),
+        idempotency_key="r14-ready-preflight",
+    )
+    committed = s16.commit(
+        request_id=result2["request_id"],
+        principal=GOVERNANCE_REGISTERED,
+        idempotency_key="r14-ready-commit",
+    )
+    assert committed["status"] == "accepted"
+    backup.capture(
+        scope_fingerprint=scope_b, copy_files=[(saved.name, digest)]
+    )
+    outcome = s16.process_next_deletion_job(worker_id="w1", now=_now() + 1)
+    assert outcome["status"] == "complete", outcome
+    job = s16._job_for_request(result2["request_id"])
+    assert job is not None
+    job_id = str(job["job_id"])
+    assert s16.ready() is True
+    saved.write_bytes(b"post-complete-tamper")
+    assert s16.ready() is False
+    idle = s16.process_next_deletion_job(worker_id="w2", now=_now() + 2)
+    assert idle["status"] == "idle"
+    receipt = s16.receipt(
+        request_id=result2["request_id"], principal=GOVERNANCE_REGISTERED
+    )
+    assert receipt["result"] == "deleted"
+    _assert_locator_free(receipt, backup_root, "target.sqlite3", ".s16_deletion")
+    with pytest.raises(S16OwnerFailure) as replay_exc:
+        s16.replay_restore_if_needed()
+    assert replay_exc.value.reason_code == S16_VERIFY_FAILED
+    assert s16.ready() is False
+    saved.write_bytes(payload)
+    assert s16.ready() is True
+    restored = s16.replay_restore_if_needed()
+    assert restored["status"] == "replayed"
+    with backup._registry_connect() as connection:
+        refs_a = connection.execute(
+            "SELECT COUNT(*) FROM backup_registry_refs "
+            "WHERE scope_fingerprint = ?",
+            (scope_a,),
+        ).fetchone()[0]
+        refs_b = connection.execute(
+            "SELECT COUNT(*) FROM backup_registry_refs "
+            "WHERE scope_fingerprint = ?",
+            (scope_b,),
+        ).fetchone()[0]
+        binding = connection.execute(
+            "SELECT status FROM backup_deletion_bindings "
+            "WHERE operation_id = ? AND fence = 1",
+            (job_id,),
+        ).fetchone()
+        active = connection.execute(
+            "SELECT active_fence, source_fence FROM backup_operation_fences "
+            "WHERE operation_id = ?",
+            (job_id,),
+        ).fetchone()
+    assert refs_a == 0
+    assert refs_b == 1
+    assert binding is not None and binding[0] == "complete"
+    assert active is not None and int(active[0]) == 1
+    assert int(active[1]) == 1
+    assert saved.exists()
+
+
+def test_backup_worker_retry_exhaustion_then_repair_forward(
+    tmp_path: Path,
+) -> None:
+    """R14 P2-S1: repeated before_final_commit shared rewrite exhausts
+    attempts into repair_required; restore then repair completes once."""
+    import shutil
+
+    service, submission, application_id = _registered_terminated(tmp_path)
+    backup_root = tmp_path / "backups"
+    s16 = _s16_service(
+        tmp_path,
+        service,
+        backup_root=backup_root,
+        governance_scope=TENANT_SCOPE,
+        max_owner_attempts=2,
+    )
+    backup = s16._owners["backup"]
+    state_path = tmp_path / "target.sqlite3"
+    saved = backup_root / "target.sqlite3"
+    shutil.copy2(state_path, saved)
+    payload = saved.read_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    result = _preflight(
+        s16, str(submission["upstream_application_ref"]), scope=TENANT_SCOPE
+    )
+    scope_a = result["scope_fingerprint"]
+    scope_b = "b" * 64
+    backup.capture(
+        scope_fingerprint=scope_a, copy_files=[(saved.name, digest)]
+    )
+    result2 = s16.preflight(
+        application_reference=str(submission["upstream_application_ref"]),
+        principal=S01CommandPrincipal(
+            subject=GOVERNANCE.subject,
+            role="operator",
+            scope=TENANT_SCOPE,
+            source_id="s16-governance-console",
+        ),
+        idempotency_key="r14-exhaust-preflight",
+    )
+    committed = s16.commit(
+        request_id=result2["request_id"],
+        principal=GOVERNANCE_REGISTERED,
+        idempotency_key="r14-exhaust-commit",
+    )
+    assert committed["status"] == "accepted"
+    backup.capture(
+        scope_fingerprint=scope_b, copy_files=[(saved.name, digest)]
+    )
+
+    def hook(point: str) -> None:
+        if point == "before_final_commit":
+            saved.write_bytes(b"exhaust-tamper")
+
+    backup._crash_hook = hook
+    first = s16.process_next_deletion_job(worker_id="w1", now=_now() + 1)
+    assert first["status"] == "pending", first
+    second = s16.process_next_deletion_job(
+        worker_id="w2", now=_now() + 1 + LEASE_SECONDS + 1
+    )
+    backup._crash_hook = None
+    assert second["status"] == "repair_required", second
+    job = s16._job_for_request(result2["request_id"])
+    assert job is not None
+    job_id = str(job["job_id"])
+    with backup._registry_connect() as connection:
+        bindings = connection.execute(
+            "SELECT COUNT(*) FROM backup_deletion_bindings "
+            "WHERE operation_id = ?",
+            (job_id,),
+        ).fetchone()[0]
+        refs_a = connection.execute(
+            "SELECT COUNT(*) FROM backup_registry_refs "
+            "WHERE scope_fingerprint = ?",
+            (scope_a,),
+        ).fetchone()[0]
+        refs_b = connection.execute(
+            "SELECT COUNT(*) FROM backup_registry_refs "
+            "WHERE scope_fingerprint = ?",
+            (scope_b,),
+        ).fetchone()[0]
+    assert bindings == 0
+    assert refs_a == 1
+    assert refs_b == 1
+    query = s16.query(
+        request_id=result2["request_id"], principal=GOVERNANCE_REGISTERED
+    )
+    assert query["job"]["status"] == "repair_required"
+    saved.write_bytes(payload)
+    repaired = s16.repair(
+        request_id=result2["request_id"],
+        owner_id="backup",
+        repair_fact="backup-repair-verified",
+        principal=GOVERNANCE_REGISTERED,
+        idempotency_key="r14-exhaust-repair",
+    )
+    assert repaired["status"] == "accepted"
+    third = s16.process_next_deletion_job(
+        worker_id="w3", now=_now() + 1 + 2 * LEASE_SECONDS
+    )
+    assert third["status"] == "complete", third
+    receipt = s16.receipt(
+        request_id=result2["request_id"], principal=GOVERNANCE_REGISTERED
+    )
+    assert receipt["result"] == "deleted"
+    _assert_locator_free(receipt, backup_root, "target.sqlite3")
+    with backup._registry_connect() as connection:
+        refs_a = connection.execute(
+            "SELECT COUNT(*) FROM backup_registry_refs "
+            "WHERE scope_fingerprint = ?",
+            (scope_a,),
+        ).fetchone()[0]
+        refs_b = connection.execute(
+            "SELECT COUNT(*) FROM backup_registry_refs "
+            "WHERE scope_fingerprint = ?",
+            (scope_b,),
+        ).fetchone()[0]
+        old_intent = connection.execute(
+            "SELECT status FROM backup_deletion_intents "
+            "WHERE operation_id = ? AND fence = 1",
+            (job_id,),
+        ).fetchone()
+        active = connection.execute(
+            "SELECT active_fence, source_fence FROM backup_operation_fences "
+            "WHERE operation_id = ?",
+            (job_id,),
+        ).fetchone()
+    assert refs_a == 0
+    assert refs_b == 1
+    assert old_intent is not None and old_intent[0] == "superseded"
+    assert active is not None and int(active[0]) == 3
+    assert int(active[1]) == 1

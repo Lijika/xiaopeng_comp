@@ -1782,6 +1782,82 @@ class BackupDeletionOwner:
         except (TypeError, ValueError, OSError, S16Unavailable):
             self._fail_unproven_purge()
 
+    def _assert_completed_binding_proof(
+        self,
+        connection: sqlite3.Connection,
+        operation_id: str,
+        fence: int,
+    ) -> None:
+        """Prove a completed binding still matches live shared sources.
+
+        Exclusive identities must remain absent. Shared identities must
+        keep a matching capture at the registry handle with no quarantine.
+        """
+        intent = connection.execute(
+            "SELECT identities_json, manifest_ids_json, source_fence "
+            "FROM backup_deletion_intents "
+            "WHERE operation_id = ? AND fence = ?",
+            (operation_id, int(fence)),
+        ).fetchone()
+        if intent is None:
+            try:
+                self._backup_reconciliation()
+            except S16Unavailable:
+                self._fail_unproven_purge()
+            if self._quarantine_has_residue():
+                self._fail_unproven_purge()
+            return
+        try:
+            identities = json.loads(intent[0] or "[]")
+            manifest_ids = json.loads(intent[1] or "[]")
+            if not isinstance(identities, list) or not isinstance(manifest_ids, list):
+                raise ValueError("intent")
+            source_fence = int(intent[2]) if intent[2] is not None else int(fence)
+            staged = {str(manifest_id) for manifest_id in manifest_ids}
+            for manifest_id in staged:
+                if self._manifest_path(manifest_id).exists():
+                    self._fail_unproven_purge()
+                if self._quarantine_manifest_path(
+                    operation_id, source_fence, manifest_id
+                ).exists():
+                    self._fail_unproven_purge()
+            for identity in identities:
+                if not isinstance(identity, str) or not identity:
+                    raise ValueError("identity")
+                row = connection.execute(
+                    "SELECT handle, content_sha256 FROM backup_registry "
+                    "WHERE connector_identity = ?",
+                    (identity,),
+                ).fetchone()
+                remaining = connection.execute(
+                    "SELECT manifest_id FROM backup_registry_refs "
+                    "WHERE connector_identity = ?",
+                    (identity,),
+                ).fetchall()
+                still_referenced = any(
+                    str(ref[0]) not in staged for ref in remaining
+                )
+                quarantined = self._quarantine_capture_path(
+                    operation_id, source_fence, identity
+                ).exists()
+                if still_referenced:
+                    if row is None or not str(row[0]) or not str(row[1]):
+                        self._fail_unproven_purge()
+                    target = self._capture_target(str(row[0]))
+                    if quarantined or not target.exists():
+                        self._fail_unproven_purge()
+                    observed = hashlib.sha256(target.read_bytes()).hexdigest()
+                    if observed != str(row[1]):
+                        self._fail_unproven_purge()
+                    continue
+                if quarantined or row is not None:
+                    self._fail_unproven_purge()
+            self._backup_reconciliation()
+        except S16OwnerFailure:
+            raise
+        except (TypeError, ValueError, OSError, S16Unavailable, json.JSONDecodeError):
+            self._fail_unproven_purge()
+
     def _purge_quarantine(
         self,
         operation_id: str,
@@ -2265,15 +2341,9 @@ class BackupDeletionOwner:
                             responsible_party="backup_operations_owner",
                             recovery_action="retry_backup_quarantine_purge",
                         )
-                    try:
-                        self._backup_reconciliation()
-                    except S16Unavailable:
-                        raise S16OwnerFailure(
-                            self.owner_id,
-                            S16_VERIFY_FAILED,
-                            retryable=True,
-                            responsible_party="backup_operations_owner",
-                            recovery_action="retry_backup_quarantine_purge",
+                    with self._registry_connect() as proof:
+                        self._assert_completed_binding_proof(
+                            proof, operation_id, int(fence)
                         )
                     return {
                         "status": "complete",
@@ -3161,11 +3231,9 @@ class BackupDeletionOwner:
                                 "reconcile_scope_binding_and_resume"
                             ),
                         )
-                    # R6 (P1-1): the binding authorizes; the CURRENT
-                    # manifests and files decide the proof.  A capture
-                    # that reappeared after the binding completed is not
-                    # proven absent by the binding row alone.
-                    self._backup_reconciliation()
+                    # R6 (P1-1) + R14: the binding authorizes replay only
+                    # after the same shared-source digest/ref proof as
+                    # delete() already-absent.
                     remaining = self._manifests_for_fingerprints(
                         fingerprints, scope_fingerprint=scope_fingerprint
                     )
@@ -3179,6 +3247,9 @@ class BackupDeletionOwner:
                                 "verify_backup_absence_and_resume_the_same_job"
                             ),
                         )
+                    self._assert_completed_binding_proof(
+                        connection, operation_id, int(fence)
+                    )
                     return {
                         "owner_id": self.owner_id,
                         "status": "verified",
@@ -5669,7 +5740,7 @@ class GovernedDeletionService:
                 scope_fingerprint=str(job.get("scope_fingerprint") or ""),
             )
             return False
-        except S16OwnerFailure:
+        except (S16OwnerFailure, S16Unavailable):
             return True
 
     def ready(self) -> bool:
