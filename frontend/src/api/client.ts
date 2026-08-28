@@ -77,6 +77,12 @@ export type S12JobResponse = components["schemas"]["S12JobResponse"];
 export type S12ProcessResponse = components["schemas"]["S12ProcessResponse"];
 export type S12BundleResponse = components["schemas"]["S12BundleResponse"];
 export type S12StartJobBody = components["schemas"]["S12StartJobBody"];
+export type S16PreflightResponse = components["schemas"]["S16PreflightResponse"];
+export type S16ManifestEntry = components["schemas"]["S16ManifestEntry"];
+export type S16CommandResponse = components["schemas"]["S16CommandResponse"];
+export type S16QueryResponse = components["schemas"]["S16QueryResponse"];
+export type S16ReceiptResponse = components["schemas"]["S16ReceiptResponse"];
+export type S16ProcessResponse = components["schemas"]["S16ProcessResponse"];
 
 /** A structured server rejection; never invents identifiers or evidence. */
 export class HttpError extends Error {
@@ -275,6 +281,42 @@ export function isDefinitiveS12Rejection(
     );
   }
   return S12_DEFINITIVE_STATUSES.has(error.status);
+}
+
+/**
+ * The S16 command surface's definitive-rejection classifier.  The registered
+ * S16 pre-command responses are the evidence: a structured ``S16_FORBIDDEN``
+ * 403 or ``S16_UNAVAILABLE`` 503 is definitive (the governed-deletion plane
+ * failed closed before commit), as are the registered 404/409/422 statuses
+ * (unknown request/application, stable conflict, invalid command).  A
+ * generic 403/503, an unreadable payload, or a transport/lost response
+ * stays unknown so the panel keeps observing the authoritative query.
+ */
+const S16_DEFINITIVE_STATUSES: ReadonlySet<number> = new Set([404, 409, 422]);
+const S16_403_DEFINITIVE_ERROR_CODES: ReadonlySet<string> = new Set([
+  "S16_FORBIDDEN",
+]);
+const S16_503_DEFINITIVE_ERROR_CODES: ReadonlySet<string> = new Set([
+  "S16_UNAVAILABLE",
+]);
+
+export function isDefinitiveS16Rejection(
+  error: unknown,
+): error is HttpError {
+  if (!(error instanceof HttpError)) return false;
+  if (error.status === 403) {
+    return (
+      error.errorCode !== undefined &&
+      S16_403_DEFINITIVE_ERROR_CODES.has(error.errorCode)
+    );
+  }
+  if (error.status === 503) {
+    return (
+      error.errorCode !== undefined &&
+      S16_503_DEFINITIVE_ERROR_CODES.has(error.errorCode)
+    );
+  }
+  return S16_DEFINITIVE_STATUSES.has(error.status);
 }
 
 /** The closed S14 command outcome vocabulary (mirrors the FastAPI literal).

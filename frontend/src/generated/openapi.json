@@ -18170,6 +18170,937 @@
         "title": "S14SettlementViewResponse",
         "type": "object"
       },
+      "S16ApprovalSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "appended_at": {
+            "minimum": 0.0,
+            "title": "Appended At",
+            "type": "integer"
+          },
+          "manifest_digest": {
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "Manifest Digest",
+            "type": "string"
+          },
+          "subject_fingerprint": {
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "Subject Fingerprint",
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject_fingerprint",
+          "manifest_digest",
+          "appended_at"
+        ],
+        "title": "S16ApprovalSummary",
+        "type": "object"
+      },
+      "S16ApproveBody": {
+        "additionalProperties": false,
+        "properties": {
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "manifest_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Manifest Digest",
+            "type": "string"
+          }
+        },
+        "required": [
+          "manifest_digest",
+          "idempotency_key"
+        ],
+        "title": "S16ApproveBody",
+        "type": "object"
+      },
+      "S16CancelBody": {
+        "additionalProperties": false,
+        "properties": {
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "idempotency_key"
+        ],
+        "title": "S16CancelBody",
+        "type": "object"
+      },
+      "S16CommandResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "approved_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approved By"
+          },
+          "hold_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hold Id"
+          },
+          "job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Job Id"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Code"
+          },
+          "replayed": {
+            "default": false,
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Id"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "S16CommandResponse",
+        "type": "object"
+      },
+      "S16CommitBody": {
+        "additionalProperties": false,
+        "properties": {
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "idempotency_key"
+        ],
+        "title": "S16CommitBody",
+        "type": "object"
+      },
+      "S16ErrorDetail": {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "title": "Error",
+            "type": "string"
+          },
+          "hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hint"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Code"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "title": "S16ErrorDetail",
+        "type": "object"
+      },
+      "S16ErrorResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/S16ErrorDetail"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "S16ErrorResponse",
+        "type": "object"
+      },
+      "S16JobSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt": {
+            "minimum": 0.0,
+            "title": "Attempt",
+            "type": "integer"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "fence": {
+            "minimum": 0.0,
+            "title": "Fence",
+            "type": "integer"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "lease_owner": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lease Owner"
+          },
+          "owner_results": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Owner Results",
+            "type": "object"
+          },
+          "pending_owner_fingerprints": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Pending Owner Fingerprints",
+            "type": "object"
+          },
+          "stable_failure": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/S16StableFailure"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "status",
+          "attempt",
+          "fence",
+          "pending_owner_fingerprints",
+          "owner_results"
+        ],
+        "title": "S16JobSummary",
+        "type": "object"
+      },
+      "S16LegalHoldSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "effective_time": {
+            "minimum": 0.0,
+            "title": "Effective Time",
+            "type": "integer"
+          },
+          "expiry": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expiry"
+          },
+          "generation": {
+            "minimum": 1.0,
+            "title": "Generation",
+            "type": "integer"
+          },
+          "hold_id": {
+            "title": "Hold Id",
+            "type": "string"
+          },
+          "owner": {
+            "title": "Owner",
+            "type": "string"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "released": {
+            "title": "Released",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "hold_id",
+          "generation",
+          "reason_code",
+          "owner",
+          "effective_time",
+          "released"
+        ],
+        "title": "S16LegalHoldSummary",
+        "type": "object"
+      },
+      "S16ManifestEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "classification": {
+            "title": "Classification",
+            "type": "string"
+          },
+          "content_sha256": {
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "Content Sha256",
+            "type": "string"
+          },
+          "copy_class": {
+            "title": "Copy Class",
+            "type": "string"
+          },
+          "count": {
+            "minimum": 0.0,
+            "title": "Count",
+            "type": "integer"
+          },
+          "hold_state": {
+            "title": "Hold State",
+            "type": "string"
+          },
+          "identity_fingerprint": {
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "Identity Fingerprint",
+            "type": "string"
+          },
+          "legal_hold_generation": {
+            "minimum": 0.0,
+            "title": "Legal Hold Generation",
+            "type": "integer"
+          },
+          "owner_id": {
+            "title": "Owner Id",
+            "type": "string"
+          },
+          "planned_action": {
+            "title": "Planned Action",
+            "type": "string"
+          },
+          "retention_due_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retention Due At"
+          },
+          "retention_policy_id": {
+            "title": "Retention Policy Id",
+            "type": "string"
+          },
+          "retention_policy_version": {
+            "title": "Retention Policy Version",
+            "type": "string"
+          },
+          "shared_state": {
+            "title": "Shared State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner_id",
+          "copy_class",
+          "classification",
+          "content_sha256",
+          "identity_fingerprint",
+          "retention_policy_id",
+          "retention_policy_version",
+          "legal_hold_generation",
+          "hold_state",
+          "shared_state",
+          "planned_action",
+          "count"
+        ],
+        "title": "S16ManifestEntry",
+        "type": "object"
+      },
+      "S16PreflightBody": {
+        "additionalProperties": false,
+        "properties": {
+          "application_reference": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Application Reference",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "application_reference",
+          "idempotency_key"
+        ],
+        "title": "S16PreflightBody",
+        "type": "object"
+      },
+      "S16PreflightResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "application_reference": {
+            "title": "Application Reference",
+            "type": "string"
+          },
+          "early_deletion": {
+            "title": "Early Deletion",
+            "type": "boolean"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/S16ManifestEntry"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "entries_digest": {
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "Entries Digest",
+            "type": "string"
+          },
+          "manifest_digest": {
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "Manifest Digest",
+            "type": "string"
+          },
+          "owner_registry_digest": {
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "Owner Registry Digest",
+            "type": "string"
+          },
+          "policy_digest": {
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "Policy Digest",
+            "type": "string"
+          },
+          "replayed": {
+            "default": false,
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "retained_scan_clean": {
+            "title": "Retained Scan Clean",
+            "type": "boolean"
+          },
+          "retention_due": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retention Due"
+          },
+          "s01_revision": {
+            "minimum": 0.0,
+            "title": "S01 Revision",
+            "type": "integer"
+          },
+          "s12_revision": {
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "S12 Revision",
+            "type": "string"
+          },
+          "scope_fingerprint": {
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "Scope Fingerprint",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "request_id",
+          "application_reference",
+          "scope_fingerprint",
+          "manifest_digest",
+          "entries_digest",
+          "owner_registry_digest",
+          "s01_revision",
+          "s12_revision",
+          "policy_digest",
+          "early_deletion",
+          "retained_scan_clean",
+          "entries"
+        ],
+        "title": "S16PreflightResponse",
+        "type": "object"
+      },
+      "S16ProcessResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attempt"
+          },
+          "job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Job Id"
+          },
+          "owner_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Owner Id"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Code"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Id"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "S16ProcessResponse",
+        "type": "object"
+      },
+      "S16QueryResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "approvals": {
+            "items": {
+              "$ref": "#/components/schemas/S16ApprovalSummary"
+            },
+            "title": "Approvals",
+            "type": "array"
+          },
+          "cancelled": {
+            "title": "Cancelled",
+            "type": "boolean"
+          },
+          "early_deletion": {
+            "title": "Early Deletion",
+            "type": "boolean"
+          },
+          "job": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/S16JobSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "legal_holds": {
+            "items": {
+              "$ref": "#/components/schemas/S16LegalHoldSummary"
+            },
+            "title": "Legal Holds",
+            "type": "array"
+          },
+          "manifest_digest": {
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "Manifest Digest",
+            "type": "string"
+          },
+          "owner_registry_digest": {
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "Owner Registry Digest",
+            "type": "string"
+          },
+          "policy_digest": {
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "Policy Digest",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "retention_due": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retention Due"
+          },
+          "s01_revision": {
+            "minimum": 0.0,
+            "title": "S01 Revision",
+            "type": "integer"
+          },
+          "s12_revision": {
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "S12 Revision",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": "s16-query/1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "scope_fingerprint": {
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "Scope Fingerprint",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "request_id",
+          "scope_fingerprint",
+          "manifest_digest",
+          "owner_registry_digest",
+          "s01_revision",
+          "s12_revision",
+          "policy_digest",
+          "early_deletion",
+          "cancelled",
+          "approvals",
+          "legal_holds"
+        ],
+        "title": "S16QueryResponse",
+        "type": "object"
+      },
+      "S16ReceiptResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "authority": {
+            "title": "Authority",
+            "type": "string"
+          },
+          "completed_at": {
+            "minimum": 0.0,
+            "title": "Completed At",
+            "type": "integer"
+          },
+          "owner_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Owner Counts",
+            "type": "object"
+          },
+          "policy": {
+            "title": "Policy",
+            "type": "string"
+          },
+          "receipt_id": {
+            "title": "Receipt Id",
+            "type": "string"
+          },
+          "restore_replay_status": {
+            "title": "Restore Replay Status",
+            "type": "string"
+          },
+          "result": {
+            "title": "Result",
+            "type": "string"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "schema_version": {
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "scope_fingerprint": {
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "Scope Fingerprint",
+            "type": "string"
+          },
+          "subject": {
+            "title": "Subject",
+            "type": "string"
+          }
+        },
+        "required": [
+          "receipt_id",
+          "schema_version",
+          "action",
+          "policy",
+          "scope_fingerprint",
+          "completed_at",
+          "authority",
+          "result",
+          "owner_counts",
+          "restore_replay_status",
+          "subject",
+          "role"
+        ],
+        "title": "S16ReceiptResponse",
+        "type": "object"
+      },
+      "S16RepairBody": {
+        "additionalProperties": false,
+        "properties": {
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "owner_id": {
+            "maxLength": 40,
+            "minLength": 1,
+            "title": "Owner Id",
+            "type": "string"
+          },
+          "repair_fact": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Repair Fact",
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner_id",
+          "repair_fact",
+          "idempotency_key"
+        ],
+        "title": "S16RepairBody",
+        "type": "object"
+      },
+      "S16StableFailure": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt": {
+            "minimum": 0.0,
+            "title": "Attempt",
+            "type": "integer"
+          },
+          "owner_id": {
+            "title": "Owner Id",
+            "type": "string"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "recovery_action": {
+            "title": "Recovery Action",
+            "type": "string"
+          },
+          "responsible_party": {
+            "title": "Responsible Party",
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner_id",
+          "reason_code",
+          "responsible_party",
+          "recovery_action",
+          "attempt"
+        ],
+        "title": "S16StableFailure",
+        "type": "object"
+      },
+      "S16ValidationErrorItem": {
+        "additionalProperties": false,
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Loc",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Msg",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "S16ValidationErrorItem",
+        "type": "object"
+      },
+      "S16ValidationErrorResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/S16ValidationErrorItem"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "S16ValidationErrorResponse",
+        "type": "object"
+      },
       "T05BusinessExceptionOperationsResult": {
         "additionalProperties": false,
         "properties": {
@@ -27595,6 +28526,745 @@
           }
         },
         "summary": "Controlled S14 Settlement React Page"
+      }
+    },
+    "/controlled/s16": {
+      "get": {
+        "description": "Canonical S16 governed-deletion shell: the shared qualified React\nbuild under the registered data-governance identity with no-store shell\nheaders and fail-closed missing-build behavior.",
+        "operationId": "controlled_s16_page_controlled_s16_get",
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Controlled S16 Page"
+      }
+    },
+    "/controlled/s16/api/deletions/preflight": {
+      "post": {
+        "operationId": "s16_preflight_controlled_s16_api_deletions_preflight_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S16PreflightBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16PreflightResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ValidationErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "S16 Preflight"
+      }
+    },
+    "/controlled/s16/api/deletions/{request_id}": {
+      "get": {
+        "operationId": "s16_query_controlled_s16_api_deletions__request_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "title": "Request Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16QueryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ValidationErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "S16 Query"
+      }
+    },
+    "/controlled/s16/api/deletions/{request_id}/approve": {
+      "post": {
+        "operationId": "s16_approve_controlled_s16_api_deletions__request_id__approve_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "title": "Request Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S16ApproveBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16CommandResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ValidationErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "S16 Approve"
+      }
+    },
+    "/controlled/s16/api/deletions/{request_id}/cancel": {
+      "post": {
+        "operationId": "s16_cancel_controlled_s16_api_deletions__request_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "title": "Request Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S16CancelBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16CommandResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ValidationErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "S16 Cancel"
+      }
+    },
+    "/controlled/s16/api/deletions/{request_id}/commit": {
+      "post": {
+        "operationId": "s16_commit_controlled_s16_api_deletions__request_id__commit_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "title": "Request Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S16CommitBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16CommandResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ValidationErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "S16 Commit"
+      }
+    },
+    "/controlled/s16/api/deletions/{request_id}/receipt": {
+      "get": {
+        "operationId": "s16_receipt_controlled_s16_api_deletions__request_id__receipt_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "title": "Request Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ReceiptResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ValidationErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "S16 Receipt"
+      }
+    },
+    "/controlled/s16/api/deletions/{request_id}/repair": {
+      "post": {
+        "operationId": "s16_repair_controlled_s16_api_deletions__request_id__repair_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "title": "Request Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S16RepairBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16CommandResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ValidationErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "S16 Repair"
+      }
+    },
+    "/controlled/s16/api/process": {
+      "post": {
+        "description": "The registered process seam: exactly one bounded worker attempt under\nthe governance identity.  No ordinary user can trigger a hard delete.",
+        "operationId": "s16_process_next_controlled_s16_api_process_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ProcessResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ValidationErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "S16 Process Next"
+      }
+    },
+    "/controlled/s16/react": {
+      "get": {
+        "description": "The S16 /react alias: the same closed shell contract as the canonical\nroute.",
+        "operationId": "controlled_s16_react_page_controlled_s16_react_get",
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Controlled S16 React Page"
       }
     },
     "/demo/react": {

@@ -1,0 +1,443 @@
+"""Ticket #32 / S16 governed deletion — HTTP authority and transport.
+
+Covers identity fail-closed configuration, the four-role allow/deny matrix,
+same-scope existence hiding, typed 4xx/409/503 responses, no-store headers,
+idempotent replay, OpenAPI schema exposure and the canonical/alias shell
+routes with fail-closed missing-build 503.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+from fastapi.testclient import TestClient
+
+from task4_consistency.controlled.s01 import (
+    AdmissionDisposition,
+    ControlledScenarioService,
+    S01CommandPrincipal,
+)
+from task4_consistency.controlled.s16 import (
+    BackupDeletionOwner,
+    ExportTempOwner,
+    GovernedDeletionService,
+    RetentionPolicy,
+    S01DeletionOwner,
+    S02DeletionOwner,
+    S12DeletionOwner,
+)
+from task4_consistency.controlled.s12 import EvaluationService
+
+from tests.test_s16_controlled import (
+    CLOCK,
+    _admit_c_demo,
+    _c_demo_service,
+    _empty_evaluation,
+    _terminate,
+)
+
+ROOT = Path(__file__).resolve().parents[1]
+RULES = ROOT / "configs" / "rules_auto_lease.yaml"
+FIXTURES = ROOT / "fixtures" / "applications"
+
+GOVERNANCE_CREDENTIAL = "s16-governance-credential"
+GOVERNANCE_SUBJECT = "s16-http-governance"
+APPROVER1_CREDENTIAL = "s16-approver1-credential"
+APPROVER1_SUBJECT = "s16-http-approver1"
+APPROVER2_CREDENTIAL = "s16-approver2-credential"
+APPROVER2_SUBJECT = "s16-http-approver2"
+OPERATOR_CREDENTIAL = "s16-http-operator-credential"
+DEMO_CREDENTIAL = "s16-http-demo-credential"
+S08_ADMIN_CREDENTIAL = "s16-http-s08-admin-credential"
+REVIEWER_CREDENTIAL = "s16-http-reviewer-credential"
+
+PREFERRED = "APP-R53-BAD-ENGINE"
+
+
+def _auth(credential: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {credential}"}
+
+
+def _build_s16_service(
+    tmp_path: Path, service: ControlledScenarioService
+) -> GovernedDeletionService:
+    return GovernedDeletionService(
+        ledger_path=tmp_path / "s16.sqlite3",
+        owners={
+            "s01": S01DeletionOwner(
+                service,
+                retention=RetentionPolicy(retention_seconds=0),
+                clock=lambda: int(CLOCK["now"]),
+            ),
+            "s02": S02DeletionOwner(
+                service.registered_source_boundary, service
+            ),
+            "s12": S12DeletionOwner(_empty_evaluation(tmp_path)),
+            "backup": BackupDeletionOwner(
+                tmp_path / "backups", clock=lambda: int(CLOCK["now"])
+            ),
+            "s17-disabled": ExportTempOwner(),
+        },
+        retention=RetentionPolicy(retention_seconds=0),
+        governance_subject=GOVERNANCE_SUBJECT,
+        approver_subjects=(APPROVER1_SUBJECT, APPROVER2_SUBJECT),
+        clock=lambda: int(CLOCK["now"]),
+    )
+
+
+def _install(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Any, str]:
+    """Bind the web module to one terminated C-DEMO application and a live
+    S16 service; returns the module and the application id."""
+    import task4_consistency.web.app as web
+
+    service = _c_demo_service(tmp_path)
+    application_id = _admit_c_demo(service, key="s16-http-intake")
+    _terminate(service, application_id)
+    s16 = _build_s16_service(tmp_path, service)
+
+    monkeypatch.setattr(web, "S01_SERVICE", service)
+    monkeypatch.setattr(web, "S01_BACKGROUND_ENABLED", False)
+    monkeypatch.setattr(web, "S01_REQUIRE_CONFIGURED_STARTUP", False)
+    monkeypatch.setattr(web, "S16_SERVICE", s16)
+    monkeypatch.setattr(web, "S16_GOVERNANCE_CREDENTIAL", GOVERNANCE_CREDENTIAL)
+    monkeypatch.setattr(web, "S16_GOVERNANCE_SUBJECT", GOVERNANCE_SUBJECT)
+    monkeypatch.setattr(web, "S16_APPROVER1_CREDENTIAL", APPROVER1_CREDENTIAL)
+    monkeypatch.setattr(web, "S16_APPROVER1_SUBJECT", APPROVER1_SUBJECT)
+    monkeypatch.setattr(web, "S16_APPROVER2_CREDENTIAL", APPROVER2_CREDENTIAL)
+    monkeypatch.setattr(web, "S16_APPROVER2_SUBJECT", APPROVER2_SUBJECT)
+    monkeypatch.setattr(web, "S16_GOVERNANCE_SCOPE", "C-DEMO")
+    return web, application_id
+
+
+def test_s16_routes_fail_closed_without_configuration(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import task4_consistency.web.app as web
+
+    service = _c_demo_service(tmp_path)
+    monkeypatch.setattr(web, "S01_SERVICE", service)
+    monkeypatch.setattr(web, "S01_BACKGROUND_ENABLED", False)
+    monkeypatch.setattr(web, "S01_REQUIRE_CONFIGURED_STARTUP", False)
+    monkeypatch.setattr(web, "S16_SERVICE", None)
+    monkeypatch.setattr(web, "S16_GOVERNANCE_CREDENTIAL", "")
+    monkeypatch.setattr(web, "S16_GOVERNANCE_SUBJECT", "")
+    client = TestClient(web.app)
+
+    for method, path, body in (
+        ("post", "/controlled/s16/api/deletions/preflight", {"application_reference": PREFERRED, "idempotency_key": "x"}),
+        ("post", "/controlled/s16/api/deletions/req/cancel", {"idempotency_key": "x"}),
+        ("post", "/controlled/s16/api/deletions/req/commit", {"idempotency_key": "x"}),
+        ("get", "/controlled/s16/api/deletions/req", None),
+        ("get", "/controlled/s16/api/deletions/req/receipt", None),
+        ("get", "/controlled/s16", None),
+    ):
+        kwargs = {"headers": _auth(GOVERNANCE_CREDENTIAL)}
+        if body is not None:
+            kwargs["json"] = body
+        response = getattr(client, method)(path, **kwargs)
+        assert response.status_code == 503, (method, path, response.text)
+        assert response.json()["detail"]["error"] == "S16_UNAVAILABLE"
+        assert response.headers["cache-control"] == "no-store"
+    # Other planes stay reachable.
+    assert client.get("/api/health").status_code == 200
+
+
+def test_s16_identity_matrix_allows_governance_and_approvers_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    web, _application_id = _install(monkeypatch, tmp_path)
+    del web
+    client = TestClient(_webapp())
+    # Anonymous and every non-S16 identity are denied on the governance
+    # surface.
+    denied = (None, OPERATOR_CREDENTIAL, DEMO_CREDENTIAL, S08_ADMIN_CREDENTIAL, REVIEWER_CREDENTIAL, APPROVER1_CREDENTIAL)
+    for credential in denied:
+        headers = _auth(credential) if credential is not None else {}
+        response = client.post(
+            "/controlled/s16/api/deletions/preflight",
+            headers=headers,
+            json={"application_reference": PREFERRED, "idempotency_key": "matrix-pre"},
+        )
+        assert response.status_code == 403, (credential, response.text)
+        assert response.json()["detail"]["error"] == "S16_FORBIDDEN"
+    # Approvers can approve but never preflight/commit.
+    for credential in (APPROVER1_CREDENTIAL, APPROVER2_CREDENTIAL):
+        response = client.post(
+            "/controlled/s16/api/deletions/preflight",
+            headers=_auth(credential),
+            json={"application_reference": PREFERRED, "idempotency_key": f"matrix-{credential}"},
+        )
+        assert response.status_code == 403
+    # The governance owner can preflight.
+    response = client.post(
+        "/controlled/s16/api/deletions/preflight",
+        headers=_auth(GOVERNANCE_CREDENTIAL),
+        json={"application_reference": PREFERRED, "idempotency_key": "matrix-ok"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["pragma"] == "no-cache"
+
+
+def _webapp():
+    import task4_consistency.web.app as web
+
+    return web.app
+
+
+def test_s16_preflight_commit_process_receipt_flow(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _install(monkeypatch, tmp_path)
+    client = TestClient(_webapp())
+
+    preflight = client.post(
+        "/controlled/s16/api/deletions/preflight",
+        headers=_auth(GOVERNANCE_CREDENTIAL),
+        json={"application_reference": PREFERRED, "idempotency_key": "flow-pre"},
+    )
+    assert preflight.status_code == 200, preflight.text
+    body = preflight.json()
+    assert body["status"] == "accepted"
+    assert len(body["entries"]) == 9
+    request_id = body["request_id"]
+    manifest_digest = body["manifest_digest"]
+    assert body["early_deletion"] is False
+
+    # Approve with the governance owner is forbidden (never an approver).
+    denied = client.post(
+        f"/controlled/s16/api/deletions/{request_id}/approve",
+        headers=_auth(GOVERNANCE_CREDENTIAL),
+        json={"manifest_digest": manifest_digest, "idempotency_key": "flow-ap-gov"},
+    )
+    assert denied.status_code == 403
+    # Approvers can approve even for a due deletion (harmless replay state).
+    approved = client.post(
+        f"/controlled/s16/api/deletions/{request_id}/approve",
+        headers=_auth(APPROVER1_CREDENTIAL),
+        json={"manifest_digest": manifest_digest, "idempotency_key": "flow-ap-1"},
+    )
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["status"] == "accepted"
+
+    commit = client.post(
+        f"/controlled/s16/api/deletions/{request_id}/commit",
+        headers=_auth(GOVERNANCE_CREDENTIAL),
+        json={"idempotency_key": "flow-commit"},
+    )
+    assert commit.status_code == 200, commit.text
+    assert commit.json()["status"] == "accepted"
+
+    processed = client.post(
+        "/controlled/s16/api/process",
+        headers=_auth(GOVERNANCE_CREDENTIAL),
+    )
+    assert processed.status_code == 200, processed.text
+    assert processed.json()["status"] == "complete"
+
+    query = client.get(
+        f"/controlled/s16/api/deletions/{request_id}",
+        headers=_auth(GOVERNANCE_CREDENTIAL),
+    )
+    assert query.status_code == 200, query.text
+    assert query.json()["job"]["status"] == "complete"
+    assert query.headers["cache-control"] == "no-store"
+
+    receipt = client.get(
+        f"/controlled/s16/api/deletions/{request_id}/receipt",
+        headers=_auth(GOVERNANCE_CREDENTIAL),
+    )
+    assert receipt.status_code == 200, receipt.text
+    assert receipt.json()["result"] == "deleted"
+    assert receipt.headers["cache-control"] == "no-store"
+    serialized = json.dumps(receipt.json())
+    for token in (PREFERRED, "app_", "target.sqlite3"):
+        assert token not in serialized
+
+
+def test_s16_typed_errors_idempotency_and_existence_hiding(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    web, _application_id = _install(monkeypatch, tmp_path)
+    del web
+    client = TestClient(_webapp())
+
+    # Unknown application: governance and demo identities receive the same
+    # existence-hiding 404.
+    unknown = client.post(
+        "/controlled/s16/api/deletions/preflight",
+        headers=_auth(GOVERNANCE_CREDENTIAL),
+        json={"application_reference": "UNKNOWN-REF", "idempotency_key": "eh-1"},
+    )
+    assert unknown.status_code == 404
+    assert unknown.json()["detail"]["error"] == "S16_NOT_FOUND"
+    unknown_demo = client.post(
+        "/controlled/s16/api/deletions/preflight",
+        headers=_auth(DEMO_CREDENTIAL),
+        json={"application_reference": "UNKNOWN-REF", "idempotency_key": "eh-2"},
+    )
+    assert unknown_demo.status_code == 403  # unauthorized, never existence
+    # Same-scope hidden: a registered reviewer still gets 403, not 404.
+    reviewer = client.post(
+        "/controlled/s16/api/deletions/preflight",
+        headers=_auth(REVIEWER_CREDENTIAL),
+        json={"application_reference": "UNKNOWN-REF", "idempotency_key": "eh-3"},
+    )
+    assert reviewer.status_code == 403
+
+    # Unknown request ids hide on every command.
+    for method, path, body in (
+        ("get", "/controlled/s16/api/deletions/s16req_unknown", None),
+        ("get", "/controlled/s16/api/deletions/s16req_unknown/receipt", None),
+        ("post", "/controlled/s16/api/deletions/s16req_unknown/cancel", {"idempotency_key": "x"}),
+        ("post", "/controlled/s16/api/deletions/s16req_unknown/commit", {"idempotency_key": "x"}),
+        ("post", "/controlled/s16/api/deletions/s16req_unknown/repair", {"owner_id": "s02", "repair_fact": "x", "idempotency_key": "x"}),
+    ):
+        kwargs = {"headers": _auth(GOVERNANCE_CREDENTIAL)}
+        if body is not None:
+            kwargs["json"] = body
+        response = getattr(client, method)(path, **kwargs)
+        assert response.status_code == 404, (method, path, response.text)
+
+    # Idempotency: same key same content replays; same key different content
+    # is a typed conflict.
+    first = client.post(
+        "/controlled/s16/api/deletions/preflight",
+        headers=_auth(GOVERNANCE_CREDENTIAL),
+        json={"application_reference": PREFERRED, "idempotency_key": "idem-1"},
+    )
+    assert first.status_code == 200
+    replayed = client.post(
+        "/controlled/s16/api/deletions/preflight",
+        headers=_auth(GOVERNANCE_CREDENTIAL),
+        json={"application_reference": PREFERRED, "idempotency_key": "idem-1"},
+    )
+    assert replayed.status_code == 200
+    assert replayed.json()["replayed"] is True
+    conflict = client.post(
+        "/controlled/s16/api/deletions/preflight",
+        headers=_auth(GOVERNANCE_CREDENTIAL),
+        json={"application_reference": "OTHER-REF", "idempotency_key": "idem-1"},
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["reason_code"] == "S16 idempotency conflict: same key different content"
+
+    # Early deletion without two approvals is a typed 409 gate.
+    service = ControlledScenarioService(
+        fixture_root=FIXTURES,
+        rules_path=RULES,
+        state_path=tmp_path / "early.sqlite3",
+        clock=lambda: int(CLOCK["now"]),
+    )
+    application_id = _admit_c_demo(service, key="s16-http-early")
+    _terminate(service, application_id)
+    early_s16 = GovernedDeletionService(
+        ledger_path=tmp_path / "s16-early.sqlite3",
+        owners={
+            "s01": S01DeletionOwner(service, retention=RetentionPolicy(retention_seconds=10**12), clock=lambda: int(CLOCK["now"])),
+            "s02": S02DeletionOwner(service.registered_source_boundary, service),
+            "s12": S12DeletionOwner(_empty_evaluation(tmp_path)),
+            "backup": BackupDeletionOwner(tmp_path / "early-backups", clock=lambda: int(CLOCK["now"])),
+            "s17-disabled": ExportTempOwner(),
+        },
+        retention=RetentionPolicy(retention_seconds=10**12),
+        governance_subject=GOVERNANCE_SUBJECT,
+        approver_subjects=(APPROVER1_SUBJECT, APPROVER2_SUBJECT),
+        clock=lambda: int(CLOCK["now"]),
+    )
+    import task4_consistency.web.app as web2
+
+    monkeypatch.setattr(web2, "S16_SERVICE", early_s16)
+    early = client.post(
+        "/controlled/s16/api/deletions/preflight",
+        headers=_auth(GOVERNANCE_CREDENTIAL),
+        json={"application_reference": PREFERRED, "idempotency_key": "early-pre"},
+    )
+    assert early.status_code == 200
+    assert early.json()["early_deletion"] is True
+    blocked = client.post(
+        f"/controlled/s16/api/deletions/{early.json()['request_id']}/commit",
+        headers=_auth(GOVERNANCE_CREDENTIAL),
+        json={"idempotency_key": "early-commit"},
+    )
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["reason_code"] == "S16_APPROVALS_INCOMPLETE"
+
+    # Invalid command shape is a typed 422.
+    invalid = client.post(
+        "/controlled/s16/api/deletions/preflight",
+        headers=_auth(GOVERNANCE_CREDENTIAL),
+        json={"application_reference": PREFERRED, "idempotency_key": ""},
+    )
+    assert invalid.status_code == 422
+
+
+def test_s16_openapi_schema_exposes_typed_contract(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _install(monkeypatch, tmp_path)
+    client = TestClient(_webapp())
+    spec = client.get("/openapi.json").json()
+    paths = spec["paths"]
+    for path in (
+        "/controlled/s16/api/deletions/preflight",
+        "/controlled/s16/api/deletions/{request_id}/approve",
+        "/controlled/s16/api/deletions/{request_id}/cancel",
+        "/controlled/s16/api/deletions/{request_id}/commit",
+        "/controlled/s16/api/deletions/{request_id}/repair",
+        "/controlled/s16/api/deletions/{request_id}",
+        "/controlled/s16/api/deletions/{request_id}/receipt",
+        "/controlled/s16/api/process",
+        "/controlled/s16",
+        "/controlled/s16/react",
+    ):
+        assert path in paths, path
+    schemas = spec["components"]["schemas"]
+    for name in (
+        "S16PreflightResponse",
+        "S16ManifestEntry",
+        "S16QueryResponse",
+        "S16ReceiptResponse",
+        "S16CommandResponse",
+        "S16ErrorResponse",
+        "S16ProcessResponse",
+    ):
+        assert name in schemas, name
+
+
+def test_s16_shell_canonical_alias_and_missing_build(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    web, _application_id = _install(monkeypatch, tmp_path)
+    import task4_consistency.web.app as webapp_module
+
+    del webapp_module
+    client = TestClient(_webapp())
+
+    anonymous = client.get("/controlled/s16")
+    assert anonymous.status_code == 403
+    anonymous_alias = client.get("/controlled/s16/react")
+    assert anonymous_alias.status_code == 403
+
+    # A qualified build serves both the canonical route and the alias.
+    monkeypatch.setattr(
+        web,
+        "_react_shell_index_html",
+        lambda: "<!doctype html><html><head></head><body><div id=\"root\"></div><script type=\"module\" src=\"/static/react/assets/index-hash.js\"></script><link rel=\"stylesheet\" href=\"/static/react/assets/index-hash.css\"></body></html>",
+    )
+    canonical = client.get("/controlled/s16", headers=_auth(GOVERNANCE_CREDENTIAL))
+    assert canonical.status_code == 200, canonical.text
+    assert canonical.headers["cache-control"] == "no-store"
+    alias = client.get("/controlled/s16/react", headers=_auth(GOVERNANCE_CREDENTIAL))
+    assert alias.status_code == 200
+    assert alias.headers["cache-control"] == "no-store"
+
+    # A missing or partial build is a fail-closed no-store 503.
+    monkeypatch.setattr(web, "_react_shell_index_html", lambda: None)
+    missing = client.get("/controlled/s16", headers=_auth(GOVERNANCE_CREDENTIAL))
+    assert missing.status_code == 503
+    assert missing.json()["detail"]["error"] == "S16_REACT_UNAVAILABLE"
+    assert missing.headers["cache-control"] == "no-store"

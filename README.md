@@ -55,6 +55,7 @@ Python ≥ 3.10；依赖轻量（PyYAML + 标准库）。系统 Python 若受 PE
 | **evaluate main** | `python -m task4_consistency evaluate -c configs/rules_auto_lease.yaml --suite main -o out/metrics_main.json` | **唯一交付数字** |
 | **evaluate semi** | `… --suite semi -o out/metrics_semi.json` | external_ocr 集；无 label 时仅 smoke |
 | **Web 演示** | `bash scripts/run_web.sh` → http://127.0.0.1:8765/ | 校验 / 批量 / 规则·KB 只读（变更走 S08/S09 治理）；可选 `TASK4_WEB_TOKEN` |
+| **合规删除 S16** | `/controlled/s16`（独立数据治理身份，Ticket #32） | 已终止申请的九类副本聚合 dry-run → 双审批（提前删除）→ 短事务 commit → 持久 worker → 无原值 receipt；独立 SQLite 账本，旧备份恢复先重放删除清单再开放查询。配置见 `docs/DEPLOY.md` §5.3；S17 导出保持关闭 |
 | **OCR 导入** | `python scripts/import_external_ocr.py fixtures/ocr_inbox/example.json -o fixtures/semi/` | 离线中间 JSON，无 OCR 引擎 |
 | **bench** | `python scripts/bench.py` | → `out/bench.json`（mean≪50ms） |
 | **demo** | `bash scripts/demo.sh` | 报告样例 + evaluate + probes |

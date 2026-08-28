@@ -46,6 +46,11 @@ import {
   type S09PreviewResponse,
   type S09ProposeRollbackResponse,
   type S09RecoverHoldResponse,
+  type S16CommandResponse,
+  type S16PreflightResponse,
+  type S16ProcessResponse,
+  type S16QueryResponse,
+  type S16ReceiptResponse,
   type SubmitResult,
   type VerifyRecoveryResult,
   type WorkspaceResponse,
@@ -1500,4 +1505,243 @@ export function useTerminationConvergence(
     };
   }, [applicationId, active, intervalMs, maxAttempts, queryClient]);
   return outcome;
+}
+
+// ---------------------------------------------------------------------------
+// S16 governed deletion (Ticket #32)
+// ---------------------------------------------------------------------------
+
+export const S16_REQUEST_KEY = (requestId: string) =>
+  ["s16", "deletions", requestId] as const;
+export const S16_RECEIPT_KEY = (requestId: string) =>
+  ["s16", "deletions", requestId, "receipt"] as const;
+
+export interface S16PreflightCommand {
+  application_reference: string;
+  idempotency_key: string;
+}
+
+/**
+ * The governance-owner dry-run: one POST carries the closed reference +
+ * idempotency-key DTO and returns the nine-class manifest.  No retries: a
+ * lost response never invents a second request; the panel shows the unknown
+ * state and keeps the same key for exact replay.
+ */
+export function useS16Preflight(): UseMutationResult<
+  S16PreflightResponse,
+  Error,
+  S16PreflightCommand
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: S16PreflightCommand) =>
+      request<S16PreflightResponse>("/controlled/s16/api/deletions/preflight", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    retry: false,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["s16"] });
+    },
+  });
+}
+
+/**
+ * The authoritative deletion-request read.  Polls only while the durable
+ * job is still moving (pending/running/repair_required); a terminal job
+ * stops polling and the panel renders the receipt.
+ */
+export function useS16Query(
+  requestId: string | null,
+): UseQueryResult<S16QueryResponse> {
+  return useQuery({
+    queryKey: S16_REQUEST_KEY(requestId ?? ""),
+    enabled: requestId !== null,
+    queryFn: () =>
+      request<S16QueryResponse>(
+        `/controlled/s16/api/deletions/${encodeURIComponent(requestId ?? "")}`,
+      ),
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      if (data === undefined) return false;
+      const status = data.job?.status;
+      if (
+        status === "pending" ||
+        status === "running" ||
+        status === "repair_required"
+      ) {
+        return 1200;
+      }
+      return false;
+    },
+  });
+}
+
+export function useS16Receipt(
+  requestId: string | null,
+): UseQueryResult<S16ReceiptResponse> {
+  return useQuery({
+    queryKey: S16_RECEIPT_KEY(requestId ?? ""),
+    enabled: requestId !== null,
+    queryFn: () =>
+      request<S16ReceiptResponse>(
+        `/controlled/s16/api/deletions/${encodeURIComponent(requestId ?? "")}/receipt`,
+      ),
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+}
+
+export interface S16ApproveCommand {
+  requestId: string;
+  manifestDigest: string;
+  idempotencyKey: string;
+  /** The approver's own bearer credential, presented by the approver for
+   * this one approval action; never persisted by the panel. */
+  approverToken?: string;
+}
+
+export function useS16Approve(): UseMutationResult<
+  S16CommandResponse,
+  Error,
+  S16ApproveCommand
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (command: S16ApproveCommand) => {
+      const headers: Record<string, string> = {};
+      if (command.approverToken !== undefined && command.approverToken !== "") {
+        headers["X-S16-Approver-Token"] = command.approverToken;
+      }
+      return request<S16CommandResponse>(
+        `/controlled/s16/api/deletions/${encodeURIComponent(command.requestId)}/approve`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            manifest_digest: command.manifestDigest,
+            idempotency_key: command.idempotencyKey,
+          }),
+        },
+      );
+    },
+    retry: false,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["s16"] });
+    },
+  });
+}
+
+export interface S16RequestCommand {
+  requestId: string;
+  idempotencyKey: string;
+}
+
+export function useS16Commit(): UseMutationResult<
+  S16CommandResponse,
+  Error,
+  S16RequestCommand
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (command: S16RequestCommand) =>
+      request<S16CommandResponse>(
+        `/controlled/s16/api/deletions/${encodeURIComponent(command.requestId)}/commit`,
+        {
+          method: "POST",
+          body: JSON.stringify({ idempotency_key: command.idempotencyKey }),
+        },
+      ),
+    retry: false,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["s16"] });
+    },
+  });
+}
+
+export function useS16Cancel(): UseMutationResult<
+  S16CommandResponse,
+  Error,
+  S16RequestCommand
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (command: S16RequestCommand) =>
+      request<S16CommandResponse>(
+        `/controlled/s16/api/deletions/${encodeURIComponent(command.requestId)}/cancel`,
+        {
+          method: "POST",
+          body: JSON.stringify({ idempotency_key: command.idempotencyKey }),
+        },
+      ),
+    retry: false,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["s16"] });
+    },
+  });
+}
+
+export interface S16RepairCommand extends S16RequestCommand {
+  ownerId: string;
+  repairFact: string;
+}
+
+export function useS16Repair(): UseMutationResult<
+  S16CommandResponse,
+  Error,
+  S16RepairCommand
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (command: S16RepairCommand) =>
+      request<S16CommandResponse>(
+        `/controlled/s16/api/deletions/${encodeURIComponent(command.requestId)}/repair`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            owner_id: command.ownerId,
+            repair_fact: command.repairFact,
+            idempotency_key: command.idempotencyKey,
+          }),
+        },
+      ),
+    retry: false,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["s16"] });
+    },
+  });
+}
+
+/** One bounded worker attempt under the registered process seam. */
+export function useS16Process(): UseMutationResult<
+  S16ProcessResponse,
+  Error,
+  void
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      request<S16ProcessResponse>("/controlled/s16/api/process", {
+        method: "POST",
+      }),
+    retry: false,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["s16"] });
+    },
+  });
+}
+
+/**
+ * Cache clearing after a completed governed deletion: every application-
+ * scoped read cache (S01/S02/S12/S13) is dropped so a hard refresh or
+ * identity change can never re-present deleted values, and the S16 plane
+ * is refetched from the authority.
+ */
+export function clearApplicationScopedCache(queryClient: ReturnType<typeof useQueryClient>): void {
+  for (const prefix of ["s01", "s02", "s12", "s13"] as const) {
+    queryClient.removeQueries({ queryKey: [prefix] });
+  }
+  void queryClient.invalidateQueries({ queryKey: ["s16"] });
 }

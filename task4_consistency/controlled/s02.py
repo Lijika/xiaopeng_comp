@@ -12,11 +12,18 @@ import hashlib
 import json
 import math
 import re
+import sqlite3
 import struct
+import time
 import zlib
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
+
+from task4_consistency.controlled.s16 import (
+    COPY_CLASS_DERIVED_OBJECT,
+    copy_identity_fingerprint,
+)
 
 
 ENVELOPE_VERSION = "registered-observation-envelope/1"
@@ -460,6 +467,7 @@ class RegisteredSourceBoundary:
         self,
         registrations: Iterable[RegisteredSource] = (),
         objects: Iterable[ControlledObject] = (),
+        absence_store_path: str | Path | None = None,
     ) -> None:
         self._registrations = tuple(registrations)
         self._objects: dict[str, ControlledObject] = {}
@@ -469,12 +477,143 @@ class RegisteredSourceBoundary:
             if not isinstance(item.content, bytes):
                 raise ValueError("controlled object content must be bytes")
             self._objects[item.object_ref] = item
+        self.absence_store_path = (
+            str(absence_store_path) if absence_store_path is not None else None
+        )
+        self._absent_fingerprints: set[str] = set()
+        if self.absence_store_path is not None:
+            self._ensure_absence_schema()
+            self._load_absence()
         manifest = {
             "schema_version": "s02-source-registry/1",
             "adapter_build": ADAPTER_BUILD,
             "registrations": [asdict(item) for item in self._registrations],
         }
         self.manifest_digest = _digest(manifest)
+
+    # -- S16 governed-deletion absence seam ------------------------------
+    # The absence store is a small SQLite ledger owned by the S02 boundary
+    # (an S16 orchestration concern, kept outside the business backup): a
+    # deleted object's content fingerprint persists there, so a process
+    # restart that re-registers the same objects from the runtime registry
+    # still fails every direct object read and proves absence.
+
+    def _ensure_absence_schema(self) -> None:
+        if self.absence_store_path is None:
+            return
+        Path(self.absence_store_path).parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(self.absence_store_path, timeout=10.0) as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS s02_object_absence (
+                    fingerprint TEXT PRIMARY KEY,
+                    deleted_at INTEGER NOT NULL,
+                    schema_version TEXT NOT NULL
+                )
+                """
+            )
+
+    def _load_absence(self) -> None:
+        if self.absence_store_path is None:
+            return
+        with sqlite3.connect(self.absence_store_path, timeout=10.0) as connection:
+            rows = connection.execute(
+                "SELECT fingerprint FROM s02_object_absence"
+            ).fetchall()
+        self._absent_fingerprints = {str(row[0]) for row in rows}
+
+    def _persist_absence(self, fingerprint: str, *, deleted_at: int) -> None:
+        if self.absence_store_path is None:
+            return
+        with sqlite3.connect(self.absence_store_path, timeout=10.0) as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO s02_object_absence("
+                "fingerprint, deleted_at, schema_version) VALUES (?, ?, ?)",
+                (fingerprint, deleted_at, "s02-object-absence/1"),
+            )
+
+    @staticmethod
+    def _object_fingerprint(content: bytes) -> str:
+        return hashlib.sha256(content).hexdigest()
+
+    @classmethod
+    def _identity_fingerprint(cls, content: bytes) -> str:
+        """The S16 copy identity fingerprint of one registered object."""
+        return copy_identity_fingerprint(
+            "s02", COPY_CLASS_DERIVED_OBJECT, cls._object_fingerprint(content)
+        )
+
+    def s02_inventory(self) -> dict[str, Any]:
+        """Value-free object inventory: content digest + count per object."""
+        return {
+            "schema_version": "s02-object-inventory/1",
+            "objects": [
+                {
+                    "content_sha256": self._object_fingerprint(item.content),
+                    "count": 1,
+                }
+                for item in self._objects.values()
+                if self._identity_fingerprint(item.content)
+                not in self._absent_fingerprints
+            ],
+        }
+
+    def s02_delete(self, fingerprints: Iterable[str]) -> dict[str, Any]:
+        """Persist absence for the named copy identity fingerprints and drop
+        the live mappings (monotonic: absent is already a success)."""
+        deleted = 0
+        now = int(time.time())
+        target = set(fingerprints)
+        removed: list[str] = []
+        for object_ref, item in list(self._objects.items()):
+            fingerprint = self._identity_fingerprint(item.content)
+            if fingerprint in target:
+                removed.append(object_ref)
+                if fingerprint not in self._absent_fingerprints:
+                    self._absent_fingerprints.add(fingerprint)
+                    self._persist_absence(fingerprint, deleted_at=now)
+                    deleted += 1
+        for object_ref in removed:
+            del self._objects[object_ref]
+        return {"status": "complete", "deleted_counts": {"derived_object": deleted}}
+
+    def s02_verify_absent(self, fingerprints: Iterable[str]) -> dict[str, Any]:
+        target = set(fingerprints)
+        live = {
+            self._identity_fingerprint(item.content)
+            for item in self._objects.values()
+        }
+        absent = bool(target) and target.issubset(self._absent_fingerprints) and not (
+            target & live
+        )
+        return {"absent": absent, "absent_count": len(target & self._absent_fingerprints)}
+
+    def s02_replay(self, fingerprints: Iterable[str]) -> dict[str, Any]:
+        """Restore-time replay: idempotently re-persist absence and drop any
+        live mapping for the named fingerprints."""
+        now = int(time.time())
+        target = set(fingerprints)
+        removed: list[str] = []
+        for object_ref, item in list(self._objects.items()):
+            fingerprint = self._identity_fingerprint(item.content)
+            if fingerprint in target:
+                removed.append(object_ref)
+                self._absent_fingerprints.add(fingerprint)
+                self._persist_absence(fingerprint, deleted_at=now)
+        for object_ref in removed:
+            del self._objects[object_ref]
+        return {"status": "replayed"}
+
+    def s02_verify_repair(self, repair_fact: str) -> bool:
+        if repair_fact != "s02-repair-verified":
+            return False
+        try:
+            if self.absence_store_path is not None:
+                self._ensure_absence_schema()
+                self._load_absence()
+            return True
+        except Exception:
+            return False
 
     @staticmethod
     def command_fingerprint(submission: Any) -> str:
@@ -510,6 +649,8 @@ class RegisteredSourceBoundary:
             or item.tenant_id != tenant_id
             or item.source_system_id != source_system_id
         ):
+            raise LookupError("controlled object is unavailable")
+        if self._identity_fingerprint(item.content) in self._absent_fingerprints:
             raise LookupError("controlled object is unavailable")
         return item.content
 

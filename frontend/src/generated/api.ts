@@ -2437,6 +2437,189 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/controlled/s16": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Controlled S16 Page
+         * @description Canonical S16 governed-deletion shell: the shared qualified React
+         *     build under the registered data-governance identity with no-store shell
+         *     headers and fail-closed missing-build behavior.
+         */
+        get: operations["controlled_s16_page_controlled_s16_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s16/api/deletions/preflight": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** S16 Preflight */
+        post: operations["s16_preflight_controlled_s16_api_deletions_preflight_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s16/api/deletions/{request_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** S16 Query */
+        get: operations["s16_query_controlled_s16_api_deletions__request_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s16/api/deletions/{request_id}/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** S16 Approve */
+        post: operations["s16_approve_controlled_s16_api_deletions__request_id__approve_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s16/api/deletions/{request_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** S16 Cancel */
+        post: operations["s16_cancel_controlled_s16_api_deletions__request_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s16/api/deletions/{request_id}/commit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** S16 Commit */
+        post: operations["s16_commit_controlled_s16_api_deletions__request_id__commit_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s16/api/deletions/{request_id}/receipt": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** S16 Receipt */
+        get: operations["s16_receipt_controlled_s16_api_deletions__request_id__receipt_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s16/api/deletions/{request_id}/repair": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** S16 Repair */
+        post: operations["s16_repair_controlled_s16_api_deletions__request_id__repair_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s16/api/process": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * S16 Process Next
+         * @description The registered process seam: exactly one bounded worker attempt under
+         *     the governance identity.  No ordinary user can trigger a hard delete.
+         */
+        post: operations["s16_process_next_controlled_s16_api_process_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s16/react": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Controlled S16 React Page
+         * @description The S16 /react alias: the same closed shell contract as the canonical
+         *     route.
+         */
+        get: operations["controlled_s16_react_page_controlled_s16_react_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/demo/react": {
         parameters: {
             query?: never;
@@ -8597,6 +8780,293 @@ export interface components {
              * @constant
              */
             schema_version: "s14-settlement-view/1";
+        };
+        /** S16ApprovalSummary */
+        S16ApprovalSummary: {
+            /** Appended At */
+            appended_at: number;
+            /** Manifest Digest */
+            manifest_digest: string;
+            /** Subject Fingerprint */
+            subject_fingerprint: string;
+        };
+        /** S16ApproveBody */
+        S16ApproveBody: {
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Manifest Digest */
+            manifest_digest: string;
+        };
+        /** S16CancelBody */
+        S16CancelBody: {
+            /** Idempotency Key */
+            idempotency_key: string;
+        };
+        /** S16CommandResponse */
+        S16CommandResponse: {
+            /** Approved By */
+            approved_by?: string | null;
+            /** Hold Id */
+            hold_id?: string | null;
+            /** Job Id */
+            job_id?: string | null;
+            /** Reason Code */
+            reason_code?: string | null;
+            /**
+             * Replayed
+             * @default false
+             */
+            replayed: boolean;
+            /** Request Id */
+            request_id?: string | null;
+            /** Status */
+            status: string;
+        };
+        /** S16CommitBody */
+        S16CommitBody: {
+            /** Idempotency Key */
+            idempotency_key: string;
+        };
+        /** S16ErrorDetail */
+        S16ErrorDetail: {
+            /** Error */
+            error: string;
+            /** Hint */
+            hint?: string | null;
+            /** Message */
+            message?: string | null;
+            /** Reason Code */
+            reason_code?: string | null;
+        };
+        /** S16ErrorResponse */
+        S16ErrorResponse: {
+            detail: components["schemas"]["S16ErrorDetail"];
+        };
+        /** S16JobSummary */
+        S16JobSummary: {
+            /** Attempt */
+            attempt: number;
+            /** Completed At */
+            completed_at?: number | null;
+            /** Fence */
+            fence: number;
+            /** Job Id */
+            job_id: string;
+            /** Lease Owner */
+            lease_owner?: string | null;
+            /** Owner Results */
+            owner_results: {
+                [key: string]: string;
+            };
+            /** Pending Owner Fingerprints */
+            pending_owner_fingerprints: {
+                [key: string]: number;
+            };
+            stable_failure?: components["schemas"]["S16StableFailure"] | null;
+            /** Status */
+            status: string;
+        };
+        /** S16LegalHoldSummary */
+        S16LegalHoldSummary: {
+            /** Effective Time */
+            effective_time: number;
+            /** Expiry */
+            expiry?: number | null;
+            /** Generation */
+            generation: number;
+            /** Hold Id */
+            hold_id: string;
+            /** Owner */
+            owner: string;
+            /** Reason Code */
+            reason_code: string;
+            /** Released */
+            released: boolean;
+        };
+        /** S16ManifestEntry */
+        S16ManifestEntry: {
+            /** Classification */
+            classification: string;
+            /** Content Sha256 */
+            content_sha256: string;
+            /** Copy Class */
+            copy_class: string;
+            /** Count */
+            count: number;
+            /** Hold State */
+            hold_state: string;
+            /** Identity Fingerprint */
+            identity_fingerprint: string;
+            /** Legal Hold Generation */
+            legal_hold_generation: number;
+            /** Owner Id */
+            owner_id: string;
+            /** Planned Action */
+            planned_action: string;
+            /** Retention Due At */
+            retention_due_at?: number | null;
+            /** Retention Policy Id */
+            retention_policy_id: string;
+            /** Retention Policy Version */
+            retention_policy_version: string;
+            /** Shared State */
+            shared_state: string;
+        };
+        /** S16PreflightBody */
+        S16PreflightBody: {
+            /** Application Reference */
+            application_reference: string;
+            /** Idempotency Key */
+            idempotency_key: string;
+        };
+        /** S16PreflightResponse */
+        S16PreflightResponse: {
+            /** Application Reference */
+            application_reference: string;
+            /** Early Deletion */
+            early_deletion: boolean;
+            /** Entries */
+            entries: components["schemas"]["S16ManifestEntry"][];
+            /** Entries Digest */
+            entries_digest: string;
+            /** Manifest Digest */
+            manifest_digest: string;
+            /** Owner Registry Digest */
+            owner_registry_digest: string;
+            /** Policy Digest */
+            policy_digest: string;
+            /**
+             * Replayed
+             * @default false
+             */
+            replayed: boolean;
+            /** Request Id */
+            request_id: string;
+            /** Retained Scan Clean */
+            retained_scan_clean: boolean;
+            /** Retention Due */
+            retention_due?: number | null;
+            /** S01 Revision */
+            s01_revision: number;
+            /** S12 Revision */
+            s12_revision: string;
+            /** Scope Fingerprint */
+            scope_fingerprint: string;
+            /** Status */
+            status: string;
+        };
+        /** S16ProcessResponse */
+        S16ProcessResponse: {
+            /** Attempt */
+            attempt?: number | null;
+            /** Job Id */
+            job_id?: string | null;
+            /** Owner Id */
+            owner_id?: string | null;
+            /** Reason Code */
+            reason_code?: string | null;
+            /** Request Id */
+            request_id?: string | null;
+            /** Status */
+            status: string;
+        };
+        /** S16QueryResponse */
+        S16QueryResponse: {
+            /** Approvals */
+            approvals: components["schemas"]["S16ApprovalSummary"][];
+            /** Cancelled */
+            cancelled: boolean;
+            /** Early Deletion */
+            early_deletion: boolean;
+            job?: components["schemas"]["S16JobSummary"] | null;
+            /** Legal Holds */
+            legal_holds: components["schemas"]["S16LegalHoldSummary"][];
+            /** Manifest Digest */
+            manifest_digest: string;
+            /** Owner Registry Digest */
+            owner_registry_digest: string;
+            /** Policy Digest */
+            policy_digest: string;
+            /** Request Id */
+            request_id: string;
+            /** Retention Due */
+            retention_due?: number | null;
+            /** S01 Revision */
+            s01_revision: number;
+            /** S12 Revision */
+            s12_revision: string;
+            /**
+             * Schema Version
+             * @constant
+             */
+            schema_version: "s16-query/1";
+            /** Scope Fingerprint */
+            scope_fingerprint: string;
+        };
+        /** S16ReceiptResponse */
+        S16ReceiptResponse: {
+            /** Action */
+            action: string;
+            /** Authority */
+            authority: string;
+            /** Completed At */
+            completed_at: number;
+            /** Owner Counts */
+            owner_counts: {
+                [key: string]: number;
+            };
+            /** Policy */
+            policy: string;
+            /** Receipt Id */
+            receipt_id: string;
+            /** Restore Replay Status */
+            restore_replay_status: string;
+            /** Result */
+            result: string;
+            /** Role */
+            role: string;
+            /** Schema Version */
+            schema_version: string;
+            /** Scope Fingerprint */
+            scope_fingerprint: string;
+            /** Subject */
+            subject: string;
+        };
+        /** S16RepairBody */
+        S16RepairBody: {
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Owner Id */
+            owner_id: string;
+            /** Repair Fact */
+            repair_fact: string;
+        };
+        /** S16StableFailure */
+        S16StableFailure: {
+            /** Attempt */
+            attempt: number;
+            /** Owner Id */
+            owner_id: string;
+            /** Reason Code */
+            reason_code: string;
+            /** Recovery Action */
+            recovery_action: string;
+            /** Responsible Party */
+            responsible_party: string;
+        };
+        /** S16ValidationErrorItem */
+        S16ValidationErrorItem: {
+            /** Loc */
+            loc: (string | number)[];
+            /** Msg */
+            msg: string;
+            /** Type */
+            type: string;
+        };
+        /** S16ValidationErrorResponse */
+        S16ValidationErrorResponse: {
+            /** Detail */
+            detail: components["schemas"]["S16ValidationErrorItem"][];
         };
         /** T05BusinessExceptionOperationsResult */
         T05BusinessExceptionOperationsResult: {
@@ -15527,6 +15997,634 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["S01ErrorResponse"];
+                };
+            };
+        };
+    };
+    controlled_s16_page_controlled_s16_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+        };
+    };
+    s16_preflight_controlled_s16_api_deletions_preflight_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["S16PreflightBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16PreflightResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ValidationErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+        };
+    };
+    s16_query_controlled_s16_api_deletions__request_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                request_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16QueryResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ValidationErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+        };
+    };
+    s16_approve_controlled_s16_api_deletions__request_id__approve_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                request_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["S16ApproveBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16CommandResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ValidationErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+        };
+    };
+    s16_cancel_controlled_s16_api_deletions__request_id__cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                request_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["S16CancelBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16CommandResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ValidationErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+        };
+    };
+    s16_commit_controlled_s16_api_deletions__request_id__commit_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                request_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["S16CommitBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16CommandResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ValidationErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+        };
+    };
+    s16_receipt_controlled_s16_api_deletions__request_id__receipt_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                request_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ReceiptResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ValidationErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+        };
+    };
+    s16_repair_controlled_s16_api_deletions__request_id__repair_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                request_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["S16RepairBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16CommandResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ValidationErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+        };
+    };
+    s16_process_next_controlled_s16_api_process_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ProcessResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ValidationErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+        };
+    };
+    controlled_s16_react_page_controlled_s16_react_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
                 };
             };
         };

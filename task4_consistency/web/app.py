@@ -325,6 +325,14 @@ try:
         clock=lambda: int(time.time()),
         corpus_root=FIXTURES,
     )
+    # The S02 absence store configured for S16 (when set): the registered
+    # source boundary persists object deletions there so restarts keep
+    # governed-deleted objects unreadable.
+    _s16_absence_value = os.environ.get(
+        "TASK4_S16_OBJECT_ABSENCE_PATH", ""
+    ).strip()
+    if _s16_absence_value and not Path(_s16_absence_value).is_absolute():
+        raise ValueError("TASK4_S16_OBJECT_ABSENCE_PATH must be absolute")
     S01_SERVICE: ControlledScenarioService | None = ControlledScenarioService(
         fixture_root=FIXTURES,
         rules_path=DEFAULT_RULES,
@@ -333,6 +341,7 @@ try:
         storage_available=_s01_demo_flag("TASK4_S01_STORAGE_AVAILABLE", default=True),
         registered_sources=S02_REGISTERED_SOURCES,
         controlled_objects=S02_CONTROLLED_OBJECTS,
+        controlled_object_absence_store=_s16_absence_value or None,
         exception_approver_subject=S05_EXCEPTION_APPROVER_SUBJECT,
         policy_governance=S08_SERVICE,
     )
@@ -468,6 +477,207 @@ try:
 except Exception as error:
     S12_SERVICE = None
     S12_CONFIGURATION_ERROR = str(error)
+
+# --- S16 governed-deletion plane -------------------------------------------
+# Independent data-governance identities: the governance owner, two early-
+# deletion approvers and the system worker.  Missing or aliased
+# configuration closes every S16 route (S16_UNAVAILABLE) without affecting
+# any other plane.  The ledger lives on its own SQLite path so business
+# backup restores never lose the deletion manifest.
+S16_CONFIGURATION_ERROR: str | None = None
+S16_GOVERNANCE_CREDENTIAL = os.environ.get(
+    "TASK4_S16_GOVERNANCE_CREDENTIAL", ""
+).strip()
+S16_GOVERNANCE_SUBJECT = os.environ.get(
+    "TASK4_S16_GOVERNANCE_SUBJECT", ""
+).strip()
+S16_APPROVER1_CREDENTIAL = os.environ.get(
+    "TASK4_S16_APPROVER1_CREDENTIAL", ""
+).strip()
+S16_APPROVER1_SUBJECT = os.environ.get(
+    "TASK4_S16_APPROVER1_SUBJECT", ""
+).strip()
+S16_APPROVER2_CREDENTIAL = os.environ.get(
+    "TASK4_S16_APPROVER2_CREDENTIAL", ""
+).strip()
+S16_APPROVER2_SUBJECT = os.environ.get(
+    "TASK4_S16_APPROVER2_SUBJECT", ""
+).strip()
+S16_GOVERNANCE_SCOPE = (
+    os.environ.get("TASK4_S16_GOVERNANCE_SCOPE", "C-DEMO").strip() or "C-DEMO"
+)
+S16_WORKER_SUBJECT = (
+    os.environ.get("TASK4_S16_WORKER_SUBJECT", "s16-deletion-worker").strip()
+    or "s16-deletion-worker"
+)
+
+
+def _s16_identities_configured() -> bool:
+    credentials = (
+        S16_GOVERNANCE_CREDENTIAL,
+        S16_APPROVER1_CREDENTIAL,
+        S16_APPROVER2_CREDENTIAL,
+    )
+    subjects = (
+        S16_GOVERNANCE_SUBJECT,
+        S16_APPROVER1_SUBJECT,
+        S16_APPROVER2_SUBJECT,
+    )
+    return bool(
+        all(credentials)
+        and all(subjects)
+        and len(set(credentials)) == 3
+        and len(set(subjects)) == 3
+    )
+
+
+def _s16_identities_alias_controlled() -> bool:
+    """The three S16 identities must not alias any other controlled
+    identity (P-5 style), or the governed-deletion plane stays closed."""
+    controlled_credentials = {
+        globals().get(name, "")
+        for name in (
+            "S01_DEMO_CREDENTIAL",
+            "S01_OPERATOR_CREDENTIAL",
+            "S01_AUDITOR_CREDENTIAL",
+            "S02_CREDENTIAL",
+            "S05_EXCEPTION_APPROVER_CREDENTIAL",
+            "S08_ADMIN_CREDENTIAL",
+            "S08_APPROVER_CREDENTIAL",
+            "S08_OPERATOR_CREDENTIAL",
+            "S09_REPLAY_CREDENTIAL",
+            "S09_SIMULATION_CREDENTIAL",
+            "S12_CREDENTIAL",
+            "S13_OPERATOR_CREDENTIAL",
+        )
+    }
+    controlled_subjects = {
+        globals().get(name, "")
+        for name in (
+            "S01_DEMO_SUBJECT",
+            "S01_OPERATOR_SUBJECT",
+            "S01_AUDITOR_SUBJECT",
+            "S02_SUBJECT",
+            "S05_EXCEPTION_APPROVER_SUBJECT",
+            "S08_ADMIN_SUBJECT",
+            "S08_APPROVER_SUBJECT",
+            "S08_OPERATOR_SUBJECT",
+            "S09_REPLAY_SUBJECT",
+            "S09_SIMULATION_SUBJECT",
+            "S12_SUBJECT",
+            "S13_OPERATOR_SUBJECT",
+        )
+    }
+    return bool(
+        (
+            {
+                S16_GOVERNANCE_CREDENTIAL,
+                S16_APPROVER1_CREDENTIAL,
+                S16_APPROVER2_CREDENTIAL,
+            }
+            & controlled_credentials
+        )
+        or (
+            {
+                S16_GOVERNANCE_SUBJECT,
+                S16_APPROVER1_SUBJECT,
+                S16_APPROVER2_SUBJECT,
+            }
+            & controlled_subjects
+        )
+    )
+
+
+def _s16_retention_seconds() -> int:
+    value = os.environ.get("TASK4_S16_RETENTION_SECONDS", "").strip()
+    if not value:
+        return 90 * 24 * 60 * 60
+    parsed = int(value)
+    if parsed < 0:
+        raise ValueError("TASK4_S16_RETENTION_SECONDS must be non-negative")
+    return parsed
+
+
+def _s16_object_absence_path() -> Path | None:
+    """The S02 absence-store path configured for S16.  When set, the S01
+    registered-source boundary persists object deletions here so a restart
+    keeps every deleted object unreadable."""
+    value = os.environ.get("TASK4_S16_OBJECT_ABSENCE_PATH", "").strip()
+    if not value:
+        return None
+    path = Path(value)
+    if not path.is_absolute():
+        raise ValueError("TASK4_S16_OBJECT_ABSENCE_PATH must be absolute")
+    return path
+
+
+def _s16_service_factory() -> GovernedDeletionService | None:
+    from task4_consistency.controlled.s16 import (
+        BackupDeletionOwner,
+        ExportTempOwner,
+        GovernedDeletionService,
+        RetentionPolicy,
+        S01DeletionOwner,
+        S02DeletionOwner,
+        S12DeletionOwner,
+    )
+
+    if not _s16_identities_configured():
+        return None
+    if _s16_identities_alias_controlled():
+        raise ValueError("TASK4_S16 identity aliases a controlled identity")
+    state_value = os.environ.get("TASK4_S16_STATE_PATH", "").strip()
+    if not state_value:
+        raise ValueError("TASK4_S16_STATE_PATH is required")
+    state_path = Path(state_value)
+    if not state_path.is_absolute():
+        raise ValueError("TASK4_S16_STATE_PATH must be absolute")
+    if S01_SERVICE is None:
+        raise ValueError("S16 requires the S01 lifecycle authority")
+    if S12_SERVICE is None:
+        raise ValueError("S16 requires the S12 evaluation authority")
+    absence_path = _s16_object_absence_path() or (
+        state_path.parent / "s02_object_absence.sqlite3"
+    )
+    backup_root = Path(
+        os.environ.get("TASK4_S16_BACKUP_ROOT", "").strip()
+        or str(state_path.parent / "backups")
+    )
+    clock = lambda: int(time.time())
+    retention = RetentionPolicy(retention_seconds=_s16_retention_seconds())
+    return GovernedDeletionService(
+        ledger_path=state_path,
+        owners={
+            "s01": S01DeletionOwner(
+                S01_SERVICE, retention=retention, clock=clock
+            ),
+            "s02": S02DeletionOwner(
+                S01_SERVICE.registered_source_boundary, S01_SERVICE
+            ),
+            "s12": S12DeletionOwner(S12_SERVICE),
+            "backup": BackupDeletionOwner(backup_root, clock=clock),
+            "s17-disabled": ExportTempOwner(),
+        },
+        retention=retention,
+        governance_subject=S16_GOVERNANCE_SUBJECT,
+        approver_subjects=(S16_APPROVER1_SUBJECT, S16_APPROVER2_SUBJECT),
+        worker_id=S16_WORKER_SUBJECT,
+        audit_available=_s01_demo_flag(
+            "TASK4_S01_AUDIT_AVAILABLE", default=True
+        ),
+        storage_available=_s01_demo_flag(
+            "TASK4_S01_STORAGE_AVAILABLE", default=True
+        ),
+        clock=clock,
+    )
+
+
+try:
+    S16_SERVICE = _s16_service_factory()
+except Exception as error:
+    S16_SERVICE = None
+    S16_CONFIGURATION_ERROR = str(error)
+
 S01_TEST_DRIVER: ControlledScenarioTestDriver | None = None
 S01_BACKGROUND_ENABLED = _s01_demo_flag(
     "TASK4_S01_BACKGROUND_ENABLED", default=True
@@ -512,8 +722,14 @@ class S01BackgroundRuntime:
     _WORKER_IDENTITY = "s01-background-runtime"
     _SOURCE_ID = "s01-target-worker"
 
-    def __init__(self, service: ControlledScenarioService) -> None:
+    def __init__(
+        self,
+        service: ControlledScenarioService,
+        *,
+        deletion_worker: Callable[[], dict[str, Any]] | None = None,
+    ) -> None:
         self._service = service
+        self._deletion_worker = deletion_worker
         self._principal = S01CommandPrincipal(
             subject=self._WORKER_IDENTITY,
             role="operator",
@@ -523,6 +739,8 @@ class S01BackgroundRuntime:
         self._stop = threading.Event()
         self._health_lock = threading.Lock()
         self._health = {"status": "created", "reason_code": ""}
+        self._deletion_health_lock = threading.Lock()
+        self._deletion_health = {"status": "idle", "reason_code": ""}
         self._thread = threading.Thread(
             target=self._run,
             name=self._WORKER_IDENTITY,
@@ -544,6 +762,10 @@ class S01BackgroundRuntime:
     def health(self) -> dict[str, str]:
         with self._health_lock:
             return dict(self._health)
+
+    def deletion_health(self) -> dict[str, str]:
+        with self._deletion_health_lock:
+            return dict(self._deletion_health)
 
     def _mark_unhealthy(self, reason_code: str) -> None:
         with self._health_lock:
@@ -571,6 +793,25 @@ class S01BackgroundRuntime:
                 )
                 if impact_process is not None:
                     impact_process()
+                if self._deletion_worker is not None:
+                    try:
+                        deletion_result = self._deletion_worker()
+                    except Exception:
+                        with self._deletion_health_lock:
+                            self._deletion_health = {
+                                "status": "unhealthy",
+                                "reason_code": "S16_BACKGROUND_RUNTIME_EXCEPTION",
+                            }
+                    else:
+                        with self._deletion_health_lock:
+                            self._deletion_health = {
+                                "status": str(
+                                    deletion_result.get("status") or "idle"
+                                ),
+                                "reason_code": str(
+                                    deletion_result.get("reason_code") or ""
+                                ),
+                            }
             except Exception:
                 reason_code = "S01_BACKGROUND_RUNTIME_EXCEPTION"
                 self._mark_unhealthy(reason_code)
@@ -606,7 +847,14 @@ async def _lifespan(application: FastAPI):
         )
     application.openapi()
     if S01_BACKGROUND_ENABLED and S01_SERVICE is not None:
-        runtime = S01BackgroundRuntime(S01_SERVICE)
+        runtime = S01BackgroundRuntime(
+            S01_SERVICE,
+            deletion_worker=(
+                S16_SERVICE.process_next_deletion_job
+                if S16_SERVICE is not None
+                else None
+            ),
+        )
         runtime.start()
     application.state.s01_background_runtime = runtime
     try:
@@ -6519,6 +6767,17 @@ from task4_consistency.web.s13_http import register_router as register_s13_route
 
 register_s13_router(app, sys.modules[__name__])
 
+# --- S16 governed-deletion HTTP adapter ------------------------------------
+# The typed data-governance surface (preflight/approve/cancel/commit/repair/
+# query/receipt/process and the two shell routes) lives in web/s16_http.py
+# on its own APIRouter and registers after S13 so route order stays stable.
+# S16_SERVICE is None unless the independent ledger path plus the three
+# distinct S16 identities are configured; every S16 route then reports
+# scoped S16_UNAVAILABLE without affecting any other plane.
+from task4_consistency.web.s16_http import register_router as register_s16_router
+
+register_s16_router(app, sys.modules[__name__])
+
 _S13_SHELL_ERROR_RESPONSES = {
     403: {
         "content": {
@@ -6801,6 +7060,98 @@ def controlled_s14_settlement_react_page(request: Request) -> Response:
     return _s14_shell_with_cache_policy(
         lambda: _s14_settlement_shell_response(request)
     )
+
+
+def _s16_react_shell() -> Response:
+    """The shared qualified React build under the S16 governance boundary, or
+    the minimized closed S16 503 when the build is missing or partial.  The
+    shell never creates an S01/S02 reviewer session and grants no authority;
+    every S16 command stays guarded by its own route identity."""
+    index_html = _react_shell_index_html()
+    if index_html is None:
+        response = JSONResponse(
+            status_code=503,
+            content={
+                "detail": {
+                    "error": "S16_REACT_UNAVAILABLE",
+                    "message": "Controlled S16 governed-deletion shell is not built",
+                }
+            },
+        )
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+        return response
+    response = HTMLResponse(index_html)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    return response
+
+
+def _s16_require_governance(request: Request) -> None:
+    if S16_SERVICE is None:
+        raise HTTPException(
+            503,
+            detail={
+                "error": "S16_UNAVAILABLE",
+                "message": "Controlled S16 governed-deletion plane is unavailable",
+            },
+            headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+        )
+    if (
+        not S16_GOVERNANCE_SUBJECT
+        or not _s01_has_credential(request, S16_GOVERNANCE_CREDENTIAL)
+    ):
+        raise HTTPException(
+            403,
+            detail={
+                "error": "S16_FORBIDDEN",
+                "message": "Registered S16 governance owner identity required",
+            },
+            headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+        )
+
+
+_S16_SHELL_ERROR_RESPONSES = {
+    403: {
+        "content": {
+            "application/json": {
+                "schema": {"$ref": "#/components/schemas/S16ErrorResponse"}
+            }
+        },
+    },
+    503: {
+        "content": {
+            "application/json": {
+                "schema": {"$ref": "#/components/schemas/S16ErrorResponse"}
+            }
+        },
+    },
+}
+
+
+@app.get(
+    "/controlled/s16",
+    response_class=HTMLResponse,
+    responses=_S16_SHELL_ERROR_RESPONSES,
+)
+def controlled_s16_page(request: Request) -> Response:
+    """Canonical S16 governed-deletion shell: the shared qualified React
+    build under the registered data-governance identity with no-store shell
+    headers and fail-closed missing-build behavior."""
+    _s16_require_governance(request)
+    return _s16_react_shell()
+
+
+@app.get(
+    "/controlled/s16/react",
+    response_class=HTMLResponse,
+    responses=_S16_SHELL_ERROR_RESPONSES,
+)
+def controlled_s16_react_page(request: Request) -> Response:
+    """The S16 /react alias: the same closed shell contract as the canonical
+    route."""
+    _s16_require_governance(request)
+    return _s16_react_shell()
 
 
 def create_s01_test_app() -> FastAPI:

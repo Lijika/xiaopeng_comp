@@ -159,7 +159,50 @@ curl -s http://127.0.0.1:8765/api/health
 
 `RELEASE_PY` 指向 `.venv/bin/python` 绝对路径，与 release harness 的 qualified interpreter 契约一致（`$ROOT/.venv/bin/python`）。发布资格门禁（安装包导入来源、wheel 内容、聚焦 release 测试、真实 uvicorn 健康检查、完整浏览器矩阵）由 `scripts/test_installed_web_release.sh` 执行。
 
-### 5.3 React 路由与 canonical 切流矩阵（Issue #54）
+### 5.3 S16 合规删除平面（Ticket #32）
+
+S16 对一笔已终止申请执行完整聚合合规删除：数据治理负责人以独立身份在 `/controlled/s16` 提交 application reference，服务端生成九类副本 dry-run 清单（source_object / derived_object / evidence / run_or_finding / projection_or_cache / export_or_temp / evaluation_copy / replica / backup_manifest），普通到期删除由当前版本化 retention 授权，提前删除需两名互异审批人；commit 在短事务内复核清单、owner registry、保留策略、Legal Hold、终止态、审计与幂等绑定，随后持久 worker 按 lease/fence/attempt 逐 owner 执行，失败进入 `repair_required` 并可修复续跑；完成后仅暴露无原值 receipt。S17 export 保持关闭（`export_or_temp` 类目返回带证明的零条目）。
+
+**配置（全部缺失或任一别名受控身份时 S16 路由关闭，其他平面不受影响）**：
+
+| 环境变量 | 说明 |
+|----------|------|
+| `TASK4_S16_STATE_PATH` | **独立** S16 账本 SQLite 路径（与业务备份分属不同恢复域；此文件是删除清单的唯一权威） |
+| `TASK4_S16_GOVERNANCE_CREDENTIAL` / `_SUBJECT` | 数据治理负责人身份（preflight/commit/cancel/repair/query/receipt） |
+| `TASK4_S16_APPROVER1_CREDENTIAL` / `_SUBJECT`、`TASK4_S16_APPROVER2_CREDENTIAL` / `_SUBJECT` | 两名提前删除审批人（互异、且不同于治理身份） |
+| `TASK4_S16_GOVERNANCE_SCOPE` | 治理授权范围（默认 `C-DEMO`；注册租户场景传 `R-OBSERVED/<tenant>`） |
+| `TASK4_S16_RETENTION_SECONDS` | 版本化保留时长（默认 90 天；0 = 到期即删） |
+| `TASK4_S16_OBJECT_ABSENCE_PATH` | S02 登记对象删除的持久 absence 账本（重启后仍拒绝已删对象读取；缺省在账本目录下） |
+| `TASK4_S16_BACKUP_ROOT` | 备份 owner 根目录（scope 级备份副本与恢复清单；缺省在账本目录下） |
+
+启动示例（在 5.2 的变量基础上追加）：
+
+```bash
+export TASK4_S16_STATE_PATH=/opt/task4/site/var/s16.sqlite3
+export TASK4_S16_GOVERNANCE_CREDENTIAL=<cred> TASK4_S16_GOVERNANCE_SUBJECT=<subject>
+export TASK4_S16_APPROVER1_CREDENTIAL=<cred> TASK4_S16_APPROVER1_SUBJECT=<subject>
+export TASK4_S16_APPROVER2_CREDENTIAL=<cred> TASK4_S16_APPROVER2_SUBJECT=<subject>
+```
+
+**路由**（均 no-store；命令响应统一 no-store）：
+
+| 路由 | 用途 |
+|------|------|
+| `POST /controlled/s16/api/deletions/preflight` | 九类副本 dry-run 清单 |
+| `POST /controlled/s16/api/deletions/{request_id}/approve` | 审批人批准（绑清单摘要） |
+| `POST /controlled/s16/api/deletions/{request_id}/cancel` | commit 前取消（只追加事实） |
+| `POST /controlled/s16/api/deletions/{request_id}/commit` | 唯一不可逆边界（短事务复核 + 建 job） |
+| `POST /controlled/s16/api/deletions/{request_id}/repair` | 修复后恢复原 job |
+| `GET /controlled/s16/api/deletions/{request_id}` | 任务/审批/保全状态 |
+| `GET /controlled/s16/api/deletions/{request_id}/receipt` | 无原值 receipt |
+| `POST /controlled/s16/api/process` | 受控 worker 尝试（一次一个 job） |
+| `GET /controlled/s16`（别名 `/controlled/s16/react`） | 治理 React 壳；build 缺失时 `503 S16_REACT_UNAVAILABLE` |
+
+**账本备份与恢复顺序**：S16 账本必须单独备份（与业务备份分离）；业务旧备份恢复后，**先**由 S16 启动重放（`restore_replay`）对 S01/S02/S12/backup owner 幂等重删并逐项验证 absence，全部 verified 后 S16 readiness 才开放受限查询；任一 owner 无法验证时启动 fail-closed。
+
+**证据范围与机构前置项（G4）**：当前 SQLite 账本、本地对象 owner 与临时 backup owner 只提供可执行合同证据。机构 G4 Controlled-pilot candidate 仍需：机构 IdP/KMS 身份；真实 retention/legal-hold authority；对象与备份 connector；独立 audit/WORM、可观测性与恢复演练证据；以及独立账本备份策略的生产验证。S17 export 路由与凭据保持关闭。
+
+### 5.4 React 路由与 canonical 切流矩阵（Issue #54）
 
 当前制品（Issue #45 收缩后）在 canonical 路由直接服务已认证 React build；legacy 模板/静态五个文件已由 #45 物理删除、五个直接变更接口已退役，不再打包进 wheel。fixed-base 先于 #45 的旧 wheel 仍含 legacy 面，仅作为**部署回滚路径**存在。
 
@@ -177,11 +220,11 @@ curl -s http://127.0.0.1:8765/api/health
 - **Legacy 表面契约（Issue #45 收缩后全退役）**：`task4_consistency/web/legacy_catalog.py` 是唯一权威目录（10 个条目现全部 `retired=True`：root/S01/S02 模板页面、`/static/app.js`、`/static/style.css`、`PUT /api/rules`、`POST /api/rules/reset`、`POST /api/kb`、`DELETE /api/kb/{section}/{key}`、`POST /api/kb/reload`）。五个物理文件（三个模板 + 两个静态）必须保持删除，任一复现即 reintroduction 失败；五个变更 handler 已物理移除，请求落框架 405/404 absence 状态。规则/KB 保留面仅 `GET /api/rules`、`POST /api/rules/validate`（干跑，永不写 `runtime_rules.yaml`）、`GET /api/kb`、`GET /api/kb/graph`；`/static` mount 只服务 react 资产。源扫描与运行时观察都消费该目录；canonical 源边必须为零。
 - 浏览器矩阵（S05/S06 + T01/T02/T03/T06/T07/T08 production React 流程、两个 viewport、键盘/语义/overflow/security）由 Playwright specs 覆盖：`npm run test:e2e`。受控窗口内该矩阵作为 `operator-simulated` 队列运行，legacy 模板控制台浏览器 spec（S01/S02/S03/S07）已在 #54 按等接口证据退役。
 
-### 5.4 部署回滚（deployment-only rollback，Issue #54）
+### 5.5 部署回滚（deployment-only rollback，Issue #54）
 
 回滚是**制品级**的（current → prior → current 三阶段）：停止当前 wheel 进程 → 启动**上一合格 wheel**（同一 SQLite authority `TASK4_S01_STATE_PATH`；prior 为 fixed-base `2627d488...` 构建，canonical root/S01/S02 在 prior 阶段同样服务 qualified React shell，静态/mutation legacy 面仅在 prior 阶段制品中解析）→ 验证 accepted facts 不变 → 停止 → 重启当前 wheel（canonical React 恢复）。**accepted facts 在三个阶段必须保持相等**；浏览器与静态制品不拥有 lifecycle/decision/policy/audit facts；回滚只替换可执行制品与进程身份。发布资格门禁内的一次 current → prior → current 演练由 `scripts/test_installed_web_release.sh` 执行（prior wheel 从 fixed base `git archive` 构建，字节不变）。
 
-### 5.5 观察遥测（Issue #54）
+### 5.6 观察遥测（Issue #54）
 
 应用入口观察模块（`task4_consistency/web/observation.py`）在 canonical FastAPI 适配器内消费 legacy 目录并输出确定性证据记录；它不是 security-audit、Lifecycle 或 Policy Governance 所有者。**不设置任何观察变量时完全无捕获**（零磁盘、零行为差异）。
 
@@ -204,7 +247,7 @@ curl -s http://127.0.0.1:8765/api/health
 
 有效窗口 = 非空 operator 分母、连续序列、精确摘要、干净进程生命周期、零 unknown 类别、零 canonical 源边、零 operator-simulated legacy 命中；`rollback-probe` 的 legacy 命中单独计入 manifest。窗口 raw 日志与其 SHA256 一并封存。
 
-### 5.6 鉴权与环境变量
+### 5.7 鉴权与环境变量
 
 | 变量 | 默认 | 说明 |
 |------|------|------|

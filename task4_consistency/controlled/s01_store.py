@@ -51,6 +51,7 @@ _TABLES = (
     "delivery_attempts",
     "delivery_reconciliations",
     "delivery_compensations",
+    "s16_governed_deletions",
 )
 
 _INTEGRITY_SCHEMA = "s01-immutable-row/v1"
@@ -76,6 +77,7 @@ _IMMUTABLE_LIST_IDS = {
     "delivery_attempts": "attempt_id",
     "delivery_reconciliations": "reconciliation_id",
     "delivery_compensations": "compensation_id",
+    "s16_governed_deletions": "scope_fingerprint",
 }
 _IMMUTABLE_TABLES = frozenset(
     {*_IMMUTABLE_MAP_TABLES, *_IMMUTABLE_LIST_IDS, "idempotency", "outbox"}
@@ -216,6 +218,7 @@ class SQLiteTargetStore:
         self.delivery_attempts: list[dict[str, Any]] = []
         self.delivery_reconciliations: list[dict[str, Any]] = []
         self.delivery_compensations: list[dict[str, Any]] = []
+        self.s16_governed_deletions: list[dict[str, Any]] = []
         self.projection_watermark = 0
         self.cohort_stop: dict[str, Any] | None = None
         self._store_revision = 0
@@ -271,6 +274,7 @@ class SQLiteTargetStore:
             "delivery_attempts",
             "delivery_reconciliations",
             "delivery_compensations",
+            "s16_governed_deletions",
             "cohort_stop",
         ):
             setattr(cloned, name, copy.deepcopy(getattr(self, name)))
@@ -615,6 +619,8 @@ class SQLiteTargetStore:
                     self.delivery_reconciliations = [payload for _, payload in values]
                 elif table == "delivery_compensations":
                     self.delivery_compensations = [payload for _, payload in values]
+                elif table == "s16_governed_deletions":
+                    self.s16_governed_deletions = [payload for _, payload in values]
 
     def persist(self) -> None:
         """Append facts and publish mutable owners in one transaction."""
@@ -768,6 +774,12 @@ class SQLiteTargetStore:
                     self.delivery_compensations,
                     self._integrity_cache,
                 )
+                self._sync_immutable_list(
+                    connection,
+                    "s16_governed_deletions",
+                    self.s16_governed_deletions,
+                    self._integrity_cache,
+                )
                 connection.commit()
                 self._store_revision = next_revision
             except Exception:
@@ -778,11 +790,26 @@ class SQLiteTargetStore:
         self,
         plan: dict[str, set[str]],
         receipt: dict[str, Any],
+        tombstone: dict[str, Any] | None = None,
     ) -> None:
-        """Delete one expired public-demo aggregate and seal its receipt."""
+        """Delete one governed aggregate and seal its receipt.
+
+        The optional ``tombstone`` (a value-free S16 deletion record keyed by
+        scope fingerprint) is written in the same transaction so the S16
+        absence proof and the deletion commit or fail together.
+        """
         receipt_id = str(receipt.get("deletion_receipt_id") or "")
         if not receipt_id:
             raise ValueError("governed deletion requires a receipt identity")
+        tombstone_scope = ""
+        if tombstone is not None:
+            tombstone_scope = str(tombstone.get("scope_fingerprint") or "")
+            if not tombstone_scope:
+                raise ValueError(
+                    "governed deletion tombstone requires a scope fingerprint"
+                )
+            if str(tombstone.get("schema_version") or "") != "s16-tombstone/1":
+                raise ValueError("governed deletion tombstone schema is invalid")
         if set(plan).difference(_GOVERNED_DELETION_IDS):
             raise ValueError("governed deletion plan contains an unsupported table")
         normalized = {
@@ -844,6 +871,27 @@ class SQLiteTargetStore:
                     "VALUES ('deletion_receipts', ?, ?)",
                     (receipt_id, digest),
                 )
+                if tombstone is not None:
+                    tombstone_payload = _encode(tombstone)
+                    tombstone_digest = _integrity_digest(
+                        "s16_governed_deletions",
+                        tombstone_scope,
+                        tombstone_payload,
+                    )
+                    connection.execute(
+                        "INSERT OR REPLACE INTO s16_governed_deletions("
+                        "item_id, payload, integrity_sha256) VALUES (?, ?, ?)",
+                        (tombstone_scope, tombstone_payload, tombstone_digest),
+                    )
+                    connection.execute(
+                        "INSERT OR REPLACE INTO s01_immutable_catalog("
+                        "table_name, item_id, integrity_sha256) VALUES (?, ?, ?)",
+                        (
+                            "s16_governed_deletions",
+                            tombstone_scope,
+                            tombstone_digest,
+                        ),
+                    )
                 next_revision = current_revision + 1
                 updated = connection.execute(
                     "UPDATE s01_meta SET projection_watermark = ?, cohort_stop = ?, "

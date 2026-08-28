@@ -703,6 +703,7 @@ class ControlledScenarioService:
         clock: Callable[[], int] | None = None,
         registered_sources: tuple[RegisteredSource, ...] = (),
         controlled_objects: tuple[ControlledObject, ...] = (),
+        controlled_object_absence_store: str | Path | None = None,
         scenario_id: str = "app_r53_bad_engine.json",
         checker_build: str | None = None,
         exception_approver_subject: str = "c-demo-exception-approver",
@@ -739,7 +740,9 @@ class ControlledScenarioService:
         self._worker_identity = worker_identity
         self._clock = clock or (lambda: int(time.time()))
         self._registered_source_boundary = RegisteredSourceBoundary(
-            registered_sources, controlled_objects
+            registered_sources,
+            controlled_objects,
+            absence_store_path=controlled_object_absence_store,
         )
         self._registered_runtime_configured = bool(
             registered_sources or controlled_objects
@@ -4818,9 +4821,22 @@ class ControlledScenarioService:
         visible_scopes = {principal.scope}
         if principal.scope.startswith(self._SESSION_SCOPE_PREFIX):
             visible_scopes.add("C-DEMO")
-        return (
+        if (
             principal.subject == str(authority.get("subject") or "")
             and str(authority.get("scope") or "") in visible_scopes
+        ):
+            return True
+        # Registered R-OBSERVED track: the exact admission-bound upstream
+        # actor (subject + source + scope all equal the admission authority)
+        # may cancel its own cycle.  This keeps L14 Terminated reachable for
+        # registered applications so governed deletion (S16) can complete
+        # across the S02 object owner; no other identity gains cancel power.
+        return bool(
+            self.is_registered_scope(principal.scope)
+            and principal.subject == str(authority.get("subject") or "")
+            and principal.scope == str(authority.get("scope") or "")
+            and admission_source
+            and principal.source_id == admission_source
         )
 
     @classmethod
@@ -27925,6 +27941,614 @@ class ControlledScenarioService:
                 raise RuntimeError("cohort stop audit projection is invalid")
             cohort_stop = copy.deepcopy(authority)
         self._store.cohort_stop = cohort_stop
+
+    # ------------------------------------------------------------------
+    # S16 governed-deletion seam (Ticket #32).
+    #
+    # The S16 orchestrator owns an independent ledger and calls these
+    # narrow methods; the service never writes S16 tables and the
+    # orchestrator never writes S01 tables directly.  Everything crossing
+    # this seam is value-free: fingerprints and digests only.
+    # ------------------------------------------------------------------
+
+    @property
+    def registered_source_boundary(self) -> Any:
+        """The live registered-source boundary (S02 owner seam)."""
+        return self._registered_source_boundary
+
+    def _s16_scope_fingerprint(self, application_id: str) -> str:
+        from task4_consistency.controlled.s16 import scope_fingerprint_for
+
+        return scope_fingerprint_for(application_id)
+
+    def s16_resolve_application(
+        self, *, upstream_application_reference: str, scope: str
+    ) -> str | None:
+        """Resolve exactly one application by its business reference within
+        the caller's governed scope, or ``None`` (existence-hiding)."""
+        if (
+            not isinstance(upstream_application_reference, str)
+            or not upstream_application_reference
+        ):
+            return None
+        if not isinstance(scope, str) or not scope:
+            return None
+        with self._lock:
+            self._reload_store()
+            matches: list[str] = []
+            for application_id, app in self._store.applications.items():
+                if (
+                    app.get("upstream_application_reference")
+                    != upstream_application_reference
+                ):
+                    continue
+                try:
+                    visibility = self._application_visibility_scope(application_id)
+                except _ApplicationStateAuthorityUnavailable:
+                    continue
+                if visibility == scope or (
+                    scope == "C-DEMO" and visibility.startswith("C-DEMO/")
+                ):
+                    matches.append(application_id)
+            if len(matches) != 1:
+                return None
+            return matches[0]
+
+    def s16_resolve_by_scope_fingerprint(self, scope_fingerprint: str) -> str | None:
+        """Resolve a live application by its value-free scope fingerprint,
+        or ``None`` when absent (deleted or unknown)."""
+        with self._lock:
+            self._reload_store()
+            for application_id in self._store.applications:
+                try:
+                    if (
+                        self._s16_scope_fingerprint(application_id)
+                        == scope_fingerprint
+                    ):
+                        return application_id
+                except _ApplicationStateAuthorityUnavailable:
+                    continue
+            return None
+
+    def s16_application_ids(self) -> list[str]:
+        with self._lock:
+            self._reload_store()
+            return list(self._store.applications)
+
+    def s16_application_visibility_scope(self, application_id: str) -> str:
+        with self._lock:
+            self._reload_store()
+            return self._application_visibility_scope(application_id)
+
+    def s16_application_terminated_at(self, application_id: str) -> int | None:
+        with self._lock:
+            self._reload_store()
+            times = [
+                int(event["event_time"])
+                for event in self._store.audit_events
+                if event.get("action") == "s14_cycle_terminated"
+                and event.get("application_id") == application_id
+                and isinstance(event.get("event_time"), int)
+                and not isinstance(event.get("event_time"), bool)
+            ]
+            return max(times) if times else None
+
+    def s16_is_terminated(self, application_id: str) -> bool:
+        with self._lock:
+            self._reload_store()
+            app = self._store.applications.get(application_id)
+            return isinstance(app, dict) and app.get("phase") == "Terminated"
+
+    def s16_is_terminated_by_fingerprint(self, scope_fingerprint: str) -> bool:
+        application_id = self.s16_resolve_by_scope_fingerprint(scope_fingerprint)
+        if application_id is None:
+            return False
+        return self.s16_is_terminated(application_id)
+
+    def s16_store_revision(self) -> int:
+        with self._lock:
+            self._reload_store()
+            return int(self._store._store_revision)
+
+    def s16_owner_healthy(self) -> bool:
+        try:
+            with self._lock:
+                self._reload_store()
+            return bool(self.audit_available and self.storage_available)
+        except Exception:
+            return False
+
+    def s16_tombstone_verified(self, scope_fingerprint: str) -> bool:
+        with self._lock:
+            self._reload_store()
+            return any(
+                item.get("schema_version") == "s16-tombstone/1"
+                and item.get("scope_fingerprint") == scope_fingerprint
+                for item in self._store.s16_governed_deletions
+            )
+
+    def s16_referenced_object_digests(self, application_id: str) -> frozenset[str]:
+        """Content digests this application references on the registered
+        source object owner (for S02 shared-copy detection)."""
+        digests: set[str] = set()
+
+        def _collect(value: Any) -> None:
+            if not isinstance(value, (str, dict, list)):
+                if hasattr(value, "__dict__"):
+                    value = vars(value)
+                else:
+                    return
+            if isinstance(value, str):
+                candidate = value
+                if candidate.startswith("c-demo-object:sha256:"):
+                    candidate = candidate.split(":", 2)[-1]
+                if (
+                    len(candidate) == 64
+                    and all(
+                        character in "0123456789abcdef" for character in candidate
+                    )
+                ):
+                    digests.add(candidate)
+                return
+            if isinstance(value, dict):
+                for key in (
+                    "source_object_ref",
+                    "object_ref",
+                    "content_sha256",
+                    "source_sha256",
+                    "sha256",
+                ):
+                    if key in value:
+                        _collect(value[key])
+                for nested in value.values():
+                    if isinstance(nested, (dict, list)):
+                        _collect(nested)
+                return
+            if isinstance(value, list):
+                for item in value:
+                    _collect(item)
+
+        with self._lock:
+            self._reload_store()
+            for receipt in self._store.receipts.values():
+                receipt_app = (
+                    receipt.get("application_id")
+                    if isinstance(receipt, dict)
+                    else getattr(receipt, "application_id", None)
+                )
+                if receipt_app == application_id:
+                    _collect(receipt)
+            for event in self._store.evidence_events:
+                if event.get("application_id") == application_id:
+                    _collect(event)
+            app = self._store.applications.get(application_id)
+            if isinstance(app, dict):
+                _collect(app.get("envelope"))
+        return frozenset(digests)
+
+    def s16_inventory(self, application_id: str) -> dict[str, Any]:
+        """Value-free per-class copy inventory for one application."""
+        with self._lock:
+            self._reload_store()
+            store = self._store
+            if application_id not in store.applications:
+                raise QueryNotFound(application_id)
+            scope = self._application_visibility_scope(application_id)
+            terminated_at = self.s16_application_terminated_at(application_id)
+
+            def _row_digest(values: list[Any]) -> str:
+                return hashlib.sha256(
+                    json.dumps(
+                        sorted(str(value) for value in values),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+
+            receipts = [
+                receipt_id
+                for receipt_id, payload in store.receipts.items()
+                if (
+                    payload.get("application_id")
+                    if isinstance(payload, dict)
+                    else getattr(payload, "application_id", None)
+                )
+                == application_id
+            ]
+            evidence = [
+                event["event_id"]
+                for event in store.evidence_events
+                if event.get("application_id") == application_id
+            ]
+            jobs = [
+                job["job_id"]
+                for job in store.jobs
+                if job.get("application_id") == application_id
+            ]
+            runs = [
+                run["run_record_id"]
+                for run in store.runs
+                if run.get("application_id") == application_id
+            ]
+            findings = [
+                finding["finding_id"]
+                for finding in store.findings
+                if finding.get("application_id") == application_id
+            ]
+            attempts = [
+                attempt["attempt_id"]
+                for attempt in store.attempts
+                if attempt.get("application_id") == application_id
+            ]
+            work_items = [
+                item["work_item_id"]
+                for item in store.work_items
+                if item.get("application_id") == application_id
+            ]
+            review_records = [
+                record["record_id"]
+                for record in store.review_records
+                if record.get("application_id") == application_id
+            ]
+            recovery_events = [
+                event["event_id"]
+                for event in store.recovery_events
+                if event.get("application_id") == application_id
+            ]
+            inbox = [
+                message["message_id"]
+                for message in store.inbox
+                if message.get("application_id") == application_id
+            ]
+            outbox = [
+                event["event_id"]
+                for event in store.outbox
+                if event.get("application_id") == application_id
+            ]
+            projections = [
+                projection_id
+                for projection_id in store.projections
+                if projection_id == application_id
+            ]
+            # Application-scoped idempotency bindings: every binding whose
+            # sealed result names this application (admission, cancel,
+            # settle, review outcomes all carry the application id).  The
+            # bindings are deleted together with the aggregate; the caller
+            # idempotency key itself is never stored in any S16 record.
+            idempotency_scopes = {
+                str(binding_key)
+                for binding_key, (_fingerprint, result) in store.idempotency.items()
+                if application_id
+                in json.dumps(
+                    result,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=lambda value: (
+                        value.__dict__
+                        if hasattr(value, "__dict__")
+                        else str(value)
+                    ),
+                )
+            }
+            sessions = [
+                token_digest
+                for token_digest, principal in store.sessions.items()
+                if principal.get("scope") == scope
+            ]
+            demo_sessions = [
+                item["demo_session_id"]
+                for item in store.demo_sessions
+                if item.get("scope") == scope
+            ]
+            other_apps_share_scope = any(
+                candidate_id != application_id
+                and self._application_visibility_scope(candidate_id) == scope
+                for candidate_id in store.applications
+            )
+            projection_shared = bool(
+                other_apps_share_scope and (sessions or demo_sessions)
+            )
+
+            def _entry(values: list[Any], *, shared: bool = False) -> dict[str, Any]:
+                return {
+                    "count": len(values),
+                    "content_sha256": _row_digest(values),
+                    "shared_state": "shared" if shared else "exclusive",
+                }
+
+            classes = {
+                "source_object": _entry([application_id, *receipts]),
+                "evidence": _entry(evidence),
+                "run_or_finding": _entry([*jobs, *attempts, *runs, *findings]),
+                "projection_or_cache": _entry(
+                    [
+                        *projections,
+                        *work_items,
+                        *review_records,
+                        *recovery_events,
+                        *inbox,
+                        *outbox,
+                        *sessions,
+                        *demo_sessions,
+                        *idempotency_scopes,
+                    ],
+                    shared=projection_shared,
+                ),
+            }
+            retained_scan = self._s16_retained_history_scan(
+                store, application_id
+            )
+            return {
+                "schema_version": "s16-s01-inventory/1",
+                "scope_fingerprint": self._s16_scope_fingerprint(application_id),
+                "terminated": self.s16_is_terminated(application_id),
+                "terminated_at": terminated_at,
+                "store_revision": int(store._store_revision),
+                "classes": classes,
+                "retained_scan": retained_scan,
+            }
+
+    def _s16_retained_history_scan(
+        self, store: _TargetStore, application_id: str
+    ) -> dict[str, Any]:
+        """Sensitive-field scan of the rows S16 retains (Lifecycle terminal
+        history, the minimized system audit, delivery accountability).  Any
+        raw value, recoverable locator, credential or caller key keeps the
+        commit closed."""
+        forbidden_fields = frozenset(
+            {
+                "raw",
+                "normalized",
+                "ocr_text",
+                "ocr",
+                "bbox",
+                "value",
+                "content",
+                "free_text",
+                "path",
+                "url",
+                "credential",
+                "token",
+                "secret",
+                "password",
+            }
+        )
+
+        def _violates(value: Any) -> bool:
+            if isinstance(value, str):
+                return bool(value.strip())
+            if isinstance(value, dict):
+                return any(
+                    key in forbidden_fields and _violates(nested)
+                    for key, nested in value.items()
+                )
+            if isinstance(value, list):
+                return any(_violates(item) for item in value)
+            return False
+
+        retained: list[dict[str, Any]] = [
+            event
+            for event in store.lifecycle_events
+            if event.get("application_id") == application_id
+        ]
+        retained.extend(
+            event
+            for event in store.audit_events
+            if event.get("application_id") == application_id
+            and event.get("action")
+            in {"controlled_cohort_stop", "runtime_recovery"}
+        )
+        retained.extend(
+            item
+            for item in store.delivery_obligations
+            if item.get("application_id") == application_id
+        )
+        violations = [
+            (index, key)
+            for index, row in enumerate(retained)
+            for key in sorted(row)
+            if key in forbidden_fields and _violates(row[key])
+        ]
+        clean = not violations
+        return {
+            "clean": clean,
+            "digest": hashlib.sha256(
+                json.dumps(
+                    {"schema_version": "s16-retained-scan/1", "clean": clean},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+        }
+
+    def s16_build_deletion_plan(
+        self, store: _TargetStore, application_id: str
+    ) -> dict[str, set[str]]:
+        """The S16 structured-content deletion plan: restricted rows only.
+        Lifecycle terminal history, minimized system audit, delivery
+        accountability and S16 facts are retained."""
+        if application_id not in store.applications:
+            raise QueryNotFound(application_id)
+        scope = self._application_visibility_scope(application_id)
+        scoped_audit = [
+            event
+            for event in store.audit_events
+            if event.get("application_id") == application_id
+        ]
+        plan: dict[str, set[str]] = {
+            "applications": {application_id},
+            "receipts": {
+                str(receipt_id)
+                for receipt_id, payload in store.receipts.items()
+                if (
+                    payload.get("application_id")
+                    if isinstance(payload, dict)
+                    else getattr(payload, "application_id", None)
+                )
+                == application_id
+            },
+            "evidence_events": {
+                str(event["event_id"])
+                for event in store.evidence_events
+                if event.get("application_id") == application_id
+            },
+            "audit_events": {
+                str(event["event_id"])
+                for event in scoped_audit
+                if event.get("action")
+                not in {"controlled_cohort_stop", "runtime_recovery"}
+            },
+            "jobs": {
+                str(job["job_id"])
+                for job in store.jobs
+                if job.get("application_id") == application_id
+            },
+            "idempotency": {
+                str(binding_key)
+                for binding_key, (_fingerprint, result) in store.idempotency.items()
+                if application_id
+                in json.dumps(
+                    result,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=lambda value: (
+                        value.__dict__
+                        if hasattr(value, "__dict__")
+                        else str(value)
+                    ),
+                )
+            },
+            "attempts": {
+                str(attempt["attempt_id"])
+                for attempt in store.attempts
+                if attempt.get("application_id") == application_id
+            },
+            "runs": {
+                str(run["run_record_id"])
+                for run in store.runs
+                if run.get("application_id") == application_id
+            },
+            "findings": {
+                str(finding["finding_id"])
+                for finding in store.findings
+                if finding.get("application_id") == application_id
+            },
+            "work_items": {
+                str(item["work_item_id"])
+                for item in store.work_items
+                if item.get("application_id") == application_id
+            },
+            "review_records": {
+                str(record["record_id"])
+                for record in store.review_records
+                if record.get("application_id") == application_id
+            },
+            "recovery_events": {
+                str(event["event_id"])
+                for event in store.recovery_events
+                if event.get("application_id") == application_id
+            },
+            "inbox": {
+                str(message["message_id"])
+                for message in store.inbox
+                if message.get("application_id") == application_id
+            },
+            "outbox": {
+                str(event["event_id"])
+                for event in store.outbox
+                if event.get("application_id") == application_id
+            },
+            "projections": {application_id}.intersection(store.projections),
+            "sessions": {
+                token_digest
+                for token_digest, principal in store.sessions.items()
+                if principal.get("scope") == scope
+            },
+            "demo_sessions": {
+                str(item["demo_session_id"])
+                for item in store.demo_sessions
+                if item.get("scope") == scope
+            },
+        }
+        return plan
+
+    def s16_apply_deletion(
+        self,
+        application_id: str,
+        receipt: dict[str, Any],
+        *,
+        operation_id: str,
+        fence: int,
+        scope_fingerprint: str,
+    ) -> dict[str, Any]:
+        """Delete the S16 structured content and write the value-free
+        tombstone in one SQLite transaction (ADR-0003)."""
+        with self._lock:
+            self._reload_store()
+            if application_id not in self._store.applications:
+                if self.s16_tombstone_verified(scope_fingerprint):
+                    return {"deleted_counts": {}, "already_absent": True}
+                raise RuntimeError("S16 deletion target is unavailable")
+            staged = copy.deepcopy(self._store)
+            plan = self.s16_build_deletion_plan(staged, application_id)
+            if not any(plan.values()):
+                return {"deleted_counts": {}, "already_absent": True}
+            deleted_counts = {
+                table: len(item_ids) for table, item_ids in sorted(plan.items())
+            }
+            sealed = {
+                **receipt,
+                "deleted_counts": deleted_counts,
+                "deleted_identity_digest": hashlib.sha256(
+                    json.dumps(
+                        {
+                            table: sorted(item_ids)
+                            for table, item_ids in sorted(plan.items())
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+                **self._audit_time_fields(
+                    staged,
+                    now=float(receipt.get("deleted_at") or self._clock()),
+                ),
+            }
+            tombstone = {
+                "schema_version": "s16-tombstone/1",
+                "scope_fingerprint": scope_fingerprint,
+                "application_id_fingerprint": hashlib.sha256(
+                    application_id.encode("utf-8")
+                ).hexdigest(),
+                "operation_id": operation_id,
+                "fence": int(fence),
+                "deleted_at": int(receipt.get("deleted_at") or self._clock()),
+            }
+            try:
+                staged.governed_delete(plan, sealed, tombstone=tombstone)
+            except StaleStoreRevision as error:
+                raise RuntimeError(
+                    "S16 S01 deletion raced a store revision"
+                ) from error
+            self._store = staged
+            self._hydrate_admission_results()
+            self._restore_cohort_stop_authority()
+            return {"deleted_counts": deleted_counts}
+
+    def s16_verify_absent(self, scope_fingerprint: str) -> dict[str, Any]:
+        """Absence proof: the tombstone was written in the same transaction
+        as the deletion, and no live application resolves to this scope."""
+        with self._lock:
+            self._reload_store()
+            live = self.s16_resolve_by_scope_fingerprint(scope_fingerprint)
+            tombstoned = self.s16_tombstone_verified(scope_fingerprint)
+            return {
+                "absent": bool(tombstoned and live is None),
+                "tombstoned": bool(tombstoned),
+                "live": live is not None,
+            }
 
 
 class ControlledScenarioTestDriver:

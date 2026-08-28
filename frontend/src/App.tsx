@@ -16,6 +16,7 @@ import T16LifecyclePanel, {
   T16SettlementPanel,
 } from "./components/T16LifecyclePanel";
 import T15DeliveryPanel from "./components/T15DeliveryPanel";
+import S16GovernedDeletionPanel from "./components/S16GovernedDeletionPanel";
 
 function readParam(name: string): string | null {
   return new URLSearchParams(window.location.search).get(name);
@@ -52,6 +53,14 @@ function isS12Shell(): boolean {
 
 function isS13Shell(): boolean {
   return window.location.pathname.startsWith("/controlled/s13");
+}
+
+/** The S16 governed-deletion console mounted only for the canonical route
+ * and its alias: a data-governance boundary whose panel runs the complete
+ * dry-run -> approvals -> commit -> worker -> receipt flow. */
+function isS16Shell(): boolean {
+  const pathname = window.location.pathname;
+  return pathname === "/controlled/s16" || pathname === "/controlled/s16/react";
 }
 
 /** The T16 lifecycle cancellation workbench mounted only for the S14
@@ -322,6 +331,29 @@ function SettlementConsoleShell() {
   );
 }
 
+/** The S16 governed-deletion shell: the ``application`` query value is
+ * presentation/navigation state only; every preflight/approve/commit/repair
+ * command stays guarded by the registered governance/approver identities.
+ * No S01/S02/S05/S08/S09/S12/S13/S14 read can fire here. */
+function GovernedDeletionShell() {
+  return (
+    <div className="mx-auto max-w-4xl px-4 py-6">
+      <header className="app-header">
+        <h1>合规删除工作台</h1>
+        <span className="boundary track" data-testid="s16-boundary-track">
+          S16
+        </span>
+        <span className="boundary" data-testid="s16-boundary-gate">
+          S16
+        </span>
+      </header>
+      <main>
+        <S16GovernedDeletionPanel />
+      </main>
+    </div>
+  );
+}
+
 /** The Reviewer workbench owns every S01 read; it is never mounted on the
  * Integrator shell, so no S01 query can fire there. */
 function ReviewerWorkbench() {
@@ -401,6 +433,9 @@ export default function App() {
   }
   if (isS13Shell()) {
     return <DeliveryConsoleShell />;
+  }
+  if (isS16Shell()) {
+    return <GovernedDeletionShell />;
   }
   if (isS14SettlementShell()) {
     return <SettlementConsoleShell />;

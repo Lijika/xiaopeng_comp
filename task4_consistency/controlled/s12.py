@@ -42,6 +42,7 @@ from task4_consistency.controlled.s01 import (
 )
 from task4_consistency.controlled.s01_checker import TargetRelease
 from task4_consistency.controlled.s01_store import StaleStoreRevision
+from task4_consistency.controlled.s16 import scope_fingerprint_for
 from task4_consistency.controlled.s08 import (
     GovernedReleaseNotFound,
     PolicyUnavailable,
@@ -449,6 +450,38 @@ class _EvalStore:
                     if table == "s12_bundles":
                         _verify_bundle_content_address(item_id, value)
                     target[item_id] = value
+
+    def delete_rows_transaction(
+        self, table: str, item_ids: Iterable[str]
+    ) -> int:
+        """Row-scoped deletion used by the S16 governed-deletion owner: only
+        the named rows are removed, in one write transaction, with their
+        integrity rows.  Unknown tables fail closed."""
+        if table not in _EVAL_TABLES:
+            raise ValueError(f"S16 S12 deletion table is unknown: {table}")
+        ids = sorted(set(str(item_id) for item_id in item_ids))
+        if not ids:
+            return 0
+        self._ensure_schema()
+        with contextlib.closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            persisted = {
+                str(row[0])
+                for row in connection.execute(
+                    f"SELECT item_id FROM {table}"
+                ).fetchall()
+            }
+            missing = set(ids).difference(persisted)
+            if missing:
+                raise RuntimeError(
+                    f"S16 S12 deletion authority changed for {table}"
+                )
+            connection.executemany(
+                f"DELETE FROM {table} WHERE item_id = ?",
+                ((item_id,) for item_id in ids),
+            )
+            connection.commit()
+        return len(ids)
 
     def reload(self) -> None:
         self.plans.clear()
@@ -2497,6 +2530,228 @@ class EvaluationService:
                 raise ValueError(f"bundle {bundle_id} does not exist")
             self._verify_replay_bundle(bundle_id, bundle)
             return bundle
+
+    # ------------------------------------------------------------------
+    # S16 governed-deletion seam (Ticket #32).
+    #
+    # The S16 orchestrator owns an independent ledger; these narrow
+    # methods enumerate, delete, verify and replay evaluation rows by
+    # value-free scope fingerprint only.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _s16_application_fingerprint(application_id: str) -> str:
+        return scope_fingerprint_for(application_id)
+
+    @staticmethod
+    def _s16_plan_referenced_scopes(plan: dict[str, Any]) -> frozenset[str]:
+        """Scope fingerprints (s16 application-scope form) referenced by one
+        frozen plan: opportunities, evidence references and cluster
+        membership."""
+        referenced: set[str] = set()
+
+        def _add(application_id: Any) -> None:
+            if isinstance(application_id, str) and application_id:
+                referenced.add(
+                    EvaluationService._s16_application_fingerprint(application_id)
+                )
+
+        for opportunity in plan.get("opportunities") or []:
+            if isinstance(opportunity, dict):
+                _add(opportunity.get("application_id"))
+        for reference in plan.get("evidence_references") or []:
+            if isinstance(reference, dict):
+                _add(reference.get("application_id"))
+        for cluster in plan.get("clusters") or []:
+            if isinstance(cluster, dict):
+                for application_id in cluster.get("applications") or []:
+                    _add(application_id)
+        return frozenset(referenced)
+
+    def _s16_plan_row(self, row_type: str, row_id: str, row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "row_type": row_type,
+            "row_id": row_id,
+            "content_sha256": content_digest(row),
+        }
+
+    def s16_enumerate_all_rows(
+        self,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Every evaluation row with its value-free content digest, plans
+        annotated with their referenced scope fingerprints."""
+        with self._lock:
+            self._store.reload()
+            plans = [
+                {
+                    **self._s16_plan_row("plan", plan_id, plan),
+                    "referenced_scopes": sorted(
+                        self._s16_plan_referenced_scopes(plan)
+                    ),
+                }
+                for plan_id, plan in self._store.plans.items()
+            ]
+            plan_ids = set(self._store.plans)
+            jobs = [
+                self._s16_plan_row("job", job_id, job)
+                for job_id, job in self._store.jobs.items()
+            ]
+            bundles = [
+                self._s16_plan_row("bundle", bundle_id, bundle)
+                for bundle_id, bundle in self._store.bundles.items()
+            ]
+            return {"plans": plans, "jobs": jobs, "bundles": bundles}
+
+    def s16_enumerate_scope(
+        self, scope_fingerprint: str
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Evaluation rows referencing the target application scope, with
+        shared-state detection (a plan covering more than one application is
+        a shared copy that must be repacked or wholly disposed)."""
+        rows = self.s16_enumerate_all_rows()
+        matched_plans = [
+            plan for plan in rows["plans"] if scope_fingerprint in plan["referenced_scopes"]
+        ]
+        matched_plan_ids = {plan["row_id"] for plan in matched_plans}
+        plans = []
+        for plan in matched_plans:
+            shared = len(plan["referenced_scopes"]) > 1
+            plans.append(
+                {
+                    "row_type": "plan",
+                    "row_id": plan["row_id"],
+                    "content_sha256": plan["content_sha256"],
+                    "shared_state": "shared" if shared else "exclusive",
+                }
+            )
+        jobs = []
+        for job in rows["jobs"]:
+            job_row = self._store.jobs.get(str(job["row_id"]))
+            if job_row is None:
+                continue
+            if str(job_row.get("plan_id") or "") in matched_plan_ids:
+                jobs.append({**job, "shared_state": "exclusive"})
+        bundles = []
+        for bundle in rows["bundles"]:
+            bundle_row = self._store.bundles.get(str(bundle["row_id"]))
+            if bundle_row is None:
+                continue
+            replay = bundle_row.get("replay_package") or {}
+            plan = replay.get("plan") or {} if isinstance(replay, dict) else {}
+            if str(plan.get("plan_id") or "") in matched_plan_ids:
+                bundles.append({**bundle, "shared_state": "exclusive"})
+        return {"plans": plans, "jobs": jobs, "bundles": bundles}
+
+    def _s16_rows_by_fingerprint(
+        self,
+        fingerprints: set[str],
+    ) -> dict[str, list[str]]:
+        from task4_consistency.controlled.s16 import (
+            COPY_CLASS_EVALUATION_COPY,
+            copy_identity_fingerprint,
+        )
+
+        rows = self.s16_enumerate_all_rows()
+        matched: dict[str, list[str]] = {}
+        for row in [*rows["plans"], *rows["jobs"], *rows["bundles"]]:
+            fingerprint = copy_identity_fingerprint(
+                "s12", COPY_CLASS_EVALUATION_COPY, str(row["content_sha256"])
+            )
+            if fingerprint in fingerprints:
+                matched.setdefault(str(row["row_type"]), []).append(
+                    str(row["row_id"])
+                )
+        return matched
+
+    def s16_delete_scope(self, fingerprints: Iterable[str]) -> dict[str, Any]:
+        """Delete the evaluation rows named by the copy fingerprints (and
+        their dependent attempts/predictions) in short transactions."""
+        target = set(fingerprints)
+        if not target:
+            return {"deleted_counts": {}, "already_absent": True}
+        with self._lock:
+            self._store.reload()
+            matched = self._s16_rows_by_fingerprint(target)
+            plan_ids = set(matched.get("plan", []))
+            job_ids = set(matched.get("job", []))
+            bundle_ids = set(matched.get("bundle", []))
+            # A shared plan can never be reached here: preflight marks it
+            # S16_SHARED_COPY_REQUIRES_REPACK and commit stays closed.
+            deleted_counts: dict[str, int] = {}
+            for table, ids in (
+                ("s12_bundles", bundle_ids),
+                ("s12_predictions", self._s12_prediction_ids(plan_ids)),
+                ("s12_attempts", self._s12_attempt_ids(job_ids)),
+                ("s12_jobs", job_ids),
+                ("s12_plans", plan_ids),
+            ):
+                if not ids:
+                    continue
+                deleted_counts[table] = self._store.delete_rows_transaction(
+                    table, ids
+                )
+            return {"deleted_counts": deleted_counts}
+
+    def _s12_attempt_ids(self, job_ids: set[str]) -> set[str]:
+        return {
+            attempt_id
+            for attempt_id, attempt in self._store.attempts.items()
+            if str(attempt.get("job_id") or "") in job_ids
+        }
+
+    def _s12_prediction_ids(self, plan_ids: set[str]) -> set[str]:
+        opportunity_ids: set[str] = set()
+        for plan_id in plan_ids:
+            plan = self._store.plans.get(plan_id)
+            if plan is None:
+                continue
+            for opportunity in plan.get("opportunities") or []:
+                if isinstance(opportunity, dict):
+                    opportunity_ids.add(str(opportunity.get("opportunity_id") or ""))
+        return {
+            prediction_id
+            for prediction_id, prediction in self._store.predictions.items()
+            if prediction_id in opportunity_ids
+        }
+
+    def s16_verify_absent(self, fingerprints: Iterable[str]) -> dict[str, Any]:
+        target = set(fingerprints)
+        with self._lock:
+            self._store.reload()
+            remaining = self._s16_rows_by_fingerprint(target)
+            absent = not any(remaining.values())
+            return {"absent": absent}
+
+    def s16_replay_scope(self, fingerprints: Iterable[str]) -> dict[str, Any]:
+        """Restore-time replay: idempotently re-delete the named rows (rows
+        already absent are a complete replay)."""
+        return self.s16_delete_scope(fingerprints)
+
+    def s16_store_revision(self) -> str:
+        """Value-free owner revision: digest of the sorted row identities."""
+        with self._lock:
+            self._store.reload()
+            identities: list[str] = []
+            for table in _EVAL_TABLES:
+                identities.extend(
+                    f"{table}:{item_id}"
+                    for item_id in self._store.__dict__[table.replace("s12_", "")]
+                )
+            return hashlib.sha256(
+                json.dumps(
+                    sorted(identities),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+
+    def s16_owner_healthy(self) -> bool:
+        try:
+            with self._lock:
+                self._store.reload()
+            return True
+        except Exception:
+            return False
 
     # -- durable worker -----------------------------------------------------
 
