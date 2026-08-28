@@ -5649,3 +5649,326 @@ def test_backup_worker_shared_source_tamper_repairs_forward(
     assert old_intent is not None and old_intent[0] == "superseded"
     assert active is not None and int(active[0]) == 2
     assert int(active[1]) == 1
+
+
+def test_backup_shared_source_rewrite_at_final_commit_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """R13 P1-1: rewriting shared source at before_final_commit keeps
+    refs/registry/binding unchanged."""
+    backup_root = tmp_path / "backups"
+    backup = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
+    scope_a = "a" * 64
+    scope_b = "b" * 64
+    saved = backup_root / "shared.bin"
+    payload = b"shared-final"
+    saved.write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    backup.capture(
+        scope_fingerprint=scope_a, copy_files=[("shared.bin", digest)]
+    )
+    backup.capture(
+        scope_fingerprint=scope_b, copy_files=[("shared.bin", digest)]
+    )
+    fingerprint_a = _replica_fingerprint(backup, scope_a)
+    before = _backup_bookkeeping(backup)
+
+    def hook(point: str) -> None:
+        if point == "before_final_commit":
+            saved.write_bytes(b"shared-final-tampered")
+
+    backup._crash_hook = hook
+    with pytest.raises(S16OwnerFailure) as excinfo:
+        backup.delete(
+            {fingerprint_a},
+            scope_fingerprint=scope_a,
+            operation_id="op-final-rewrite",
+            fence=1,
+        )
+    backup._crash_hook = None
+    assert excinfo.value.reason_code == S16_VERIFY_FAILED
+    after = _backup_bookkeeping(backup)
+    assert after["registry"] == before["registry"]
+    assert after["refs"] == before["refs"]
+    assert after["bindings"] == []
+    with backup._registry_connect() as connection:
+        intent = connection.execute(
+            "SELECT status, source_fence FROM backup_deletion_intents "
+            "WHERE operation_id = ? AND fence = ?",
+            ("op-final-rewrite", 1),
+        ).fetchone()
+    assert intent is not None and intent[0] == "transitioned"
+    assert int(intent[1]) == 1
+    saved.write_bytes(payload)
+    result = backup.delete(
+        {fingerprint_a},
+        scope_fingerprint=scope_a,
+        operation_id="op-final-rewrite",
+        fence=1,
+    )
+    assert result["status"] == "complete", result
+    _assert_locator_free(result, backup_root, "shared.bin")
+    assert saved.exists()
+    with backup._registry_connect() as connection:
+        refs_a = connection.execute(
+            "SELECT COUNT(*) FROM backup_registry_refs "
+            "WHERE scope_fingerprint = ?",
+            (scope_a,),
+        ).fetchone()[0]
+        refs_b = connection.execute(
+            "SELECT COUNT(*) FROM backup_registry_refs "
+            "WHERE scope_fingerprint = ?",
+            (scope_b,),
+        ).fetchone()[0]
+    assert refs_a == 0
+    assert refs_b == 1
+    saved.write_bytes(b"shared-final-tampered")
+    with pytest.raises(S16OwnerFailure) as replay_exc:
+        backup.delete(
+            {fingerprint_a},
+            scope_fingerprint=scope_a,
+            operation_id="op-final-rewrite",
+            fence=1,
+        )
+    assert replay_exc.value.reason_code == S16_VERIFY_FAILED
+    saved.write_bytes(payload)
+    replay = backup.delete(
+        {fingerprint_a},
+        scope_fingerprint=scope_a,
+        operation_id="op-final-rewrite",
+        fence=1,
+    )
+    assert replay["status"] == "complete"
+    assert replay.get("already_absent") is True
+
+
+def test_backup_shared_source_unlink_at_final_commit_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """R13 P1-1: unlinking shared source at before_final_commit is
+    fail-closed with zero binding/ref change."""
+    backup_root = tmp_path / "backups"
+    backup = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
+    scope_a = "c" * 64
+    scope_b = "d" * 64
+    saved = backup_root / "shared.bin"
+    payload = b"shared-unlink-final"
+    saved.write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    backup.capture(
+        scope_fingerprint=scope_a, copy_files=[("shared.bin", digest)]
+    )
+    backup.capture(
+        scope_fingerprint=scope_b, copy_files=[("shared.bin", digest)]
+    )
+    fingerprint_a = _replica_fingerprint(backup, scope_a)
+    before = _backup_bookkeeping(backup)
+
+    def hook(point: str) -> None:
+        if point == "before_final_commit":
+            saved.unlink()
+
+    backup._crash_hook = hook
+    with pytest.raises(S16OwnerFailure) as excinfo:
+        backup.delete(
+            {fingerprint_a},
+            scope_fingerprint=scope_a,
+            operation_id="op-final-unlink",
+            fence=1,
+        )
+    backup._crash_hook = None
+    assert excinfo.value.reason_code == S16_VERIFY_FAILED
+    after = _backup_bookkeeping(backup)
+    assert after["registry"] == before["registry"]
+    assert after["refs"] == before["refs"]
+    assert after["bindings"] == []
+    saved.write_bytes(payload)
+    result = backup.delete(
+        {fingerprint_a},
+        scope_fingerprint=scope_a,
+        operation_id="op-final-unlink",
+        fence=1,
+    )
+    assert result["status"] == "complete", result
+    assert saved.exists()
+
+
+def test_backup_shared_source_read_oserror_at_final_commit_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """R13 P1-1: OSError hashing shared source at before_final_commit
+    does not write a complete binding."""
+    backup_root = tmp_path / "backups"
+    backup = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
+    scope_a = "e" * 64
+    scope_b = "f" * 64
+    saved = backup_root / "shared.bin"
+    payload = b"shared-oserror-final"
+    saved.write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    backup.capture(
+        scope_fingerprint=scope_a, copy_files=[("shared.bin", digest)]
+    )
+    backup.capture(
+        scope_fingerprint=scope_b, copy_files=[("shared.bin", digest)]
+    )
+    fingerprint_a = _replica_fingerprint(backup, scope_a)
+    before = _backup_bookkeeping(backup)
+    real_read = Path.read_bytes
+
+    def wrapped(self: Path) -> bytes:
+        if self.name == "shared.bin":
+            raise OSError("injected final shared read")
+        return real_read(self)
+
+    def hook(point: str) -> None:
+        if point == "before_final_commit":
+            Path.read_bytes = wrapped  # type: ignore[method-assign]
+
+    backup._crash_hook = hook
+    try:
+        with pytest.raises(S16OwnerFailure) as excinfo:
+            backup.delete(
+                {fingerprint_a},
+                scope_fingerprint=scope_a,
+                operation_id="op-final-oserror",
+                fence=1,
+            )
+    finally:
+        backup._crash_hook = None
+        Path.read_bytes = real_read  # type: ignore[method-assign]
+    assert excinfo.value.reason_code == S16_VERIFY_FAILED
+    after = _backup_bookkeeping(backup)
+    assert after["registry"] == before["registry"]
+    assert after["refs"] == before["refs"]
+    assert after["bindings"] == []
+    result = backup.delete(
+        {fingerprint_a},
+        scope_fingerprint=scope_a,
+        operation_id="op-final-oserror",
+        fence=1,
+    )
+    assert result["status"] == "complete", result
+
+
+def test_backup_worker_shared_source_tamper_at_final_commit(
+    tmp_path: Path,
+) -> None:
+    """R13 P2-S1: process_next_deletion_job fails at before_final_commit
+    shared rewrite; fence-2 takeover completes after restore."""
+    import shutil
+
+    service, submission, application_id = _registered_terminated(tmp_path)
+    backup_root = tmp_path / "backups"
+    s16 = _s16_service(
+        tmp_path, service, backup_root=backup_root, governance_scope=TENANT_SCOPE
+    )
+    backup = s16._owners["backup"]
+    state_path = tmp_path / "target.sqlite3"
+    saved = backup_root / "target.sqlite3"
+    shutil.copy2(state_path, saved)
+    payload = saved.read_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    result = _preflight(
+        s16, str(submission["upstream_application_ref"]), scope=TENANT_SCOPE
+    )
+    scope_a = result["scope_fingerprint"]
+    scope_b = "b" * 64
+    backup.capture(
+        scope_fingerprint=scope_a, copy_files=[(saved.name, digest)]
+    )
+    result2 = s16.preflight(
+        application_reference=str(submission["upstream_application_ref"]),
+        principal=S01CommandPrincipal(
+            subject=GOVERNANCE.subject,
+            role="operator",
+            scope=TENANT_SCOPE,
+            source_id="s16-governance-console",
+        ),
+        idempotency_key="r13-final-preflight",
+    )
+    committed = s16.commit(
+        request_id=result2["request_id"],
+        principal=GOVERNANCE_REGISTERED,
+        idempotency_key="r13-final-commit",
+    )
+    assert committed["status"] == "accepted"
+    backup.capture(
+        scope_fingerprint=scope_b, copy_files=[(saved.name, digest)]
+    )
+
+    def hook(point: str) -> None:
+        if point == "before_final_commit":
+            saved.write_bytes(b"tampered-final-shared")
+
+    backup._crash_hook = hook
+    first = s16.process_next_deletion_job(worker_id="w1", now=_now() + 1)
+    backup._crash_hook = None
+    assert first["status"] == "pending", first
+    job = s16._job_for_request(result2["request_id"])
+    assert job is not None
+    job_id = str(job["job_id"])
+    with backup._registry_connect() as connection:
+        bindings = connection.execute(
+            "SELECT COUNT(*) FROM backup_deletion_bindings "
+            "WHERE operation_id = ?",
+            (job_id,),
+        ).fetchone()[0]
+        refs_a = connection.execute(
+            "SELECT COUNT(*) FROM backup_registry_refs "
+            "WHERE scope_fingerprint = ?",
+            (scope_a,),
+        ).fetchone()[0]
+        refs_b = connection.execute(
+            "SELECT COUNT(*) FROM backup_registry_refs "
+            "WHERE scope_fingerprint = ?",
+            (scope_b,),
+        ).fetchone()[0]
+        intent = connection.execute(
+            "SELECT status, source_fence FROM backup_deletion_intents "
+            "WHERE operation_id = ? AND fence = 1",
+            (job_id,),
+        ).fetchone()
+    assert bindings == 0
+    assert refs_a == 1
+    assert refs_b == 1
+    assert intent is not None and intent[0] == "transitioned"
+    assert int(intent[1]) == 1
+    assert first.get("owner_id") == "backup"
+    saved.write_bytes(payload)
+    second = s16.process_next_deletion_job(
+        worker_id="w2", now=_now() + 1 + LEASE_SECONDS + 1
+    )
+    assert second["status"] == "complete", second
+    receipt = s16.receipt(
+        request_id=result2["request_id"], principal=GOVERNANCE_REGISTERED
+    )
+    assert receipt["result"] == "deleted"
+    _assert_locator_free(receipt, backup_root, "target.sqlite3", ".s16_deletion")
+    with backup._registry_connect() as connection:
+        refs_a = connection.execute(
+            "SELECT COUNT(*) FROM backup_registry_refs "
+            "WHERE scope_fingerprint = ?",
+            (scope_a,),
+        ).fetchone()[0]
+        refs_b = connection.execute(
+            "SELECT COUNT(*) FROM backup_registry_refs "
+            "WHERE scope_fingerprint = ?",
+            (scope_b,),
+        ).fetchone()[0]
+        old_intent = connection.execute(
+            "SELECT status FROM backup_deletion_intents "
+            "WHERE operation_id = ? AND fence = 1",
+            (job_id,),
+        ).fetchone()
+        active = connection.execute(
+            "SELECT active_fence, source_fence FROM backup_operation_fences "
+            "WHERE operation_id = ?",
+            (job_id,),
+        ).fetchone()
+    assert refs_a == 0
+    assert refs_b == 1
+    assert old_intent is not None and old_intent[0] == "superseded"
+    assert active is not None and int(active[0]) == 2
+    assert int(active[1]) == 1
+    assert saved.exists()

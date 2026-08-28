@@ -2265,6 +2265,16 @@ class BackupDeletionOwner:
                             responsible_party="backup_operations_owner",
                             recovery_action="retry_backup_quarantine_purge",
                         )
+                    try:
+                        self._backup_reconciliation()
+                    except S16Unavailable:
+                        raise S16OwnerFailure(
+                            self.owner_id,
+                            S16_VERIFY_FAILED,
+                            retryable=True,
+                            responsible_party="backup_operations_owner",
+                            recovery_action="retry_backup_quarantine_purge",
+                        )
                     return {
                         "status": "complete",
                         "deleted_counts": {},
@@ -3059,6 +3069,7 @@ class BackupDeletionOwner:
             identities,
         )
         connection.execute("BEGIN IMMEDIATE")
+        self._run_crash_hook("before_final_commit")
         self._assert_converted_absence(
             connection,
             operation_id,
@@ -3106,7 +3117,6 @@ class BackupDeletionOwner:
                 int(self._clock()),
             ),
         )
-        self._run_crash_hook("before_final_commit")
         connection.execute("COMMIT")
         self._run_crash_hook("before_return")
         return {
@@ -5093,6 +5103,7 @@ class GovernedDeletionService:
                         fence=int(job.get("fence") or 0),
                     )
                 except S16OwnerFailure:
+                    owner_results.pop(owner_id, None)
                     raise
             return self._publish_success(
                 job, owner_results, worker, observed_now
