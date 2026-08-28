@@ -2761,10 +2761,8 @@ def test_pre_r2_job_schema_backfills_columns_and_records_migration_fact(
 def test_backup_delete_resumes_after_crash_between_unlink_and_commit(
     tmp_path: Path,
 ) -> None:
-    """R3 P1-14: a crash between file unlink and the registry commit
-    leaves a staged intent; the next attempt with the same operation
-    resumes, completes and proves absence — never a permanent verify
-    failure."""
+    """R9 P1-1 / P2-S1: crash after the production rename and before the
+    durable marker still repair-forwards on the same operation/fence."""
     backup_root = tmp_path / "backups"
     backup = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
     scope = "2" * 64
@@ -2774,66 +2772,55 @@ def test_backup_delete_resumes_after_crash_between_unlink_and_commit(
     backup.capture(
         scope_fingerprint=scope, copy_files=[("target.sqlite3", digest)]
     )
-    fingerprints = {"fp-crash"}
-    fingerprints_digest = backup._bindings_digest(fingerprints)
-    identity = backup._connector_identity("target.sqlite3", digest)
-    staged_manifest = backup._load_manifests()[0]
-    staged_manifest_id = str(staged_manifest["manifest_id"])
-    # Crash simulation: intent staged (with its fixed manifest set and
-    # per-manifest content snapshot), files already unlinked, registry
-    # rows and binding NOT committed.
-    with backup._registry_connect() as connection:
-        connection.execute("BEGIN IMMEDIATE")
-        connection.execute(
-            "INSERT INTO backup_deletion_intents("
-            "operation_id, fence, scope_fingerprint, fingerprints_digest, "
-            "status, staged_at, identities_json, manifest_ids_json, "
-            "manifests_json, unlinked_manifest_ids_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                "op-crash",
-                1,
-                scope,
-                fingerprints_digest,
-                "staged",
-                int(_now()),
-                json.dumps([identity], separators=(",", ":")),
-                json.dumps([staged_manifest_id], separators=(",", ":")),
-                json.dumps(
-                    [
-                        {
-                            "manifest_id": staged_manifest_id,
-                            "scope_fingerprint": str(
-                                staged_manifest.get("scope_fingerprint") or ""
-                            ),
-                            "entries_digest": str(
-                                staged_manifest.get("entries_digest") or ""
-                            ),
-                            "manifest_digest": hashlib.sha256(
-                                json.dumps(
-                                    staged_manifest,
-                                    ensure_ascii=False,
-                                    sort_keys=True,
-                                    separators=(",", ":"),
-                                ).encode("utf-8")
-                            ).hexdigest(),
-                            "identities": [
-                                str(e["connector_identity"])
-                                for e in staged_manifest["files"]
-                            ],
-                        }
-                    ],
-                    separators=(",", ":"),
-                ),
-                # R8 (P1-1): the crash marker — this pass unlinked the
-                # manifest path before the process died.
-                json.dumps([staged_manifest_id], separators=(",", ":")),
-            ),
+    fingerprints = {
+        entry.identity_fingerprint
+        for entry in backup.inventory(scope_fingerprint=scope)
+        if entry.copy_class == COPY_CLASS_REPLICA
+    }
+
+    class Crash(RuntimeError):
+        pass
+
+    def hook(point: str) -> None:
+        if point == "after_transition":
+            raise Crash(point)
+
+    backup._crash_hook = hook
+    with pytest.raises(Crash, match="after_transition"):
+        backup.delete(
+            fingerprints,
+            scope_fingerprint=scope,
+            operation_id="op-crash",
+            fence=1,
         )
-        connection.commit()
-    saved.unlink()
-    for manifest in backup._load_manifests():
-        backup._manifest_path(str(manifest["manifest_id"])).unlink()
+    backup._crash_hook = None
+    with backup._registry_connect() as connection:
+        marker = connection.execute(
+            "SELECT unlinked_manifest_ids_json, status "
+            "FROM backup_deletion_intents "
+            "WHERE operation_id = ? AND fence = ?",
+            ("op-crash", 1),
+        ).fetchone()
+        bindings = connection.execute(
+            "SELECT COUNT(*) FROM backup_deletion_bindings "
+            "WHERE operation_id = ?",
+            ("op-crash",),
+        ).fetchone()[0]
+        refs = connection.execute(
+            "SELECT COUNT(*) FROM backup_registry_refs"
+        ).fetchone()[0]
+        registry = connection.execute(
+            "SELECT COUNT(*) FROM backup_registry"
+        ).fetchone()[0]
+    assert marker is not None
+    assert json.loads(marker[0] or "[]") == []
+    assert marker[1] == "staged"
+    assert bindings == 0
+    assert refs == 1
+    assert registry == 1
+    assert backup._load_manifests() == []
+    assert list(backup._quarantine_root().iterdir())
+    assert not saved.exists()
 
     result = backup.delete(
         fingerprints,
@@ -2842,6 +2829,10 @@ def test_backup_delete_resumes_after_crash_between_unlink_and_commit(
         fence=1,
     )
     assert result["status"] == "complete", result
+    serialized = json.dumps(result)
+    assert str(backup_root) not in serialized
+    assert ".s16_deletion" not in serialized
+    assert "target.sqlite3" not in serialized
     assert backup.verify_absent(
         fingerprints, scope_fingerprint=scope
     )["status"] == "verified"
@@ -2862,6 +2853,15 @@ def test_backup_delete_resumes_after_crash_between_unlink_and_commit(
         ).fetchone()
     assert binding is not None and binding[0] == "complete"
     assert intent is not None and intent[0] == "committed"
+    replay = backup.delete(
+        fingerprints,
+        scope_fingerprint=scope,
+        operation_id="op-crash",
+        fence=1,
+    )
+    assert replay["status"] == "complete"
+    assert replay.get("already_absent") is True
+    assert not saved.exists()
 
 
 def test_non_callable_audit_writer_fails_closed_at_construction(
@@ -4507,3 +4507,509 @@ def test_backup_resume_rejects_mismatched_unlink_marker(
             ).fetchone()[0]
             == 0
         )
+
+
+# ---------------------------------------------------------------------------
+# R9 (P1-1 / P1-2 / P2-S1) regressions
+# ---------------------------------------------------------------------------
+
+
+class _BackupDeleteCrash(RuntimeError):
+    pass
+
+
+def _arm_backup_crash(backup: BackupDeletionOwner, point: str) -> None:
+    def hook(seen: str) -> None:
+        if seen == point:
+            raise _BackupDeleteCrash(seen)
+
+    backup._crash_hook = hook
+
+
+def _disarm_backup_crash(backup: BackupDeletionOwner) -> None:
+    backup._crash_hook = None
+
+
+def _backup_bookkeeping(backup: BackupDeletionOwner) -> dict[str, Any]:
+    with backup._registry_connect() as connection:
+        return {
+            "registry": connection.execute(
+                "SELECT connector_identity, handle, content_sha256 "
+                "FROM backup_registry ORDER BY 1"
+            ).fetchall(),
+            "refs": connection.execute(
+                "SELECT connector_identity, scope_fingerprint, manifest_id "
+                "FROM backup_registry_refs ORDER BY 1, 2, 3"
+            ).fetchall(),
+            "bindings": connection.execute(
+                "SELECT operation_id, fence, status "
+                "FROM backup_deletion_bindings ORDER BY 1, 2"
+            ).fetchall(),
+            "intents": connection.execute(
+                "SELECT operation_id, fence, status, "
+                "unlinked_manifest_ids_json FROM backup_deletion_intents "
+                "ORDER BY 1, 2"
+            ).fetchall(),
+        }
+
+
+def _replica_fingerprint(backup: BackupDeletionOwner, scope: str) -> str:
+    inv = backup.inventory(scope_fingerprint=scope)
+    replicas = [
+        entry.identity_fingerprint
+        for entry in inv
+        if entry.copy_class == COPY_CLASS_REPLICA
+    ]
+    assert replicas
+    return replicas[0]
+
+
+def _assert_locator_free(payload: Any, backup_root: Path, *names: str) -> None:
+    serialized = json.dumps(payload, default=str)
+    assert str(backup_root) not in serialized
+    assert ".s16_deletion" not in serialized
+    for name in names:
+        assert name not in serialized, name
+
+
+@pytest.mark.parametrize(
+    "point",
+    [
+        "before_transition",
+        "after_transition",
+        "before_marker_commit",
+        "before_final_commit",
+    ],
+)
+def test_backup_delete_repairs_forward_from_each_production_crash_point(
+    tmp_path: Path,
+    point: str,
+) -> None:
+    """R9 P1-1: each production crash boundary resumes with the same
+    operation/fence/pass and never repeats the exclusive deletion."""
+    backup_root = tmp_path / "backups"
+    backup = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
+    scope = "r" * 64
+    saved = backup_root / "crash.bin"
+    saved.write_bytes(b"crash-capture")
+    digest = hashlib.sha256(b"crash-capture").hexdigest()
+    backup.capture(
+        scope_fingerprint=scope, copy_files=[("crash.bin", digest)]
+    )
+    fingerprint = _replica_fingerprint(backup, scope)
+    _arm_backup_crash(backup, point)
+    with pytest.raises(_BackupDeleteCrash, match=point):
+        backup.delete(
+            {fingerprint},
+            scope_fingerprint=scope,
+            operation_id="op-points",
+            fence=1,
+        )
+    _disarm_backup_crash(backup)
+    result = backup.delete(
+        {fingerprint},
+        scope_fingerprint=scope,
+        operation_id="op-points",
+        fence=1,
+    )
+    assert result["status"] == "complete", result
+    _assert_locator_free(result, backup_root, "crash.bin")
+    assert not saved.exists()
+    assert backup._load_manifests() == []
+    replay = backup.delete(
+        {fingerprint},
+        scope_fingerprint=scope,
+        operation_id="op-points",
+        fence=1,
+    )
+    assert replay["status"] == "complete"
+    assert replay.get("already_absent") is True
+    assert replay.get("deleted_counts", {}).get("replica", 0) == 0
+    assert not saved.exists()
+    with backup._registry_connect() as connection:
+        binding = connection.execute(
+            "SELECT status FROM backup_deletion_bindings "
+            "WHERE operation_id = ? AND fence = ?",
+            ("op-points", 1),
+        ).fetchone()
+    assert binding is not None and binding[0] == "complete"
+
+
+def test_backup_resume_rejects_wrong_fence_quarantine(
+    tmp_path: Path,
+) -> None:
+    """R9 P1-1: a quarantine bound to a different fence never proves this
+    pass — fail closed with zero registry/ref/binding changes."""
+    backup_root = tmp_path / "backups"
+    backup = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
+    scope = "s" * 64
+    saved = backup_root / "fence.bin"
+    saved.write_bytes(b"fence-capture")
+    digest = hashlib.sha256(b"fence-capture").hexdigest()
+    backup.capture(
+        scope_fingerprint=scope, copy_files=[("fence.bin", digest)]
+    )
+    fingerprint = _replica_fingerprint(backup, scope)
+    staged_manifest = backup._load_manifests()[0]
+    identity = backup._connector_identity("fence.bin", digest)
+    snapshot = {
+        "manifest_id": str(staged_manifest["manifest_id"]),
+        "scope_fingerprint": scope,
+        "entries_digest": str(staged_manifest.get("entries_digest") or ""),
+        "manifest_digest": _digest(staged_manifest),
+        "identities": [identity],
+    }
+    staged_manifest_id, _ = _stage_backup_intent(
+        backup,
+        operation_id="op-fence",
+        scope=scope,
+        fingerprint=fingerprint,
+        staged_manifest=staged_manifest,
+        snapshot=snapshot,
+        unlinked_marker=[],
+    )
+    src = backup._manifest_path(staged_manifest_id)
+    wrong = backup._quarantine_manifest_path("op-fence", 2, staged_manifest_id)
+    wrong.parent.mkdir(parents=True, exist_ok=True)
+    src.rename(wrong)
+    before = _backup_bookkeeping(backup)
+    with pytest.raises(S16OwnerFailure) as excinfo:
+        backup.delete(
+            {fingerprint},
+            scope_fingerprint=scope,
+            operation_id="op-fence",
+            fence=1,
+        )
+    assert excinfo.value.reason_code == S16_VERIFY_FAILED
+    assert excinfo.value.retryable is False
+    assert saved.exists()
+    assert _backup_bookkeeping(backup) == before
+
+
+def test_backup_resume_rejects_wrong_operation_quarantine(
+    tmp_path: Path,
+) -> None:
+    """R9 P1-1: a quarantine bound to another operation_id is cross-pass
+    residue and fails closed with zero changes."""
+    backup_root = tmp_path / "backups"
+    backup = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
+    scope = "t" * 64
+    saved = backup_root / "op.bin"
+    saved.write_bytes(b"op-capture")
+    digest = hashlib.sha256(b"op-capture").hexdigest()
+    backup.capture(
+        scope_fingerprint=scope, copy_files=[("op.bin", digest)]
+    )
+    fingerprint = _replica_fingerprint(backup, scope)
+    staged_manifest = backup._load_manifests()[0]
+    identity = backup._connector_identity("op.bin", digest)
+    snapshot = {
+        "manifest_id": str(staged_manifest["manifest_id"]),
+        "scope_fingerprint": scope,
+        "entries_digest": str(staged_manifest.get("entries_digest") or ""),
+        "manifest_digest": _digest(staged_manifest),
+        "identities": [identity],
+    }
+    staged_manifest_id, _ = _stage_backup_intent(
+        backup,
+        operation_id="op-self",
+        scope=scope,
+        fingerprint=fingerprint,
+        staged_manifest=staged_manifest,
+        snapshot=snapshot,
+        unlinked_marker=[],
+    )
+    src = backup._manifest_path(staged_manifest_id)
+    wrong = backup._quarantine_manifest_path(
+        "op-other", 1, staged_manifest_id
+    )
+    wrong.parent.mkdir(parents=True, exist_ok=True)
+    src.rename(wrong)
+    before = _backup_bookkeeping(backup)
+    with pytest.raises(S16OwnerFailure) as excinfo:
+        backup.delete(
+            {fingerprint},
+            scope_fingerprint=scope,
+            operation_id="op-self",
+            fence=1,
+        )
+    assert excinfo.value.reason_code == S16_VERIFY_FAILED
+    assert saved.exists()
+    assert _backup_bookkeeping(backup) == before
+
+
+def test_backup_resume_rejects_old_schema_missing_marker(
+    tmp_path: Path,
+) -> None:
+    """R9 P1-1: a pre-marker intent (column default empty) plus an
+    external unlink stays fail-closed."""
+    backup_root = tmp_path / "backups"
+    backup = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
+    scope = "u" * 64
+    saved = backup_root / "old.bin"
+    saved.write_bytes(b"old-capture")
+    digest = hashlib.sha256(b"old-capture").hexdigest()
+    backup.capture(
+        scope_fingerprint=scope, copy_files=[("old.bin", digest)]
+    )
+    fingerprint = _replica_fingerprint(backup, scope)
+    staged_manifest = backup._load_manifests()[0]
+    staged_manifest_id = str(staged_manifest["manifest_id"])
+    identity = backup._connector_identity("old.bin", digest)
+    snapshot = {
+        "manifest_id": staged_manifest_id,
+        "scope_fingerprint": scope,
+        "entries_digest": str(staged_manifest.get("entries_digest") or ""),
+        "manifest_digest": _digest(staged_manifest),
+        "identities": [identity],
+    }
+    with backup._registry_connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "INSERT INTO backup_deletion_intents("
+            "operation_id, fence, scope_fingerprint, fingerprints_digest, "
+            "status, staged_at, identities_json, manifest_ids_json, "
+            "manifests_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "op-old",
+                1,
+                scope,
+                backup._bindings_digest({fingerprint}),
+                "staged",
+                int(_now()),
+                json.dumps([identity], separators=(",", ":")),
+                json.dumps([staged_manifest_id], separators=(",", ":")),
+                json.dumps([snapshot], separators=(",", ":")),
+            ),
+        )
+        connection.commit()
+    backup._manifest_path(staged_manifest_id).unlink()
+    before = _backup_bookkeeping(backup)
+    with pytest.raises(S16OwnerFailure) as excinfo:
+        backup.delete(
+            {fingerprint},
+            scope_fingerprint=scope,
+            operation_id="op-old",
+            fence=1,
+        )
+    assert excinfo.value.reason_code == S16_VERIFY_FAILED
+    assert saved.exists()
+    assert _backup_bookkeeping(backup) == before
+
+
+def test_backup_resume_rejects_second_identity_registry_residue(
+    tmp_path: Path,
+) -> None:
+    """R9 P1-2: the first staged identity can be clean while the second
+    still has refs and registry — that residue blocks complete."""
+    backup_root = tmp_path / "backups"
+    backup = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
+    scope = "v" * 64
+    first_file = backup_root / "one.bin"
+    second_file = backup_root / "two.bin"
+    first_file.write_bytes(b"one-capture")
+    second_file.write_bytes(b"two-capture")
+    digest_one = hashlib.sha256(b"one-capture").hexdigest()
+    digest_two = hashlib.sha256(b"two-capture").hexdigest()
+    backup.capture(
+        scope_fingerprint=scope,
+        copy_files=[("one.bin", digest_one), ("two.bin", digest_two)],
+    )
+    fingerprint = _replica_fingerprint(backup, scope)
+    staged_manifest = backup._load_manifests()[0]
+    staged_manifest_id = str(staged_manifest["manifest_id"])
+    id_one = backup._connector_identity("one.bin", digest_one)
+    id_two = backup._connector_identity("two.bin", digest_two)
+    cleaned, remaining = sorted([id_one, id_two])
+    snapshot = {
+        "manifest_id": staged_manifest_id,
+        "scope_fingerprint": scope,
+        "entries_digest": str(staged_manifest.get("entries_digest") or ""),
+        "manifest_digest": _digest(staged_manifest),
+        "identities": [id_one, id_two],
+    }
+    with backup._registry_connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "INSERT INTO backup_deletion_intents("
+            "operation_id, fence, scope_fingerprint, fingerprints_digest, "
+            "status, staged_at, identities_json, manifest_ids_json, "
+            "manifests_json, unlinked_manifest_ids_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "op-multi",
+                1,
+                scope,
+                backup._bindings_digest({fingerprint}),
+                "staged",
+                int(_now()),
+                json.dumps([id_one, id_two], separators=(",", ":")),
+                json.dumps([staged_manifest_id], separators=(",", ":")),
+                json.dumps([snapshot], separators=(",", ":")),
+                "[]",
+            ),
+        )
+        connection.execute(
+            "DELETE FROM backup_registry_refs WHERE connector_identity = ?",
+            (cleaned,),
+        )
+        connection.execute(
+            "DELETE FROM backup_registry WHERE connector_identity = ?",
+            (cleaned,),
+        )
+        connection.commit()
+    backup._manifest_path(staged_manifest_id).unlink()
+    before = _backup_bookkeeping(backup)
+    with pytest.raises(S16OwnerFailure) as excinfo:
+        backup.delete(
+            {fingerprint},
+            scope_fingerprint=scope,
+            operation_id="op-multi",
+            fence=1,
+        )
+    assert excinfo.value.reason_code == S16_VERIFY_FAILED
+    assert excinfo.value.retryable is False
+    assert _backup_bookkeeping(backup) == before
+    with backup._registry_connect() as connection:
+        remaining_refs = connection.execute(
+            "SELECT COUNT(*) FROM backup_registry_refs "
+            "WHERE connector_identity = ?",
+            (remaining,),
+        ).fetchone()[0]
+        remaining_registry = connection.execute(
+            "SELECT COUNT(*) FROM backup_registry "
+            "WHERE connector_identity = ?",
+            (remaining,),
+        ).fetchone()[0]
+        cleaned_registry = connection.execute(
+            "SELECT COUNT(*) FROM backup_registry "
+            "WHERE connector_identity = ?",
+            (cleaned,),
+        ).fetchone()[0]
+        bindings = connection.execute(
+            "SELECT COUNT(*) FROM backup_deletion_bindings "
+            "WHERE operation_id = ?",
+            ("op-multi",),
+        ).fetchone()[0]
+    assert remaining_refs == 1
+    assert remaining_registry == 1
+    assert cleaned_registry == 0
+    assert bindings == 0
+
+
+def test_backup_shared_ref_survives_unlink_crash_resume(
+    tmp_path: Path,
+) -> None:
+    """R9 P1-1: a legal crash-resume of scope A keeps the shared file and
+    scope B refs/registry, and writes A's complete binding."""
+    backup_root = tmp_path / "backups"
+    backup = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
+    scope_a = "a" * 64
+    scope_b = "b" * 64
+    saved = backup_root / "shared.bin"
+    saved.write_bytes(b"shared-capture")
+    digest = hashlib.sha256(b"shared-capture").hexdigest()
+    backup.capture(
+        scope_fingerprint=scope_a, copy_files=[("shared.bin", digest)]
+    )
+    backup.capture(
+        scope_fingerprint=scope_b, copy_files=[("shared.bin", digest)]
+    )
+    fingerprint_a = _replica_fingerprint(backup, scope_a)
+    _arm_backup_crash(backup, "after_transition")
+    with pytest.raises(_BackupDeleteCrash):
+        backup.delete(
+            {fingerprint_a},
+            scope_fingerprint=scope_a,
+            operation_id="op-shared-crash",
+            fence=1,
+        )
+    _disarm_backup_crash(backup)
+    result = backup.delete(
+        {fingerprint_a},
+        scope_fingerprint=scope_a,
+        operation_id="op-shared-crash",
+        fence=1,
+    )
+    assert result["status"] == "complete", result
+    _assert_locator_free(result, backup_root, "shared.bin")
+    assert saved.exists()
+    assert backup.owner_healthy() is True
+    inv_b = backup.inventory(scope_fingerprint=scope_b)
+    assert [entry for entry in inv_b if entry.copy_class == COPY_CLASS_REPLICA]
+    with backup._registry_connect() as connection:
+        registry = connection.execute(
+            "SELECT COUNT(*) FROM backup_registry"
+        ).fetchone()[0]
+        refs_b = connection.execute(
+            "SELECT COUNT(*) FROM backup_registry_refs "
+            "WHERE scope_fingerprint = ?",
+            (scope_b,),
+        ).fetchone()[0]
+        refs_a = connection.execute(
+            "SELECT COUNT(*) FROM backup_registry_refs "
+            "WHERE scope_fingerprint = ?",
+            (scope_a,),
+        ).fetchone()[0]
+        binding = connection.execute(
+            "SELECT status FROM backup_deletion_bindings "
+            "WHERE operation_id = ? AND fence = ?",
+            ("op-shared-crash", 1),
+        ).fetchone()
+    assert registry == 1
+    assert refs_b == 1
+    assert refs_a == 0
+    assert binding is not None and binding[0] == "complete"
+
+
+def test_backup_resume_rejects_corrupt_identities_json(
+    tmp_path: Path,
+) -> None:
+    """R9 P1-2: identities_json parse failure is fail-closed zero-change."""
+    backup_root = tmp_path / "backups"
+    backup = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
+    scope = "w" * 64
+    saved = backup_root / "parse.bin"
+    saved.write_bytes(b"parse-capture")
+    digest = hashlib.sha256(b"parse-capture").hexdigest()
+    backup.capture(
+        scope_fingerprint=scope, copy_files=[("parse.bin", digest)]
+    )
+    fingerprint = _replica_fingerprint(backup, scope)
+    staged_manifest = backup._load_manifests()[0]
+    identity = backup._connector_identity("parse.bin", digest)
+    snapshot = {
+        "manifest_id": str(staged_manifest["manifest_id"]),
+        "scope_fingerprint": scope,
+        "entries_digest": str(staged_manifest.get("entries_digest") or ""),
+        "manifest_digest": _digest(staged_manifest),
+        "identities": [identity],
+    }
+    staged_manifest_id, _ = _stage_backup_intent(
+        backup,
+        operation_id="op-parse",
+        scope=scope,
+        fingerprint=fingerprint,
+        staged_manifest=staged_manifest,
+        snapshot=snapshot,
+        unlinked_marker=[],
+    )
+    with backup._registry_connect() as connection:
+        connection.execute(
+            "UPDATE backup_deletion_intents SET identities_json = ? "
+            "WHERE operation_id = ? AND fence = ?",
+            ("{", "op-parse", 1),
+        )
+        connection.commit()
+    backup._manifest_path(staged_manifest_id).unlink()
+    before = _backup_bookkeeping(backup)
+    with pytest.raises(S16OwnerFailure) as excinfo:
+        backup.delete(
+            {fingerprint},
+            scope_fingerprint=scope,
+            operation_id="op-parse",
+            fence=1,
+        )
+    assert excinfo.value.reason_code == S16_VERIFY_FAILED
+    assert saved.exists()
+    assert _backup_bookkeeping(backup) == before

@@ -1477,6 +1477,7 @@ class BackupDeletionOwner:
     readiness stays gated until absence is verified."""
 
     owner_id = "backup"
+    _DELETION_PASS = "backup-deletion"
 
     def __init__(self, root: str | Path, *, clock: Callable[[], int]) -> None:
         self._root = Path(root).resolve()
@@ -1600,6 +1601,136 @@ class BackupDeletionOwner:
 
     def _manifest_path(self, manifest_id: str) -> Path:
         return self._root / f"{manifest_id}.json"
+
+    def _quarantine_root(self) -> Path:
+        """Owner-private conversion directory. Never a locator in receipts,
+        audit, manifests or browser responses."""
+        return self._root / ".s16_deletion"
+
+    def _quarantine_manifest_path(
+        self, operation_id: str, fence: int, manifest_id: str
+    ) -> Path:
+        token = _digest(
+            {
+                "kind": "manifest",
+                "manifest_id": manifest_id,
+                "operation_id": operation_id,
+                "fence": int(fence),
+                "pass": self._DELETION_PASS,
+            }
+        )
+        return self._quarantine_root() / token
+
+    def _controlled_transition_proven(
+        self, operation_id: str, fence: int, manifest_id: str
+    ) -> bool:
+        return self._quarantine_manifest_path(
+            operation_id, int(fence), manifest_id
+        ).is_file()
+
+    def _quarantine_capture_path(
+        self, operation_id: str, fence: int, identity: str
+    ) -> Path:
+        token = _digest(
+            {
+                "kind": "capture",
+                "identity": identity,
+                "operation_id": operation_id,
+                "fence": int(fence),
+                "pass": self._DELETION_PASS,
+            }
+        )
+        return self._quarantine_root() / token
+
+    def _capture_transition_proven(
+        self, operation_id: str, fence: int, identity: str
+    ) -> bool:
+        return self._quarantine_capture_path(
+            operation_id, int(fence), identity
+        ).is_file()
+
+    def _pass_converted_manifest_ids(
+        self,
+        operation_id: str,
+        fence: int,
+        staged_ids: set[str],
+    ) -> set[str]:
+        return {
+            manifest_id
+            for manifest_id in staged_ids
+            if self._controlled_transition_proven(
+                operation_id, int(fence), manifest_id
+            )
+        }
+
+    def _cleanup_quarantine(
+        self,
+        operation_id: str,
+        fence: int,
+        manifest_ids: Iterable[str],
+        identities: Iterable[str] = (),
+    ) -> None:
+        for manifest_id in manifest_ids:
+            path = self._quarantine_manifest_path(
+                operation_id, int(fence), str(manifest_id)
+            )
+            try:
+                if path.is_file():
+                    path.unlink()
+            except OSError:
+                continue
+        for identity in identities:
+            path = self._quarantine_capture_path(
+                operation_id, int(fence), str(identity)
+            )
+            try:
+                if path.is_file():
+                    path.unlink()
+            except OSError:
+                continue
+
+    def _staged_identities_have_residue(
+        self,
+        connection: sqlite3.Connection,
+        identities_json: str,
+    ) -> bool:
+        """True when ANY staged identity still has refs or registry rows.
+
+        Shared and cross-scope refs count as residue on the unproven-missing
+        path so an unproven loss cannot be laundered into complete. Parse
+        or query failures fail closed with zero changes.
+        """
+        try:
+            identities = json.loads(identities_json or "[]")
+            if not isinstance(identities, list):
+                raise ValueError("identities_json")
+            for identity in identities:
+                if not isinstance(identity, str) or not identity:
+                    raise ValueError("identity")
+                refs = connection.execute(
+                    "SELECT COUNT(*) FROM backup_registry_refs "
+                    "WHERE connector_identity = ?",
+                    (identity,),
+                ).fetchone()[0]
+                registry_rows = connection.execute(
+                    "SELECT COUNT(*) FROM backup_registry "
+                    "WHERE connector_identity = ?",
+                    (identity,),
+                ).fetchone()[0]
+                if refs or registry_rows:
+                    return True
+            return False
+        except (TypeError, ValueError, json.JSONDecodeError, sqlite3.Error):
+            connection.execute("COMMIT")
+            raise S16OwnerFailure(
+                self.owner_id,
+                S16_VERIFY_FAILED,
+                retryable=False,
+                responsible_party="backup_operations_owner",
+                recovery_action=(
+                    "repair_backup_capture_and_resume_the_same_job"
+                ),
+            )
 
     @classmethod
     def _connector_identity(cls, handle: str, content_sha256: str) -> str:
@@ -2050,28 +2181,21 @@ class BackupDeletionOwner:
                     staged_manifest_ids
                     - current_scope_ids
                     - unlinked_marker
+                    - self._pass_converted_manifest_ids(
+                        operation_id, int(fence), staged_manifest_ids
+                    )
                 )
                 if missing_unproven:
-                    # R8 (P1-1): a staged manifest missing WITHOUT this
-                    # pass's crash marker is an external/unknown deletion.
-                    # Fail closed with zero registry/ref changes and let
-                    # the worker record repair_required — unless the
-                    # operator's repair already cleared EVERY trace of the
-                    # staged captures (no manifests, no refs, no registry
-                    # rows), in which case re-staging the empty set is the
-                    # honest already-absent completion.
-                    residue_refs = connection.execute(
-                        "SELECT COUNT(*) FROM backup_registry_refs "
-                        "WHERE connector_identity = ?",
-                        (
-                            sorted(
-                                json.loads(staged[2] or "[]")
-                            )[0]
-                            if json.loads(staged[2] or "[]")
-                            else "",
-                        ),
-                    ).fetchone()[0]
-                    if current_scope_manifests or residue_refs:
+                    # R8 (P1-1) + R9 (P1-2): missing without this pass's
+                    # crash marker AND without a bound quarantine file is
+                    # external/unknown deletion. Fail closed with zero
+                    # registry/ref changes unless the operator already
+                    # cleared EVERY staged identity's refs AND registry
+                    # rows (shared/cross-scope refs count as residue).
+                    residue_found = self._staged_identities_have_residue(
+                        connection, staged[2]
+                    )
+                    if current_scope_manifests or residue_found:
                         connection.execute("COMMIT")
                         raise S16OwnerFailure(
                             self.owner_id,
@@ -2256,6 +2380,13 @@ class BackupDeletionOwner:
                 manifest_snapshots, set(), resume=False,
             )
 
+    def _run_crash_hook(self, point: str) -> None:
+        """Test-only fault-injection seam at the production crash
+        boundaries of the backup deletion state machine (R9 P2-S1)."""
+        hook = getattr(self, "_crash_hook", None)
+        if hook is not None:
+            hook(point)
+
     def _backup_delete_commit(
         self,
         connection: sqlite3.Connection,
@@ -2349,13 +2480,12 @@ class BackupDeletionOwner:
         for staged_id in sorted(staged_manifest_ids):
             current = by_id.get(staged_id)
             if current is None:
-                # R8 (P1-1): a missing staged manifest is tolerated ONLY
-                # when this deletion pass's durable crash marker proves it
-                # unlinked the path (same operation + fence + manifest id).
-                # External deletion, an old intent, a missing or mismatched
-                # marker and cross-scope absence all fail closed with zero
-                # registry/ref changes and put the job in repair_required.
-                if resume and staged_id in unlinked_manifest_ids:
+                # R8/R9 (P1-1): missing is tolerated only when THIS pass's
+                # owner-private quarantine proves the conversion. Marker
+                # or resume=True without that FS fact is unproven.
+                if self._controlled_transition_proven(
+                    operation_id, int(fence), staged_id
+                ):
                     continue
                 connection.execute("ROLLBACK")
                 raise S16OwnerFailure(
@@ -2394,6 +2524,14 @@ class BackupDeletionOwner:
                     responsible_party="backup_operations_owner",
                     recovery_action="repair_backup_capture_and_resume_the_same_job",
                 )
+        # R9 (P1-1): filesystem conversion happens BEFORE the durable
+        # marker. Exclusive captures and staged manifests rename into an
+        # owner-private quarantine bound to operation/fence/pass plus
+        # identity or manifest id. Unknown missing files fail closed.
+        # Crash windows: before_transition, after_transition,
+        # before_marker_commit, before_final_commit.
+        self._run_crash_hook("before_transition")
+        self._quarantine_root().mkdir(parents=True, exist_ok=True)
         deleted = 0
         for identity in sorted(identities):
             row = connection.execute(
@@ -2437,8 +2575,30 @@ class BackupDeletionOwner:
                         recovery_action="repair_the_captured_copy_digest",
                     )
                 if not still_referenced:
-                    target.unlink()
-                    if target.exists():
+                    dst = self._quarantine_capture_path(
+                        operation_id, int(fence), identity
+                    )
+                    if dst.exists():
+                        connection.execute("ROLLBACK")
+                        raise S16OwnerFailure(
+                            self.owner_id,
+                            S16_VERIFY_FAILED,
+                            retryable=True,
+                            responsible_party="backup_operations_owner",
+                            recovery_action="verify_the_captured_copy_removal",
+                        )
+                    try:
+                        target.rename(dst)
+                    except OSError:
+                        connection.execute("ROLLBACK")
+                        raise S16OwnerFailure(
+                            self.owner_id,
+                            S16_VERIFY_FAILED,
+                            retryable=True,
+                            responsible_party="backup_operations_owner",
+                            recovery_action="verify_the_captured_copy_removal",
+                        )
+                    if target.exists() or not dst.is_file():
                         connection.execute("ROLLBACK")
                         raise S16OwnerFailure(
                             self.owner_id,
@@ -2448,7 +2608,7 @@ class BackupDeletionOwner:
                             recovery_action="verify_the_captured_copy_removal",
                         )
                     deleted += 1
-            elif not resume and not still_referenced:
+            elif still_referenced:
                 connection.execute("ROLLBACK")
                 raise S16OwnerFailure(
                     self.owner_id,
@@ -2457,12 +2617,26 @@ class BackupDeletionOwner:
                     responsible_party="backup_operations_owner",
                     recovery_action="restore_and_verify_the_captured_copy",
                 )
-        unlinked_now: list[str] = []
+            elif self._capture_transition_proven(
+                operation_id, int(fence), identity
+            ):
+                deleted += 1
+            else:
+                connection.execute("ROLLBACK")
+                raise S16OwnerFailure(
+                    self.owner_id,
+                    S16_VERIFY_FAILED,
+                    retryable=True,
+                    responsible_party="backup_operations_owner",
+                    recovery_action="restore_and_verify_the_captured_copy",
+                )
         for manifest_id in sorted(staged_manifest_ids):
-            manifest_path = self._manifest_path(manifest_id)
-            if manifest_path.exists():
-                manifest_path.unlink()
-                if manifest_path.exists():
+            src = self._manifest_path(manifest_id)
+            dst = self._quarantine_manifest_path(
+                operation_id, int(fence), manifest_id
+            )
+            if src.exists():
+                if dst.exists():
                     connection.execute("ROLLBACK")
                     raise S16OwnerFailure(
                         self.owner_id,
@@ -2471,8 +2645,31 @@ class BackupDeletionOwner:
                         responsible_party="backup_operations_owner",
                         recovery_action="verify_the_backup_manifest_removal",
                     )
-                unlinked_now.append(manifest_id)
-            elif not resume and manifest_id not in unlinked_manifest_ids:
+                try:
+                    src.rename(dst)
+                except OSError:
+                    connection.execute("ROLLBACK")
+                    raise S16OwnerFailure(
+                        self.owner_id,
+                        S16_VERIFY_FAILED,
+                        retryable=True,
+                        responsible_party="backup_operations_owner",
+                        recovery_action="verify_the_backup_manifest_removal",
+                    )
+                if src.exists() or not dst.is_file():
+                    connection.execute("ROLLBACK")
+                    raise S16OwnerFailure(
+                        self.owner_id,
+                        S16_VERIFY_FAILED,
+                        retryable=True,
+                        responsible_party="backup_operations_owner",
+                        recovery_action="verify_the_backup_manifest_removal",
+                    )
+            elif self._controlled_transition_proven(
+                operation_id, int(fence), manifest_id
+            ):
+                continue
+            else:
                 connection.execute("ROLLBACK")
                 raise S16OwnerFailure(
                     self.owner_id,
@@ -2481,10 +2678,11 @@ class BackupDeletionOwner:
                     responsible_party="backup_operations_owner",
                     recovery_action="restore_and_verify_the_backup_manifest",
                 )
-        # R8 (P1-1): the crash marker is durable in its OWN transaction —
-        # it records which manifest paths THIS pass unlinked, so a later
-        # resume can distinguish this pass's residue from external loss.
-        combined_marker = sorted(set(unlinked_manifest_ids) | set(unlinked_now))
+        self._run_crash_hook("after_transition")
+        self._run_crash_hook("before_marker_commit")
+        combined_marker = sorted(
+            set(unlinked_manifest_ids) | set(staged_manifest_ids)
+        )
         connection.execute(
             "UPDATE backup_deletion_intents "
             "SET unlinked_manifest_ids_json = ? "
@@ -2537,7 +2735,11 @@ class BackupDeletionOwner:
                 int(self._clock()),
             ),
         )
+        self._run_crash_hook("before_final_commit")
         connection.execute("COMMIT")
+        self._cleanup_quarantine(
+            operation_id, int(fence), staged_manifest_ids, identities
+        )
         return {
             "status": "complete",
             "deleted_counts": {"replica": deleted},
