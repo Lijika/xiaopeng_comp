@@ -6,7 +6,7 @@
 
 - 固定基线：`e9e9cbb27326b99b38edc81e4da3d1a793db7a43`（与 R2 review 一致）。
 - R2 起始 HEAD（R1 交付）：`bba05c0`。
-- R2 最终 HEAD：待提交后回填。
+- R2 最终 HEAD：`21664ea5671a793a743cc10373989fce3da7e6d5`（`fix(s16): R2 review — per-owner readiness, binding uniqueness, audit wiring`，12 files changed；R1 交付 `bba05c0` 之上）。
 
 ## R2 finding 修复状态（逐项，对应 brief 17 项任务）
 
