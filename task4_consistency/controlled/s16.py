@@ -1890,6 +1890,31 @@ class BackupDeletionOwner:
 
     def _backfill_operation_fences(self, connection: sqlite3.Connection) -> None:
         """Derive or verify high-water/active/source fence from bindings."""
+        try:
+            self._backfill_operation_fences_inner(connection)
+        except (TypeError, ValueError, sqlite3.Error, json.JSONDecodeError):
+            self._record_visible_fence_migration_failures(connection)
+
+    def _record_visible_fence_migration_failures(
+        self, connection: sqlite3.Connection
+    ) -> None:
+        ops: set[str] = set()
+        for table in (
+            "backup_operation_fences",
+            "backup_deletion_bindings",
+            "backup_deletion_intents",
+        ):
+            try:
+                for row in connection.execute(f"SELECT operation_id FROM {table}"):
+                    ops.add(str(row[0]))
+            except sqlite3.Error:
+                continue
+        for operation_id in ops:
+            self._record_fence_migration_failure(connection, operation_id)
+
+    def _backfill_operation_fences_inner(
+        self, connection: sqlite3.Connection
+    ) -> None:
         grouped = self._operation_fence_history(connection)
         present = {
             str(row[0]): row
@@ -1917,6 +1942,10 @@ class BackupDeletionOwner:
                 self._migrate_operation_fence_rows(
                     connection, operation_id, rows
                 )
+        for operation_id in present:
+            if operation_id in grouped or operation_id in failed:
+                continue
+            self._record_fence_migration_failure(connection, operation_id)
 
     def _operation_fence_history(
         self, connection: sqlite3.Connection, operation_id: str | None = None
@@ -1954,13 +1983,33 @@ class BackupDeletionOwner:
                 identities_json,
                 manifest_ids_json,
             ) in rows:
-                grouped.setdefault(str(op), []).append(
+                op_id = str(op)
+                try:
+                    fence_n = self._parse_fence_int(fence)
+                    source_n = self._parse_fence_int(
+                        source_fence, allow_none=True
+                    )
+                except (TypeError, ValueError):
+                    grouped.setdefault(op_id, []).append(
+                        (
+                            0,
+                            "",
+                            "",
+                            "unknown",
+                            None,
+                            kind,
+                            "[",
+                            "{",
+                        )
+                    )
+                    continue
+                grouped.setdefault(op_id, []).append(
                     (
-                        int(fence),
+                        fence_n,
                         str(scope or ""),
                         str(digest or ""),
                         str(status or ""),
-                        int(source_fence) if source_fence is not None else None,
+                        source_n,
                         kind,
                         identities_json if identities_json is not None else "[]",
                         manifest_ids_json if manifest_ids_json is not None else "[]",
@@ -1968,20 +2017,58 @@ class BackupDeletionOwner:
                 )
         return grouped
 
+    @staticmethod
+    def _parse_fence_int(value: Any, *, allow_none: bool = False) -> int | None:
+        if value is None:
+            if allow_none:
+                return None
+            raise ValueError("null")
+        if isinstance(value, bool):
+            raise ValueError("bool")
+        if isinstance(value, int):
+            parsed = int(value)
+        elif isinstance(value, str):
+            stripped = value.strip()
+            if stripped.startswith("-"):
+                digits = stripped[1:]
+                if not digits.isdigit():
+                    raise ValueError("numeric")
+                parsed = -int(digits)
+            elif stripped.isdigit():
+                parsed = int(stripped)
+            else:
+                raise ValueError("numeric")
+        else:
+            raise ValueError("numeric")
+        if parsed < 1:
+            raise ValueError("range")
+        return parsed
+
+    @staticmethod
+    def _coerce_live_fence_int(value: Any) -> int:
+        if value is None or isinstance(value, bool):
+            raise ValueError("numeric")
+        if isinstance(value, int):
+            return int(value)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.startswith("-") and stripped[1:].isdigit():
+                return int(stripped)
+            if stripped.isdigit():
+                return int(stripped)
+        raise ValueError("numeric")
+
     def _migrate_one_operation_fence(
         self,
         connection: sqlite3.Connection,
         operation_id: str,
-        *,
-        record_failure: bool = True,
     ) -> bool:
         if self._fence_migration_failed(connection, operation_id):
             return False
         try:
             grouped = self._operation_fence_history(connection, operation_id)
         except (TypeError, ValueError, sqlite3.Error, json.JSONDecodeError):
-            if record_failure:
-                self._record_fence_migration_failure(connection, operation_id)
+            self._record_fence_migration_failure(connection, operation_id)
             return False
         rows = grouped.get(operation_id, [])
         existing = connection.execute(
@@ -1991,13 +2078,16 @@ class BackupDeletionOwner:
             (operation_id,),
         ).fetchone()
         if existing is not None:
+            if not rows:
+                self._record_fence_migration_failure(connection, operation_id)
+                return False
             return self._validate_existing_operation_fence(
                 connection, operation_id, rows, existing
             )
         if not rows:
             return False
         return self._migrate_operation_fence_rows(
-            connection, operation_id, rows, record_failure=record_failure
+            connection, operation_id, rows
         )
 
     def _record_fence_migration_failure(
@@ -2093,7 +2183,13 @@ class BackupDeletionOwner:
                 raise ValueError("status conflict")
             if intent_statuses & incomplete and intent_statuses & complete:
                 raise ValueError("status conflict")
-            if "complete" in binding_statuses and "staged" in intent_statuses:
+            binding_terminal = {"complete", "committed"}
+            intent_inflight = {"staged", "transitioned"}
+            intent_terminal = {"complete", "committed"}
+            binding_inflight = {"staged", "transitioned"}
+            if binding_statuses & binding_terminal and intent_statuses & intent_inflight:
+                raise ValueError("status conflict")
+            if intent_statuses & intent_terminal and binding_statuses & binding_inflight:
                 raise ValueError("status conflict")
         scopes = {item[1] for item in rows}
         digests = {item[2] for item in rows}
@@ -2132,15 +2228,18 @@ class BackupDeletionOwner:
             high_water, active, source_fence, scope, digest = (
                 self._derive_operation_fence(rows)
             )
-        except (TypeError, ValueError):
+            existing_high = self._parse_fence_int(existing[1])
+            existing_active = self._parse_fence_int(existing[2])
+            existing_source = self._parse_fence_int(existing[3])
+        except (TypeError, ValueError, IndexError):
             self._record_fence_migration_failure(connection, operation_id)
             return False
         if (
-            int(existing[1]) != high_water
-            or int(existing[2]) != active
-            or int(existing[3]) != source_fence
-            or str(existing[4]) != scope
-            or str(existing[5]) != digest
+            existing_high != high_water
+            or existing_active != active
+            or existing_source != source_fence
+            or str(existing[4] or "") != scope
+            or str(existing[5] or "") != digest
         ):
             self._record_fence_migration_failure(connection, operation_id)
             return False
@@ -2151,8 +2250,6 @@ class BackupDeletionOwner:
         connection: sqlite3.Connection,
         operation_id: str,
         rows: list[tuple[int, str, str, str, int | None, str, Any, Any]],
-        *,
-        record_failure: bool = True,
     ) -> bool:
         try:
             high_water, active, source_fence, scope, digest = (
@@ -2174,8 +2271,7 @@ class BackupDeletionOwner:
             )
             return True
         except (TypeError, ValueError, sqlite3.Error):
-            if record_failure:
-                self._record_fence_migration_failure(connection, operation_id)
+            self._record_fence_migration_failure(connection, operation_id)
             return False
 
     def _fence_migration_failed(
@@ -2204,9 +2300,7 @@ class BackupDeletionOwner:
             (operation_id,),
         ).fetchone()
         if row is None:
-            self._migrate_one_operation_fence(
-                connection, operation_id, record_failure=False
-            )
+            self._migrate_one_operation_fence(connection, operation_id)
             if self._fence_migration_failed(connection, operation_id):
                 return True
             row = connection.execute(
@@ -2216,11 +2310,27 @@ class BackupDeletionOwner:
             ).fetchone()
             if row is None:
                 return False
-        if int(fence) < int(row[0]):
+        else:
+            try:
+                grouped = self._operation_fence_history(connection, operation_id)
+            except (TypeError, ValueError, sqlite3.Error, json.JSONDecodeError):
+                self._record_fence_migration_failure(connection, operation_id)
+                return True
+            if not grouped.get(operation_id):
+                self._record_fence_migration_failure(connection, operation_id)
+                return True
+        try:
+            high_water = self._coerce_live_fence_int(row[0])
+            active = self._coerce_live_fence_int(row[1])
+            requested = self._coerce_live_fence_int(fence)
+        except (TypeError, ValueError):
+            self._record_fence_migration_failure(connection, operation_id)
+            return True
+        if requested < high_water:
             return True
         if allow_higher:
             return False
-        return int(fence) != int(row[1])
+        return requested != active
 
     def _raise_stale_fence(self) -> None:
         raise S16OwnerFailure(
