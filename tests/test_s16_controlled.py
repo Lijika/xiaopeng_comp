@@ -4551,7 +4551,19 @@ def _backup_bookkeeping(backup: BackupDeletionOwner) -> dict[str, Any]:
                 "unlinked_manifest_ids_json FROM backup_deletion_intents "
                 "ORDER BY 1, 2"
             ).fetchall(),
+            "fences": connection.execute(
+                "SELECT operation_id, high_water, active_fence, "
+                "source_fence, scope_fingerprint, fingerprints_digest "
+                "FROM backup_operation_fences ORDER BY 1"
+            ).fetchall(),
         }
+
+
+def _backup_effect_state(snapshot: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: snapshot[key]
+        for key in ("registry", "refs", "bindings", "intents")
+    }
 
 
 def _replica_fingerprint(backup: BackupDeletionOwner, scope: str) -> str:
@@ -4689,7 +4701,7 @@ def test_backup_resume_rejects_wrong_fence_quarantine(
     assert excinfo.value.reason_code == S16_VERIFY_FAILED
     assert excinfo.value.retryable is False
     assert saved.exists()
-    assert _backup_bookkeeping(backup) == before
+    assert _backup_effect_state(_backup_bookkeeping(backup)) == _backup_effect_state(before)
 
 
 def test_backup_resume_rejects_wrong_operation_quarantine(
@@ -4741,7 +4753,7 @@ def test_backup_resume_rejects_wrong_operation_quarantine(
         )
     assert excinfo.value.reason_code == S16_VERIFY_FAILED
     assert saved.exists()
-    assert _backup_bookkeeping(backup) == before
+    assert _backup_effect_state(_backup_bookkeeping(backup)) == _backup_effect_state(before)
 
 
 def test_backup_resume_rejects_old_schema_missing_marker(
@@ -4800,7 +4812,7 @@ def test_backup_resume_rejects_old_schema_missing_marker(
         )
     assert excinfo.value.reason_code == S16_VERIFY_FAILED
     assert saved.exists()
-    assert _backup_bookkeeping(backup) == before
+    assert _backup_effect_state(_backup_bookkeeping(backup)) == _backup_effect_state(before)
 
 
 def test_backup_resume_rejects_second_identity_registry_residue(
@@ -4875,7 +4887,7 @@ def test_backup_resume_rejects_second_identity_registry_residue(
         )
     assert excinfo.value.reason_code == S16_VERIFY_FAILED
     assert excinfo.value.retryable is False
-    assert _backup_bookkeeping(backup) == before
+    assert _backup_effect_state(_backup_bookkeeping(backup)) == _backup_effect_state(before)
     with backup._registry_connect() as connection:
         remaining_refs = connection.execute(
             "SELECT COUNT(*) FROM backup_registry_refs "
@@ -5018,7 +5030,7 @@ def test_backup_resume_rejects_corrupt_identities_json(
         )
     assert excinfo.value.reason_code == S16_VERIFY_FAILED
     assert saved.exists()
-    assert _backup_bookkeeping(backup) == before
+    assert _backup_effect_state(_backup_bookkeeping(backup)) == _backup_effect_state(before)
 
 
 
@@ -5104,7 +5116,7 @@ def test_backup_fresh_unknown_missing_is_zero_change(
         )
     assert excinfo.value.reason_code == S16_VERIFY_FAILED
     assert saved.exists()
-    assert _backup_bookkeeping(backup) == before
+    assert _backup_effect_state(_backup_bookkeeping(backup)) == _backup_effect_state(before)
 
 
 def test_backup_worker_lease_takeover_completes_prior_fence_quarantine(
@@ -6586,3 +6598,131 @@ def test_backup_worker_before_return_shared_tamper_invalidates_binding(
     assert int(still_active[0]) == 2
     assert int(still_active[1]) == 2
     assert int(still_active[2]) == 1
+
+
+def test_backup_old_schema_backfills_operation_fences_and_rejects_stale(
+    tmp_path: Path,
+) -> None:
+    """R17 P1-1: pre-fence bindings migrate to high-water/active/source
+    fence; late fence-1 verify_absent is stale with zero fence change."""
+    backup_root = tmp_path / "backups"
+    backup = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
+    scope = "a" * 64
+    fingerprints = {"fp-old-schema"}
+    digest = backup._bindings_digest(fingerprints)
+    with backup._registry_connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("DELETE FROM backup_operation_fences")
+        connection.execute("DELETE FROM backup_fence_migration_failures")
+        for fence, status in ((1, "unverified"), (2, "complete")):
+            connection.execute(
+                "INSERT INTO backup_deletion_bindings("
+                "operation_id, fence, scope_fingerprint, fingerprints_digest, "
+                "status, completed_at, identities_json, manifest_ids_json, "
+                "source_fence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "op-old-mig",
+                    fence,
+                    scope,
+                    digest,
+                    status,
+                    int(_now()),
+                    "[]",
+                    "[]",
+                    1,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO backup_deletion_intents("
+                "operation_id, fence, scope_fingerprint, fingerprints_digest, "
+                "status, staged_at, identities_json, manifest_ids_json, "
+                "source_fence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "op-old-mig",
+                    fence,
+                    scope,
+                    digest,
+                    "committed" if fence == 2 else "transitioned",
+                    int(_now()),
+                    "[]",
+                    "[]",
+                    1,
+                ),
+            )
+        connection.execute("COMMIT")
+    migrated = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
+    with migrated._registry_connect() as connection:
+        row = connection.execute(
+            "SELECT high_water, active_fence, source_fence, "
+            "scope_fingerprint, fingerprints_digest "
+            "FROM backup_operation_fences WHERE operation_id = ?",
+            ("op-old-mig",),
+        ).fetchone()
+        failed = connection.execute(
+            "SELECT COUNT(*) FROM backup_fence_migration_failures"
+        ).fetchone()[0]
+    assert failed == 0
+    assert row is not None
+    assert int(row[0]) == 2
+    assert int(row[1]) == 2
+    assert int(row[2]) == 1
+    assert str(row[3]) == scope
+    assert str(row[4]) == digest
+    before = _backup_bookkeeping(migrated)
+    with pytest.raises(S16OwnerFailure) as excinfo:
+        migrated.verify_absent(
+            fingerprints,
+            scope_fingerprint=scope,
+            operation_id="op-old-mig",
+            fence=1,
+        )
+    assert excinfo.value.reason_code == S16_OWNER_STALE_FENCE
+    assert _backup_bookkeeping(migrated) == before
+    late = migrated.delete(
+        fingerprints,
+        scope_fingerprint=scope,
+        operation_id="op-old-mig",
+        fence=1,
+    )
+    assert late["status"] == "stale"
+    assert _backup_bookkeeping(migrated) == before
+
+
+def test_backup_ambiguous_fence_migration_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """R17 P1-1: conflicting scope/digest on one operation closes health."""
+    backup_root = tmp_path / "backups"
+    backup = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
+    digest_a = backup._bindings_digest({"fp-a"})
+    digest_b = backup._bindings_digest({"fp-b"})
+    with backup._registry_connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("DELETE FROM backup_operation_fences")
+        connection.execute("DELETE FROM backup_fence_migration_failures")
+        connection.execute(
+            "INSERT INTO backup_deletion_bindings("
+            "operation_id, fence, scope_fingerprint, fingerprints_digest, "
+            "status, completed_at) VALUES (?, ?, ?, ?, ?, ?)",
+            ("op-ambig", 1, "a" * 64, digest_a, "complete", int(_now())),
+        )
+        connection.execute(
+            "INSERT INTO backup_deletion_bindings("
+            "operation_id, fence, scope_fingerprint, fingerprints_digest, "
+            "status, completed_at) VALUES (?, ?, ?, ?, ?, ?)",
+            ("op-ambig", 2, "b" * 64, digest_b, "complete", int(_now())),
+        )
+        connection.execute("COMMIT")
+    migrated = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
+    assert migrated.owner_healthy() is False
+    with migrated._registry_connect() as connection:
+        failed = connection.execute(
+            "SELECT operation_id FROM backup_fence_migration_failures"
+        ).fetchall()
+        fences = connection.execute(
+            "SELECT COUNT(*) FROM backup_operation_fences "
+            "WHERE operation_id = ?",
+            ("op-ambig",),
+        ).fetchone()[0]
+    assert failed == [("op-ambig",)]
+    assert fences == 0

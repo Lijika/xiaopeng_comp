@@ -1609,6 +1609,14 @@ class BackupDeletionOwner:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS backup_fence_migration_failures (
+                    operation_id TEXT PRIMARY KEY
+                )
+                """
+            )
+            self._backfill_operation_fences(connection)
             # R5 (P1-2): backfill reference rows for pre-R5 captures so old
             # backups keep reconciling under the ref-aware contract.
             for manifest in self._load_manifests():
@@ -1880,17 +1888,173 @@ class BackupDeletionOwner:
         except (TypeError, ValueError, OSError, S16Unavailable, json.JSONDecodeError):
             self._fail_unproven_purge()
 
-    def _stale_operation_fence(
-        self, connection: sqlite3.Connection, operation_id: str, fence: int
+    def _backfill_operation_fences(self, connection: sqlite3.Connection) -> None:
+        """Derive high-water/active/source fence from pre-R10 bindings."""
+        present = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT operation_id FROM backup_operation_fences"
+            ).fetchall()
+        }
+        failed = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT operation_id FROM backup_fence_migration_failures"
+            ).fetchall()
+        }
+        grouped: dict[str, list[tuple[int, str, str, str, int | None]]] = {}
+        for table in ("backup_deletion_bindings", "backup_deletion_intents"):
+            rows = connection.execute(
+                f"SELECT operation_id, fence, scope_fingerprint, "
+                f"fingerprints_digest, status, source_fence FROM {table}"
+            ).fetchall()
+            for operation_id, fence, scope, digest, status, source_fence in rows:
+                grouped.setdefault(str(operation_id), []).append(
+                    (
+                        int(fence),
+                        str(scope or ""),
+                        str(digest or ""),
+                        str(status or ""),
+                        int(source_fence) if source_fence is not None else None,
+                    )
+                )
+        for operation_id, rows in grouped.items():
+            if operation_id in present or operation_id in failed:
+                continue
+            self._migrate_operation_fence_rows(connection, operation_id, rows)
+
+    def _migrate_one_operation_fence(
+        self, connection: sqlite3.Connection, operation_id: str
     ) -> bool:
+        if self._fence_migration_failed(connection, operation_id):
+            return False
+        existing = connection.execute(
+            "SELECT 1 FROM backup_operation_fences WHERE operation_id = ?",
+            (operation_id,),
+        ).fetchone()
+        if existing is not None:
+            return True
+        rows: list[tuple[int, str, str, str, int | None]] = []
+        for table in ("backup_deletion_bindings", "backup_deletion_intents"):
+            fetched = connection.execute(
+                f"SELECT fence, scope_fingerprint, fingerprints_digest, "
+                f"status, source_fence FROM {table} WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchall()
+            for fence, scope, digest, status, source_fence in fetched:
+                rows.append(
+                    (
+                        int(fence),
+                        str(scope or ""),
+                        str(digest or ""),
+                        str(status or ""),
+                        int(source_fence) if source_fence is not None else None,
+                    )
+                )
+        if not rows:
+            return False
+        return self._migrate_operation_fence_rows(
+            connection, operation_id, rows
+        )
+
+    def _migrate_operation_fence_rows(
+        self,
+        connection: sqlite3.Connection,
+        operation_id: str,
+        rows: list[tuple[int, str, str, str, int | None]],
+    ) -> bool:
+        try:
+            scopes = {item[1] for item in rows if item[1]}
+            digests = {item[2] for item in rows if item[2]}
+            if len(scopes) != 1 or len(digests) != 1:
+                raise ValueError("ambiguous")
+            high_water = max(item[0] for item in rows)
+            incomplete = [
+                item[0]
+                for item in rows
+                if item[3] in {"staged", "transitioned", "unverified"}
+            ]
+            complete = [
+                item[0]
+                for item in rows
+                if item[3] in {"complete", "committed"}
+            ]
+            if complete and high_water in complete:
+                active = high_water
+            elif incomplete:
+                active = max(incomplete)
+            else:
+                active = high_water
+            source_vals = {
+                item[4]
+                for item in rows
+                if item[0] == active and item[4] is not None
+            }
+            if len(source_vals) > 1:
+                raise ValueError("ambiguous source")
+            source_fence = source_vals.pop() if source_vals else active
+            connection.execute(
+                "INSERT INTO backup_operation_fences("
+                "operation_id, high_water, active_fence, source_fence, "
+                "scope_fingerprint, fingerprints_digest) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    operation_id,
+                    high_water,
+                    active,
+                    source_fence,
+                    next(iter(scopes)),
+                    next(iter(digests)),
+                ),
+            )
+            return True
+        except (TypeError, ValueError, sqlite3.Error):
+            connection.execute(
+                "INSERT OR IGNORE INTO backup_fence_migration_failures("
+                "operation_id) VALUES (?)",
+                (operation_id,),
+            )
+            return False
+
+    def _fence_migration_failed(
+        self, connection: sqlite3.Connection, operation_id: str
+    ) -> bool:
+        row = connection.execute(
+            "SELECT 1 FROM backup_fence_migration_failures "
+            "WHERE operation_id = ?",
+            (operation_id,),
+        ).fetchone()
+        return row is not None
+
+    def _stale_operation_fence(
+        self,
+        connection: sqlite3.Connection,
+        operation_id: str,
+        fence: int,
+        *,
+        allow_higher: bool = False,
+    ) -> bool:
+        if self._fence_migration_failed(connection, operation_id):
+            return True
         row = connection.execute(
             "SELECT high_water, active_fence FROM backup_operation_fences "
             "WHERE operation_id = ?",
             (operation_id,),
         ).fetchone()
         if row is None:
+            self._migrate_one_operation_fence(connection, operation_id)
+            row = connection.execute(
+                "SELECT high_water, active_fence FROM backup_operation_fences "
+                "WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            if row is None:
+                return self._fence_migration_failed(connection, operation_id)
+        if int(fence) < int(row[0]):
+            return True
+        if allow_higher:
             return False
-        return int(fence) < int(row[0]) or int(fence) != int(row[1])
+        return int(fence) != int(row[1])
 
     def _raise_stale_fence(self) -> None:
         raise S16OwnerFailure(
@@ -1903,14 +2067,10 @@ class BackupDeletionOwner:
 
     def _active_fence_cas_sql(self) -> str:
         return (
-            " AND ("
-            "NOT EXISTS ("
-            "SELECT 1 FROM backup_operation_fences "
-            "WHERE operation_id = ?"
-            ") OR fence = ("
+            " AND fence = ("
             "SELECT active_fence FROM backup_operation_fences "
             "WHERE operation_id = ?"
-            "))"
+            ")"
         )
 
     def _mark_binding_unverified(self, operation_id: str, fence: int) -> None:
@@ -1928,7 +2088,6 @@ class BackupDeletionOwner:
                     operation_id,
                     int(fence),
                     "complete",
-                    operation_id,
                     operation_id,
                 ),
             )
@@ -1949,7 +2108,6 @@ class BackupDeletionOwner:
                     operation_id,
                     int(fence),
                     "unverified",
-                    operation_id,
                     operation_id,
                 ),
             )
@@ -2410,12 +2568,9 @@ class BackupDeletionOwner:
         fingerprints_digest = self._bindings_digest(fingerprints)
         with self._registry_connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            high = connection.execute(
-                "SELECT high_water FROM backup_operation_fences "
-                "WHERE operation_id = ?",
-                (operation_id,),
-            ).fetchone()
-            if high is not None and int(fence) < int(high[0]):
+            if self._stale_operation_fence(
+                connection, operation_id, int(fence), allow_higher=True
+            ):
                 connection.execute("COMMIT")
                 return {"status": "stale", "deleted_counts": {}}
             binding = connection.execute(
@@ -3479,7 +3634,11 @@ class BackupDeletionOwner:
             self._backup_reconciliation()
             if self._quarantine_has_residue():
                 return False
-            return True
+            with self._registry_connect() as connection:
+                failed = connection.execute(
+                    "SELECT COUNT(*) FROM backup_fence_migration_failures"
+                ).fetchone()[0]
+            return failed == 0
         except Exception:
             return False
 
