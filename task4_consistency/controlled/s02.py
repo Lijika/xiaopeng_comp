@@ -596,16 +596,56 @@ class RegisteredSourceBoundary:
                 (operation_id, int(fence)),
             ).fetchone()
             if binding is not None:
-                connection.execute("COMMIT")
                 if (
                     str(binding[1]) != str(scope_fingerprint)
                     or str(binding[2]) != fingerprints_digest
                 ):
+                    connection.execute("ROLLBACK")
                     return {
                         "status": "conflict",
                         "deleted_counts": {},
                         "reason_code": "S16_OWNER_BINDING_CONFLICT",
                     }
+                # R6 (P1-1): the binding authorizes the replay, but the
+                # CURRENT owner state decides the effect — values that
+                # reappeared after the binding completed are re-persisted
+                # as absent (idempotent repair-forward) instead of being
+                # proven absent by the binding row alone.
+                persisted = {
+                    str(row[0]): str(row[1])
+                    for row in connection.execute(
+                        "SELECT fingerprint, scope_fingerprint "
+                        "FROM s02_object_absence"
+                    ).fetchall()
+                }
+                live = {
+                    self._identity_fingerprint(item.content)
+                    for item in self._objects.values()
+                }
+                resurrected = target.difference(persisted) | (target & live)
+                if resurrected:
+                    absent_rows = [
+                        (fingerprint, now, "s02-object-absence/1", scope_fingerprint)
+                        for fingerprint in sorted(resurrected)
+                    ]
+                    connection.executemany(
+                        "INSERT OR REPLACE INTO s02_object_absence("
+                        "fingerprint, deleted_at, schema_version, scope_fingerprint) "
+                        "VALUES (?, ?, ?, ?)",
+                        absent_rows,
+                    )
+                    for object_ref, item in list(self._objects.items()):
+                        if (
+                            self._identity_fingerprint(item.content) in resurrected
+                        ):
+                            del self._objects[object_ref]
+                    connection.execute("COMMIT")
+                    return {
+                        "status": "complete",
+                        "deleted_counts": {"derived_object": len(absent_rows)},
+                        "replayed": True,
+                    }
+                connection.execute("COMMIT")
                 return {
                     "status": "complete",
                     "deleted_counts": {},
@@ -717,7 +757,33 @@ class RegisteredSourceBoundary:
                         or str(binding[1]) != fingerprints_digest
                     ):
                         return {"binding": "conflict"}
-                    return {"binding": "verified", "absent": True}
+                    # R6 (P1-1): the binding authorizes; the CURRENT
+                    # absence rows and live mappings decide the proof.
+                    persisted = {
+                        str(row[0]): str(row[1])
+                        for row in connection.execute(
+                            "SELECT fingerprint, scope_fingerprint "
+                            "FROM s02_object_absence"
+                        ).fetchall()
+                    }
+                    live = {
+                        self._identity_fingerprint(item.content)
+                        for item in self._objects.values()
+                    }
+                    absent = bool(
+                        target
+                        and target.issubset(persisted.keys())
+                        and not (
+                            target
+                            & {
+                                key
+                                for key, scope in persisted.items()
+                                if scope != scope_fingerprint
+                            }
+                        )
+                        and not (target & live)
+                    )
+                    return {"binding": "verified", "absent": absent}
                 highest = connection.execute(
                     "SELECT MAX(fence) FROM s02_deletion_bindings "
                     "WHERE operation_id = ?",

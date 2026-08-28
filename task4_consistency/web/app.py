@@ -325,9 +325,11 @@ try:
         clock=lambda: int(time.time()),
         corpus_root=FIXTURES,
     )
-    # The S02 absence store configured for S16 (when set): the registered
-    # source boundary persists object deletions there so restarts keep
-    # governed-deleted objects unreadable.
+    # The S02 absence store for S16 (R6 P1-2): the configured env value
+    # when set, otherwise the stable default beside the S16 state ledger.
+    # The registered source boundary persists object deletions there so a
+    # standard deployment never runs an S02 deletion without a persistent
+    # absence store.
     _s16_absence_value = os.environ.get(
         "TASK4_S16_OBJECT_ABSENCE_PATH", ""
     ).strip()
@@ -341,7 +343,12 @@ try:
         storage_available=_s01_demo_flag("TASK4_S01_STORAGE_AVAILABLE", default=True),
         registered_sources=S02_REGISTERED_SOURCES,
         controlled_objects=S02_CONTROLLED_OBJECTS,
-        controlled_object_absence_store=_s16_absence_value or None,
+        controlled_object_absence_store=(
+            _s16_absence_value
+            or str(
+                Path(_s01_state_path).parent / "s02_object_absence.sqlite3"
+            )
+        ),
         exception_approver_subject=S05_EXCEPTION_APPROVER_SUBJECT,
         policy_governance=S08_SERVICE,
     )
@@ -598,19 +605,6 @@ def _s16_retention_seconds() -> int:
     return parsed
 
 
-def _s16_object_absence_path() -> Path | None:
-    """The S02 absence-store path configured for S16.  When set, the S01
-    registered-source boundary persists object deletions here so a restart
-    keeps every deleted object unreadable."""
-    value = os.environ.get("TASK4_S16_OBJECT_ABSENCE_PATH", "").strip()
-    if not value:
-        return None
-    path = Path(value)
-    if not path.is_absolute():
-        raise ValueError("TASK4_S16_OBJECT_ABSENCE_PATH must be absolute")
-    return path
-
-
 def _s16_service_factory() -> GovernedDeletionService | None:
     from task4_consistency.controlled.s16 import (
         BackupDeletionOwner,
@@ -670,9 +664,10 @@ def _s16_service_factory() -> GovernedDeletionService | None:
             "it must not coincide with or nest inside the S16 ledger, the "
             "business database or either parent recovery root"
         )
-    absence_path = _s16_object_absence_path() or (
-        state_path.parent / "s02_object_absence.sqlite3"
-    )
+    # R6 (P1-2): the S02 absence store lives on the S01 registered-source
+    # boundary (env value or the stable default beside the state ledger);
+    # the S02 owner reads the boundary's own path, so no separate local
+    # computation is needed here.
     clock = lambda: int(time.time())
     retention = RetentionPolicy(retention_seconds=_s16_retention_seconds())
     # R2 (P1-5): the independent security-audit owner seam.  A real narrow

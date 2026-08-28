@@ -27,6 +27,7 @@ from task4_consistency.controlled.s01 import (
 )
 from task4_consistency.controlled.s12 import EvaluationService
 from task4_consistency.controlled.s16 import (
+    _digest,
     S16_AUDIT_SEAM_UNAVAILABLE,
     S16_OWNER_BINDING_CONFLICT,
     S16_HOLD_GENERATION_CHANGED,
@@ -2776,16 +2777,18 @@ def test_backup_delete_resumes_after_crash_between_unlink_and_commit(
     fingerprints = {"fp-crash"}
     fingerprints_digest = backup._bindings_digest(fingerprints)
     identity = backup._connector_identity("target.sqlite3", digest)
-    staged_manifest_id = str(backup._load_manifests()[0]["manifest_id"])
-    # Crash simulation: intent staged (with its fixed manifest set),
-    # files already unlinked, registry rows and binding NOT committed.
+    staged_manifest = backup._load_manifests()[0]
+    staged_manifest_id = str(staged_manifest["manifest_id"])
+    # Crash simulation: intent staged (with its fixed manifest set and
+    # per-manifest content snapshot), files already unlinked, registry
+    # rows and binding NOT committed.
     with backup._registry_connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
         connection.execute(
             "INSERT INTO backup_deletion_intents("
             "operation_id, fence, scope_fingerprint, fingerprints_digest, "
-            "status, staged_at, identities_json, manifest_ids_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "status, staged_at, identities_json, manifest_ids_json, "
+            "manifests_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 "op-crash",
                 1,
@@ -2795,6 +2798,32 @@ def test_backup_delete_resumes_after_crash_between_unlink_and_commit(
                 int(_now()),
                 json.dumps([identity], separators=(",", ":")),
                 json.dumps([staged_manifest_id], separators=(",", ":")),
+                json.dumps(
+                    [
+                        {
+                            "manifest_id": staged_manifest_id,
+                            "scope_fingerprint": str(
+                                staged_manifest.get("scope_fingerprint") or ""
+                            ),
+                            "entries_digest": str(
+                                staged_manifest.get("entries_digest") or ""
+                            ),
+                            "manifest_digest": hashlib.sha256(
+                                json.dumps(
+                                    staged_manifest,
+                                    ensure_ascii=False,
+                                    sort_keys=True,
+                                    separators=(",", ":"),
+                                ).encode("utf-8")
+                            ).hexdigest(),
+                            "identities": [
+                                str(e["connector_identity"])
+                                for e in staged_manifest["files"]
+                            ],
+                        }
+                    ],
+                    separators=(",", ":"),
+                ),
             ),
         )
         connection.commit()
@@ -3643,6 +3672,15 @@ def test_backup_delete_conflicts_on_capture_after_stage_and_repairs_forward(
     # NOTHING, preserving the new capture.
     with backup._registry_connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
+        staged_snapshot = {
+            "manifest_id": staged_manifest_id,
+            "scope_fingerprint": scope,
+            "entries_digest": str(
+                backup._load_manifests()[0].get("entries_digest") or ""
+            ),
+            "manifest_digest": _digest(backup._load_manifests()[0]),
+            "identities": [identity1],
+        }
         with pytest.raises(S16OwnerFailure) as excinfo:
             backup._backup_delete_commit(
                 connection,
@@ -3652,6 +3690,7 @@ def test_backup_delete_conflicts_on_capture_after_stage_and_repairs_forward(
                 1,
                 {identity1},
                 [staged_manifest_id],
+                [staged_snapshot],
                 resume=False,
             )
     assert excinfo.value.reason_code == S16_VERIFY_FAILED
@@ -3674,3 +3713,345 @@ def test_backup_delete_conflicts_on_capture_after_stage_and_repairs_forward(
     assert not first.exists()
     assert not second.exists()
     assert backup._load_manifests() == []
+
+
+
+# ---------------------------------------------------------------------------
+# R6 (P1/P2) regressions
+# ---------------------------------------------------------------------------
+
+
+def test_s02_post_binding_resurrection_replay_repairs_forward(
+    tmp_path: Path,
+) -> None:
+    """R6 P1-1: after the binding completed, resurrected S02 values are
+    never proven absent by the binding row — verify fails until a replay
+    re-persists absence; readiness stays closed in between; the same
+    binding replay re-executes the deletion effect idempotently."""
+    service, submission, application_id = _registered_terminated(tmp_path)
+    boundary = service.registered_source_boundary
+    originals = dict(boundary._objects)
+    assert originals
+    s16 = _s16_service(tmp_path, service, governance_scope=TENANT_SCOPE)
+    result = _preflight(
+        s16, str(submission["upstream_application_ref"]), scope=TENANT_SCOPE
+    )
+    s16.commit(
+        request_id=result["request_id"],
+        principal=GOVERNANCE_REGISTERED,
+        idempotency_key="s02-res-commit",
+    )
+    outcome = s16.process_next_deletion_job(worker_id="w", now=_now() + 1)
+    assert outcome["status"] == "complete", outcome
+    job = s16._job_for_request(result["request_id"])
+    assert job is not None
+    with sqlite3.connect(boundary.absence_store_path) as connection:
+        fingerprints = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT fingerprint FROM s02_object_absence"
+            ).fetchall()
+        }
+    assert fingerprints
+    scope = result["scope_fingerprint"]
+    binding = (
+        str(job["job_id"]),
+        int(job.get("fence") or 0),
+    )
+    assert boundary.s02_verify_absent(
+        fingerprints, scope_fingerprint=scope,
+        operation_id=binding[0], fence=binding[1],
+    )["absent"] is True
+    assert s16.ready() is True
+
+    # Resurrection: the live objects come back (external write).  The
+    # binding alone never proves absence and readiness stays closed.
+    boundary._objects.update(originals)
+    assert boundary.s02_verify_absent(
+        fingerprints, scope_fingerprint=scope,
+        operation_id=binding[0], fence=binding[1],
+    )["absent"] is False
+    assert s16.ready() is False
+    # Same-binding replay re-executes the deletion effect and reopens
+    # readiness for the already-repaired owner.
+    replayed = boundary.s02_replay(
+        fingerprints,
+        operation_id=binding[0],
+        fence=binding[1],
+        scope_fingerprint=scope,
+    )
+    assert replayed["replayed"] is True
+    assert replayed.get("deleted_counts", {}).get("derived_object", 0) >= 1
+    assert boundary.s02_verify_absent(
+        fingerprints, scope_fingerprint=scope,
+        operation_id=binding[0], fence=binding[1],
+    )["absent"] is True
+    assert s16.ready() is True
+    replayed_jobs = s16.replay_restore_if_needed()
+    assert replayed_jobs["jobs"] == 0
+    assert s16.ready() is True
+
+
+def test_s12_post_binding_resurrection_replay_repairs_forward(
+    tmp_path: Path,
+) -> None:
+    """R6 P1-1: the same-binding S12 replay re-deletes resurrected rows
+    and only then proves absence."""
+    from task4_consistency.controlled.s12 import content_digest
+    from task4_consistency.controlled.s16 import copy_identity_fingerprint
+
+    evaluation = _empty_evaluation(tmp_path)
+    scope = scope_fingerprint_for("app-s12-res")
+    plan = {
+        "plan_id": "plan-res",
+        "kind": "s16-res",
+        "opportunities": [
+            {"opportunity_id": "opp-res", "application_id": "app-s12-res"}
+        ],
+    }
+    with evaluation._store._connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        evaluation._store._write_row(
+            connection, "s12_plans", "plan-res", plan
+        )
+        connection.commit()
+    fingerprint = copy_identity_fingerprint(
+        "s12", "evaluation_copy", content_digest(plan)
+    )
+    assert evaluation.s16_delete_scope(
+        [fingerprint],
+        operation_id="op-res",
+        fence=1,
+        scope_fingerprint=scope,
+    )["status"] == "complete"
+    assert evaluation.s16_verify_absent(
+        [fingerprint], scope_fingerprint=scope,
+        operation_id="op-res", fence=1,
+    )["absent"] is True
+    # Resurrection: the same plan row returns.
+    with evaluation._store._connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        evaluation._store._write_row(
+            connection, "s12_plans", "plan-res", plan
+        )
+        connection.commit()
+    evaluation._store.reload()
+    assert evaluation.s16_verify_absent(
+        [fingerprint], scope_fingerprint=scope,
+        operation_id="op-res", fence=1,
+    )["absent"] is False
+    # Same-binding replay re-deletes.
+    replayed = evaluation.s16_replay_scope(
+        [fingerprint],
+        operation_id="op-res",
+        fence=1,
+        scope_fingerprint=scope,
+    )
+    assert replayed["status"] == "complete"
+    assert evaluation.s16_verify_absent(
+        [fingerprint], scope_fingerprint=scope,
+        operation_id="op-res", fence=1,
+    )["absent"] is True
+    # A wrong binding still never proves absence.
+    assert evaluation.s16_verify_absent(
+        [fingerprint], scope_fingerprint=scope,
+        operation_id="op-other", fence=1,
+    )["binding"] == "missing"
+
+
+def test_backup_post_binding_resurrection_replay_repairs_forward(
+    tmp_path: Path,
+) -> None:
+    """R6 P1-1: a capture that reappears after the backup binding
+    completed is never proven absent — verify fails, the same-binding
+    replay re-deletes, and readiness reopens only afterwards."""
+    backup_root = tmp_path / "backups"
+    backup = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
+    scope = "e" * 64
+    saved = backup_root / "target.sqlite3"
+    saved.write_bytes(b"resurrect-capture")
+    digest = hashlib.sha256(b"resurrect-capture").hexdigest()
+    backup.capture(
+        scope_fingerprint=scope, copy_files=[("target.sqlite3", digest)]
+    )
+    inv = backup.inventory(scope_fingerprint=scope)
+    fingerprint = [
+        e.identity_fingerprint for e in inv if e.copy_class == COPY_CLASS_REPLICA
+    ][0]
+    assert backup.delete(
+        {fingerprint},
+        scope_fingerprint=scope,
+        operation_id="op-res",
+        fence=1,
+    )["status"] == "complete"
+    assert backup.verify_absent(
+        {fingerprint}, scope_fingerprint=scope,
+        operation_id="op-res", fence=1,
+    )["status"] == "verified"
+    # Resurrection: the same capture returns.
+    saved.write_bytes(b"resurrect-capture")
+    backup.capture(
+        scope_fingerprint=scope, copy_files=[("target.sqlite3", digest)]
+    )
+    with pytest.raises(S16OwnerFailure) as excinfo:
+        backup.verify_absent(
+            {fingerprint}, scope_fingerprint=scope,
+            operation_id="op-res", fence=1,
+        )
+    assert excinfo.value.reason_code == S16_VERIFY_FAILED
+    # Same-binding replay re-deletes.
+    replayed = backup.replay(
+        {fingerprint},
+        scope_fingerprint=scope,
+        operation_id="op-res",
+        fence=1,
+    )
+    assert replayed["status"] == "complete"
+    assert backup.verify_absent(
+        {fingerprint}, scope_fingerprint=scope,
+        operation_id="op-res", fence=1,
+    )["status"] == "verified"
+    assert not saved.exists()
+    assert backup.owner_healthy() is True
+
+
+def test_backup_staged_manifest_content_mutation_conflicts_and_repairs(
+    tmp_path: Path,
+) -> None:
+    """R6 P1-3: an in-place rewrite of an already staged manifest (same
+    manifest id, different files/scope/entries digest) is never unlinked —
+    the delete fails stable with zero file/manifest loss, and the same
+    operation repair-forwards by re-staging the current content."""
+    backup_root = tmp_path / "backups"
+    backup = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
+    scope = "f" * 64
+    saved = backup_root / "first.bin"
+    saved.write_bytes(b"first-capture")
+    digest1 = hashlib.sha256(b"first-capture").hexdigest()
+    backup.capture(
+        scope_fingerprint=scope, copy_files=[("first.bin", digest1)]
+    )
+    inv = backup.inventory(scope_fingerprint=scope)
+    fingerprint = [
+        e.identity_fingerprint for e in inv if e.copy_class == COPY_CLASS_REPLICA
+    ][0]
+    staged_manifest = backup._load_manifests()[0]
+    staged_manifest_id = str(staged_manifest["manifest_id"])
+    identity1 = backup._connector_identity("first.bin", digest1)
+    snapshot = {
+        "manifest_id": staged_manifest_id,
+        "scope_fingerprint": scope,
+        "entries_digest": str(staged_manifest.get("entries_digest") or ""),
+        "manifest_digest": _digest(staged_manifest),
+        "identities": [identity1],
+    }
+    with backup._registry_connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "INSERT INTO backup_deletion_intents("
+            "operation_id, fence, scope_fingerprint, fingerprints_digest, "
+            "status, staged_at, identities_json, manifest_ids_json, "
+            "manifests_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "op-mut",
+                1,
+                scope,
+                backup._bindings_digest({fingerprint}),
+                "staged",
+                int(_now()),
+                json.dumps([identity1], separators=(",", ":")),
+                json.dumps([staged_manifest_id], separators=(",", ":")),
+                json.dumps([snapshot], separators=(",", ":")),
+            ),
+        )
+        connection.commit()
+    # Mutation: the SAME manifest id is rewritten in place — entries
+    # digest changes while the identity set stays registered, so the
+    # repair-forward can complete consistently.
+    digest2 = hashlib.sha256(b"tampered").hexdigest()
+    mutated = {
+        **staged_manifest,
+        "entries_digest": _digest(
+            [
+                {
+                    "connector_identity": identity1,
+                    "content_sha256": digest2,
+                }
+            ]
+        ),
+    }
+    backup._manifest_path(staged_manifest_id).write_text(
+        json.dumps(mutated, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    with backup._registry_connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        with pytest.raises(S16OwnerFailure) as excinfo:
+            backup._backup_delete_commit(
+                connection,
+                scope,
+                backup._bindings_digest({fingerprint}),
+                "op-mut",
+                1,
+                {identity1},
+                [staged_manifest_id],
+                [snapshot],
+                resume=False,
+            )
+    assert excinfo.value.reason_code == S16_VERIFY_FAILED
+    assert excinfo.value.retryable is False
+    # Zero unlink: the file and the mutated manifest survive; the owner
+    # stays diagnostically healthy (the mutated manifest is consistent).
+    assert saved.exists()
+    assert len(backup._load_manifests()) == 1
+    # Repair-forward: the same operation re-stages the current content
+    # (the stale intent is replaced) and completes.
+    outcome = backup.delete(
+        {fingerprint},
+        scope_fingerprint=scope,
+        operation_id="op-mut",
+        fence=1,
+    )
+    assert outcome["status"] == "complete", outcome
+    assert backup.owner_healthy() is True
+    assert not saved.exists()
+    assert backup._load_manifests() == []
+
+
+def test_s02_default_absence_store_is_wired_in_production(
+    tmp_path: Path,
+) -> None:
+    """R6 P1-2: without TASK4_S16_OBJECT_ABSENCE_PATH the production app
+    wires the stable default absence store beside the S16 state ledger, so
+    the S02 owner never runs into 'S02 absence store is not configured'."""
+    import os
+    import subprocess
+    import sys
+
+    env = {
+        **os.environ,
+        "TASK4_S16_OBJECT_ABSENCE_PATH": "",
+        "TASK4_S01_STATE_PATH": str(tmp_path / "s01.sqlite3"),
+        "TASK4_S01_DEMO_CREDENTIAL": "demo",
+        "TASK4_S01_DEMO_SUBJECT": "demo",
+        "TASK4_S01_OPERATOR_CREDENTIAL": "operator",
+        "TASK4_S01_OPERATOR_SUBJECT": "operator",
+        "TASK4_S01_AUDITOR_CREDENTIAL": "auditor",
+        "TASK4_S01_AUDITOR_SUBJECT": "auditor",
+    }
+    probe = (
+        "import task4_consistency.web.app as app; "
+        "b = app.S01_SERVICE.registered_source_boundary; "
+        "print(b.absence_store_path is not None, "
+        "str(b.absence_store_path).endswith('s02_object_absence.sqlite3'))"
+    )
+    run = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=str(Path(__file__).resolve().parent.parent),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.strip() == "True True", run.stdout

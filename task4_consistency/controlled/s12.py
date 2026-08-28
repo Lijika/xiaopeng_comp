@@ -519,16 +519,54 @@ class _EvalStore:
                 (operation_id, int(fence)),
             ).fetchone()
             if binding is not None:
-                connection.execute("ROLLBACK")
                 if (
                     str(binding[1]) != str(scope_fingerprint)
                     or str(binding[2]) != fingerprints_digest
                 ):
+                    connection.execute("ROLLBACK")
                     return {
                         "status": "conflict",
                         "deleted_counts": {},
                         "reason_code": "S16_OWNER_BINDING_CONFLICT",
                     }
+                # R6 (P1-1): the binding authorizes the replay; rows that
+                # reappeared after the binding completed are re-deleted
+                # (idempotent repair-forward) — never proven absent by the
+                # binding row alone.
+                resurrected: dict[str, set[str]] = {}
+                for table, ids in tables_and_ids:
+                    ids = set(ids)
+                    if not ids:
+                        continue
+                    if table not in _EVAL_TABLES:
+                        connection.execute("ROLLBACK")
+                        raise ValueError(
+                            f"S16 S12 deletion table is unknown: {table}"
+                        )
+                    persisted = {
+                        str(row[0])
+                        for row in connection.execute(
+                            f"SELECT item_id FROM {table}"
+                        ).fetchall()
+                    }
+                    present = ids & persisted
+                    if present:
+                        resurrected[table] = present
+                if resurrected:
+                    deleted_counts: dict[str, int] = {}
+                    for table, ids in resurrected.items():
+                        connection.executemany(
+                            f"DELETE FROM {table} WHERE item_id = ?",
+                            ((item_id,) for item_id in sorted(ids)),
+                        )
+                        deleted_counts[table] = len(ids)
+                    connection.execute("COMMIT")
+                    return {
+                        "status": "complete",
+                        "deleted_counts": deleted_counts,
+                        "replayed": True,
+                    }
+                connection.execute("ROLLBACK")
                 return {
                     "status": "complete",
                     "deleted_counts": {},
@@ -2916,7 +2954,17 @@ class EvaluationService:
                         or str(binding[1]) != fingerprints_digest
                     ):
                         return {"binding": "conflict"}
-                    return {"binding": "verified", "absent": True}
+                    # R6 (P1-1): the binding authorizes; the CURRENT row
+                    # state decides the proof.
+                    with self._lock:
+                        self._store.reload()
+                        remaining = self._s16_rows_by_fingerprint(
+                            target, scope_fingerprint=scope_fingerprint or None
+                        )
+                    return {
+                        "binding": "verified",
+                        "absent": not any(remaining.values()),
+                    }
                 highest = connection.execute(
                     "SELECT MAX(fence) FROM s12_deletion_bindings "
                     "WHERE operation_id = ?",
