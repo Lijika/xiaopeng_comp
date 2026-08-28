@@ -27,6 +27,14 @@ from task4_consistency.controlled.s01 import (
 )
 from task4_consistency.controlled.s12 import EvaluationService
 from task4_consistency.controlled.s16 import (
+    S16_AUDIT_SEAM_UNAVAILABLE,
+    S16_HOLD_GENERATION_CHANGED,
+    S16_OWNER_REGISTRY_STALE,
+    S16_OWNER_STALE_FENCE,
+    S16_POLICY_STALE,
+    S16_STALE_WORKER,
+    S16_VERIFY_FAILED,
+    S16OwnerFailure,
     BackupDeletionOwner,
     CopyInventoryEntry,
     ExportTempOwner,
@@ -51,6 +59,7 @@ from task4_consistency.controlled.s16 import (
     COPY_CLASSES,
     copy_identity_fingerprint,
     s16_owner_registry_digest,
+    scope_fingerprint_for,
 )
 from task4_consistency.controlled.s16 import (
     COPY_CLASS_BACKUP_MANIFEST,
@@ -300,17 +309,24 @@ def _s16_service(
     fault_injector: Any = None,
     audit_available: bool = True,
     storage_available: bool = True,
+    security_audit_available: bool = True,
+    security_audit_writer: Any = None,
+    governance_scope: str = "C-DEMO",
     ledger_path: Path | None = None,
 ) -> GovernedDeletionService:
+    retention = RetentionPolicy(retention_seconds=retention_seconds)
+    s01_owner = S01DeletionOwner(
+        service,
+        retention=retention,
+        clock=_CdemoSessionClock(),
+    )
     return GovernedDeletionService(
         ledger_path=ledger_path or (tmp_path / "s16.sqlite3"),
         owners={
-            "s01": S01DeletionOwner(
-                service,
-                retention=RetentionPolicy(retention_seconds=retention_seconds),
-                clock=_CdemoSessionClock(),
+            "s01": s01_owner,
+            "s02": S02DeletionOwner(
+                service.registered_source_boundary, s01_owner
             ),
-            "s02": S02DeletionOwner(service.registered_source_boundary, service),
             "s12": S12DeletionOwner(
                 evaluation or _empty_evaluation(tmp_path)
             ),
@@ -319,11 +335,14 @@ def _s16_service(
             ),
             "s17-disabled": ExportTempOwner(),
         },
-        retention=RetentionPolicy(retention_seconds=retention_seconds),
+        retention=retention,
         governance_subject=GOVERNANCE.subject,
         approver_subjects=(APPROVER_1.subject, APPROVER_2.subject),
+        governance_scope=governance_scope,
         audit_available=audit_available,
         storage_available=storage_available,
+        security_audit_available=security_audit_available,
+        security_audit_writer=security_audit_writer,
         max_owner_attempts=max_owner_attempts,
         clock=_CdemoSessionClock(),
         fault_injector=fault_injector,
@@ -343,17 +362,33 @@ def _preflight(s16: GovernedDeletionService, reference: str, *, scope: str = "C-
     )
 
 
-def _approve_two(s16: GovernedDeletionService, request_id: str, manifest_digest: str) -> None:
+def _approve_two(
+    s16: GovernedDeletionService,
+    request_id: str,
+    manifest_digest: str,
+    *,
+    scope: str = "C-DEMO",
+) -> None:
     s16.approve(
         request_id=request_id,
         manifest_digest=manifest_digest,
-        principal=APPROVER_1,
+        principal=S01CommandPrincipal(
+            subject=APPROVER_1.subject,
+            role="operator",
+            scope=scope,
+            source_id="s16-approval-desk",
+        ),
         idempotency_key=f"approve-1-{request_id}",
     )
     s16.approve(
         request_id=request_id,
         manifest_digest=manifest_digest,
-        principal=APPROVER_2,
+        principal=S01CommandPrincipal(
+            subject=APPROVER_2.subject,
+            role="operator",
+            scope=scope,
+            source_id="s16-approval-desk",
+        ),
         idempotency_key=f"approve-2-{request_id}",
     )
 
@@ -608,40 +643,54 @@ def test_legal_hold_and_commit_race_has_one_safe_winner(tmp_path: Path) -> None:
     s16 = _s16_service(tmp_path, service)
     result = _preflight(s16, "APP-R53-BAD-ENGINE")
 
-    # Hold lands first: hold wins, commit stays closed.
+    # Hold lands first: the manifest generation is pinned at preflight, so
+    # commit closes with a stable gate (hold wins) and content stays intact.
     hold = s16.impose_legal_hold(
         scope_fingerprint=result["scope_fingerprint"],
         principal=GOVERNANCE,
-        reason_code="LITIGATION_HOLD",
+        reason_code="litigation",
         owner="s01",
         effective_time=_now(),
+        idempotency_key="hold-1",
     )
     assert hold["status"] == "accepted"
     with pytest.raises(S16Blocked) as excinfo:
         s16.commit(request_id=result["request_id"], principal=GOVERNANCE, idempotency_key="hold-commit-1")
-    assert excinfo.value.reason_code == S16_ACTIVE_LEGAL_HOLD
+    assert excinfo.value.reason_code in {"S16_ACTIVE_LEGAL_HOLD", "S16_HOLD_GENERATION_CHANGED"}
     # Content fully intact while the hold is active.
     assert _s01_fact_counts(service)["applications"] == 1
 
-    # Release, then commit wins and the worker continues forward.
-    released = s16.release_legal_hold(hold_id=hold["hold_id"], principal=GOVERNANCE)
+    # Release, then a FRESH preflight pins the new generation; commit wins
+    # and the worker continues forward.
+    released = s16.release_legal_hold(
+        hold_id=hold["hold_id"],
+        principal=GOVERNANCE,
+        idempotency_key="release-1",
+    )
     assert released["status"] == "accepted"
-    committed = s16.commit(request_id=result["request_id"], principal=GOVERNANCE, idempotency_key="hold-commit-2")
+    result2 = s16.preflight(
+        application_reference="APP-R53-BAD-ENGINE",
+        principal=GOVERNANCE,
+        idempotency_key="s16-hold-preflight-2",
+    )
+    committed = s16.commit(request_id=result2["request_id"], principal=GOVERNANCE, idempotency_key="hold-commit-2")
     assert committed["status"] == "accepted"
     # An impose that lands after commit is recorded but deletion continues.
     late_hold = s16.impose_legal_hold(
-        scope_fingerprint=result["scope_fingerprint"],
+        scope_fingerprint=result2["scope_fingerprint"],
         principal=GOVERNANCE,
-        reason_code="LATE_HOLD",
-        owner="s01",
+        reason_code="regulatory",
+        owner="all",
         effective_time=_now(),
+        idempotency_key="hold-2",
     )
     assert late_hold["status"] == "accepted"
     outcome = s16.process_next_deletion_job(worker_id="w", now=_now() + 1)
     assert outcome["status"] == "complete", outcome
     assert _s01_fact_counts(service)["applications"] == 0
-    query = s16.query(request_id=result["request_id"], principal=GOVERNANCE)
+    query = s16.query(request_id=result2["request_id"], principal=GOVERNANCE)
     assert len(query["legal_holds"]) == 2
+
 
 
 # ---------------------------------------------------------------------------
@@ -716,6 +765,7 @@ def test_partial_owner_failure_restart_and_repair_complete_one_effect(
         service,
         max_owner_attempts=2,
         fault_injector=fault,
+        governance_scope=TENANT_SCOPE,
     )
     result = _preflight(s16, str(submission["upstream_application_ref"]), scope=TENANT_SCOPE)
     assert sum(e["count"] for e in result["entries"] if e["copy_class"] == "derived_object") == 2
@@ -795,7 +845,14 @@ def test_missing_owner_stale_manifest_and_shared_copy_block_commit(
 
     # Owner inventory failure -> preflight unavailable.
     s16 = _s16_service(tmp_path, service)
-    broken = S02DeletionOwner(service.registered_source_boundary, service)
+    broken = S02DeletionOwner(
+        service.registered_source_boundary,
+        S01DeletionOwner(
+            service,
+            retention=RetentionPolicy(retention_seconds=0),
+            clock=_CdemoSessionClock(),
+        ),
+    )
 
     def boom(scope_fingerprint: str) -> list[CopyInventoryEntry]:
         raise S16Unavailable("injected owner outage")
@@ -804,7 +861,14 @@ def test_missing_owner_stale_manifest_and_shared_copy_block_commit(
     s16._owners["s02"] = broken
     with pytest.raises(S16Unavailable):
         _preflight(s16, "APP-R53-BAD-ENGINE")
-    s16._owners["s02"] = S02DeletionOwner(service.registered_source_boundary, service)
+    s16._owners["s02"] = S02DeletionOwner(
+        service.registered_source_boundary,
+        S01DeletionOwner(
+            service,
+            retention=RetentionPolicy(retention_seconds=0),
+            clock=_CdemoSessionClock(),
+        ),
+    )
 
     # Stale manifest: a store revision change between preflight and commit.
     result = _preflight(s16, "APP-R53-BAD-ENGINE")
@@ -822,7 +886,7 @@ def test_missing_owner_stale_manifest_and_shared_copy_block_commit(
     tmp2 = tmp_path / "shared"
     tmp2.mkdir(parents=True)
     service_b, submission_b, _ = _registered_terminated(tmp2, second_app=True)
-    s16b = _s16_service(tmp2, service_b)
+    s16b = _s16_service(tmp2, service_b, governance_scope=TENANT_SCOPE)
     result_b = _preflight(s16b, str(submission_b["upstream_application_ref"]), scope=TENANT_SCOPE)
     derived = [e for e in result_b["entries"] if e["copy_class"] == "derived_object"]
     assert derived and derived[0]["shared_state"] == "shared"
@@ -843,7 +907,7 @@ def test_completed_deletion_hides_s01_s02_s12_s13_and_s15_reads(
     # -- registered scenario: S02 objects + S01/S13/S15 reads -------------
     service, submission, application_id = _registered_terminated(tmp_path)
     boundary = service.registered_source_boundary
-    s16 = _s16_service(tmp_path, service)
+    s16 = _s16_service(tmp_path, service, governance_scope=TENANT_SCOPE)
     result = _preflight(s16, str(submission["upstream_application_ref"]), scope=TENANT_SCOPE)
     assert any(
         e["copy_class"] == "derived_object" and e["count"] >= 1
@@ -1100,7 +1164,9 @@ def test_old_backup_restore_replays_external_manifest_before_readiness(
     state_path = tmp_path / "target.sqlite3"
     backup_root = tmp_path / "backups"
     backup = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
-    s16 = _s16_service(tmp_path, service, backup_root=backup_root)
+    s16 = _s16_service(
+        tmp_path, service, backup_root=backup_root, governance_scope=TENANT_SCOPE
+    )
 
     result = _preflight(s16, str(submission["upstream_application_ref"]), scope=TENANT_SCOPE)
     scope_fingerprint = result["scope_fingerprint"]
@@ -1141,8 +1207,10 @@ def test_old_backup_restore_replays_external_manifest_before_readiness(
     assert outcome["status"] == "complete", outcome
     assert not list(backup_root.glob("backup_*.json"))
     assert not saved.exists()
-    # Completion leaves restore replay pending -> readiness stays closed.
-    assert s16.ready() is False
+    # After a normal completion the scope stays absent, so the shared
+    # readiness gate stays open (the immutable receipt reports the pending
+    # replay state until the next startup/runtime replay).
+    assert s16.ready() is True
 
     # Old-backup restore: put the pre-deletion DB back and restart the
     # ledger; startup replay must re-delete before readiness opens.
@@ -1188,31 +1256,15 @@ def test_old_backup_restore_replays_external_manifest_before_readiness(
         controlled_objects=(),
         controlled_object_absence_store=service.registered_source_boundary.absence_store_path,
     )
-    # Simulate an unfinished restore replay: the ledger still records the
-    # completed manifest with a pending replay state.
+    # Simulate an unfinished restore replay: remove the append-only replay
+    # facts (the immutable receipt stays untouched) so readiness derives
+    # from the missing verification.
     with sqlite3.connect(tmp_path / "s16.sqlite3") as connection:
-        rows = connection.execute(
-            "SELECT receipt_id, payload FROM s16_receipts"
-        ).fetchall()
-        for receipt_id, payload in rows:
-            value = json.loads(payload)
-            value["restore_replay_status"] = "pending"
-            updated = json.dumps(
-                value,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-            from task4_consistency.controlled.s16 import S16Ledger
-
-            digest = S16Ledger._integrity_digest(
-                "s16_receipts", receipt_id, updated
-            )
-            connection.execute(
-                "UPDATE s16_receipts SET payload = ?, integrity_sha256 = ? "
-                "WHERE receipt_id = ?",
-                (updated, digest, receipt_id),
-            )
+        connection.execute("DELETE FROM s16_replays")
+        connection.execute(
+            "DELETE FROM s16_events WHERE payload LIKE '%restore_replay%'"
+        )
+    assert restarted.ready() is False
     with pytest.raises(Exception):
         GovernedDeletionService(
             ledger_path=tmp_path / "s16.sqlite3",
@@ -1250,7 +1302,7 @@ def test_admin_cross_scope_unknown_and_direct_hard_delete_are_denied(
     tmp_path: Path,
 ) -> None:
     service, submission, application_id = _registered_terminated(tmp_path)
-    s16 = _s16_service(tmp_path, service)
+    s16 = _s16_service(tmp_path, service, governance_scope=TENANT_SCOPE)
 
     # Platform admin / reviewer / demo user cannot run preflight.
     for principal in (PLATFORM_ADMIN, REVIEWER, DEMO_USER):
@@ -1263,10 +1315,13 @@ def test_admin_cross_scope_unknown_and_direct_hard_delete_are_denied(
     # Unknown reference existence-hides.
     with pytest.raises(S16NotFound):
         _preflight(s16, "DOES-NOT-EXIST", scope=TENANT_SCOPE)
-    # Cross-scope: governance owner scoped C-DEMO cannot resolve an
-    # R-OBSERVED application; same existence-hiding result as unknown.
-    with pytest.raises(S16NotFound):
+    # Cross-scope: the same governance subject bound to a different scope is
+    # an invalid identity (role/scope/source are part of the binding, R1),
+    # so it is rejected before any existence fact is disclosed.
+    with pytest.raises(S16Forbidden):
         _preflight(s16, str(submission["upstream_application_ref"]), scope="C-DEMO")
+    # The HTTP surface cannot produce this state: principals are derived
+    # from the registered credentials and always carry the configured scope.
 
     # Unknown request ids existence-hide for every command.
     with pytest.raises(S16NotFound):
@@ -1280,7 +1335,11 @@ def test_admin_cross_scope_unknown_and_direct_hard_delete_are_denied(
     with pytest.raises(S16NotFound):
         s16.repair(request_id="s16req_unknown", owner_id="s02", repair_fact="x", principal=GOVERNANCE_REGISTERED, idempotency_key="u-3")
     with pytest.raises(S16NotFound):
-        s16.release_legal_hold(hold_id="hold_unknown", principal=GOVERNANCE_REGISTERED)
+        s16.release_legal_hold(
+            hold_id="hold_unknown",
+            principal=GOVERNANCE_REGISTERED,
+            idempotency_key="u-4",
+        )
 
     # No direct hard-delete surface exists on the service.
     for name in ("hard_delete", "delete_all", "delete_application", "purge"):
@@ -1311,9 +1370,10 @@ def test_audit_or_deletion_ledger_outage_has_zero_commit_effect(
         s16.impose_legal_hold(
             scope_fingerprint=result["scope_fingerprint"],
             principal=GOVERNANCE,
-            reason_code="HOLD",
+            reason_code="litigation",
             owner="s01",
             effective_time=_now(),
+            idempotency_key="outage-hold",
         )
     assert excinfo.value.reason_code == S16_AUDIT_UNAVAILABLE
 
@@ -1351,13 +1411,14 @@ def test_receipt_manifest_and_retained_history_contain_no_business_value_or_loca
 ) -> None:
     service, submission, application_id = _registered_terminated(tmp_path)
     backup_root = tmp_path / "backups"
-    s16 = _s16_service(tmp_path, service, backup_root=backup_root)
+    s16 = _s16_service(
+        tmp_path, service, backup_root=backup_root, governance_scope=TENANT_SCOPE
+    )
     reference = str(submission["upstream_application_ref"])
     result = _preflight(s16, reference, scope=TENANT_SCOPE)
     scope_fingerprint = result["scope_fingerprint"]
     backup = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
-    saved = tmp_path / "saved" / "target.sqlite3"
-    saved.parent.mkdir(parents=True)
+    saved = backup_root / "target.sqlite3"
     import shutil
 
     shutil.copy2(tmp_path / "target.sqlite3", saved)
@@ -1375,7 +1436,12 @@ def test_receipt_manifest_and_retained_history_contain_no_business_value_or_loca
         ),
         idempotency_key="s16-no-value-preflight-2",
     )
-    _approve_two(s16, result2["request_id"], result2["manifest_digest"])
+    _approve_two(
+        s16,
+        result2["request_id"],
+        result2["manifest_digest"],
+        scope=TENANT_SCOPE,
+    )
     committed = s16.commit(request_id=result2["request_id"], principal=GOVERNANCE_REGISTERED, idempotency_key="no-value-commit")
     assert committed["status"] == "accepted"
     outcome = s16.process_next_deletion_job(worker_id="w", now=_now() + 1)
@@ -1443,3 +1509,495 @@ def test_receipt_manifest_and_retained_history_contain_no_business_value_or_loca
     assert set(receipt["owner_counts"]) == {"s01", "s02", "backup"}
     assert all(count >= 1 for count in receipt["owner_counts"].values())
     assert receipt["restore_replay_status"] == "pending"
+
+
+# ---------------------------------------------------------------------------
+# R1 targeted regressions
+# ---------------------------------------------------------------------------
+
+
+def test_stale_worker_publish_cas_never_overwrites_newer_state(
+    tmp_path: Path,
+) -> None:
+    service = _c_demo_service(tmp_path)
+    _admit_c_demo(service, key="s16-cas-intake")
+    _terminate(service, _app_of(service))
+    s16 = _s16_service(tmp_path, service)
+    result = _preflight(s16, "APP-R53-BAD-ENGINE")
+    s16.commit(request_id=result["request_id"], principal=GOVERNANCE, idempotency_key="cas-commit")
+
+    # Worker 1 claims (fence 1), then its lease expires and worker 2 claims
+    # (fence 2): worker 1's publish must be rejected by the CAS.
+    first = s16._claim_job("worker-1", _now() + 1)
+    assert first is not None and int(first["fence"]) == 1
+    second = s16._claim_job("worker-2", _now() + 61)
+    assert second is not None and int(second["fence"]) == 2
+
+    stale = s16._publish_success(first, {}, "worker-1", _now() + 62)
+    assert stale["status"] == "stale"
+    assert stale["reason_code"] == S16_STALE_WORKER
+    job = s16._job_for_request(result["request_id"])
+    assert job is not None and int(job["fence"]) == 2
+    assert job["status"] == "running"
+    assert job["lease_owner"] == "worker-2"
+    # The stale worker never minted a receipt.
+    assert s16.receipt.__self__._receipts == {}
+    with sqlite3.connect(tmp_path / "s16.sqlite3") as connection:
+        rows = connection.execute(
+            "SELECT payload FROM s16_events WHERE payload LIKE '%stale_worker%'"
+        ).fetchall()
+    assert rows
+
+    # The current worker publishes successfully and completes.
+    final = s16._publish_success(second, {}, "worker-2", _now() + 63)
+    assert final["status"] == "complete"
+    job = s16._job_for_request(result["request_id"])
+    assert job is not None and job["status"] == "complete"
+
+
+def _app_of(service: ControlledScenarioService) -> str:
+    (application_id,) = service.s16_application_ids()
+    return application_id
+
+
+def test_commit_rejects_registry_policy_and_hold_generation_changes(
+    tmp_path: Path,
+) -> None:
+    import task4_consistency.controlled.s16 as s16_module
+
+    service = _c_demo_service(tmp_path)
+    application_id = _admit_c_demo(service, key="s16-stale-intake")
+    _terminate(service, application_id)
+    s16 = _s16_service(tmp_path, service)
+    result = _preflight(s16, "APP-R53-BAD-ENGINE")
+
+    # Registry change between preflight and commit is a stable gate.
+    original_digest = s16_module.s16_owner_registry_digest
+    s16_module.s16_owner_registry_digest = lambda: "0" * 64  # type: ignore[assignment]
+    try:
+        with pytest.raises(S16Blocked) as excinfo:
+            s16.commit(request_id=result["request_id"], principal=GOVERNANCE, idempotency_key="stale-registry")
+        assert excinfo.value.reason_code == S16_OWNER_REGISTRY_STALE
+    finally:
+        s16_module.s16_owner_registry_digest = original_digest
+
+    # Policy change between preflight and commit is a stable gate.
+    s16._retention = RetentionPolicy(
+        policy_version="2", retention_seconds=0
+    )
+    try:
+        with pytest.raises(S16Blocked) as excinfo:
+            s16.commit(request_id=result["request_id"], principal=GOVERNANCE, idempotency_key="stale-policy")
+        assert excinfo.value.reason_code == S16_POLICY_STALE
+    finally:
+        s16._retention = RetentionPolicy(retention_seconds=0)
+
+    # Hold generation change between preflight and commit is a stable gate.
+    result2 = _preflight(s16, "APP-R53-BAD-ENGINE", )
+    result2 = s16.preflight(
+        application_reference="APP-R53-BAD-ENGINE",
+        principal=GOVERNANCE,
+        idempotency_key="s16-stale-preflight-2",
+    )
+    s16.impose_legal_hold(
+        scope_fingerprint=result2["scope_fingerprint"],
+        principal=GOVERNANCE,
+        reason_code="litigation",
+        owner="s01",
+        effective_time=_now(),
+        idempotency_key="stale-hold",
+    )
+    with pytest.raises(S16Blocked) as excinfo:
+        s16.commit(request_id=result2["request_id"], principal=GOVERNANCE, idempotency_key="stale-hold-commit")
+    assert excinfo.value.reason_code in {"S16_ACTIVE_LEGAL_HOLD", "S16_HOLD_GENERATION_CHANGED"}
+
+
+def test_backup_capture_path_boundary_and_delete_verification(
+    tmp_path: Path,
+) -> None:
+    backup_root = tmp_path / "backups"
+    backup = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
+    scope_fingerprint = "0" * 64
+
+    # Absolute paths, separators and escapes are rejected at capture.
+    for bad_handle in ("/etc/passwd", "../evil", "a/b", "a\\b", "..", "."):
+        with pytest.raises(ValueError):
+            backup.capture(
+                scope_fingerprint=scope_fingerprint,
+                copy_files=[(bad_handle, "0" * 64)],
+            )
+
+    captured = backup_root / "captured.bin"
+    captured.write_bytes(b"captured-bytes")
+    digest = hashlib.sha256(b"captured-bytes").hexdigest()
+    manifest = backup.capture(
+        scope_fingerprint=scope_fingerprint,
+        copy_files=[(captured.name, digest)],
+    )
+    # A repeated identity never overwrites: unique manifests accumulate.
+    captured2 = backup_root / "captured2.bin"
+    captured2.write_bytes(b"captured-bytes")
+    digest2 = hashlib.sha256(b"captured-bytes").hexdigest()
+    manifest2 = backup.capture(
+        scope_fingerprint=scope_fingerprint,
+        copy_files=[(captured2.name, digest2)],
+    )
+    assert manifest["manifest_id"] != manifest2["manifest_id"]
+    assert len(backup._load_manifests()) == 2
+
+    # Digest mismatch fails the delete and keeps the manifest.
+    captured.write_bytes(b"tampered-bytes")
+    fingerprints = {
+        entry.identity_fingerprint
+        for entry in backup.inventory(scope_fingerprint)
+    }
+    with pytest.raises(S16OwnerFailure) as excinfo:
+        backup.delete(fingerprints, scope_fingerprint=scope_fingerprint, operation_id="o", fence=1)
+    assert excinfo.value.reason_code == S16_VERIFY_FAILED
+    # The failing manifest is preserved (fail-closed): the delete never
+    # removes a manifest whose captured copy could not be verified.
+    assert any(
+        manifest.get("files", [{}])[0].get("handle") == "captured.bin"
+        for manifest in backup._load_manifests()
+    )
+    assert captured.exists()
+
+    # Correct digest deletes the files, verifies removal, then manifests.
+    captured.write_bytes(b"captured-bytes")
+    outcome = backup.delete(
+        fingerprints, scope_fingerprint=scope_fingerprint, operation_id="o", fence=1
+    )
+    assert outcome["status"] == "complete"
+    assert not captured.exists()
+    assert not captured2.exists()
+    assert not list(backup_root.glob("backup_*.json"))
+
+
+def test_s02_absence_persistence_failure_keeps_memory_intact_and_retryable(
+    tmp_path: Path,
+) -> None:
+    service, submission, application_id = _registered_terminated(tmp_path)
+    boundary = service.registered_source_boundary
+    fingerprints = [
+        entry.identity_fingerprint
+        for entry in S02DeletionOwner(
+            boundary,
+            S01DeletionOwner(
+                service,
+                retention=RetentionPolicy(retention_seconds=0),
+                clock=_CdemoSessionClock(),
+            ),
+        ).inventory(scope_fingerprint_for(application_id))
+        if entry.planned_action == "delete"
+    ]
+    assert len(fingerprints) == 2
+
+    import sqlite3 as _sqlite3
+
+    real_connect = sqlite3.connect
+    failed = {"armed": True}
+
+    def failing_connect(*args: Any, **kwargs: Any) -> Any:
+        if failed["armed"]:
+            raise OSError("injected absence-store outage")
+        return real_connect(*args, **kwargs)
+
+    monkeypatch_connect = failing_connect
+    original = sqlite3.connect
+    sqlite3.connect = failing_connect  # type: ignore[assignment]
+    try:
+        with pytest.raises(OSError, match="absence-store outage"):
+            boundary.s02_delete(
+                fingerprints,
+                operation_id="op-1",
+                fence=1,
+                scope_fingerprint=scope_fingerprint_for(application_id),
+            )
+    finally:
+        sqlite3.connect = original  # type: ignore[assignment]
+    # Memory state is untouched: the objects stay readable and absent is
+    # not claimed.
+    boundary.read_object(
+        tenant_id="tenant-test",
+        source_system_id="registered-source",
+        object_ref="result-object",
+    )
+    assert boundary.s02_inventory()["objects"]
+    assert boundary.s02_verify_absent(fingerprints)["absent"] is False
+
+    # The retry after the outage persists absence atomically.
+    outcome = boundary.s02_delete(
+        fingerprints,
+        operation_id="op-1",
+        fence=1,
+        scope_fingerprint=scope_fingerprint_for(application_id),
+    )
+    assert outcome["status"] == "complete"
+    assert boundary.s02_verify_absent(fingerprints)["absent"] is True
+    # Replaying the same operation/fence returns the original result.
+    replayed = boundary.s02_delete(
+        fingerprints,
+        operation_id="op-1",
+        fence=1,
+        scope_fingerprint=scope_fingerprint_for(application_id),
+    )
+    assert replayed["replayed"] is True
+    # A stale fence is a stable stale outcome.
+    stale = boundary.s02_delete(
+        fingerprints,
+        operation_id="op-1",
+        fence=0,
+        scope_fingerprint=scope_fingerprint_for(application_id),
+    )
+    assert stale["status"] == "stale"
+
+
+def test_owner_level_fencing_rejects_stale_fence_on_s12(
+    tmp_path: Path,
+) -> None:
+    service = _c_demo_service(tmp_path)
+    application_id = _admit_c_demo(service, key="s16-fence-intake")
+    _terminate(service, application_id)
+    evaluation = _empty_evaluation(tmp_path)
+    # Seed one minimal plan row referencing the target scope: the S16 S12
+    # adapter scans row structure only, so this exercises the owner binding.
+    plan_id = "plan-fence-1"
+    plan = {
+        "plan_id": plan_id,
+        "opportunities": [
+            {
+                "opportunity_id": "opp-fence",
+                "application_id": application_id,
+                "check_id": "R_ENGINE_CROSS",
+            }
+        ],
+        "clusters": [],
+        "evidence_references": [],
+    }
+    with evaluation._store._connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        evaluation._store._write_row(
+            connection, "s12_plans", plan_id, plan
+        )
+        connection.execute("COMMIT")
+    scope_fp = scope_fingerprint_for(application_id)
+    entries = S12DeletionOwner(evaluation).inventory(scope_fp)
+    fingerprints = [entry.identity_fingerprint for entry in entries]
+    assert fingerprints
+
+    first = evaluation.s16_delete_scope(
+        fingerprints,
+        operation_id="s12-op-1",
+        fence=2,
+        scope_fingerprint=scope_fp,
+    )
+    assert first["status"] == "complete"
+    assert evaluation.s16_verify_absent(fingerprints)["absent"] is True
+    replayed = evaluation.s16_delete_scope(
+        fingerprints,
+        operation_id="s12-op-1",
+        fence=2,
+        scope_fingerprint=scope_fp,
+    )
+    assert replayed["replayed"] is True
+    stale = evaluation.s16_delete_scope(
+        fingerprints,
+        operation_id="s12-op-1",
+        fence=1,
+        scope_fingerprint=scope_fp,
+    )
+    assert stale["status"] == "stale"
+
+
+def test_security_audit_facts_and_outage_zero_state_change(
+    tmp_path: Path,
+) -> None:
+    recorded: list[dict[str, Any]] = []
+
+    def writer(record: dict[str, Any]) -> bool:
+        recorded.append(record)
+        return True
+
+    service = _c_demo_service(tmp_path)
+    application_id = _admit_c_demo(service, key="s16-audit-intake")
+    _terminate(service, application_id)
+    s16 = _s16_service(tmp_path, service, security_audit_writer=writer)
+    probe = _preflight(s16, "APP-R53-BAD-ENGINE")
+    hold = s16.impose_legal_hold(
+        scope_fingerprint=probe["scope_fingerprint"],
+        principal=GOVERNANCE,
+        reason_code="litigation",
+        owner="s01",
+        effective_time=_now(),
+        idempotency_key="audit-hold",
+    )
+    s16.release_legal_hold(
+        hold_id=hold["hold_id"],
+        principal=GOVERNANCE,
+        idempotency_key="audit-release",
+    )
+    # A fresh preflight pins the post-hold generation so commit can proceed.
+    result = s16.preflight(
+        application_reference="APP-R53-BAD-ENGINE",
+        principal=GOVERNANCE,
+        idempotency_key="s16-audit-preflight-2",
+    )
+    _approve_two(s16, result["request_id"], result["manifest_digest"])
+    committed = s16.commit(request_id=result["request_id"], principal=GOVERNANCE, idempotency_key="audit-commit")
+    assert committed["status"] == "accepted"
+    with sqlite3.connect(tmp_path / "s16.sqlite3") as connection:
+        audit_rows = connection.execute(
+            "SELECT payload FROM s16_events WHERE payload LIKE '%security_audit%'"
+        ).fetchall()
+    facts = [json.loads(row[0]) for row in audit_rows]
+    actions = {
+        fact.get("action")
+        for fact in facts
+        if fact.get("event_type") == "security_audit"
+    }
+    assert {"approval", "legal_hold_imposed", "commit"} <= actions
+    assert all(
+        fact.get("event_type") == "security_audit"
+        and fact.get("scope_fingerprint") == result["scope_fingerprint"]
+        and len(fact.get("subject_fingerprint", "")) == 64
+        for fact in facts
+        if fact.get("event_type") == "security_audit"
+    )
+    # The post-commit full copy reached the writer and was recorded.
+    assert any(
+        fact.get("event_type") == "security_audit_replication"
+        and fact.get("status") == "replicated"
+        for fact in facts
+    )
+    assert recorded
+
+    # A failing writer records the failure without rolling back the commit.
+    failed_writer: list[dict[str, Any]] = []
+
+    def failing_writer(record: dict[str, Any]) -> bool:
+        failed_writer.append(record)
+        raise RuntimeError("worm outage")
+
+    service2 = _c_demo_service(tmp_path / "audit-b")
+    application_id2 = _admit_c_demo(service2, key="s16-audit2-intake")
+    _terminate(service2, application_id2)
+    s16b = _s16_service(
+        tmp_path / "audit-b",
+        service2,
+        security_audit_writer=failing_writer,
+        ledger_path=tmp_path / "audit-b" / "s16.sqlite3",
+    )
+    result_b = _preflight(s16b, "APP-R53-BAD-ENGINE")
+    _approve_two(s16b, result_b["request_id"], result_b["manifest_digest"])
+    committed_b = s16b.commit(request_id=result_b["request_id"], principal=GOVERNANCE, idempotency_key="audit-commit-b")
+    assert committed_b["status"] == "accepted"
+    with sqlite3.connect(tmp_path / "audit-b" / "s16.sqlite3") as connection:
+        rows_b = connection.execute(
+            "SELECT payload FROM s16_events WHERE payload LIKE '%security_audit_replication%'"
+        ).fetchall()
+    assert any(
+        json.loads(row[0]).get("status") == "failed" for row in rows_b
+    )
+
+    # Audit seam outage: protected commands change zero state.
+    service3 = _c_demo_service(tmp_path / "audit-c")
+    application_id3 = _admit_c_demo(service3, key="s16-audit3-intake")
+    _terminate(service3, application_id3)
+    s16c = _s16_service(
+        tmp_path / "audit-c",
+        service3,
+        security_audit_available=False,
+        ledger_path=tmp_path / "audit-c" / "s16.sqlite3",
+    )
+    result_c = _preflight(s16c, "APP-R53-BAD-ENGINE")
+    with pytest.raises(S16Blocked) as excinfo:
+        s16c.commit(request_id=result_c["request_id"], principal=GOVERNANCE, idempotency_key="audit-commit-c")
+    assert excinfo.value.reason_code == S16_AUDIT_SEAM_UNAVAILABLE
+    assert _s01_fact_counts(service3)["applications"] == 1
+    assert s16c.query(request_id=result_c["request_id"], principal=GOVERNANCE)["job"] is None
+
+
+def test_receipt_append_only_and_replay_facts_immutable(tmp_path: Path) -> None:
+    service = _c_demo_service(tmp_path)
+    application_id = _admit_c_demo(service, key="s16-receipt-intake")
+    _terminate(service, application_id)
+    s16 = _s16_service(tmp_path, service)
+    result = _preflight(s16, "APP-R53-BAD-ENGINE")
+    s16.commit(request_id=result["request_id"], principal=GOVERNANCE, idempotency_key="receipt-commit")
+    outcome = s16.process_next_deletion_job(worker_id="w", now=_now() + 1)
+    assert outcome["status"] == "complete", outcome
+    with sqlite3.connect(tmp_path / "s16.sqlite3") as connection:
+        receipt_rows = connection.execute(
+            "SELECT receipt_id, payload, integrity_sha256 FROM s16_receipts"
+        ).fetchall()
+    assert len(receipt_rows) == 1
+    receipt_id, original_payload, original_digest = receipt_rows[0]
+
+    # Restart replays and appends immutable replay facts; the original
+    # receipt row is byte-identical.
+    restarted = _s16_service(
+        tmp_path,
+        service,
+        ledger_path=tmp_path / "s16.sqlite3",
+    )
+    assert restarted.ready() is True
+    with sqlite3.connect(tmp_path / "s16.sqlite3") as connection:
+        after_rows = connection.execute(
+            "SELECT receipt_id, payload, integrity_sha256 FROM s16_receipts"
+        ).fetchall()
+        replay_rows = connection.execute(
+            "SELECT replay_id, payload FROM s16_replays"
+        ).fetchall()
+        replay_events = connection.execute(
+            "SELECT payload FROM s16_events WHERE payload LIKE '%restore_replay%'"
+        ).fetchall()
+    assert after_rows == [(receipt_id, original_payload, original_digest)]
+    assert len(replay_rows) >= 1
+    assert len(replay_events) >= 1
+    assert restarted.receipt(request_id=result["request_id"], principal=GOVERNANCE)[
+        "restore_replay_status"
+    ] == "verified"
+
+    # Tampering the immutable receipt is detected on the next load.
+    with sqlite3.connect(tmp_path / "s16.sqlite3") as connection:
+        connection.execute(
+            "UPDATE s16_receipts SET payload = ? WHERE receipt_id = ?",
+            (_canonical_tamper(original_payload), receipt_id),
+        )
+    with pytest.raises(S16Unavailable):
+        _s16_service(tmp_path, service, ledger_path=tmp_path / "s16.sqlite3")
+
+
+def _canonical_tamper(payload: str) -> str:
+    value = json.loads(payload)
+    value["tampered"] = True
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def test_runtime_restore_replay_reopens_readiness(tmp_path: Path) -> None:
+    import shutil
+
+    service = _c_demo_service(tmp_path)
+    application_id = _admit_c_demo(service, key="s16-runtime-restore-intake")
+    _terminate(service, application_id)
+    state_path = tmp_path / "target.sqlite3"
+    original_db = tmp_path / "original.sqlite3"
+    shutil.copy2(state_path, original_db)
+    s16 = _s16_service(tmp_path, service)
+    result = _preflight(s16, "APP-R53-BAD-ENGINE")
+    s16.commit(request_id=result["request_id"], principal=GOVERNANCE, idempotency_key="runtime-commit")
+    outcome = s16.process_next_deletion_job(worker_id="w", now=_now() + 1)
+    assert outcome["status"] == "complete", outcome
+    assert s16.ready() is True
+
+    # Old backup restored under the running process: the shared gate closes
+    # until the runtime replay re-deletes.
+    shutil.copy2(original_db, state_path)
+    service._reload_store()
+    assert s16.ready() is False
+    replayed = s16.replay_restore_if_needed()
+    assert replayed["jobs"] >= 1
+    assert s16.ready() is True
+    assert service.s16_resolve_by_scope_fingerprint(
+        scope_fingerprint_for(application_id)
+    ) is None

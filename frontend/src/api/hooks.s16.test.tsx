@@ -14,8 +14,10 @@ import {
   S16_REQUEST_KEY,
   useS16Approve,
   useS16Commit,
+  useS16ImposeHold,
   useS16Preflight,
   useS16Query,
+  useS16ReleaseHold,
   useS16Repair,
 } from "./hooks";
 import { createQueryClient, fetchRouter } from "../test-utils";
@@ -333,5 +335,58 @@ describe("clearApplicationScopedCache", () => {
     expect(client.getQueryData(["s13", "delivery", "app_1"])).toBeUndefined();
     // The S16 entry itself survives for the authority refetch.
     expect(client.getQueryData(S16_REQUEST_KEY("s16req_1"))).toBeDefined();
+  });
+});
+
+describe("S16 legal hold hooks", () => {
+  it("impose posts the closed vocabulary body and carries no raw fields", async () => {
+    const client = createQueryClient();
+    const router = fetchRouter({
+      "POST /controlled/s16/api/legal-holds/impose": () =>
+        new Response(
+          JSON.stringify({
+            status: "accepted",
+            hold_id: "hold_1",
+            generation: 1,
+          }),
+          { headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    const { result } = renderHook(() => useS16ImposeHold(), {
+      wrapper: wrap(client),
+    });
+    result.current.mutate({
+      scopeFingerprint: "c".repeat(64),
+      reasonCode: "litigation",
+      owner: "all",
+      effectiveTime: 1_800_000_000,
+      idempotencyKey: "hold-key",
+    });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(router.calls[0]?.body).toEqual({
+      scope_fingerprint: "c".repeat(64),
+      reason_code: "litigation",
+      owner: "all",
+      effective_time: 1_800_000_000,
+      idempotency_key: "hold-key",
+    });
+    expect(result.current.data?.hold_id).toBe("hold_1");
+  });
+
+  it("release posts only the idempotency key to the hold route", async () => {
+    const client = createQueryClient();
+    const router = fetchRouter({
+      "POST /controlled/s16/api/legal-holds/hold_1/release": () =>
+        new Response(
+          JSON.stringify({ status: "accepted", hold_id: "hold_1" }),
+          { headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    const { result } = renderHook(() => useS16ReleaseHold(), {
+      wrapper: wrap(client),
+    });
+    result.current.mutate({ holdId: "hold_1", idempotencyKey: "release-key" });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(router.calls[0]?.body).toEqual({ idempotency_key: "release-key" });
   });
 });

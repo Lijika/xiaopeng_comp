@@ -2578,6 +2578,48 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/controlled/s16/api/legal-holds/impose": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * S16 Impose Legal Hold
+         * @description Impose one typed Legal Hold on a governed scope: closed reason and
+         *     owner vocabulary, scope existence gate, request id + idempotency
+         *     binding, arbitrated with commit inside the same ledger transaction.
+         */
+        post: operations["s16_impose_legal_hold_controlled_s16_api_legal_holds_impose_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/controlled/s16/api/legal-holds/{hold_id}/release": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * S16 Release Legal Hold
+         * @description Release one imposed Legal Hold under the governance identity.
+         */
+        post: operations["s16_release_legal_hold_controlled_s16_api_legal_holds__hold_id__release_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/controlled/s16/api/process": {
         parameters: {
             query?: never;
@@ -8806,6 +8848,8 @@ export interface components {
         S16CommandResponse: {
             /** Approved By */
             approved_by?: string | null;
+            /** Generation */
+            generation?: number | null;
             /** Hold Id */
             hold_id?: string | null;
             /** Job Id */
@@ -8841,6 +8885,27 @@ export interface components {
         /** S16ErrorResponse */
         S16ErrorResponse: {
             detail: components["schemas"]["S16ErrorDetail"];
+        };
+        /** S16ImposeHoldBody */
+        S16ImposeHoldBody: {
+            /** Effective Time */
+            effective_time: number;
+            /** Expiry */
+            expiry?: number | null;
+            /** Idempotency Key */
+            idempotency_key: string;
+            /**
+             * Owner
+             * @enum {string}
+             */
+            owner: "s01" | "s02" | "s12" | "backup" | "s17-disabled" | "all";
+            /**
+             * Reason Code
+             * @enum {string}
+             */
+            reason_code: "litigation" | "regulatory" | "internal_investigation";
+            /** Scope Fingerprint */
+            scope_fingerprint: string;
         };
         /** S16JobSummary */
         S16JobSummary: {
@@ -9031,6 +9096,11 @@ export interface components {
             scope_fingerprint: string;
             /** Subject */
             subject: string;
+        };
+        /** S16ReleaseHoldBody */
+        S16ReleaseHoldBody: {
+            /** Idempotency Key */
+            idempotency_key: string;
         };
         /** S16RepairBody */
         S16RepairBody: {
@@ -16467,6 +16537,146 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["S16RepairBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16CommandResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ValidationErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+        };
+    };
+    s16_impose_legal_hold_controlled_s16_api_legal_holds_impose_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["S16ImposeHoldBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16CommandResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ValidationErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["S16ErrorResponse"];
+                };
+            };
+        };
+    };
+    s16_release_legal_hold_controlled_s16_api_legal_holds__hold_id__release_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                hold_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["S16ReleaseHoldBody"];
             };
         };
         responses: {

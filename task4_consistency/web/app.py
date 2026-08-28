@@ -636,15 +636,63 @@ def _s16_service_factory() -> GovernedDeletionService | None:
         raise ValueError("S16 requires the S01 lifecycle authority")
     if S12_SERVICE is None:
         raise ValueError("S16 requires the S12 evaluation authority")
+    # R1 (P2): the backup root must be an explicitly configured independent
+    # recovery domain.  A same-directory default would let a directory-level
+    # backup restore roll the ledger and the backup manifests back together.
+    backup_root_value = os.environ.get("TASK4_S16_BACKUP_ROOT", "").strip()
+    if not backup_root_value:
+        raise ValueError(
+            "TASK4_S16_BACKUP_ROOT is required: the backup owner must live "
+            "in an independent recovery domain, separate from the S16 "
+            "ledger and the business database"
+        )
+    backup_root = Path(backup_root_value).resolve()
+    if not backup_root.is_absolute():
+        raise ValueError("TASK4_S16_BACKUP_ROOT must be absolute")
+    business_db_path = Path(_s01_state_value).resolve()
+    ledger_path = state_path.resolve()
+
+    def _shares_recovery_root(path_a: Path, path_b: Path) -> bool:
+        return (
+            path_a == path_b
+            or path_b.is_relative_to(path_a)
+            or path_a.is_relative_to(path_b)
+        )
+
+    if (
+        _shares_recovery_root(backup_root, business_db_path)
+        or _shares_recovery_root(backup_root, business_db_path.parent)
+        or _shares_recovery_root(backup_root, ledger_path)
+        or _shares_recovery_root(backup_root, ledger_path.parent)
+    ):
+        raise ValueError(
+            "TASK4_S16_BACKUP_ROOT must be an independent recovery domain: "
+            "it must not coincide with or nest inside the S16 ledger, the "
+            "business database or either parent recovery root"
+        )
     absence_path = _s16_object_absence_path() or (
         state_path.parent / "s02_object_absence.sqlite3"
     )
-    backup_root = Path(
-        os.environ.get("TASK4_S16_BACKUP_ROOT", "").strip()
-        or str(state_path.parent / "backups")
-    )
     clock = lambda: int(time.time())
     retention = RetentionPolicy(retention_seconds=_s16_retention_seconds())
+    # R1 (P1): the independent security-audit owner seam.  When configured,
+    # protected commands write value-free audit facts and the writer
+    # receives the post-commit full copy; an unavailable seam closes
+    # protected commands with zero state change.
+    def _s16_security_audit_writer(record: dict[str, Any]) -> bool:
+        audit_writer = getattr(S01_SERVICE, "audit_writer", None)
+        if audit_writer is None:
+            return False
+        try:
+            return bool(audit_writer(record))
+        except Exception:
+            return False
+
+    security_audit_writer = (
+        _s16_security_audit_writer
+        if _s01_demo_flag("TASK4_S16_SECURITY_AUDIT_AVAILABLE", default=True)
+        else None
+    )
     return GovernedDeletionService(
         ledger_path=state_path,
         owners={
@@ -652,7 +700,10 @@ def _s16_service_factory() -> GovernedDeletionService | None:
                 S01_SERVICE, retention=retention, clock=clock
             ),
             "s02": S02DeletionOwner(
-                S01_SERVICE.registered_source_boundary, S01_SERVICE
+                S01_SERVICE.registered_source_boundary,
+                S01DeletionOwner(
+                    S01_SERVICE, retention=retention, clock=clock
+                ),
             ),
             "s12": S12DeletionOwner(S12_SERVICE),
             "backup": BackupDeletionOwner(backup_root, clock=clock),
@@ -661,10 +712,15 @@ def _s16_service_factory() -> GovernedDeletionService | None:
         retention=retention,
         governance_subject=S16_GOVERNANCE_SUBJECT,
         approver_subjects=(S16_APPROVER1_SUBJECT, S16_APPROVER2_SUBJECT),
+        governance_scope=S16_GOVERNANCE_SCOPE,
         worker_id=S16_WORKER_SUBJECT,
         audit_available=_s01_demo_flag(
             "TASK4_S01_AUDIT_AVAILABLE", default=True
         ),
+        security_audit_available=_s01_demo_flag(
+            "TASK4_S16_SECURITY_AUDIT_AVAILABLE", default=True
+        ),
+        security_audit_writer=security_audit_writer,
         storage_available=_s01_demo_flag(
             "TASK4_S01_STORAGE_AVAILABLE", default=True
         ),
@@ -796,6 +852,11 @@ class S01BackgroundRuntime:
                 if self._deletion_worker is not None:
                     try:
                         deletion_result = self._deletion_worker()
+                        replay_restore = getattr(
+                            S16_SERVICE, "replay_restore_if_needed", None
+                        )
+                        if replay_restore is not None:
+                            replay_restore()
                     except Exception:
                         with self._deletion_health_lock:
                             self._deletion_health = {
@@ -1046,6 +1107,56 @@ class OptionalTokenAuth(BaseHTTPMiddleware):
 
 app.add_middleware(OptionalTokenAuth)
 app.add_middleware(ReactShellCachePolicy)
+
+
+class S16NoStorePolicy(BaseHTTPMiddleware):
+    """Every S16 response — success, domain error, validation error and
+    unavailability — carries no-store (R1 P1: typed 4xx/409/503 and invalid
+    bodies must never be cached)."""
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        response = await call_next(request)
+        if request.url.path.startswith("/controlled/s16"):
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["Pragma"] = "no-cache"
+        return response
+
+
+class S16RestoreReadinessGate(BaseHTTPMiddleware):
+    """The shared restore-readiness gate (R1 P0): while any completed S16
+    manifest lacks a verified append-only replay fact, every restricted
+    controlled read stays closed with one stable unavailable result.  No
+    per-owner tombstone logic is duplicated anywhere."""
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        service = globals().get("S16_SERVICE")
+        if (
+            service is not None
+            and request.url.path.startswith("/controlled/")
+            and not service.ready()
+        ):
+            response = JSONResponse(
+                status_code=503,
+                content={
+                    "detail": {
+                        "error": "S16_RESTORE_READINESS_UNAVAILABLE",
+                        "message": (
+                            "Governed reads are closed until the governed "
+                            "deletion restore replay verifies absence"
+                        ),
+                    }
+                },
+            )
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["Pragma"] = "no-cache"
+            return response
+        return await call_next(request)
+
+
+# R1 middleware registrations: the restore-readiness gate and the no-store
+# policy wrap every controlled path (last registered = outermost).
+app.add_middleware(S16RestoreReadinessGate)
+app.add_middleware(S16NoStorePolicy)
 
 
 class S01ResponsePolicy(BaseHTTPMiddleware):

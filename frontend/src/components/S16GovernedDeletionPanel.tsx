@@ -12,10 +12,12 @@ import {
   useS16Approve,
   useS16Cancel,
   useS16Commit,
+  useS16ImposeHold,
   useS16Preflight,
   useS16Process,
   useS16Query,
   useS16Receipt,
+  useS16ReleaseHold,
   useS16Repair,
 } from "../api/hooks";
 import { useQueryClient } from "@tanstack/react-query";
@@ -85,6 +87,132 @@ function EntryRow({ entry }: { entry: S16ManifestEntry }) {
         {entry.content_sha256.slice(0, 16)}…
       </td>
     </tr>
+  );
+}
+
+function LegalHoldSection({
+  scopeFingerprint,
+  holds,
+}: {
+  scopeFingerprint: string;
+  holds: S16QueryResponse["legal_holds"];
+}) {
+  const [reasonCode, setReasonCode] = useState<
+    "litigation" | "regulatory" | "internal_investigation"
+  >("litigation");
+  const [owner, setOwner] = useState<
+    "s01" | "s02" | "s12" | "backup" | "s17-disabled" | "all"
+  >("all");
+  const impose = useS16ImposeHold();
+  const release = useS16ReleaseHold();
+
+  const handleImpose = () => {
+    impose.mutate({
+      scopeFingerprint,
+      reasonCode,
+      owner,
+      effectiveTime: Math.floor(Date.now() / 1000),
+      idempotencyKey: `s16-hold-${scopeFingerprint.slice(0, 12)}-${Date.now()}`,
+    });
+  };
+
+  return (
+    <section className="panel" data-testid="s16-legal-holds" aria-labelledby="s16-holds-title">
+      <h3 id="s16-holds-title">法律保全（与 commit 同一账本仲裁）</h3>
+      <dl className="facts">
+        {holds.map((hold) => (
+          <div key={hold.hold_id} data-testid="s16-hold-entry">
+            <dt>
+              {hold.reason_code} · gen {hold.generation}
+            </dt>
+            <dd>
+              {hold.owner} · 生效 {hold.effective_time}
+              {hold.expiry !== null && hold.expiry !== undefined
+                ? ` · 期限 ${hold.expiry}`
+                : ""}
+              {hold.released ? " · 已释放" : " · 生效中"}
+            </dd>
+            {!hold.released && (
+              <button
+                type="button"
+                data-testid={`s16-release-hold-${hold.hold_id}`}
+                disabled={release.isPending}
+                onClick={() =>
+                  release.mutate({
+                    holdId: hold.hold_id,
+                    idempotencyKey: `s16-release-${hold.hold_id}`,
+                  })
+                }
+              >
+                {release.isPending ? "提交中…" : "释放"}
+              </button>
+            )}
+          </div>
+        ))}
+      </dl>
+      {holds.length === 0 && (
+        <p data-testid="s16-holds-empty">当前无法律保全</p>
+      )}
+      <div className="demo-controls">
+        <label htmlFor="s16-hold-reason">保全理由（封闭词表）</label>
+        <select
+          id="s16-hold-reason"
+          data-testid="s16-hold-reason"
+          value={reasonCode}
+          onChange={(event) =>
+            setReasonCode(
+              event.target.value as
+                | "litigation"
+                | "regulatory"
+                | "internal_investigation",
+            )
+          }
+          disabled={impose.isPending}
+        >
+          <option value="litigation">litigation</option>
+          <option value="regulatory">regulatory</option>
+          <option value="internal_investigation">
+            internal_investigation
+          </option>
+        </select>
+        <label htmlFor="s16-hold-owner">保全对象（封闭词表）</label>
+        <select
+          id="s16-hold-owner"
+          data-testid="s16-hold-owner"
+          value={owner}
+          onChange={(event) =>
+            setOwner(
+              event.target.value as
+                | "s01"
+                | "s02"
+                | "s12"
+                | "backup"
+                | "s17-disabled"
+                | "all",
+            )
+          }
+          disabled={impose.isPending}
+        >
+          {["s01", "s02", "s12", "backup", "s17-disabled", "all"].map(
+            (value) => (
+              <option key={value} value={value}>
+                {value}
+              </option>
+            ),
+          )}
+        </select>
+        <button
+          type="button"
+          data-testid="s16-impose-hold-button"
+          disabled={impose.isPending}
+          onClick={handleImpose}
+        >
+          {impose.isPending ? "提交中…" : "实施保全"}
+        </button>
+      </div>
+      {impose.error !== null && <S16ErrorState error={impose.error} />}
+      {release.error !== null && <S16ErrorState error={release.error} />}
+    </section>
   );
 }
 
@@ -554,6 +682,13 @@ export default function S16GovernedDeletionPanel() {
       )}
 
       {preflight !== null && <ManifestTable preflight={preflight} />}
+
+      {preflight !== null && (
+        <LegalHoldSection
+          scopeFingerprint={preflight.scope_fingerprint}
+          holds={query.data?.legal_holds ?? []}
+        />
+      )}
 
       {preflight !== null && cancelled && (
         <p data-testid="s16-cancelled" role="status">

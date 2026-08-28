@@ -64,16 +64,18 @@ def _auth(credential: str) -> dict[str, str]:
 def _build_s16_service(
     tmp_path: Path, service: ControlledScenarioService
 ) -> GovernedDeletionService:
+    retention = RetentionPolicy(retention_seconds=0)
+    s01_owner = S01DeletionOwner(
+        service,
+        retention=retention,
+        clock=lambda: int(CLOCK["now"]),
+    )
     return GovernedDeletionService(
         ledger_path=tmp_path / "s16.sqlite3",
         owners={
-            "s01": S01DeletionOwner(
-                service,
-                retention=RetentionPolicy(retention_seconds=0),
-                clock=lambda: int(CLOCK["now"]),
-            ),
+            "s01": s01_owner,
             "s02": S02DeletionOwner(
-                service.registered_source_boundary, service
+                service.registered_source_boundary, s01_owner
             ),
             "s12": S12DeletionOwner(_empty_evaluation(tmp_path)),
             "backup": BackupDeletionOwner(
@@ -81,7 +83,7 @@ def _build_s16_service(
             ),
             "s17-disabled": ExportTempOwner(),
         },
-        retention=RetentionPolicy(retention_seconds=0),
+        retention=retention,
         governance_subject=GOVERNANCE_SUBJECT,
         approver_subjects=(APPROVER1_SUBJECT, APPROVER2_SUBJECT),
         clock=lambda: int(CLOCK["now"]),
@@ -334,16 +336,24 @@ def test_s16_typed_errors_idempotency_and_existence_hiding(
     )
     application_id = _admit_c_demo(service, key="s16-http-early")
     _terminate(service, application_id)
+    early_retention = RetentionPolicy(retention_seconds=10**12)
+    early_s01_owner = S01DeletionOwner(
+        service,
+        retention=early_retention,
+        clock=lambda: int(CLOCK["now"]),
+    )
     early_s16 = GovernedDeletionService(
         ledger_path=tmp_path / "s16-early.sqlite3",
         owners={
-            "s01": S01DeletionOwner(service, retention=RetentionPolicy(retention_seconds=10**12), clock=lambda: int(CLOCK["now"])),
-            "s02": S02DeletionOwner(service.registered_source_boundary, service),
+            "s01": early_s01_owner,
+            "s02": S02DeletionOwner(
+                service.registered_source_boundary, early_s01_owner
+            ),
             "s12": S12DeletionOwner(_empty_evaluation(tmp_path)),
             "backup": BackupDeletionOwner(tmp_path / "early-backups", clock=lambda: int(CLOCK["now"])),
             "s17-disabled": ExportTempOwner(),
         },
-        retention=RetentionPolicy(retention_seconds=10**12),
+        retention=early_retention,
         governance_subject=GOVERNANCE_SUBJECT,
         approver_subjects=(APPROVER1_SUBJECT, APPROVER2_SUBJECT),
         clock=lambda: int(CLOCK["now"]),
@@ -441,3 +451,203 @@ def test_s16_shell_canonical_alias_and_missing_build(
     assert missing.status_code == 503
     assert missing.json()["detail"]["error"] == "S16_REACT_UNAVAILABLE"
     assert missing.headers["cache-control"] == "no-store"
+
+
+# ---------------------------------------------------------------------------
+# R1 targeted HTTP regressions
+# ---------------------------------------------------------------------------
+
+
+def test_s16_every_domain_and_validation_error_carries_no_store(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _install(monkeypatch, tmp_path)
+    client = TestClient(_webapp())
+
+    # Unknown application: existence-hiding 404 with no-store.
+    missing = client.post(
+        "/controlled/s16/api/deletions/preflight",
+        headers=_auth(GOVERNANCE_CREDENTIAL),
+        json={"application_reference": "UNKNOWN-REF", "idempotency_key": "ns-1"},
+    )
+    assert missing.status_code == 404
+    assert missing.headers["cache-control"] == "no-store"
+    # Wrong identity: 403 with no-store.
+    denied = client.post(
+        "/controlled/s16/api/deletions/preflight",
+        headers=_auth(DEMO_CREDENTIAL),
+        json={"application_reference": PREFERRED, "idempotency_key": "ns-2"},
+    )
+    assert denied.status_code == 403
+    assert denied.headers["cache-control"] == "no-store"
+    # Invalid body: FastAPI validation 422 with no-store (middleware).
+    invalid = client.post(
+        "/controlled/s16/api/deletions/preflight",
+        headers=_auth(GOVERNANCE_CREDENTIAL),
+        json={"application_reference": PREFERRED, "idempotency_key": ""},
+    )
+    assert invalid.status_code == 422
+    assert invalid.headers["cache-control"] == "no-store"
+    # Unavailable plane: 503 with no-store.
+    import task4_consistency.web.app as web
+
+    monkeypatch.setattr(web, "S16_SERVICE", None)
+    unavailable = client.post(
+        "/controlled/s16/api/deletions/preflight",
+        headers=_auth(GOVERNANCE_CREDENTIAL),
+        json={"application_reference": PREFERRED, "idempotency_key": "ns-3"},
+    )
+    assert unavailable.status_code == 503
+    assert unavailable.headers["cache-control"] == "no-store"
+
+
+def test_s16_legal_hold_http_command_surface(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _install(monkeypatch, tmp_path)
+    client = TestClient(_webapp())
+    preflight = client.post(
+        "/controlled/s16/api/deletions/preflight",
+        headers=_auth(GOVERNANCE_CREDENTIAL),
+        json={"application_reference": PREFERRED, "idempotency_key": "hold-pre"},
+    )
+    assert preflight.status_code == 200
+    scope_fingerprint = preflight.json()["scope_fingerprint"]
+
+    # Closed vocabulary: invalid reason is a typed 409.
+    invalid = client.post(
+        "/controlled/s16/api/legal-holds/impose",
+        headers=_auth(GOVERNANCE_CREDENTIAL),
+        json={
+            "scope_fingerprint": scope_fingerprint,
+            "reason_code": "FREE_TEXT_REASON",
+            "owner": "s01",
+            "effective_time": 1_800_000_000,
+            "idempotency_key": "hold-invalid",
+        },
+    )
+    assert invalid.status_code == 422  # closed Literal vocabulary
+    assert invalid.headers["cache-control"] == "no-store"
+
+    imposed = client.post(
+        "/controlled/s16/api/legal-holds/impose",
+        headers=_auth(GOVERNANCE_CREDENTIAL),
+        json={
+            "scope_fingerprint": scope_fingerprint,
+            "reason_code": "litigation",
+            "owner": "all",
+            "effective_time": 1_800_000_000,
+            "idempotency_key": "hold-1",
+        },
+    )
+    assert imposed.status_code == 200, imposed.text
+    assert imposed.json()["status"] == "accepted"
+    hold_id = imposed.json()["hold_id"]
+    assert imposed.headers["cache-control"] == "no-store"
+
+    # Unknown scope existence-hides.
+    unknown_scope = client.post(
+        "/controlled/s16/api/legal-holds/impose",
+        headers=_auth(GOVERNANCE_CREDENTIAL),
+        json={
+            "scope_fingerprint": "0" * 64,
+            "reason_code": "litigation",
+            "owner": "s01",
+            "effective_time": 1_800_000_000,
+            "idempotency_key": "hold-unknown-scope",
+        },
+    )
+    assert unknown_scope.status_code == 404
+    assert unknown_scope.json()["detail"]["error"] == "S16_NOT_FOUND"
+
+    released = client.post(
+        f"/controlled/s16/api/legal-holds/{hold_id}/release",
+        headers=_auth(GOVERNANCE_CREDENTIAL),
+        json={"idempotency_key": "release-1"},
+    )
+    assert released.status_code == 200, released.text
+    assert released.headers["cache-control"] == "no-store"
+    # Releasing twice is a stable replay.
+    replayed = client.post(
+        f"/controlled/s16/api/legal-holds/{hold_id}/release",
+        headers=_auth(GOVERNANCE_CREDENTIAL),
+        json={"idempotency_key": "release-1"},
+    )
+    assert replayed.status_code == 200
+    assert replayed.json()["replayed"] is True
+    # Unknown hold id existence-hides.
+    unknown_hold = client.post(
+        "/controlled/s16/api/legal-holds/hold_unknown/release",
+        headers=_auth(GOVERNANCE_CREDENTIAL),
+        json={"idempotency_key": "release-unknown"},
+    )
+    assert unknown_hold.status_code == 404
+
+
+def test_s16_restore_readiness_gate_closes_all_restricted_reads(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """After an old-backup restore under the running app, every restricted
+    controlled read shares one 503 readiness gate until the runtime replay
+    re-deletes the scope."""
+    import shutil
+
+    import task4_consistency.web.app as web
+
+    fixture = _install(monkeypatch, tmp_path)
+    client = TestClient(_webapp())
+    state_path = tmp_path / "target.sqlite3"
+    original_db = tmp_path / "original.sqlite3"
+    shutil.copy2(state_path, original_db)
+
+    preflight = client.post(
+        "/controlled/s16/api/deletions/preflight",
+        headers=_auth(GOVERNANCE_CREDENTIAL),
+        json={"application_reference": PREFERRED, "idempotency_key": "gate-pre"},
+    )
+    request_id = preflight.json()["request_id"]
+    committed = client.post(
+        f"/controlled/s16/api/deletions/{request_id}/commit",
+        headers=_auth(GOVERNANCE_CREDENTIAL),
+        json={"idempotency_key": "gate-commit"},
+    )
+    assert committed.status_code == 200
+    processed = client.post("/controlled/s16/api/process", headers=_auth(GOVERNANCE_CREDENTIAL))
+    assert processed.status_code == 200
+    assert processed.json()["status"] == "complete"
+
+    # Old backup restored: the gate closes every restricted read.
+    shutil.copy2(original_db, state_path)
+    assert web.S16_SERVICE is not None
+    assert web.S16_SERVICE.ready() is False
+    closed_query = client.get(
+        f"/controlled/s16/api/deletions/{request_id}",
+        headers=_auth(GOVERNANCE_CREDENTIAL),
+    )
+    assert closed_query.status_code == 503
+    assert (
+        closed_query.json()["detail"]["error"]
+        == "S16_RESTORE_READINESS_UNAVAILABLE"
+    )
+    assert closed_query.headers["cache-control"] == "no-store"
+    # A governed S01 read is closed by the same gate.
+    closed_s01 = client.get(
+        f"/controlled/s01/api/queries/applications/{fixture[1]}/current-route",
+    )
+    assert closed_s01.status_code == 503
+    assert (
+        closed_s01.json()["detail"]["error"]
+        == "S16_RESTORE_READINESS_UNAVAILABLE"
+    )
+
+    # The runtime replay re-deletes; readiness reopens and the receipt
+    # remains readable (append-only).
+    replayed = web.S16_SERVICE.replay_restore_if_needed()
+    assert replayed["jobs"] >= 1
+    assert web.S16_SERVICE.ready() is True
+    reopened = client.get(
+        f"/controlled/s16/api/deletions/{request_id}/receipt",
+        headers=_auth(GOVERNANCE_CREDENTIAL),
+    )
+    assert reopened.status_code == 200
+    assert reopened.json()["result"] == "deleted"

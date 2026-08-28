@@ -297,3 +297,78 @@ describe("S16GovernedDeletionPanel", () => {
     );
   });
 });
+
+describe("S16 legal hold controls", () => {
+  it("imposes and releases holds with the closed vocabulary", async () => {
+    const router = fetchRouter({
+      [`POST ${PREFLIGHT_PATH}`]: () =>
+        new Response(
+          JSON.stringify(s16PreflightPayload()),
+          { headers: { "Content-Type": "application/json" } },
+        ),
+      [`GET ${QUERY_PATH}`]: () =>
+        new Response(
+          JSON.stringify(
+            s16QueryPayload({
+              job: null,
+              legal_holds: [
+                {
+                  hold_id: "hold_1",
+                  generation: 1,
+                  reason_code: "litigation",
+                  owner: "all",
+                  effective_time: 1_800_000_000,
+                  expiry: null,
+                  released: false,
+                },
+              ],
+            }),
+          ),
+          { headers: { "Content-Type": "application/json" } },
+        ),
+      "POST /controlled/s16/api/legal-holds/impose": () =>
+        new Response(
+          JSON.stringify({
+            status: "accepted",
+            hold_id: "hold_2",
+            generation: 2,
+          }),
+          { headers: { "Content-Type": "application/json" } },
+        ),
+      "POST /controlled/s16/api/legal-holds/hold_1/release": () =>
+        new Response(
+          JSON.stringify({ status: "accepted", hold_id: "hold_1" }),
+          { headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    renderWithQuery(<S16GovernedDeletionPanel />);
+    await runPreflight();
+    await screen.findByTestId("s16-legal-holds");
+
+    // The existing hold renders with its closed fields and a release
+    // command; imposing posts the closed vocabulary.
+    expect(screen.getByTestId("s16-hold-entry")).toHaveTextContent(
+      "litigation",
+    );
+    await userEvent.click(screen.getByTestId("s16-impose-hold-button"));
+    await waitFor(() =>
+      expect(
+        router.calls.some(
+          (call) =>
+            call.url === "/controlled/s16/api/legal-holds/impose" &&
+            (call.body as { reason_code?: string }).reason_code ===
+              "litigation",
+        ),
+      ).toBe(true),
+    );
+    await userEvent.click(screen.getByTestId("s16-release-hold-hold_1"));
+    await waitFor(() =>
+      expect(
+        router.calls.some(
+          (call) =>
+            call.url === "/controlled/s16/api/legal-holds/hold_1/release",
+        ),
+      ).toBe(true),
+    );
+  });
+});

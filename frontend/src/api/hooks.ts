@@ -1745,3 +1745,71 @@ export function clearApplicationScopedCache(queryClient: ReturnType<typeof useQu
   }
   void queryClient.invalidateQueries({ queryKey: ["s16"] });
 }
+
+// --- S16 legal hold (R1: typed command surface) ----------------------------
+
+export interface S16ImposeHoldCommand {
+  scopeFingerprint: string;
+  reasonCode: "litigation" | "regulatory" | "internal_investigation";
+  owner: "s01" | "s02" | "s12" | "backup" | "s17-disabled" | "all";
+  effectiveTime: number;
+  expiry?: number;
+  idempotencyKey: string;
+}
+
+/** Impose one typed Legal Hold under the governance identity: closed
+ * reason/owner vocabulary, scope existence gate and idempotency binding. */
+export function useS16ImposeHold(): UseMutationResult<
+  S16CommandResponse,
+  Error,
+  S16ImposeHoldCommand
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (command: S16ImposeHoldCommand) => {
+      const body: Record<string, unknown> = {
+        scope_fingerprint: command.scopeFingerprint,
+        reason_code: command.reasonCode,
+        owner: command.owner,
+        effective_time: command.effectiveTime,
+        idempotency_key: command.idempotencyKey,
+      };
+      if (command.expiry !== undefined) body.expiry = command.expiry;
+      return request<S16CommandResponse>("/controlled/s16/api/legal-holds/impose", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+    },
+    retry: false,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["s16"] });
+    },
+  });
+}
+
+export interface S16ReleaseHoldCommand {
+  holdId: string;
+  idempotencyKey: string;
+}
+
+export function useS16ReleaseHold(): UseMutationResult<
+  S16CommandResponse,
+  Error,
+  S16ReleaseHoldCommand
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (command: S16ReleaseHoldCommand) =>
+      request<S16CommandResponse>(
+        `/controlled/s16/api/legal-holds/${encodeURIComponent(command.holdId)}/release`,
+        {
+          method: "POST",
+          body: JSON.stringify({ idempotency_key: command.idempotencyKey }),
+        },
+      ),
+    retry: false,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["s16"] });
+    },
+  });
+}

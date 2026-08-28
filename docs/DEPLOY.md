@@ -173,7 +173,8 @@ S16 对一笔已终止申请执行完整聚合合规删除：数据治理负责�
 | `TASK4_S16_GOVERNANCE_SCOPE` | 治理授权范围（默认 `C-DEMO`；注册租户场景传 `R-OBSERVED/<tenant>`） |
 | `TASK4_S16_RETENTION_SECONDS` | 版本化保留时长（默认 90 天；0 = 到期即删） |
 | `TASK4_S16_OBJECT_ABSENCE_PATH` | S02 登记对象删除的持久 absence 账本（重启后仍拒绝已删对象读取；缺省在账本目录下） |
-| `TASK4_S16_BACKUP_ROOT` | 备份 owner 根目录（scope 级备份副本与恢复清单；缺省在账本目录下） |
+| `TASK4_S16_BACKUP_ROOT` | **必填**：备份 owner 根目录，必须位于独立恢复域（不得与 S16 账本、业务数据库或其父恢复根重合/嵌套；启动时校验，否则 S16 关闭）。目录级备份回滚不得同时回滚账本与备份清单 |
+| `TASK4_S16_SECURITY_AUDIT_AVAILABLE` | 独立安全审计 seam（默认 true）：关闭时受保护命令零状态变化；配置后受保护命令在同一事务内写 value-free audit 事实并执行提交后完整复制 |
 
 启动示例（在 5.2 的变量基础上追加）：
 
@@ -194,11 +195,13 @@ export TASK4_S16_APPROVER2_CREDENTIAL=<cred> TASK4_S16_APPROVER2_SUBJECT=<subjec
 | `POST /controlled/s16/api/deletions/{request_id}/commit` | 唯一不可逆边界（短事务复核 + 建 job） |
 | `POST /controlled/s16/api/deletions/{request_id}/repair` | 修复后恢复原 job |
 | `GET /controlled/s16/api/deletions/{request_id}` | 任务/审批/保全状态 |
-| `GET /controlled/s16/api/deletions/{request_id}/receipt` | 无原值 receipt |
-| `POST /controlled/s16/api/process` | 受控 worker 尝试（一次一个 job） |
+| `GET /controlled/s16/api/deletions/{request_id}/receipt` | 无原值 receipt（不可变；restore replay 状态由只追加 replay 事实派生） |
+| `POST /controlled/s16/api/legal-holds/impose` | 实施法律保全（封闭 reason/owner 词表 + 幂等绑定；与 commit 同一账本 CAS 仲裁） |
+| `POST /controlled/s16/api/legal-holds/{hold_id}/release` | 释放法律保全 |
+| `POST /controlled/s16/api/process` | 受控 worker 尝试（一次一个 job；lease/fence/attempt CAS publish） |
 | `GET /controlled/s16`（别名 `/controlled/s16/react`） | 治理 React 壳；build 缺失时 `503 S16_REACT_UNAVAILABLE` |
 
-**账本备份与恢复顺序**：S16 账本必须单独备份（与业务备份分离）；业务旧备份恢复后，**先**由 S16 启动重放（`restore_replay`）对 S01/S02/S12/backup owner 幂等重删并逐项验证 absence，全部 verified 后 S16 readiness 才开放受限查询；任一 owner 无法验证时启动 fail-closed。
+**账本备份与恢复顺序**：S16 账本必须单独备份（与业务备份分离）；业务旧备份恢复后，**先**由 S16 启动重放（append-only `restore_replay` facts）对 S01/S02/S12/backup owner 幂等重删并逐项验证 absence。共享 readiness 门禁：任一已完成 scope 在业务 owner 重新可见（恢复窗口）时，所有 `/controlled/*` 受限读取统一返回 `503 S16_RESTORE_READINESS_UNAVAILABLE`，直到运行期 replay 重删并追加 verified fact；任一 owner 无法验证时启动 fail-closed。所有 S16 响应（成功/错误/校验失败）均为 no-store。
 
 **证据范围与机构前置项（G4）**：当前 SQLite 账本、本地对象 owner 与临时 backup owner 只提供可执行合同证据。机构 G4 Controlled-pilot candidate 仍需：机构 IdP/KMS 身份；真实 retention/legal-hold authority；对象与备份 connector；独立 audit/WORM、可观测性与恢复演练证据；以及独立账本备份策略的生产验证。S17 export 路由与凭据保持关闭。
 

@@ -427,6 +427,19 @@ class _EvalStore:
                     )
                     """
                 )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS s12_deletion_bindings (
+                    operation_id TEXT NOT NULL,
+                    fence INTEGER NOT NULL,
+                    scope_fingerprint TEXT NOT NULL,
+                    fingerprints_digest TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    completed_at INTEGER NOT NULL,
+                    PRIMARY KEY (operation_id, fence)
+                )
+                """
+            )
 
     def _reload_once(self) -> None:
         self._ensure_schema()
@@ -482,6 +495,86 @@ class _EvalStore:
             )
             connection.commit()
         return len(ids)
+
+    def delete_scope_with_binding(
+        self,
+        *,
+        tables_and_ids: list[tuple[str, set[str]]],
+        operation_id: str,
+        fence: int,
+        scope_fingerprint: str,
+        fingerprints_digest: str,
+    ) -> dict[str, Any]:
+        """Owner-level operation/fence CAS: the deletion rows and the
+        binding commit in one transaction; a replayed binding returns the
+        original already-absent result and a lower fence is a stable stale
+        outcome (R1 owner fencing)."""
+        self._ensure_schema()
+        with contextlib.closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            binding = connection.execute(
+                "SELECT status FROM s12_deletion_bindings "
+                "WHERE operation_id = ? AND fence = ?",
+                (operation_id, int(fence)),
+            ).fetchone()
+            if binding is not None:
+                connection.execute("ROLLBACK")
+                return {
+                    "status": "complete",
+                    "deleted_counts": {},
+                    "already_absent": True,
+                    "replayed": True,
+                }
+            highest = connection.execute(
+                "SELECT MAX(fence) FROM s12_deletion_bindings "
+                "WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            if highest[0] is not None and int(highest[0]) > int(fence):
+                connection.execute("ROLLBACK")
+                return {"status": "stale", "deleted_counts": {}}
+            deleted_counts: dict[str, int] = {}
+            for table, ids in tables_and_ids:
+                ids = set(ids)
+                if not ids:
+                    continue
+                if table not in _EVAL_TABLES:
+                    connection.execute("ROLLBACK")
+                    raise ValueError(
+                        f"S16 S12 deletion table is unknown: {table}"
+                    )
+                persisted = {
+                    str(row[0])
+                    for row in connection.execute(
+                        f"SELECT item_id FROM {table}"
+                    ).fetchall()
+                }
+                missing = ids.difference(persisted)
+                if missing:
+                    connection.execute("ROLLBACK")
+                    raise RuntimeError(
+                        f"S16 S12 deletion authority changed for {table}"
+                    )
+                connection.executemany(
+                    f"DELETE FROM {table} WHERE item_id = ?",
+                    ((item_id,) for item_id in sorted(ids)),
+                )
+                deleted_counts[table] = len(ids)
+            connection.execute(
+                "INSERT INTO s12_deletion_bindings("
+                "operation_id, fence, scope_fingerprint, fingerprints_digest, "
+                "status, completed_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    operation_id,
+                    int(fence),
+                    scope_fingerprint,
+                    fingerprints_digest,
+                    "complete",
+                    int(time.time()),
+                ),
+            )
+            connection.execute("COMMIT")
+        return {"status": "complete", "deleted_counts": deleted_counts}
 
     def reload(self) -> None:
         self.plans.clear()
@@ -2663,12 +2756,23 @@ class EvaluationService:
                 )
         return matched
 
-    def s16_delete_scope(self, fingerprints: Iterable[str]) -> dict[str, Any]:
+    def s16_delete_scope(
+        self,
+        fingerprints: Iterable[str],
+        *,
+        operation_id: str,
+        fence: int,
+        scope_fingerprint: str,
+    ) -> dict[str, Any]:
         """Delete the evaluation rows named by the copy fingerprints (and
-        their dependent attempts/predictions) in short transactions."""
+        their dependent attempts/predictions) under an owner-level
+        operation/fence CAS binding (R1)."""
         target = set(fingerprints)
         if not target:
             return {"deleted_counts": {}, "already_absent": True}
+        fingerprints_digest = hashlib.sha256(
+            "\0".join(sorted(target)).encode("utf-8")
+        ).hexdigest()
         with self._lock:
             self._store.reload()
             matched = self._s16_rows_by_fingerprint(target)
@@ -2677,20 +2781,19 @@ class EvaluationService:
             bundle_ids = set(matched.get("bundle", []))
             # A shared plan can never be reached here: preflight marks it
             # S16_SHARED_COPY_REQUIRES_REPACK and commit stays closed.
-            deleted_counts: dict[str, int] = {}
-            for table, ids in (
-                ("s12_bundles", bundle_ids),
-                ("s12_predictions", self._s12_prediction_ids(plan_ids)),
-                ("s12_attempts", self._s12_attempt_ids(job_ids)),
-                ("s12_jobs", job_ids),
-                ("s12_plans", plan_ids),
-            ):
-                if not ids:
-                    continue
-                deleted_counts[table] = self._store.delete_rows_transaction(
-                    table, ids
-                )
-            return {"deleted_counts": deleted_counts}
+            return self._store.delete_scope_with_binding(
+                tables_and_ids=[
+                    ("s12_bundles", bundle_ids),
+                    ("s12_predictions", self._s12_prediction_ids(plan_ids)),
+                    ("s12_attempts", self._s12_attempt_ids(job_ids)),
+                    ("s12_jobs", job_ids),
+                    ("s12_plans", plan_ids),
+                ],
+                operation_id=operation_id,
+                fence=fence,
+                scope_fingerprint=scope_fingerprint,
+                fingerprints_digest=fingerprints_digest,
+            )
 
     def _s12_attempt_ids(self, job_ids: set[str]) -> set[str]:
         return {
@@ -2722,10 +2825,22 @@ class EvaluationService:
             absent = not any(remaining.values())
             return {"absent": absent}
 
-    def s16_replay_scope(self, fingerprints: Iterable[str]) -> dict[str, Any]:
+    def s16_replay_scope(
+        self,
+        fingerprints: Iterable[str],
+        *,
+        operation_id: str = "s16-replay",
+        fence: int = 0,
+        scope_fingerprint: str = "",
+    ) -> dict[str, Any]:
         """Restore-time replay: idempotently re-delete the named rows (rows
         already absent are a complete replay)."""
-        return self.s16_delete_scope(fingerprints)
+        return self.s16_delete_scope(
+            fingerprints,
+            operation_id=operation_id,
+            fence=fence,
+            scope_fingerprint=scope_fingerprint,
+        )
 
     def s16_store_revision(self) -> str:
         """Value-free owner revision: digest of the sorted row identities."""

@@ -142,16 +142,17 @@ def _build_fixture(work_root: Path) -> dict[str, Any]:
             raise RuntimeError("injected s02 deletion fault")
 
     retention = RetentionPolicy(retention_seconds=10**12)
+    s01_owner = S01DeletionOwner(
+        service,
+        retention=retention,
+        clock=lambda: FIXED_NOW,
+    )
     s16 = GovernedDeletionService(
         ledger_path=work_root / "s16.sqlite3",
         owners={
-            "s01": S01DeletionOwner(
-                service,
-                retention=retention,
-                clock=lambda: FIXED_NOW,
-            ),
+            "s01": s01_owner,
             "s02": S02DeletionOwner(
-                service.registered_source_boundary, service
+                service.registered_source_boundary, s01_owner
             ),
             "s12": S12DeletionOwner(evaluation),
             "backup": BackupDeletionOwner(
@@ -162,6 +163,7 @@ def _build_fixture(work_root: Path) -> dict[str, Any]:
         retention=retention,
         governance_subject=T17_GOVERNANCE_SUBJECT,
         approver_subjects=(T17_APPROVER1_SUBJECT, T17_APPROVER2_SUBJECT),
+        governance_scope=T17_SCOPE,
         clock=lambda: FIXED_NOW,
         fault_injector=fault_injector,
     )

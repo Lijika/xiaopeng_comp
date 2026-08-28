@@ -18251,6 +18251,17 @@
             ],
             "title": "Approved By"
           },
+          "generation": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Generation"
+          },
           "hold_id": {
             "anyOf": [
               {
@@ -18385,6 +18396,69 @@
           "detail"
         ],
         "title": "S16ErrorResponse",
+        "type": "object"
+      },
+      "S16ImposeHoldBody": {
+        "additionalProperties": false,
+        "properties": {
+          "effective_time": {
+            "minimum": 1.0,
+            "title": "Effective Time",
+            "type": "integer"
+          },
+          "expiry": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expiry"
+          },
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "owner": {
+            "enum": [
+              "s01",
+              "s02",
+              "s12",
+              "backup",
+              "s17-disabled",
+              "all"
+            ],
+            "title": "Owner",
+            "type": "string"
+          },
+          "reason_code": {
+            "enum": [
+              "litigation",
+              "regulatory",
+              "internal_investigation"
+            ],
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "scope_fingerprint": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Scope Fingerprint",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope_fingerprint",
+          "reason_code",
+          "owner",
+          "effective_time",
+          "idempotency_key"
+        ],
+        "title": "S16ImposeHoldBody",
         "type": "object"
       },
       "S16JobSummary": {
@@ -18983,6 +19057,22 @@
           "role"
         ],
         "title": "S16ReceiptResponse",
+        "type": "object"
+      },
+      "S16ReleaseHoldBody": {
+        "additionalProperties": false,
+        "properties": {
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "idempotency_key"
+        ],
+        "title": "S16ReleaseHoldBody",
         "type": "object"
       },
       "S16RepairBody": {
@@ -29157,6 +29247,175 @@
           }
         },
         "summary": "S16 Repair"
+      }
+    },
+    "/controlled/s16/api/legal-holds/impose": {
+      "post": {
+        "description": "Impose one typed Legal Hold on a governed scope: closed reason and\nowner vocabulary, scope existence gate, request id + idempotency\nbinding, arbitrated with commit inside the same ledger transaction.",
+        "operationId": "s16_impose_legal_hold_controlled_s16_api_legal_holds_impose_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S16ImposeHoldBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16CommandResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ValidationErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "S16 Impose Legal Hold"
+      }
+    },
+    "/controlled/s16/api/legal-holds/{hold_id}/release": {
+      "post": {
+        "description": "Release one imposed Legal Hold under the governance identity.",
+        "operationId": "s16_release_legal_hold_controlled_s16_api_legal_holds__hold_id__release_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hold_id",
+            "required": true,
+            "schema": {
+              "title": "Hold Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/S16ReleaseHoldBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16CommandResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ValidationErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S16ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "S16 Release Legal Hold"
       }
     },
     "/controlled/s16/api/process": {

@@ -512,6 +512,19 @@ class RegisteredSourceBoundary:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS s02_deletion_bindings (
+                    operation_id TEXT NOT NULL,
+                    fence INTEGER NOT NULL,
+                    scope_fingerprint TEXT NOT NULL,
+                    fingerprints_digest TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    completed_at INTEGER NOT NULL,
+                    PRIMARY KEY (operation_id, fence)
+                )
+                """
+            )
 
     def _load_absence(self) -> None:
         if self.absence_store_path is None:
@@ -521,16 +534,6 @@ class RegisteredSourceBoundary:
                 "SELECT fingerprint FROM s02_object_absence"
             ).fetchall()
         self._absent_fingerprints = {str(row[0]) for row in rows}
-
-    def _persist_absence(self, fingerprint: str, *, deleted_at: int) -> None:
-        if self.absence_store_path is None:
-            return
-        with sqlite3.connect(self.absence_store_path, timeout=10.0) as connection:
-            connection.execute(
-                "INSERT OR REPLACE INTO s02_object_absence("
-                "fingerprint, deleted_at, schema_version) VALUES (?, ?, ?)",
-                (fingerprint, deleted_at, "s02-object-absence/1"),
-            )
 
     @staticmethod
     def _object_fingerprint(content: bytes) -> str:
@@ -558,51 +561,171 @@ class RegisteredSourceBoundary:
             ],
         }
 
-    def s02_delete(self, fingerprints: Iterable[str]) -> dict[str, Any]:
-        """Persist absence for the named copy identity fingerprints and drop
-        the live mappings (monotonic: absent is already a success)."""
-        deleted = 0
+    def _absence_transaction(
+        self,
+        fingerprints: Iterable[str],
+        *,
+        operation_id: str,
+        fence: int,
+        scope_fingerprint: str,
+    ) -> dict[str, Any]:
+        """Persist absence and the owner-level operation/fence binding in
+        one SQLite transaction BEFORE any in-memory change (R1): a storage
+        failure leaves the live mappings untouched and retryable, and a
+        replay of the same binding returns the original result while a
+        lower fence is a stable stale outcome."""
+        if self.absence_store_path is None:
+            raise RuntimeError("S02 absence store is not configured")
+        target = set(fingerprints)
         now = int(time.time())
-        target = set(fingerprints)
-        removed: list[str] = []
-        for object_ref, item in list(self._objects.items()):
-            fingerprint = self._identity_fingerprint(item.content)
-            if fingerprint in target:
-                removed.append(object_ref)
-                if fingerprint not in self._absent_fingerprints:
-                    self._absent_fingerprints.add(fingerprint)
-                    self._persist_absence(fingerprint, deleted_at=now)
-                    deleted += 1
-        for object_ref in removed:
-            del self._objects[object_ref]
-        return {"status": "complete", "deleted_counts": {"derived_object": deleted}}
-
-    def s02_verify_absent(self, fingerprints: Iterable[str]) -> dict[str, Any]:
-        target = set(fingerprints)
-        live = {
-            self._identity_fingerprint(item.content)
-            for item in self._objects.values()
-        }
-        absent = bool(target) and target.issubset(self._absent_fingerprints) and not (
-            target & live
-        )
-        return {"absent": absent, "absent_count": len(target & self._absent_fingerprints)}
-
-    def s02_replay(self, fingerprints: Iterable[str]) -> dict[str, Any]:
-        """Restore-time replay: idempotently re-persist absence and drop any
-        live mapping for the named fingerprints."""
-        now = int(time.time())
-        target = set(fingerprints)
+        fingerprints_digest = _digest(sorted(target))
+        with sqlite3.connect(self.absence_store_path, timeout=10.0) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            binding = connection.execute(
+                "SELECT status FROM s02_deletion_bindings "
+                "WHERE operation_id = ? AND fence = ?",
+                (operation_id, int(fence)),
+            ).fetchone()
+            if binding is not None:
+                connection.execute("COMMIT")
+                return {
+                    "status": "complete",
+                    "deleted_counts": {},
+                    "already_absent": True,
+                    "replayed": True,
+                }
+            highest = connection.execute(
+                "SELECT MAX(fence) FROM s02_deletion_bindings "
+                "WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            if highest[0] is not None and int(highest[0]) > int(fence):
+                connection.execute("COMMIT")
+                return {"status": "stale", "deleted_counts": {}}
+            absent_rows = [
+                (fingerprint, now, "s02-object-absence/1")
+                for fingerprint in sorted(target)
+                if fingerprint
+                not in {
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT fingerprint FROM s02_object_absence"
+                    ).fetchall()
+                }
+            ]
+            connection.executemany(
+                "INSERT OR REPLACE INTO s02_object_absence("
+                "fingerprint, deleted_at, schema_version) VALUES (?, ?, ?)",
+                absent_rows,
+            )
+            connection.execute(
+                "INSERT INTO s02_deletion_bindings("
+                "operation_id, fence, scope_fingerprint, fingerprints_digest, "
+                "status, completed_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    operation_id,
+                    int(fence),
+                    scope_fingerprint,
+                    fingerprints_digest,
+                    "complete",
+                    now,
+                ),
+            )
+            connection.execute("COMMIT")
+        # Memory updates happen only after the durable transaction commits.
         removed: list[str] = []
         for object_ref, item in list(self._objects.items()):
             fingerprint = self._identity_fingerprint(item.content)
             if fingerprint in target:
                 removed.append(object_ref)
                 self._absent_fingerprints.add(fingerprint)
-                self._persist_absence(fingerprint, deleted_at=now)
         for object_ref in removed:
             del self._objects[object_ref]
-        return {"status": "replayed"}
+        return {
+            "status": "complete",
+            "deleted_counts": {"derived_object": len(absent_rows)},
+        }
+
+    def s02_delete(
+        self,
+        fingerprints: Iterable[str],
+        *,
+        operation_id: str,
+        fence: int,
+        scope_fingerprint: str,
+    ) -> dict[str, Any]:
+        """Persist absence for the named copy identity fingerprints and drop
+        the live mappings (monotonic: absent is already a success)."""
+        return self._absence_transaction(
+            fingerprints,
+            operation_id=operation_id,
+            fence=fence,
+            scope_fingerprint=scope_fingerprint,
+        )
+
+    def s02_verify_absent(self, fingerprints: Iterable[str]) -> dict[str, Any]:
+        """Absence proof against the persisted absence store (restart-proof):
+        an object is absent only when its identity fingerprint is durably
+        recorded and no live mapping remains."""
+        target = set(fingerprints)
+        persisted: set[str] = set()
+        if self.absence_store_path is not None:
+            with sqlite3.connect(
+                self.absence_store_path, timeout=10.0
+            ) as connection:
+                rows = connection.execute(
+                    "SELECT fingerprint FROM s02_object_absence"
+                ).fetchall()
+            persisted = {str(row[0]) for row in rows}
+        live = {
+            self._identity_fingerprint(item.content)
+            for item in self._objects.values()
+        }
+        absent = bool(target) and target.issubset(persisted) and not (target & live)
+        return {"absent": absent, "absent_count": len(target & persisted)}
+
+    def s02_replay(
+        self,
+        fingerprints: Iterable[str],
+        *,
+        operation_id: str = "s16-replay",
+        fence: int = 0,
+        scope_fingerprint: str = "",
+    ) -> dict[str, Any]:
+        """Restore-time replay: idempotently re-persist absence and drop any
+        live mapping for the named fingerprints."""
+        result = self._absence_transaction(
+            fingerprints,
+            operation_id=operation_id,
+            fence=fence,
+            scope_fingerprint=scope_fingerprint,
+        )
+        return {"status": "replayed", **result}
+
+    def s02_store_revision(self) -> int:
+        """Value-free owner revision: digest of the sorted absence
+        fingerprints (stable across restarts)."""
+        if self.absence_store_path is None:
+            return 0
+        with sqlite3.connect(self.absence_store_path, timeout=10.0) as connection:
+            rows = connection.execute(
+                "SELECT fingerprint FROM s02_object_absence"
+            ).fetchall()
+        return int(
+            hashlib.sha256(
+                "\0".join(sorted(str(row[0]) for row in rows)).encode("utf-8")
+            ).hexdigest(),
+            16,
+        )
+
+    def s02_owner_healthy(self) -> bool:
+        try:
+            if self.absence_store_path is not None:
+                self._ensure_absence_schema()
+                self._load_absence()
+            return True
+        except Exception:
+            return False
 
     def s02_verify_repair(self, repair_fact: str) -> bool:
         if repair_fact != "s02-repair-verified":

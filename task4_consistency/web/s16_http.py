@@ -83,6 +83,21 @@ def _s16_service(request: Request) -> Any:
             },
             headers=_S16_NO_STORE_HEADERS,
         )
+    # R1 (P0): restore readiness is the shared gate for every S16 command
+    # and query; while any completed manifest lacks a verified replay fact
+    # the plane reports the stable unavailability.
+    if not service.ready():
+        raise HTTPException(
+            503,
+            detail={
+                "error": "S16_RESTORE_READINESS_UNAVAILABLE",
+                "message": (
+                    "Controlled S16 plane is closed until restore replay "
+                    "verifies absence"
+                ),
+            },
+            headers=_S16_NO_STORE_HEADERS,
+        )
     return service
 
 
@@ -307,6 +322,7 @@ class S16CommandResponse(BaseModel):
     request_id: str | None = None
     job_id: str | None = None
     hold_id: str | None = None
+    generation: int | None = None
     approved_by: str | None = None
     reason_code: str | None = None
     replayed: bool = False
@@ -401,6 +417,27 @@ class S16ProcessResponse(BaseModel):
     reason_code: str | None = None
     owner_id: str | None = None
     attempt: int | None = None
+
+
+class S16ImposeHoldBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    scope_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    reason_code: Literal[
+        "litigation",
+        "regulatory",
+        "internal_investigation",
+    ]
+    owner: Literal["s01", "s02", "s12", "backup", "s17-disabled", "all"]
+    effective_time: int = Field(ge=1)
+    expiry: int | None = Field(default=None, ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=200)
+
+
+class S16ReleaseHoldBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: str = Field(min_length=1, max_length=200)
 
 
 # ------------------------------------------------------------------ Routes
@@ -600,6 +637,73 @@ def s16_repair(
         "status": result.get("status") or "accepted",
         "request_id": result.get("request_id"),
         "job_id": result.get("job_id"),
+        "replayed": bool(result.get("replayed")),
+    }
+
+
+@s16_router.post(
+    "/controlled/s16/api/legal-holds/impose",
+    response_model=S16CommandResponse,
+    responses=_S16_ERROR_RESPONSES,
+)
+def s16_impose_legal_hold(
+    body: S16ImposeHoldBody,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    """Impose one typed Legal Hold on a governed scope: closed reason and
+    owner vocabulary, scope existence gate, request id + idempotency
+    binding, arbitrated with commit inside the same ledger transaction."""
+    _s16_no_cache(response)
+    principal = _s16_governance_principal(request)
+    service = _s16_service(request)
+    try:
+        result = service.impose_legal_hold(
+            scope_fingerprint=body.scope_fingerprint,
+            principal=principal,
+            reason_code=body.reason_code,
+            owner=body.owner,
+            effective_time=body.effective_time,
+            expiry=body.expiry,
+            idempotency_key=body.idempotency_key,
+        )
+    except Exception as error:
+        raise _s16_http_error(error) from error
+    return {
+        "status": result.get("status") or "accepted",
+        "request_id": result.get("request_id"),
+        "hold_id": result.get("hold_id"),
+        "generation": result.get("generation"),
+        "replayed": bool(result.get("replayed")),
+    }
+
+
+@s16_router.post(
+    "/controlled/s16/api/legal-holds/{hold_id}/release",
+    response_model=S16CommandResponse,
+    responses=_S16_ERROR_RESPONSES,
+)
+def s16_release_legal_hold(
+    hold_id: str,
+    body: S16ReleaseHoldBody,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    """Release one imposed Legal Hold under the governance identity."""
+    _s16_no_cache(response)
+    principal = _s16_governance_principal(request)
+    service = _s16_service(request)
+    try:
+        result = service.release_legal_hold(
+            hold_id=hold_id,
+            principal=principal,
+            idempotency_key=body.idempotency_key,
+        )
+    except Exception as error:
+        raise _s16_http_error(error) from error
+    return {
+        "status": result.get("status") or "accepted",
+        "hold_id": result.get("hold_id"),
         "replayed": bool(result.get("replayed")),
     }
 
