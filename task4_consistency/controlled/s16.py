@@ -1889,11 +1889,14 @@ class BackupDeletionOwner:
             self._fail_unproven_purge()
 
     def _backfill_operation_fences(self, connection: sqlite3.Connection) -> None:
-        """Derive high-water/active/source fence from pre-R10 bindings."""
+        """Derive or verify high-water/active/source fence from bindings."""
+        grouped = self._operation_fence_history(connection)
         present = {
-            str(row[0])
+            str(row[0]): row
             for row in connection.execute(
-                "SELECT operation_id FROM backup_operation_fences"
+                "SELECT operation_id, high_water, active_fence, source_fence, "
+                "scope_fingerprint, fingerprints_digest "
+                "FROM backup_operation_fences"
             ).fetchall()
         }
         failed = {
@@ -1902,97 +1905,259 @@ class BackupDeletionOwner:
                 "SELECT operation_id FROM backup_fence_migration_failures"
             ).fetchall()
         }
-        grouped: dict[str, list[tuple[int, str, str, str, int | None]]] = {}
+        for operation_id, rows in grouped.items():
+            if operation_id in failed:
+                continue
+            existing = present.get(operation_id)
+            if existing is not None:
+                self._validate_existing_operation_fence(
+                    connection, operation_id, rows, existing
+                )
+            else:
+                self._migrate_operation_fence_rows(
+                    connection, operation_id, rows
+                )
+
+    def _operation_fence_history(
+        self, connection: sqlite3.Connection, operation_id: str | None = None
+    ) -> dict[
+        str,
+        list[tuple[int, str, str, str, int | None, str, Any, Any]],
+    ]:
+        grouped: dict[
+            str,
+            list[tuple[int, str, str, str, int | None, str, Any, Any]],
+        ] = {}
         for table in ("backup_deletion_bindings", "backup_deletion_intents"):
-            rows = connection.execute(
-                f"SELECT operation_id, fence, scope_fingerprint, "
-                f"fingerprints_digest, status, source_fence FROM {table}"
-            ).fetchall()
-            for operation_id, fence, scope, digest, status, source_fence in rows:
-                grouped.setdefault(str(operation_id), []).append(
+            if operation_id is None:
+                rows = connection.execute(
+                    f"SELECT operation_id, fence, scope_fingerprint, "
+                    f"fingerprints_digest, status, source_fence, "
+                    f"identities_json, manifest_ids_json FROM {table}"
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    f"SELECT operation_id, fence, scope_fingerprint, "
+                    f"fingerprints_digest, status, source_fence, "
+                    f"identities_json, manifest_ids_json FROM {table} "
+                    f"WHERE operation_id = ?",
+                    (operation_id,),
+                ).fetchall()
+            kind = "binding" if table.endswith("bindings") else "intent"
+            for (
+                op,
+                fence,
+                scope,
+                digest,
+                status,
+                source_fence,
+                identities_json,
+                manifest_ids_json,
+            ) in rows:
+                grouped.setdefault(str(op), []).append(
                     (
                         int(fence),
                         str(scope or ""),
                         str(digest or ""),
                         str(status or ""),
                         int(source_fence) if source_fence is not None else None,
+                        kind,
+                        identities_json if identities_json is not None else "[]",
+                        manifest_ids_json if manifest_ids_json is not None else "[]",
                     )
                 )
-        for operation_id, rows in grouped.items():
-            if operation_id in present or operation_id in failed:
-                continue
-            self._migrate_operation_fence_rows(connection, operation_id, rows)
+        return grouped
 
     def _migrate_one_operation_fence(
-        self, connection: sqlite3.Connection, operation_id: str
+        self,
+        connection: sqlite3.Connection,
+        operation_id: str,
+        *,
+        record_failure: bool = True,
     ) -> bool:
         if self._fence_migration_failed(connection, operation_id):
             return False
+        try:
+            grouped = self._operation_fence_history(connection, operation_id)
+        except (TypeError, ValueError, sqlite3.Error, json.JSONDecodeError):
+            if record_failure:
+                self._record_fence_migration_failure(connection, operation_id)
+            return False
+        rows = grouped.get(operation_id, [])
         existing = connection.execute(
-            "SELECT 1 FROM backup_operation_fences WHERE operation_id = ?",
+            "SELECT operation_id, high_water, active_fence, source_fence, "
+            "scope_fingerprint, fingerprints_digest "
+            "FROM backup_operation_fences WHERE operation_id = ?",
             (operation_id,),
         ).fetchone()
         if existing is not None:
-            return True
-        rows: list[tuple[int, str, str, str, int | None]] = []
-        for table in ("backup_deletion_bindings", "backup_deletion_intents"):
-            fetched = connection.execute(
-                f"SELECT fence, scope_fingerprint, fingerprints_digest, "
-                f"status, source_fence FROM {table} WHERE operation_id = ?",
-                (operation_id,),
-            ).fetchall()
-            for fence, scope, digest, status, source_fence in fetched:
-                rows.append(
-                    (
-                        int(fence),
-                        str(scope or ""),
-                        str(digest or ""),
-                        str(status or ""),
-                        int(source_fence) if source_fence is not None else None,
-                    )
-                )
+            return self._validate_existing_operation_fence(
+                connection, operation_id, rows, existing
+            )
         if not rows:
             return False
         return self._migrate_operation_fence_rows(
-            connection, operation_id, rows
+            connection, operation_id, rows, record_failure=record_failure
         )
+
+    def _record_fence_migration_failure(
+        self, connection: sqlite3.Connection, operation_id: str
+    ) -> None:
+        connection.execute(
+            "INSERT OR IGNORE INTO backup_fence_migration_failures("
+            "operation_id) VALUES (?)",
+            (operation_id,),
+        )
+
+    @staticmethod
+    def _fence_json_id_set(raw: Any) -> frozenset[str]:
+        try:
+            parsed = json.loads(raw if raw not in (None, "") else "[]")
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            raise ValueError("json") from error
+        if not isinstance(parsed, list):
+            raise ValueError("json")
+        values: list[str] = []
+        for item in parsed:
+            if not isinstance(item, str) or not item:
+                raise ValueError("json")
+            values.append(item)
+        return frozenset(values)
+
+    def _derive_operation_fence(
+        self,
+        rows: list[tuple[int, str, str, str, int | None, str, Any, Any]],
+    ) -> tuple[int, int, int, str, str]:
+        incomplete = {"staged", "transitioned", "unverified"}
+        complete = {"complete", "committed"}
+        known = incomplete | complete | {"superseded"}
+        if not rows:
+            raise ValueError("empty")
+        parsed_rows: list[
+            tuple[int, str, str, str, int | None, str, frozenset[str], frozenset[str]]
+        ] = []
+        for fence, scope, digest, status, source_fence, kind, identities_json, manifests_json in rows:
+            if (
+                not isinstance(fence, int)
+                or fence < 1
+                or not isinstance(scope, str)
+                or not scope
+                or not isinstance(digest, str)
+                or not digest
+                or status not in known
+            ):
+                raise ValueError("invalid row")
+            if source_fence is not None and (
+                not isinstance(source_fence, int)
+                or source_fence < 1
+                or source_fence > fence
+            ):
+                raise ValueError("source range")
+            parsed_rows.append(
+                (
+                    fence,
+                    scope,
+                    digest,
+                    status,
+                    source_fence,
+                    kind,
+                    self._fence_json_id_set(identities_json),
+                    self._fence_json_id_set(manifests_json),
+                )
+            )
+        rows = parsed_rows
+        by_fence: dict[int, list[tuple[int, str, str, str, int | None, str, frozenset[str], frozenset[str]]]] = {}
+        for item in rows:
+            by_fence.setdefault(item[0], []).append(item)
+        for fence_rows in by_fence.values():
+            scopes = {item[1] for item in fence_rows}
+            digests = {item[2] for item in fence_rows}
+            sources = {item[4] for item in fence_rows}
+            statuses = {item[3] for item in fence_rows}
+            identities = {item[6] for item in fence_rows}
+            manifests = {item[7] for item in fence_rows}
+            if (
+                len(scopes) != 1
+                or len(digests) != 1
+                or len(identities) != 1
+                or len(manifests) != 1
+            ):
+                raise ValueError("fence conflict")
+            if None in sources and any(item[4] is not None for item in fence_rows):
+                raise ValueError("empty source")
+            if len({s for s in sources if s is not None}) > 1:
+                raise ValueError("source conflict")
+            binding_statuses = {item[3] for item in fence_rows if item[5] == "binding"}
+            intent_statuses = {item[3] for item in fence_rows if item[5] == "intent"}
+            if binding_statuses & incomplete and binding_statuses & complete:
+                raise ValueError("status conflict")
+            if intent_statuses & incomplete and intent_statuses & complete:
+                raise ValueError("status conflict")
+            if "complete" in binding_statuses and "staged" in intent_statuses:
+                raise ValueError("status conflict")
+        scopes = {item[1] for item in rows}
+        digests = {item[2] for item in rows}
+        if len(scopes) != 1 or len(digests) != 1:
+            raise ValueError("ambiguous")
+        high_water = max(item[0] for item in rows)
+        incomplete_fences = [item[0] for item in rows if item[3] in incomplete]
+        complete_fences = [item[0] for item in rows if item[3] in complete]
+        if complete_fences and high_water in complete_fences:
+            active = high_water
+        elif incomplete_fences:
+            active = max(incomplete_fences)
+        else:
+            active = high_water
+        active_rows = [item for item in rows if item[0] == active]
+        if not active_rows:
+            raise ValueError("active missing")
+        active_sources = {item[4] for item in active_rows if item[4] is not None}
+        source_fence = next(iter(active_sources)) if len(active_sources) == 1 else active
+        return (
+            high_water,
+            active,
+            source_fence,
+            next(iter(scopes)),
+            next(iter(digests)),
+        )
+
+    def _validate_existing_operation_fence(
+        self,
+        connection: sqlite3.Connection,
+        operation_id: str,
+        rows: list[tuple[int, str, str, str, int | None, str, Any, Any]],
+        existing: tuple[Any, ...],
+    ) -> bool:
+        try:
+            high_water, active, source_fence, scope, digest = (
+                self._derive_operation_fence(rows)
+            )
+        except (TypeError, ValueError):
+            self._record_fence_migration_failure(connection, operation_id)
+            return False
+        if (
+            int(existing[1]) != high_water
+            or int(existing[2]) != active
+            or int(existing[3]) != source_fence
+            or str(existing[4]) != scope
+            or str(existing[5]) != digest
+        ):
+            self._record_fence_migration_failure(connection, operation_id)
+            return False
+        return True
 
     def _migrate_operation_fence_rows(
         self,
         connection: sqlite3.Connection,
         operation_id: str,
-        rows: list[tuple[int, str, str, str, int | None]],
+        rows: list[tuple[int, str, str, str, int | None, str, Any, Any]],
+        *,
+        record_failure: bool = True,
     ) -> bool:
         try:
-            scopes = {item[1] for item in rows if item[1]}
-            digests = {item[2] for item in rows if item[2]}
-            if len(scopes) != 1 or len(digests) != 1:
-                raise ValueError("ambiguous")
-            high_water = max(item[0] for item in rows)
-            incomplete = [
-                item[0]
-                for item in rows
-                if item[3] in {"staged", "transitioned", "unverified"}
-            ]
-            complete = [
-                item[0]
-                for item in rows
-                if item[3] in {"complete", "committed"}
-            ]
-            if complete and high_water in complete:
-                active = high_water
-            elif incomplete:
-                active = max(incomplete)
-            else:
-                active = high_water
-            source_vals = {
-                item[4]
-                for item in rows
-                if item[0] == active and item[4] is not None
-            }
-            if len(source_vals) > 1:
-                raise ValueError("ambiguous source")
-            source_fence = source_vals.pop() if source_vals else active
+            high_water, active, source_fence, scope, digest = (
+                self._derive_operation_fence(rows)
+            )
             connection.execute(
                 "INSERT INTO backup_operation_fences("
                 "operation_id, high_water, active_fence, source_fence, "
@@ -2003,17 +2168,14 @@ class BackupDeletionOwner:
                     high_water,
                     active,
                     source_fence,
-                    next(iter(scopes)),
-                    next(iter(digests)),
+                    scope,
+                    digest,
                 ),
             )
             return True
         except (TypeError, ValueError, sqlite3.Error):
-            connection.execute(
-                "INSERT OR IGNORE INTO backup_fence_migration_failures("
-                "operation_id) VALUES (?)",
-                (operation_id,),
-            )
+            if record_failure:
+                self._record_fence_migration_failure(connection, operation_id)
             return False
 
     def _fence_migration_failed(
@@ -2042,14 +2204,18 @@ class BackupDeletionOwner:
             (operation_id,),
         ).fetchone()
         if row is None:
-            self._migrate_one_operation_fence(connection, operation_id)
+            self._migrate_one_operation_fence(
+                connection, operation_id, record_failure=False
+            )
+            if self._fence_migration_failed(connection, operation_id):
+                return True
             row = connection.execute(
                 "SELECT high_water, active_fence FROM backup_operation_fences "
                 "WHERE operation_id = ?",
                 (operation_id,),
             ).fetchone()
             if row is None:
-                return self._fence_migration_failed(connection, operation_id)
+                return False
         if int(fence) < int(row[0]):
             return True
         if allow_higher:
@@ -2452,6 +2618,18 @@ class BackupDeletionOwner:
         }
 
     def inventory(self, scope_fingerprint: str) -> list[CopyInventoryEntry]:
+        with self._registry_connect() as connection:
+            failed = connection.execute(
+                "SELECT COUNT(*) FROM backup_fence_migration_failures"
+            ).fetchone()[0]
+        if failed:
+            raise S16OwnerFailure(
+                self.owner_id,
+                S16_OWNER_INTEGRITY,
+                retryable=False,
+                responsible_party="backup_operations_owner",
+                recovery_action="verify_owner_state_and_repair",
+            )
         reconciled = self._backup_reconciliation()
         manifests = reconciled["manifests"]
         # R5 (P1-2): an identity referenced by manifests of more than one
