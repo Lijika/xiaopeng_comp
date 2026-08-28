@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   HttpError,
@@ -8,7 +8,9 @@ import {
   type S16QueryResponse,
 } from "../api/client";
 import {
+  S16_REQUEST_KEY,
   clearApplicationScopedCache,
+  s16RequestQueryFn,
   useS16Approve,
   useS16Cancel,
   useS16Commit,
@@ -312,6 +314,15 @@ function ApprovalSection({
           onApproved();
         },
         onError: (error) => {
+          // R3 (P1-15): an approver-surface 403 invalidates only the
+          // approver identity — token, index and any previous approval
+          // error are cleared so the stale approver can never be reused.
+          if (error instanceof HttpError && error.status === 403) {
+            setApproverToken("");
+            setUnknown(false);
+            approve.reset();
+            return;
+          }
           if (!isDefinitiveS16Rejection(error)) setUnknown(true);
         },
       },
@@ -538,7 +549,15 @@ function JobSection({
           type="button"
           data-testid="s16-process-button"
           disabled={process.isPending || job.status === "complete"}
-          onClick={() => process.mutate()}
+          onClick={() =>
+            process.mutate(undefined, {
+              onError: (error) => {
+                if (error instanceof HttpError && error.status === 403) {
+                  onIdentityDenied();
+                }
+              },
+            })
+          }
         >
           {process.isPending ? "执行中…" : "执行一次删除尝试（受控）"}
         </button>
@@ -548,7 +567,13 @@ function JobSection({
   );
 }
 
-function ReceiptSection({ requestId }: { requestId: string }) {
+function ReceiptSection({
+  requestId,
+  onIdentityDenied,
+}: {
+  requestId: string;
+  onIdentityDenied: () => void;
+}) {
   const receipt = useS16Receipt(requestId);
   if (receipt.isPending) {
     return (
@@ -558,6 +583,12 @@ function ReceiptSection({ requestId }: { requestId: string }) {
     );
   }
   if (receipt.error !== null) {
+    if (
+      receipt.error instanceof HttpError &&
+      receipt.error.status === 403
+    ) {
+      onIdentityDenied();
+    }
     return <S16ErrorState error={receipt.error} />;
   }
   const data = receipt.data;
@@ -614,18 +645,36 @@ export default function S16GovernedDeletionPanel() {
   const [preflightUnknown, setPreflightUnknown] = useState(false);
   const [cancelled, setCancelled] = useState(false);
   const [approvedCount, setApprovedCount] = useState(0);
+  const [receiptEpoch, setReceiptEpoch] = useState(0);
   const queryClient = useQueryClient();
   const preflightMutation = useS16Preflight();
   const query = useS16Query(requestId);
 
   // After a completed deletion every application-scoped cache is dropped
   // and the S16 plane is refetched from the authority.
+  const cacheClearedRef = useRef(false);
+  const cacheKeyRef = useRef<string | null>(null);
   useEffect(() => {
+    if (cacheKeyRef.current !== requestId) {
+      cacheKeyRef.current = requestId;
+      cacheClearedRef.current = false;
+    }
     if (
       requestId !== null &&
-      query.data?.job?.status === "complete"
+      query.data?.job?.status === "complete" &&
+      !cacheClearedRef.current
     ) {
+      cacheClearedRef.current = true;
       clearApplicationScopedCache(queryClient);
+      // R3 (P1-7): the S16 caches were removed; the request query is
+      // deterministically re-populated from the authority, and the
+      // receipt observer is re-mounted so the value-free receipt
+      // refetches instead of lingering in a removed-query limbo.
+      void queryClient.fetchQuery({
+        queryKey: S16_REQUEST_KEY(requestId),
+        queryFn: s16RequestQueryFn(requestId),
+      });
+      setReceiptEpoch((current) => current + 1);
     }
   }, [query.data?.job?.status, queryClient, requestId]);
 
@@ -703,14 +752,24 @@ export default function S16GovernedDeletionPanel() {
   // receipt and its summary — every preflight, hold, approval, commit and
   // repair surface is unloaded.
   const jobComplete = query.data?.job?.status === "complete";
-  if (jobComplete && requestId !== null) {
+  if (jobComplete && requestId !== null && query.data !== undefined) {
     return (
       <section className="panel" data-testid="s16-governed-deletion" aria-labelledby="s16-title">
         <h2 id="s16-title">合规删除（服务端权威）</h2>
         <p data-testid="s16-complete-only" role="status">
           删除已完成：仅保留无原值凭证。
         </p>
-        <ReceiptSection requestId={requestId} />
+        {/* R3 (P1-7): the terminal job surface stays mounted with the
+            final "complete" status beside the value-free receipt. */}
+        <JobSection
+          query={query.data}
+          onIdentityDenied={() => setIdentityDenied(true)}
+        />
+        <ReceiptSection
+          key={receiptEpoch}
+          requestId={requestId}
+          onIdentityDenied={() => setIdentityDenied(true)}
+        />
       </section>
     );
   }

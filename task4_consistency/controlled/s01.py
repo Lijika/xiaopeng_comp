@@ -11583,6 +11583,7 @@ class ControlledScenarioService:
         response carries only the single requested value plus minimal
         location/term metadata.
         """
+        self.s16_require_read_ready(application_id)
         reveal_time = int(self._clock() if now is None else now)
         if not self._valid_reviewer_principal(principal, now=reveal_time):
             raise QueryNotFound(work_item_id)
@@ -21133,6 +21134,7 @@ class ControlledScenarioService:
         same facts without replaying prior local command results.  The read
         is bound to the principal's resource scope — a mismatch is the same
         sanitized not-found as any other unauthorized query."""
+        self.s16_require_read_ready(application_id)
 
         with self._lock:
             self._reload_store()
@@ -28089,8 +28091,14 @@ class ControlledScenarioService:
                     continue
                 if operation_id is not None and item.get("operation_id") != operation_id:
                     continue
-                if fence is not None and int(item.get("fence") or -1) != int(fence):
-                    continue
+                if fence is not None:
+                    stored_fence = item.get("fence")
+                    if stored_fence is None or not isinstance(
+                        stored_fence, (int, float)
+                    ):
+                        stored_fence = -1
+                    if int(stored_fence) != int(fence):
+                        continue
                 return True
             return False
 
@@ -28528,7 +28536,11 @@ class ControlledScenarioService:
         with self._lock:
             self._reload_store()
             if application_id not in self._store.applications:
-                if self.s16_tombstone_verified(scope_fingerprint):
+                if self.s16_tombstone_verified(
+                    scope_fingerprint,
+                    operation_id=operation_id,
+                    fence=fence,
+                ):
                     return {"deleted_counts": {}, "already_absent": True}
                 raise RuntimeError("S16 deletion target is unavailable")
             staged = copy.deepcopy(self._store)
@@ -28577,13 +28589,24 @@ class ControlledScenarioService:
             self._restore_cohort_stop_authority()
             return {"deleted_counts": deleted_counts}
 
-    def s16_verify_absent(self, scope_fingerprint: str) -> dict[str, Any]:
-        """Absence proof: the tombstone was written in the same transaction
-        as the deletion, and no live application resolves to this scope."""
+    def s16_verify_absent(
+        self,
+        scope_fingerprint: str,
+        *,
+        operation_id: str | None = None,
+        fence: int | None = None,
+    ) -> dict[str, Any]:
+        """Absence proof: the tombstone binding (scope + operation + fence)
+        was written in the same transaction as the deletion, and no live
+        application resolves to this scope (R3 P1-3)."""
         with self._lock:
             self._reload_store()
             live = self.s16_resolve_by_scope_fingerprint(scope_fingerprint)
-            tombstoned = self.s16_tombstone_verified(scope_fingerprint)
+            tombstoned = self.s16_tombstone_verified(
+                scope_fingerprint,
+                operation_id=operation_id,
+                fence=fence,
+            )
             return {
                 "absent": bool(tombstoned and live is None),
                 "tombstoned": bool(tombstoned),

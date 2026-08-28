@@ -1516,6 +1516,24 @@ export const S16_REQUEST_KEY = (requestId: string) =>
 export const S16_RECEIPT_KEY = (requestId: string) =>
   ["s16", "deletions", requestId, "receipt"] as const;
 
+export function s16RequestQueryFn(
+  requestId: string,
+): () => Promise<S16QueryResponse> {
+  return () =>
+    request<S16QueryResponse>(
+      `/controlled/s16/api/deletions/${encodeURIComponent(requestId)}`,
+    );
+}
+
+export function s16ReceiptQueryFn(
+  requestId: string,
+): () => Promise<S16ReceiptResponse> {
+  return () =>
+    request<S16ReceiptResponse>(
+      `/controlled/s16/api/deletions/${encodeURIComponent(requestId)}/receipt`,
+    );
+}
+
 export interface S16PreflightCommand {
   application_reference: string;
   idempotency_key: string;
@@ -1557,10 +1575,7 @@ export function useS16Query(
   return useQuery({
     queryKey: S16_REQUEST_KEY(requestId ?? ""),
     enabled: requestId !== null,
-    queryFn: () =>
-      request<S16QueryResponse>(
-        `/controlled/s16/api/deletions/${encodeURIComponent(requestId ?? "")}`,
-      ),
+    queryFn: s16RequestQueryFn(requestId ?? ""),
     retry: false,
     refetchOnWindowFocus: false,
     refetchInterval: (query) => {
@@ -1585,10 +1600,7 @@ export function useS16Receipt(
   return useQuery({
     queryKey: S16_RECEIPT_KEY(requestId ?? ""),
     enabled: requestId !== null,
-    queryFn: () =>
-      request<S16ReceiptResponse>(
-        `/controlled/s16/api/deletions/${encodeURIComponent(requestId ?? "")}/receipt`,
-      ),
+    queryFn: s16ReceiptQueryFn(requestId ?? ""),
     retry: false,
     refetchOnWindowFocus: false,
   });
@@ -1743,7 +1755,14 @@ export function clearApplicationScopedCache(queryClient: ReturnType<typeof useQu
   for (const prefix of ["s01", "s02", "s12", "s13"] as const) {
     queryClient.removeQueries({ queryKey: [prefix] });
   }
-  void queryClient.invalidateQueries({ queryKey: ["s16"] });
+  // R3 (P1-7): the S16 request/query and hold caches are REMOVED, not
+  // invalidated — a deleted scope must never re-present itself from a
+  // stale cache entry after an identity change.  A fresh identity can
+  // only ever see a fresh preflight/receipt query.  Mounted queries are
+  // then refetched from the authority (removal alone never re-fires an
+  // enabled-gated query observer).
+  queryClient.removeQueries({ queryKey: ["s16", "deletions"] });
+  queryClient.removeQueries({ queryKey: ["s16", "legal-holds"] });
 }
 
 // --- S16 legal hold (R1: typed command surface) ----------------------------

@@ -321,20 +321,28 @@ describe("S16 rejection classifier", () => {
 });
 
 describe("clearApplicationScopedCache", () => {
-  it("drops S01/S02/S12/S13 caches and invalidates S16", async () => {
+  it("drops S01/S02/S12/S13 caches and REMOVES S16 request/hold caches", async () => {
     const client = createQueryClient();
     client.setQueryData(["s01", "queue"], { stale: true });
     client.setQueryData(["s02", "x"], { stale: true });
     client.setQueryData(["s12", "plans"], { stale: true });
     client.setQueryData(["s13", "delivery", "app_1"], { stale: true });
     client.setQueryData(S16_REQUEST_KEY("s16req_1"), s16QueryPayload());
+    client.setQueryData(["s16", "legal-holds", "scope_1"], {
+      holdId: "hold_1",
+    });
     clearApplicationScopedCache(client);
     expect(client.getQueryData(["s01", "queue"])).toBeUndefined();
     expect(client.getQueryData(["s02", "x"])).toBeUndefined();
     expect(client.getQueryData(["s12", "plans"])).toBeUndefined();
     expect(client.getQueryData(["s13", "delivery", "app_1"])).toBeUndefined();
-    // The S16 entry itself survives for the authority refetch.
-    expect(client.getQueryData(S16_REQUEST_KEY("s16req_1"))).toBeDefined();
+    // R3 (P1-7): a deleted scope must never re-present itself from a
+    // stale cache entry after an identity change — the S16 caches are
+    // removed outright.
+    expect(client.getQueryData(S16_REQUEST_KEY("s16req_1"))).toBeUndefined();
+    expect(
+      client.getQueryData(["s16", "legal-holds", "scope_1"]),
+    ).toBeUndefined();
   });
 });
 

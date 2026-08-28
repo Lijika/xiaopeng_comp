@@ -61,6 +61,13 @@ def _auth(credential: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {credential}"}
 
 
+def _recording_writer() -> Any:
+    def writer(record: dict[str, Any]) -> bool:
+        return True
+
+    return writer
+
+
 def _build_s16_service(
     tmp_path: Path, service: ControlledScenarioService
 ) -> GovernedDeletionService:
@@ -86,6 +93,7 @@ def _build_s16_service(
         retention=retention,
         governance_subject=GOVERNANCE_SUBJECT,
         approver_subjects=(APPROVER1_SUBJECT, APPROVER2_SUBJECT),
+        security_audit_writer=_recording_writer(),
         clock=lambda: int(CLOCK["now"]),
     )
 
@@ -356,6 +364,7 @@ def test_s16_typed_errors_idempotency_and_existence_hiding(
         retention=early_retention,
         governance_subject=GOVERNANCE_SUBJECT,
         approver_subjects=(APPROVER1_SUBJECT, APPROVER2_SUBJECT),
+        security_audit_writer=_recording_writer(),
         clock=lambda: int(CLOCK["now"]),
     )
     import task4_consistency.web.app as web2
@@ -567,6 +576,11 @@ def test_s16_legal_hold_http_command_surface(
     )
     assert released.status_code == 200, released.text
     assert released.headers["cache-control"] == "no-store"
+    # R3 (P1-6): the release response carries the request id and the
+    # monotonic hold generation.
+    assert released.json()["request_id"]
+    assert isinstance(released.json()["generation"], int)
+    assert released.json()["generation"] >= 1
     # Releasing twice is a stable replay.
     replayed = client.post(
         f"/controlled/s16/api/legal-holds/{hold_id}/release",

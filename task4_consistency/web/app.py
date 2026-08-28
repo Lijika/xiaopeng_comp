@@ -690,26 +690,19 @@ def _s16_service_factory() -> GovernedDeletionService | None:
         except Exception:
             return False
 
+    _s16_audit_writer = (
+        getattr(S01_SERVICE, "audit_writer", None)
+        if S01_SERVICE is not None
+        else None
+    )
     security_audit_available = bool(
         _s01_demo_flag("TASK4_S16_SECURITY_AUDIT_AVAILABLE", default=True)
-        and S01_SERVICE is not None
-        and getattr(S01_SERVICE, "audit_writer", None) is not None
+        and _s16_audit_writer is not None
+        and callable(_s16_audit_writer)
     )
     security_audit_writer = (
         _s16_security_audit_writer if security_audit_available else None
     )
-    # R2 (P1-12): the shared domain read gate — every S01 public retrieval
-    # consults it; the HTTP middleware remains the outer boundary.
-    def _s16_domain_read_gate() -> bool:
-        return bool(
-            (not globals().get("S16_CONFIGURED"))
-            or (
-                globals().get("S16_SERVICE") is not None
-                and globals().get("S16_SERVICE").ready()
-            )
-        )
-
-    S01_SERVICE.s16_read_gate = _s16_domain_read_gate  # type: ignore[attr-defined]
     return GovernedDeletionService(
         ledger_path=state_path,
         owners={
@@ -753,12 +746,47 @@ except Exception as error:
 # service.  A configured-but-unavailable S16 (construction or restore
 # replay failure) must fail the shared restore-readiness gate closed,
 # while a genuinely unconfigured deployment keeps every other plane open.
+# R3 (P0-2): "configured" is ANY required S16 configuration present
+# (identities OR state path OR backup root).  A partially-configured
+# deployment fails the factory and therefore fails the shared restore
+# readiness gate closed — never an open gate with half-built S16.
 S16_CONFIGURED = bool(
-    _s16_identities_configured()
-    and not _s16_identities_alias_controlled()
-    and os.environ.get("TASK4_S16_STATE_PATH", "").strip()
-    and os.environ.get("TASK4_S16_BACKUP_ROOT", "").strip()
+    not _s16_identities_alias_controlled()
+    and (
+        _s16_identities_configured()
+        or os.environ.get("TASK4_S16_STATE_PATH", "").strip()
+        or os.environ.get("TASK4_S16_BACKUP_ROOT", "").strip()
+    )
 )
+
+
+def _s16_domain_read_gate() -> bool:
+    """The shared domain read gate (R2 P1-12, R3 P1-4): open only when S16
+    is unconfigured, or the live service reports ready.  A configured-but-
+    failed factory leaves S16_SERVICE None and closes every wired domain
+    retrieval — fail closed on partial configuration."""
+    return bool(
+        (not globals().get("S16_CONFIGURED"))
+        or (
+            globals().get("S16_SERVICE") is not None
+            and globals().get("S16_SERVICE").ready()
+        )
+    )
+
+
+def _install_s16_read_gates() -> None:
+    """Wire the shared gate into every domain owner regardless of whether
+    the S16 factory succeeded (a failed factory must still fail closed)."""
+    if S01_SERVICE is not None:
+        S01_SERVICE.s16_read_gate = _s16_domain_read_gate  # type: ignore[attr-defined]
+        boundary = getattr(S01_SERVICE, "registered_source_boundary", None)
+        if boundary is not None:
+            boundary.s16_read_gate = _s16_domain_read_gate  # type: ignore[attr-defined]
+    if S12_SERVICE is not None:
+        S12_SERVICE.s16_read_gate = _s16_domain_read_gate  # type: ignore[attr-defined]
+
+
+_install_s16_read_gates()
 
 S01_TEST_DRIVER: ControlledScenarioTestDriver | None = None
 S01_BACKGROUND_ENABLED = _s01_demo_flag(

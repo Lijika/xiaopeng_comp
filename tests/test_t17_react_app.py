@@ -147,6 +147,12 @@ def _build_fixture(work_root: Path) -> dict[str, Any]:
         retention=retention,
         clock=lambda: FIXED_NOW,
     )
+    def _recording_writer() -> Any:
+        def writer(record: dict[str, Any]) -> bool:
+            return True
+
+        return writer
+
     s16 = GovernedDeletionService(
         ledger_path=work_root / "s16.sqlite3",
         owners={
@@ -164,6 +170,7 @@ def _build_fixture(work_root: Path) -> dict[str, Any]:
         governance_subject=T17_GOVERNANCE_SUBJECT,
         approver_subjects=(T17_APPROVER1_SUBJECT, T17_APPROVER2_SUBJECT),
         governance_scope=T17_SCOPE,
+        security_audit_writer=_recording_writer(),
         clock=lambda: FIXED_NOW,
         fault_injector=fault_injector,
     )

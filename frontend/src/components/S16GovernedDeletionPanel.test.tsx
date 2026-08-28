@@ -467,4 +467,146 @@ describe("R2 completion and identity-invalidation states", () => {
     expect(client.getQueryData(["s16", "deletions", "s16req_test_00000001"])).toBeUndefined();
     expect(router.calls.some((call) => call.url === QUERY_PATH)).toBe(true);
   });
+
+  it("invalidates the governance identity on a receipt query 403", async () => {
+    const router = fetchRouter({
+      [`POST ${PREFLIGHT_PATH}`]: () =>
+        new Response(
+          JSON.stringify(s16PreflightPayload()),
+          { headers: { "Content-Type": "application/json" } },
+        ),
+      [`GET ${QUERY_PATH}`]: () =>
+        new Response(
+          JSON.stringify(
+            s16QueryPayload({
+              job: {
+                job_id: "s16job_1",
+                status: "complete",
+                attempt: 1,
+                fence: 1,
+                lease_owner: null,
+                pending_owner_fingerprints: { s01: 4 },
+                owner_results: { s01: "complete" },
+                stable_failure: null,
+                completed_at: 1_800_000_001,
+              },
+            }),
+          ),
+          { headers: { "Content-Type": "application/json" } },
+        ),
+      [`GET ${RECEIPT_PATH}`]: () =>
+        new Response(
+          JSON.stringify({
+            detail: { error: "S16_FORBIDDEN", message: "identity invalid" },
+          }),
+          { status: 403, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    renderWithQuery(<S16GovernedDeletionPanel />);
+    const user = userEvent.setup();
+    await user.type(screen.getByTestId("s16-reference"), "APP-REFERENCE-1");
+    await user.click(screen.getByTestId("s16-preflight-button"));
+    // R3 (P1-15): the receipt 403 invalidates the whole governance surface.
+    await screen.findByTestId("s16-error-forbidden");
+    expect(screen.queryByTestId("s16-reference")).toBeNull();
+    expect(screen.queryByTestId("s16-receipt")).toBeNull();
+    expect(router.calls.some((call) => call.url === RECEIPT_PATH)).toBe(true);
+  });
+
+  it("invalidates the governance identity on a process mutation 403", async () => {
+    const router = fetchRouter({
+      [`POST ${PREFLIGHT_PATH}`]: () =>
+        new Response(
+          JSON.stringify(s16PreflightPayload()),
+          { headers: { "Content-Type": "application/json" } },
+        ),
+      [`GET ${QUERY_PATH}`]: () =>
+        new Response(
+          JSON.stringify(
+            s16QueryPayload({
+              job: {
+                job_id: "s16job_1",
+                status: "pending",
+                attempt: 1,
+                fence: 1,
+                lease_owner: null,
+                pending_owner_fingerprints: { s01: 4 },
+                owner_results: {},
+                stable_failure: null,
+                completed_at: null,
+              },
+            }),
+          ),
+          { headers: { "Content-Type": "application/json" } },
+        ),
+      [`POST ${PROCESS_PATH}`]: () =>
+        new Response(
+          JSON.stringify({
+            detail: { error: "S16_FORBIDDEN", message: "identity invalid" },
+          }),
+          { status: 403, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    renderWithQuery(<S16GovernedDeletionPanel />);
+    const user = userEvent.setup();
+    await user.type(screen.getByTestId("s16-reference"), "APP-REFERENCE-1");
+    await user.click(screen.getByTestId("s16-preflight-button"));
+    await screen.findByTestId("s16-process-button");
+    await user.click(screen.getByTestId("s16-process-button"));
+    await screen.findByTestId("s16-error-forbidden");
+    expect(screen.queryByTestId("s16-process-button")).toBeNull();
+    expect(router.calls.some((call) => call.url === PROCESS_PATH)).toBe(true);
+  });
+
+  it("clears only the approver state on an approver 403", async () => {
+    const router = fetchRouter({
+      [`POST ${PREFLIGHT_PATH}`]: () =>
+        new Response(
+          JSON.stringify(s16PreflightPayload()),
+          { headers: { "Content-Type": "application/json" } },
+        ),
+      [`GET ${QUERY_PATH}`]: () =>
+        new Response(
+          JSON.stringify(
+            s16QueryPayload({
+              job: {
+                job_id: "s16job_1",
+                status: "pending",
+                attempt: 0,
+                fence: 0,
+                lease_owner: null,
+                pending_owner_fingerprints: { s01: 4 },
+                owner_results: {},
+                stable_failure: null,
+                completed_at: null,
+              },
+            }),
+          ),
+          { headers: { "Content-Type": "application/json" } },
+        ),
+      [`POST ${APPROVE_PATH}`]: () =>
+        new Response(
+          JSON.stringify({
+            detail: { error: "S16_FORBIDDEN", message: "approver invalid" },
+          }),
+          { status: 403, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    renderWithQuery(<S16GovernedDeletionPanel />);
+    const user = userEvent.setup();
+    await user.type(screen.getByTestId("s16-reference"), "APP-REFERENCE-1");
+    await user.click(screen.getByTestId("s16-preflight-button"));
+    await screen.findByTestId("s16-approver-token");
+    await user.type(screen.getByTestId("s16-approver-token"), "stale-approver");
+    await user.click(screen.getByTestId("s16-approve-button"));
+    // R3 (P1-15): the approver surface 403 clears the approver token and
+    // any previous approval error, but the governance surface stays intact.
+    await waitFor(() => {
+      expect((screen.getByTestId("s16-approver-token") as HTMLInputElement).value).toBe("");
+    });
+    expect(screen.queryByTestId("s16-error-code")).toBeNull();
+    expect(screen.queryByTestId("s16-commit")).not.toBeNull();
+    expect(screen.queryByTestId("s16-error-forbidden")).toBeNull();
+    expect(router.calls.some((call) => call.url === APPROVE_PATH)).toBe(true);
+  });
 });

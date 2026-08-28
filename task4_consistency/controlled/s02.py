@@ -802,6 +802,14 @@ class RegisteredSourceBoundary:
         object_ref: str,
     ) -> bytes:
         """Read one currently configured object through its registered authority."""
+        gate = getattr(self, "s16_read_gate", None)
+        if gate is not None:
+            try:
+                ready = bool(gate())
+            except Exception:
+                ready = False
+            if not ready:
+                raise LookupError("controlled object is unavailable")
         item = self._objects.get(object_ref)
         if (
             item is None

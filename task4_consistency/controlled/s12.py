@@ -2315,7 +2315,20 @@ class EvaluationService:
             self._store.reload()
             return self._store.cancel_job_transaction(job_id)
 
+    def s16_require_read_ready(self) -> None:
+        """Shared S16 restore readiness gate (R3 P1-4): a closed restore
+        window existence-hides every evaluation retrieval."""
+        gate = getattr(self, "s16_read_gate", None)
+        if gate is not None:
+            try:
+                ready = bool(gate())
+            except Exception:
+                ready = False
+            if not ready:
+                raise ValueError("query unavailable during restore replay")
+
     def query_job(self, job_id: str) -> dict[str, Any]:
+        self.s16_require_read_ready()
         with self._lock:
             self._store.reload()
             job = self._store.jobs.get(job_id)
@@ -2626,6 +2639,7 @@ class EvaluationService:
             ) from error
 
     def query_bundle(self, bundle_id: str) -> dict[str, Any]:
+        self.s16_require_read_ready()
         with self._lock:
             self._store.reload()
             bundle = self._store.bundles.get(bundle_id)
@@ -2748,6 +2762,8 @@ class EvaluationService:
     def _s16_rows_by_fingerprint(
         self,
         fingerprints: set[str],
+        *,
+        scope_fingerprint: str | None = None,
     ) -> dict[str, list[str]]:
         from task4_consistency.controlled.s16 import (
             COPY_CLASS_EVALUATION_COPY,
@@ -2756,7 +2772,44 @@ class EvaluationService:
 
         rows = self.s16_enumerate_all_rows()
         matched: dict[str, list[str]] = {}
-        for row in [*rows["plans"], *rows["jobs"], *rows["bundles"]]:
+        if scope_fingerprint is None:
+            candidates = [*rows["plans"], *rows["jobs"], *rows["bundles"]]
+        else:
+            # R3 (P1-2): only rows whose plan references the CURRENT scope
+            # (and nothing else) are deletable; a same-digest row owned by
+            # another scope is never touched here.
+            exclusive_plan_ids: set[str] = set()
+            for plan in rows["plans"]:
+                referenced = set(plan.get("referenced_scopes") or [])
+                if referenced == {scope_fingerprint}:
+                    exclusive_plan_ids.add(str(plan["row_id"]))
+            plan_by_id = {
+                str(plan["row_id"]): plan for plan in rows["plans"]
+            }
+            candidates = []
+            for plan in rows["plans"]:
+                if str(plan["row_id"]) in exclusive_plan_ids:
+                    candidates.append(plan)
+            for job in rows["jobs"]:
+                job_row = self._store.jobs.get(str(job["row_id"]))
+                if job_row is None:
+                    continue
+                if str(job_row.get("plan_id") or "") in exclusive_plan_ids:
+                    candidates.append(job)
+            for bundle in rows["bundles"]:
+                bundle_row = self._store.bundles.get(str(bundle["row_id"]))
+                if bundle_row is None:
+                    continue
+                replay = bundle_row.get("replay_package") or {}
+                plan = (
+                    replay.get("plan")
+                    if isinstance(replay, dict)
+                    else {}
+                ) or {}
+                if str(plan.get("plan_id") or "") in exclusive_plan_ids:
+                    candidates.append(bundle)
+            del plan_by_id
+        for row in candidates:
             fingerprint = copy_identity_fingerprint(
                 "s12", COPY_CLASS_EVALUATION_COPY, str(row["content_sha256"])
             )
@@ -2785,7 +2838,9 @@ class EvaluationService:
         ).hexdigest()
         with self._lock:
             self._store.reload()
-            matched = self._s16_rows_by_fingerprint(target)
+            matched = self._s16_rows_by_fingerprint(
+                target, scope_fingerprint=scope_fingerprint
+            )
             plan_ids = set(matched.get("plan", []))
             job_ids = set(matched.get("job", []))
             bundle_ids = set(matched.get("bundle", []))
@@ -2837,16 +2892,26 @@ class EvaluationService:
         target = set(fingerprints)
         with self._lock:
             self._store.reload()
-            remaining = self._s16_rows_by_fingerprint(target)
+            remaining = self._s16_rows_by_fingerprint(
+                target, scope_fingerprint=scope_fingerprint or None
+            )
             absent = not any(remaining.values())
             scope_mismatch = False
             if absent and scope_fingerprint and target:
+                # R3 (P1-1): only bindings for THIS target digest matter;
+                # unrelated scopes deleted earlier must not cause a false
+                # mismatch.
+                fingerprints_digest = hashlib.sha256(
+                    "\0".join(sorted(target)).encode("utf-8")
+                ).hexdigest()
                 with contextlib.closing(self._store._connect()) as connection:
                     rows = connection.execute(
-                        "SELECT scope_fingerprint FROM s12_deletion_bindings"
+                        "SELECT scope_fingerprint FROM s12_deletion_bindings "
+                        "WHERE fingerprints_digest = ?",
+                        (fingerprints_digest,),
                     ).fetchall()
-                scope_mismatch = bool(
-                    rows and any(str(row[0]) != scope_fingerprint for row in rows)
+                scope_mismatch = any(
+                    str(row[0]) != scope_fingerprint for row in rows
                 )
             return {
                 "absent": absent and not scope_mismatch,

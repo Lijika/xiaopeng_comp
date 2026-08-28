@@ -704,6 +704,8 @@ def s16_release_legal_hold(
     return {
         "status": result.get("status") or "accepted",
         "hold_id": result.get("hold_id"),
+        "request_id": result.get("request_id"),
+        "generation": result.get("generation"),
         "replayed": bool(result.get("replayed")),
     }
 

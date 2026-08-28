@@ -298,6 +298,16 @@ def _empty_evaluation(tmp_path: Path) -> EvaluationService:
     )
 
 
+def _recording_audit_writer() -> tuple[list[dict[str, Any]], Any]:
+    recorded: list[dict[str, Any]] = []
+
+    def writer(record: dict[str, Any]) -> bool:
+        recorded.append(record)
+        return True
+
+    return recorded, writer
+
+
 def _s16_service(
     tmp_path: Path,
     service: ControlledScenarioService,
@@ -314,6 +324,8 @@ def _s16_service(
     governance_scope: str = "C-DEMO",
     ledger_path: Path | None = None,
 ) -> GovernedDeletionService:
+    if security_audit_available and security_audit_writer is None:
+        _, security_audit_writer = _recording_audit_writer()
     retention = RetentionPolicy(retention_seconds=retention_seconds)
     s01_owner = S01DeletionOwner(
         service,
@@ -833,13 +845,17 @@ def test_missing_owner_stale_manifest_and_shared_copy_block_commit(
             ledger_path=tmp_path / "s16-missing.sqlite3",
             owners={
                 "s01": S01DeletionOwner(service, retention=RetentionPolicy(retention_seconds=0), clock=_CdemoSessionClock()),
-                "s02": S02DeletionOwner(service.registered_source_boundary, service),
+                "s02": S02DeletionOwner(
+                    service.registered_source_boundary,
+                    S01DeletionOwner(service, retention=RetentionPolicy(retention_seconds=0), clock=_CdemoSessionClock()),
+                ),
                 "s12": S12DeletionOwner(_empty_evaluation(tmp_path)),
                 "s17-disabled": ExportTempOwner(),
             },
             retention=RetentionPolicy(retention_seconds=0),
             governance_subject=GOVERNANCE.subject,
             approver_subjects=(APPROVER_1.subject, APPROVER_2.subject),
+            security_audit_writer=_recording_audit_writer()[1],
             clock=_CdemoSessionClock(),
         )
 
@@ -1278,7 +1294,11 @@ def test_old_backup_restore_replays_external_manifest_before_readiness(
                 ),
                 "s02": S02DeletionOwner(
                     service_restored2.registered_source_boundary,
-                    service_restored2,
+                    S01DeletionOwner(
+                        service_restored2,
+                        retention=RetentionPolicy(retention_seconds=0),
+                        clock=_CdemoSessionClock(),
+                    ),
                 ),
                 "s12": S12DeletionOwner(_empty_evaluation(tmp_path)),
                 "backup": BackupDeletionOwner(
@@ -1286,6 +1306,7 @@ def test_old_backup_restore_replays_external_manifest_before_readiness(
                 ),
                 "s17-disabled": ExportTempOwner(),
             },
+            security_audit_writer=_recording_audit_writer()[1],
             retention=RetentionPolicy(retention_seconds=0),
             governance_subject=GOVERNANCE.subject,
             approver_subjects=(APPROVER_1.subject, APPROVER_2.subject),
@@ -2258,3 +2279,648 @@ def test_backup_binding_rejects_scope_or_digest_mismatch(
         fence=0,
     )
     assert stale["status"] == "stale"
+
+
+
+# ---------------------------------------------------------------------------
+# R3 (P1-x) regressions
+# ---------------------------------------------------------------------------
+
+
+def test_restore_readiness_gate_closes_every_domain_retrieval(
+    tmp_path: Path,
+) -> None:
+    """R3 P1-4: the injected shared read gate closes S15 reveal,
+    S01 settlement view, S02 direct object reads and S12 job/bundle
+    queries during a restore window, and reopens with the gate."""
+    service, submission, application_id = _registered_terminated(tmp_path)
+    boundary = service.registered_source_boundary
+    evaluation = _empty_evaluation(tmp_path)
+    _s16_service(tmp_path, service, evaluation=evaluation)
+    service.s16_read_gate = lambda: False  # type: ignore[attr-defined]
+    boundary.s16_read_gate = lambda: False  # type: ignore[attr-defined]
+    evaluation.s16_read_gate = lambda: False  # type: ignore[attr-defined]
+
+    with pytest.raises(QueryNotFound):
+        service.settlement_view(
+            principal=REVIEWER, application_id=application_id
+        )
+    with pytest.raises(QueryNotFound):
+        service.reveal_field_observation(
+            principal=S01CommandPrincipal(
+                subject="s15-reviewer",
+                role="reviewer",
+                scope=TENANT_SCOPE,
+                source_id="s15-review-console",
+            ),
+            application_id=application_id,
+            work_item_id="work-item-gone",
+            observation_id="obs-gone",
+            expected_fence=1,
+            expected_context={},
+            idempotency_key="s16-gate-reveal",
+            purpose="manual_review",
+            reason="HUMAN_REVIEW_COMPLETED",
+            classification="RESTRICTED",
+            expected_source_region="region:1",
+        )
+    with pytest.raises(LookupError):
+        boundary.read_object(
+            tenant_id="tenant-test",
+            source_system_id="registered-source",
+            object_ref="result-object",
+        )
+    with pytest.raises(ValueError, match="restore replay"):
+        evaluation.query_job("job-gone")
+    with pytest.raises(ValueError, match="restore replay"):
+        evaluation.query_bundle("bundle-gone")
+
+    # Gate open: the same retrievals behave normally again.
+    service.s16_read_gate = lambda: True  # type: ignore[attr-defined]
+    boundary.s16_read_gate = lambda: True  # type: ignore[attr-defined]
+    evaluation.s16_read_gate = lambda: True  # type: ignore[attr-defined]
+    assert (
+        boundary.read_object(
+            tenant_id="tenant-test",
+            source_system_id="registered-source",
+            object_ref="result-object",
+        )
+        is not None
+    )
+    with pytest.raises(ValueError, match="does not exist"):
+        evaluation.query_job("job-gone")
+
+
+def test_s02_single_owner_restore_replays_with_operation_fence_binding(
+    tmp_path: Path,
+) -> None:
+    """R3 P0-1: an S02-only restore (absence rows back) closes readiness
+    and the per-owner replay re-deletes under a fresh replay operation
+    binding with fence 0, then verifies absence."""
+    import shutil
+
+    service, submission, application_id = _registered_terminated(tmp_path)
+    absence_path = service.registered_source_boundary.absence_store_path
+    shutil.copy2(absence_path, tmp_path / "absence_original.sqlite3")
+    s16 = _s16_service(tmp_path, service, governance_scope=TENANT_SCOPE)
+    result = _preflight(
+        s16, str(submission["upstream_application_ref"]), scope=TENANT_SCOPE
+    )
+    s16.commit(
+        request_id=result["request_id"],
+        principal=GOVERNANCE_REGISTERED,
+        idempotency_key="s02-restore-commit",
+    )
+    outcome = s16.process_next_deletion_job(worker_id="w", now=_now() + 1)
+    assert outcome["status"] == "complete", outcome
+    assert s16.ready() is True
+    with sqlite3.connect(absence_path) as connection:
+        absent_count = connection.execute(
+            "SELECT COUNT(*) FROM s02_object_absence"
+        ).fetchone()[0]
+    assert absent_count >= 1
+
+    # Single-owner restore: the ORIGINAL (pre-deletion) absence store
+    # comes back with no absence marks; the gate closes.
+    shutil.copy2(tmp_path / "absence_original.sqlite3", absence_path)
+    with sqlite3.connect(absence_path) as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM s02_object_absence"
+            ).fetchone()[0]
+            == 0
+        )
+    assert s16.ready() is False
+    replayed = s16.replay_restore_if_needed()
+    assert replayed["jobs"] >= 1
+    assert s16.ready() is True
+    with sqlite3.connect(absence_path) as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM s02_object_absence"
+            ).fetchone()[0]
+            == absent_count
+        )
+
+
+def test_s12_delete_and_verify_are_scope_aware_across_equal_digests(
+    tmp_path: Path,
+) -> None:
+    """R3 P1-1/P1-2: the S12 delete only touches rows whose plan belongs
+    to the CURRENT scope (a same-digest row owned by another scope is
+    never deleted), and absence verification only judges bindings of the
+    target digest — unrelated scopes never cause a mismatch."""
+    evaluation = _empty_evaluation(tmp_path)
+    scope_a = scope_fingerprint_for("app-s12-a")
+    scope_b = scope_fingerprint_for("app-s12-b")
+    plan_a = {
+        "plan_id": "plan-a",
+        "kind": "s16-cross-scope",
+        "opportunities": [
+            {"opportunity_id": "opp-a", "application_id": "app-s12-a"}
+        ],
+    }
+    # plan-b: different content -> different digest, scope B.
+    plan_b = {
+        "plan_id": "plan-b",
+        "kind": "s16-cross-scope",
+        "opportunities": [
+            {"opportunity_id": "opp-b", "application_id": "app-s12-b"}
+        ],
+    }
+    # job-b: byte-identical to plan-a -> SAME content digest, but owned by
+    # plan-b (scope B).  The old global fingerprint scan would delete it
+    # during the scope-A delete.
+    job_b = dict(plan_a)
+    job_b["job_id"] = "job-b"
+    job_b["plan_id"] = "plan-b"
+    with evaluation._store._connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        evaluation._store._write_row(
+            connection, "s12_plans", "plan-a", plan_a
+        )
+        evaluation._store._write_row(
+            connection, "s12_plans", "plan-b", plan_b
+        )
+        evaluation._store._write_row(
+            connection, "s12_jobs", "job-b", job_b
+        )
+        connection.commit()
+
+    from task4_consistency.controlled.s16 import copy_identity_fingerprint
+    from task4_consistency.controlled.s12 import content_digest
+
+    fingerprint_a = copy_identity_fingerprint(
+        "s12", "evaluation_copy", content_digest(plan_a)
+    )
+    fingerprint_b = copy_identity_fingerprint(
+        "s12", "evaluation_copy", content_digest(plan_b)
+    )
+    assert fingerprint_a != fingerprint_b
+
+    deleted = evaluation.s16_delete_scope(
+        [fingerprint_a],
+        operation_id="op-a",
+        fence=0,
+        scope_fingerprint=scope_a,
+    )
+    assert deleted["status"] == "complete", deleted
+    remaining = evaluation.s16_enumerate_all_rows()
+    assert [p["row_id"] for p in remaining["plans"]] == ["plan-b"]
+    # The same-digest job owned by scope B SURVIVED the scope-A delete.
+    assert [j["row_id"] for j in remaining["jobs"]] == ["job-b"]
+
+    # Verify scope A: its OWN rows are gone; the same-digest row owned
+    # by scope B is not part of scope A's deletion, so absent is TRUE.
+    verify = evaluation.s16_verify_absent(
+        [fingerprint_a], scope_fingerprint=scope_a
+    )
+    assert verify["absent"] is True
+    assert verify["scope_mismatch"] is False
+
+    # Delete scope B as well; then verify A: absent WITHOUT a mismatch
+    # even though the scope-B binding for a different digest exists.
+    deleted_b = evaluation.s16_delete_scope(
+        [fingerprint_b],
+        operation_id="op-b",
+        fence=0,
+        scope_fingerprint=scope_b,
+    )
+    assert deleted_b["status"] == "complete", deleted_b
+    verify = evaluation.s16_verify_absent(
+        [fingerprint_a], scope_fingerprint=scope_a
+    )
+    assert verify["absent"] is True, verify
+    assert verify["scope_mismatch"] is False
+    # The scope-B rows are gone too.
+    assert evaluation.s16_enumerate_all_rows()["plans"] == []
+
+
+def test_stale_tombstone_binding_never_proves_absence(tmp_path: Path) -> None:
+    """R3 P1-3: absence proofs bind to the deletion operation + fence; a
+    stale operation asking about the same scope sees not-absent."""
+    service, submission, application_id = _registered_terminated(tmp_path)
+    s16 = _s16_service(tmp_path, service, governance_scope=TENANT_SCOPE)
+    result = _preflight(
+        s16, str(submission["upstream_application_ref"]), scope=TENANT_SCOPE
+    )
+    s16.commit(
+        request_id=result["request_id"],
+        principal=GOVERNANCE_REGISTERED,
+        idempotency_key="tombstone-commit",
+    )
+    outcome = s16.process_next_deletion_job(worker_id="w", now=_now() + 1)
+    assert outcome["status"] == "complete", outcome
+    scope = result["scope_fingerprint"]
+    assert (
+        service.s16_verify_absent(
+            scope, operation_id="stale-op", fence=999
+        )["absent"]
+        is False
+    )
+    # The scope-level (any binding) proof still holds.
+    assert service.s16_verify_absent(scope)["absent"] is True
+    job = s16._job_for_request(result["request_id"])
+    assert job is not None
+    assert (
+        service.s16_verify_absent(
+            scope,
+            operation_id=str(job["job_id"]),
+            fence=int(job.get("fence") or 0),
+        )["absent"]
+        is True
+    )
+
+
+def test_preflight_replay_returns_original_manifest_after_hold_impose(
+    tmp_path: Path,
+) -> None:
+    """R3 P1-8: a same-key preflight retry replays the FIRST manifest
+    snapshot — a hold imposed in between never changes the replay."""
+    service, submission, application_id = _registered_terminated(tmp_path)
+    s16 = _s16_service(tmp_path, service, governance_scope=TENANT_SCOPE)
+    reference = str(submission["upstream_application_ref"])
+    first = _preflight(s16, reference, scope=TENANT_SCOPE)
+    held = s16.impose_legal_hold(
+        scope_fingerprint=first["scope_fingerprint"],
+        reason_code="litigation",
+        owner="all",
+        effective_time=_now(),
+        principal=GOVERNANCE_REGISTERED,
+        idempotency_key="hold-before-replay",
+    )
+    assert held["status"] == "accepted"
+    replayed = s16.preflight(
+        application_reference=reference,
+        principal=S01CommandPrincipal(
+            subject=GOVERNANCE.subject,
+            role="operator",
+            scope=TENANT_SCOPE,
+            source_id="s16-governance-console",
+        ),
+        idempotency_key=f"preflight-{reference}-{TENANT_SCOPE}",
+    )
+    assert replayed["replayed"] is True
+    assert replayed["manifest_digest"] == first["manifest_digest"]
+    assert replayed["entries_digest"] == first["entries_digest"]
+    assert replayed["request_id"] == first["request_id"]
+
+
+def test_repair_same_key_replays_after_job_resumed(tmp_path: Path) -> None:
+    """R3 P1-9: the repair idempotency binding resolves BEFORE the job
+    state is judged; a same-key retry replays the accepted repair even
+    after the first repair moved the job back to pending."""
+    service, submission, application_id = _registered_terminated(tmp_path)
+    faults = {"armed": True}
+
+    def fault(owner_id: str) -> None:
+        if owner_id == "s02" and faults["armed"]:
+            raise RuntimeError("injected")
+
+    s16 = _s16_service(
+        tmp_path,
+        service,
+        max_owner_attempts=2,
+        fault_injector=fault,
+        governance_scope=TENANT_SCOPE,
+    )
+    result = _preflight(
+        s16, str(submission["upstream_application_ref"]), scope=TENANT_SCOPE
+    )
+    s16.commit(
+        request_id=result["request_id"],
+        principal=GOVERNANCE_REGISTERED,
+        idempotency_key="repair-replay-commit",
+    )
+    first = s16.process_next_deletion_job(worker_id="w", now=_now() + 1)
+    second = s16.process_next_deletion_job(worker_id="w", now=_now() + 2)
+    assert second["status"] == "repair_required", (first, second)
+    repaired = s16.repair(
+        request_id=result["request_id"],
+        owner_id="s02",
+        repair_fact="s02-repair-verified",
+        principal=GOVERNANCE_REGISTERED,
+        idempotency_key="repair-replay-key",
+    )
+    assert repaired["status"] == "accepted"
+    # Same key + same content: replays the accepted fact without judging
+    # the (now pending) job state.
+    replayed = s16.repair(
+        request_id=result["request_id"],
+        owner_id="s02",
+        repair_fact="s02-repair-verified",
+        principal=GOVERNANCE_REGISTERED,
+        idempotency_key="repair-replay-key",
+    )
+    assert replayed["replayed"] is True
+    assert replayed["status"] == "accepted"
+
+
+def test_claim_cas_rejects_stale_five_originals(tmp_path: Path) -> None:
+    """R3 P1-10: the claim compare-and-set judges status + lease expiry +
+    fence + attempt against the database; a snapshot made before another
+    worker advanced the job can never claim it."""
+    from task4_consistency.controlled.s16 import S16Ledger
+
+    ledger = S16Ledger(tmp_path / "claim.sqlite3")
+    job = {
+        "job_id": "s16job_claim",
+        "request_id": "s16req_claim",
+        "scope_fingerprint": "0" * 64,
+        "status": "pending",
+        "lease_owner": None,
+        "lease_expires_at": None,
+        "fence": 0,
+        "attempt": 0,
+        "pending_owner_fingerprints": {"s01": ["fp"]},
+        "owner_results": {},
+    }
+    with ledger._connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        ledger._upsert_job(connection, job, 1)
+        connection.commit()
+    # Instance A's snapshot: the job as it was before any claim.
+    claimed = {
+        **job,
+        "status": "running",
+        "lease_owner": "worker-a",
+        "lease_expires_at": 61,
+        "fence": 1,
+        "attempt": 1,
+        "updated_at": 1,
+    }
+    with ledger._connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        ok = ledger._claim_job_cas(
+            connection,
+            job_id="s16job_claim",
+            worker="worker-a",
+            now=1,
+            lease_seconds=60,
+            claimed_payload=claimed,
+            claimed_fence=1,
+            claimed_attempt=1,
+            expected_status="pending",
+            expected_lease_expires_at=None,
+            expected_fence=0,
+            expected_attempt=0,
+        )
+        connection.commit()
+    assert ok is True
+    # Instance B still holds the ORIGINAL snapshot: every one of the five
+    # originals is stale now; the CAS must refuse the claim.
+    claimed_b = {
+        **job,
+        "status": "running",
+        "lease_owner": "worker-b",
+        "lease_expires_at": 61,
+        "fence": 1,
+        "attempt": 1,
+        "updated_at": 1,
+    }
+    with ledger._connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        ok_b = ledger._claim_job_cas(
+            connection,
+            job_id="s16job_claim",
+            worker="worker-b",
+            now=1,
+            lease_seconds=60,
+            claimed_payload=claimed_b,
+            claimed_fence=1,
+            claimed_attempt=1,
+            expected_status="pending",
+            expected_lease_expires_at=None,
+            expected_fence=0,
+            expected_attempt=0,
+        )
+        connection.execute("ROLLBACK")
+    assert ok_b is False
+
+
+def test_pre_r2_job_schema_backfills_columns_and_records_migration_fact(
+    tmp_path: Path,
+) -> None:
+    """R3 P1-12: opening a pre-R2 ledger adds the worker columns and
+    backfills them from the authoritative payload, and records the
+    migration fact."""
+    from task4_consistency.controlled.s16 import S16Ledger
+
+    path = tmp_path / "old_ledger.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE s16_jobs ("
+            "job_id TEXT PRIMARY KEY, payload TEXT NOT NULL, "
+            "updated_at INTEGER NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO s16_jobs VALUES (?, ?, ?)",
+            (
+                "s16job_old",
+                json.dumps(
+                    {
+                        "job_id": "s16job_old",
+                        "request_id": "s16req_old",
+                        "scope_fingerprint": "1" * 64,
+                        "status": "pending",
+                        "lease_owner": None,
+                        "lease_expires_at": None,
+                        "fence": 0,
+                        "attempt": 2,
+                        "pending_owner_fingerprints": {"s01": ["fp"]},
+                        "owner_results": {},
+                    }
+                ),
+                1,
+            ),
+        )
+    ledger = S16Ledger(path)
+    with sqlite3.connect(path) as connection:
+        columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(s16_jobs)"
+            ).fetchall()
+        }
+        fact = connection.execute(
+            "SELECT payload FROM s16_meta_facts "
+            "WHERE fact_key = 's16_jobs_schema_migration'"
+        ).fetchone()
+    assert {"status", "lease_owner", "lease_expires_at", "fence", "attempt"} <= columns
+    assert fact is not None
+    loaded = ledger._load_jobs()["s16job_old"]
+    assert loaded["status"] == "pending"
+    assert loaded["attempt"] == 2
+
+
+def test_backup_delete_resumes_after_crash_between_unlink_and_commit(
+    tmp_path: Path,
+) -> None:
+    """R3 P1-14: a crash between file unlink and the registry commit
+    leaves a staged intent; the next attempt with the same operation
+    resumes, completes and proves absence — never a permanent verify
+    failure."""
+    backup_root = tmp_path / "backups"
+    backup = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
+    scope = "2" * 64
+    saved = backup_root / "target.sqlite3"
+    saved.write_bytes(b"captured-content")
+    digest = hashlib.sha256(b"captured-content").hexdigest()
+    backup.capture(
+        scope_fingerprint=scope, copy_files=[("target.sqlite3", digest)]
+    )
+    fingerprints = {"fp-crash"}
+    fingerprints_digest = backup._bindings_digest(fingerprints)
+    identity = backup._connector_identity("target.sqlite3", digest)
+    # Crash simulation: intent staged, files already unlinked, registry
+    # rows and binding NOT committed.
+    with backup._registry_connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "INSERT INTO backup_deletion_intents("
+            "operation_id, fence, scope_fingerprint, fingerprints_digest, "
+            "status, staged_at, identities_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "op-crash",
+                1,
+                scope,
+                fingerprints_digest,
+                "staged",
+                int(_now()),
+                json.dumps([identity], separators=(",", ":")),
+            ),
+        )
+        connection.commit()
+    saved.unlink()
+    for manifest in backup._load_manifests():
+        backup._manifest_path(str(manifest["manifest_id"])).unlink()
+
+    result = backup.delete(
+        fingerprints,
+        scope_fingerprint=scope,
+        operation_id="op-crash",
+        fence=1,
+    )
+    assert result["status"] == "complete", result
+    assert backup.verify_absent(
+        fingerprints, scope_fingerprint=scope
+    )["status"] == "verified"
+    with backup._registry_connect() as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM backup_registry"
+            ).fetchone()[0]
+            == 0
+        )
+        binding = connection.execute(
+            "SELECT status FROM backup_deletion_bindings "
+            "WHERE operation_id = 'op-crash' AND fence = 1"
+        ).fetchone()
+        intent = connection.execute(
+            "SELECT status FROM backup_deletion_intents "
+            "WHERE operation_id = 'op-crash' AND fence = 1"
+        ).fetchone()
+    assert binding is not None and binding[0] == "complete"
+    assert intent is not None and intent[0] == "committed"
+
+
+def test_non_callable_audit_writer_fails_closed_at_construction(
+    tmp_path: Path,
+) -> None:
+    """R3 P1-5: availability requires a callable writer; a non-callable
+    writer is rejected at construction with zero state change."""
+    service = _c_demo_service(tmp_path)
+    with pytest.raises(ValueError, match="callable"):
+        _s16_service(
+            tmp_path,
+            service,
+            security_audit_available=True,
+            security_audit_writer="not-callable",  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="availability"):
+        _s16_service(
+            tmp_path,
+            service,
+            security_audit_available=False,
+            security_audit_writer=_recording_audit_writer()[1],
+        )
+
+
+def test_partial_s16_configuration_fails_closed(tmp_path: Path) -> None:
+    """R3 P0-2: ANY required S16 configuration present (state path only,
+    no identities) makes S16_CONFIGURED true; the failed factory leaves
+    the shared domain gate closed."""
+    import os
+    import subprocess
+    import sys
+
+    others = {
+        f"TASK4_{name}": f"other-{name}"
+        for name in (
+            "S01_DEMO_CREDENTIAL",
+            "S01_OPERATOR_CREDENTIAL",
+            "S01_AUDITOR_CREDENTIAL",
+            "S02_CREDENTIAL",
+            "S05_EXCEPTION_APPROVER_CREDENTIAL",
+            "S08_ADMIN_CREDENTIAL",
+            "S08_APPROVER_CREDENTIAL",
+            "S08_OPERATOR_CREDENTIAL",
+            "S09_REPLAY_CREDENTIAL",
+            "S09_SIMULATION_CREDENTIAL",
+            "S12_CREDENTIAL",
+            "S13_OPERATOR_CREDENTIAL",
+            "S01_DEMO_SUBJECT",
+            "S01_OPERATOR_SUBJECT",
+            "S01_AUDITOR_SUBJECT",
+            "S02_SUBJECT",
+            "S05_EXCEPTION_APPROVER_SUBJECT",
+            "S08_ADMIN_SUBJECT",
+            "S08_APPROVER_SUBJECT",
+            "S08_OPERATOR_SUBJECT",
+            "S09_REPLAY_SUBJECT",
+            "S09_SIMULATION_SUBJECT",
+            "S12_SUBJECT",
+            "S13_OPERATOR_SUBJECT",
+        )
+    }
+    env = {
+        **os.environ,
+        **others,
+        "TASK4_S16_STATE_PATH": str(tmp_path / "s16.sqlite3"),
+        "TASK4_S16_BACKUP_ROOT": str(tmp_path / "backups"),
+        "TASK4_S16_GOVERNANCE_CREDENTIAL": "",
+        "TASK4_S16_GOVERNANCE_SUBJECT": "",
+        "TASK4_S16_APPROVER1_CREDENTIAL": "",
+        "TASK4_S16_APPROVER1_SUBJECT": "",
+        "TASK4_S16_APPROVER2_CREDENTIAL": "",
+        "TASK4_S16_APPROVER2_SUBJECT": "",
+    }
+    probe = (
+        "import task4_consistency.web.app as app; "
+        "print(bool(app.S16_CONFIGURED), app.S16_SERVICE is None, "
+        "not app._s16_domain_read_gate())"
+    )
+    run = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=str(Path(__file__).resolve().parent.parent),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert run.returncode == 0, run.stderr
+    probe2 = (
+        "import task4_consistency.web.app as app; "
+        "print('alias', app._s16_identities_alias_controlled(), "
+        "'ids', app._s16_identities_configured(), "
+        "'cfg', app.S16_CONFIGURED)"
+    )
+    run2 = subprocess.run(
+        [sys.executable, "-c", probe2],
+        cwd=str(Path(__file__).resolve().parent.parent),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert run.stdout.strip() == "True True True"
