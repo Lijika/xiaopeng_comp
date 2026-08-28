@@ -325,16 +325,29 @@ try:
         clock=lambda: int(time.time()),
         corpus_root=FIXTURES,
     )
-    # The S02 absence store for S16 (R6 P1-2): the configured env value
-    # when set, otherwise the stable default beside the S16 state ledger.
-    # The registered source boundary persists object deletions there so a
-    # standard deployment never runs an S02 deletion without a persistent
-    # absence store.
+    # The S02 absence store for S16 (R7 P1-2): the configured env value
+    # when set, otherwise the stable default beside the S16 STATE LEDGER
+    # directory — never the S01 state directory, so the S02 absence
+    # authority always lives in the same independent recovery domain as
+    # the S16 ledger.  The registered source boundary persists object
+    # deletions there so a standard deployment never runs an S02 deletion
+    # without a persistent absence store.
     _s16_absence_value = os.environ.get(
         "TASK4_S16_OBJECT_ABSENCE_PATH", ""
     ).strip()
     if _s16_absence_value and not Path(_s16_absence_value).is_absolute():
         raise ValueError("TASK4_S16_OBJECT_ABSENCE_PATH must be absolute")
+    _s16_default_state_value = os.environ.get(
+        "TASK4_S16_STATE_PATH", ""
+    ).strip()
+    # The default absence ledger lives beside the S16 state ledger when
+    # S16 is configured; an unconfigured deployment falls back beside the
+    # S01 state (irrelevant there, since S16 never runs).
+    _s16_default_absence_parent = (
+        Path(_s16_default_state_value).parent
+        if _s16_default_state_value
+        else Path(_s01_state_path).parent
+    )
     S01_SERVICE: ControlledScenarioService | None = ControlledScenarioService(
         fixture_root=FIXTURES,
         rules_path=DEFAULT_RULES,
@@ -346,7 +359,7 @@ try:
         controlled_object_absence_store=(
             _s16_absence_value
             or str(
-                Path(_s01_state_path).parent / "s02_object_absence.sqlite3"
+                _s16_default_absence_parent / "s02_object_absence.sqlite3"
             )
         ),
         exception_approver_subject=S05_EXCEPTION_APPROVER_SUBJECT,

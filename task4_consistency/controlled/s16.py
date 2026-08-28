@@ -2267,15 +2267,50 @@ class BackupDeletionOwner:
                 responsible_party="backup_operations_owner",
                 recovery_action="repair_backup_capture_and_resume_the_same_job",
             )
-        # R6 (P1-3): every staged manifest must STILL be byte-identical to
-        # its staged snapshot — same id, scope, entries digest, content
-        # digest and identity set.  An in-place rewrite is never unlinked.
-        by_id = {str(manifest["manifest_id"]): manifest for manifest in current_scope_manifests}
-        for snapshot in manifest_snapshots:
-            staged_id = str(snapshot.get("manifest_id") or "")
+        # R7 (P1-1): the reconciliation index covers ALL current manifests
+        # — never the scope-filtered subset — so a staged manifest that
+        # was relocated to another scope is still found and compared.
+        by_id = {
+            str(manifest["manifest_id"]): manifest
+            for manifest in current_manifests
+        }
+        snapshot_ids = {
+            str(snapshot.get("manifest_id") or "")
+            for snapshot in manifest_snapshots
+        }
+        if snapshot_ids != staged_manifest_ids:
+            # R7 (P1-1) snapshot completeness: every staged id needs a
+            # content snapshot; a partial snapshot cannot prove what the
+            # commit would delete — fail closed with zero changes.
+            connection.execute("ROLLBACK")
+            raise S16OwnerFailure(
+                self.owner_id,
+                S16_VERIFY_FAILED,
+                retryable=False,
+                responsible_party="backup_operations_owner",
+                recovery_action="repair_backup_capture_and_resume_the_same_job",
+            )
+        for staged_id in sorted(staged_manifest_ids):
             current = by_id.get(staged_id)
             if current is None:
-                continue  # already removed by the crashed pass (resume)
+                # A missing staged manifest is allowed ONLY when the
+                # crashed pass already removed it (resume); on a fresh
+                # commit an out-of-band removal is never unlinked around.
+                if resume:
+                    continue
+                connection.execute("ROLLBACK")
+                raise S16OwnerFailure(
+                    self.owner_id,
+                    S16_VERIFY_FAILED,
+                    retryable=False,
+                    responsible_party="backup_operations_owner",
+                    recovery_action="repair_backup_capture_and_resume_the_same_job",
+                )
+            snapshot = next(
+                (snap for snap in manifest_snapshots
+                 if str(snap.get("manifest_id") or "") == staged_id),
+                None,
+            )
             current_snapshot = {
                 "manifest_id": str(current["manifest_id"]),
                 "scope_fingerprint": str(
@@ -2290,6 +2325,8 @@ class BackupDeletionOwner:
                 ),
             }
             if current_snapshot != snapshot:
+                # R6 (P1-3) + R7 (P1-1): content change, scope relocation
+                # or identity change — never unlinked.
                 connection.execute("ROLLBACK")
                 raise S16OwnerFailure(
                     self.owner_id,

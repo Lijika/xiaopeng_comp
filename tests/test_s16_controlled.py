@@ -4055,3 +4055,239 @@ def test_s02_default_absence_store_is_wired_in_production(
     )
     assert run.returncode == 0, run.stderr
     assert run.stdout.strip() == "True True", run.stdout
+
+
+
+# ---------------------------------------------------------------------------
+# R7 (P1/P2) regressions
+# ---------------------------------------------------------------------------
+
+
+def test_backup_staged_manifest_relocation_conflicts_and_preserves_scopes(
+    tmp_path: Path,
+) -> None:
+    """R7 P1-1: a staged manifest relocated to ANOTHER scope is caught by
+    the full-ID content reconciliation — the commit fails stable with zero
+    file/manifest/registry/ref changes and both scopes' artifacts survive;
+    the same operation repair-forwards and the relocated capture stays."""
+    backup_root = tmp_path / "backups"
+    backup = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
+    scope_a = "a" * 64
+    scope_b = "b" * 64
+    saved = backup_root / "relocate.bin"
+    saved.write_bytes(b"relocate-capture")
+    digest = hashlib.sha256(b"relocate-capture").hexdigest()
+    backup.capture(
+        scope_fingerprint=scope_a, copy_files=[("relocate.bin", digest)]
+    )
+    inv = backup.inventory(scope_fingerprint=scope_a)
+    fingerprint = [
+        e.identity_fingerprint for e in inv if e.copy_class == COPY_CLASS_REPLICA
+    ][0]
+    staged_manifest = backup._load_manifests()[0]
+    staged_manifest_id = str(staged_manifest["manifest_id"])
+    identity = backup._connector_identity("relocate.bin", digest)
+    snapshot = {
+        "manifest_id": staged_manifest_id,
+        "scope_fingerprint": scope_a,
+        "entries_digest": str(staged_manifest.get("entries_digest") or ""),
+        "manifest_digest": _digest(staged_manifest),
+        "identities": [identity],
+    }
+    with backup._registry_connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "INSERT INTO backup_deletion_intents("
+            "operation_id, fence, scope_fingerprint, fingerprints_digest, "
+            "status, staged_at, identities_json, manifest_ids_json, "
+            "manifests_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "op-reloc",
+                1,
+                scope_a,
+                backup._bindings_digest({fingerprint}),
+                "staged",
+                int(_now()),
+                json.dumps([identity], separators=(",", ":")),
+                json.dumps([staged_manifest_id], separators=(",", ":")),
+                json.dumps([snapshot], separators=(",", ":")),
+            ),
+        )
+        connection.commit()
+    # Relocation: the SAME manifest id now claims another scope.
+    relocated = {
+        **staged_manifest,
+        "scope_fingerprint": scope_b,
+    }
+    backup._manifest_path(staged_manifest_id).write_text(
+        json.dumps(relocated, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    with backup._registry_connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        with pytest.raises(S16OwnerFailure) as excinfo:
+            backup._backup_delete_commit(
+                connection,
+                scope_a,
+                backup._bindings_digest({fingerprint}),
+                "op-reloc",
+                1,
+                {identity},
+                [staged_manifest_id],
+                [snapshot],
+                resume=False,
+            )
+    assert excinfo.value.reason_code == S16_VERIFY_FAILED
+    assert excinfo.value.retryable is False
+    # Zero unlink: the file, the relocated manifest and the registry/ref
+    # rows all survive; the owner is DIAGNOSTICALLY unavailable (the ref
+    # row still pins the original scope) — exactly the fail-closed state.
+    assert saved.exists()
+    assert len(backup._load_manifests()) == 1
+    assert backup.owner_healthy() is False
+    with backup._registry_connect() as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM backup_registry"
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM backup_registry_refs"
+            ).fetchone()[0]
+            == 1
+        )
+    # Repair-forward: the operator reverts the tamper (the manifest returns
+    # to its staged scope/content); the same operation resumes the staged
+    # intent and completes; the owner reconciles healthy.
+    backup._manifest_path(staged_manifest_id).write_text(
+        json.dumps(staged_manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    outcome = backup.delete(
+        {fingerprint},
+        scope_fingerprint=scope_a,
+        operation_id="op-reloc",
+        fence=1,
+    )
+    assert outcome["status"] == "complete", outcome
+    assert backup.owner_healthy() is True
+    assert not saved.exists()
+    assert backup._load_manifests() == []
+
+
+def test_backup_staged_intent_missing_snapshot_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """R7 P1-1: a staged intent whose manifest id set and snapshot set do
+    not match can never prove what it would delete — fail closed with zero
+    unlink."""
+    backup_root = tmp_path / "backups"
+    backup = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
+    scope = "c" * 64
+    saved = backup_root / "snap.bin"
+    saved.write_bytes(b"snap-capture")
+    digest = hashlib.sha256(b"snap-capture").hexdigest()
+    backup.capture(
+        scope_fingerprint=scope, copy_files=[("snap.bin", digest)]
+    )
+    inv = backup.inventory(scope_fingerprint=scope)
+    fingerprint = [
+        e.identity_fingerprint for e in inv if e.copy_class == COPY_CLASS_REPLICA
+    ][0]
+    staged_manifest = backup._load_manifests()[0]
+    staged_manifest_id = str(staged_manifest["manifest_id"])
+    identity = backup._connector_identity("snap.bin", digest)
+    snapshot = {
+        "manifest_id": staged_manifest_id,
+        "scope_fingerprint": scope,
+        "entries_digest": str(staged_manifest.get("entries_digest") or ""),
+        "manifest_digest": _digest(staged_manifest),
+        "identities": [identity],
+    }
+    with backup._registry_connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "INSERT INTO backup_deletion_intents("
+            "operation_id, fence, scope_fingerprint, fingerprints_digest, "
+            "status, staged_at, identities_json, manifest_ids_json, "
+            "manifests_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "op-snap",
+                1,
+                scope,
+                backup._bindings_digest({fingerprint}),
+                "staged",
+                int(_now()),
+                json.dumps([identity], separators=(",", ":")),
+                # A staged ID with NO snapshot entry: partial snapshot.
+                json.dumps([staged_manifest_id, "manifest-ghost"], separators=(",", ":")),
+                json.dumps([snapshot], separators=(",", ":")),
+            ),
+        )
+        connection.commit()
+    with backup._registry_connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        with pytest.raises(S16OwnerFailure) as excinfo:
+            backup._backup_delete_commit(
+                connection,
+                scope,
+                backup._bindings_digest({fingerprint}),
+                "op-snap",
+                1,
+                {identity},
+                [staged_manifest_id, "manifest-ghost"],
+                [snapshot],
+                resume=False,
+            )
+    assert excinfo.value.reason_code == S16_VERIFY_FAILED
+    assert excinfo.value.retryable is False
+    assert saved.exists()
+    assert len(backup._load_manifests()) == 1
+    assert backup.owner_healthy() is True
+
+
+def test_s02_default_absence_ledger_binds_to_s16_state_parent(
+    tmp_path: Path,
+) -> None:
+    """R7 P1-2: with S01 and S16 in DIFFERENT parent directories, the
+    default absence ledger lives beside the S16 state ledger — the same
+    independent recovery domain as the S16 ledger."""
+    import os
+    import subprocess
+    import sys
+
+    s01_parent = tmp_path / "s01-domain"
+    s16_parent = tmp_path / "s16-domain"
+    s01_parent.mkdir()
+    s16_parent.mkdir()
+    env = {
+        **os.environ,
+        "TASK4_S16_OBJECT_ABSENCE_PATH": "",
+        "TASK4_S01_STATE_PATH": str(s01_parent / "s01.sqlite3"),
+        "TASK4_S16_STATE_PATH": str(s16_parent / "s16.sqlite3"),
+        "TASK4_S01_DEMO_CREDENTIAL": "demo",
+        "TASK4_S01_DEMO_SUBJECT": "demo",
+        "TASK4_S01_OPERATOR_CREDENTIAL": "operator",
+        "TASK4_S01_OPERATOR_SUBJECT": "operator",
+        "TASK4_S01_AUDITOR_CREDENTIAL": "auditor",
+        "TASK4_S01_AUDITOR_SUBJECT": "auditor",
+    }
+    probe = (
+        "import task4_consistency.web.app as app; "
+        "b = app.S01_SERVICE.registered_source_boundary; "
+        "print(str(b.absence_store_path))"
+    )
+    run = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=str(Path(__file__).resolve().parent.parent),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert run.returncode == 0, run.stderr
+    absence_path = Path(run.stdout.strip())
+    assert absence_path == s16_parent / "s02_object_absence.sqlite3"
+    assert absence_path != s01_parent / "s02_object_absence.sqlite3"
