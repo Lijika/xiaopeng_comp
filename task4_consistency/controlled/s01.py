@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 import secrets
+import sqlite3
 import tempfile
 import threading
 import time
@@ -559,7 +560,11 @@ class ControlledScenarioService:
     # annex (C12-C15): a reviewer in an assigned manual-review task may
     # reveal one field observation for manual review / evidence verification
     # while the data remains RESTRICTED.  Any other value fails closed.
-    _REVEAL_AUDIT_SCHEMA = "s15-reveal-audit/1"
+    # R3: v2 event = nullable revisions (schema-known unknown) and optional
+    # governed vocabulary; historical v1 events (always integer revisions,
+    # always the three vocabulary fields) remain readable via the generic
+    # timeline projection.
+    _REVEAL_AUDIT_SCHEMA = "s15-reveal-audit/2"
     def _resolve_governed_c19_reveal_policy(
         self,
         *,
@@ -10168,6 +10173,72 @@ class ControlledScenarioService:
             return False
         return True
 
+    def _review_target_source_readable(
+        self,
+        app: dict[str, Any],
+        target_observation: dict[str, Any] | None,
+    ) -> bool:
+        """Targeted integrity for reveal: only the one result object
+        required by the contract and the requested observation's object.
+        No iteration over all evidence observations and no full evidence
+        reload (the caller has already parsed and assembled it)."""
+        try:
+            if self._fault_injector is not None:
+                self._fault_injector("review.source_read")
+            if app.get("track") == "C-DEMO":
+                source = app.get("source")
+                if not isinstance(source, dict):
+                    raise ValueError("controlled source authority is unavailable")
+                _, source_sha256 = self._read_fixed_scenario(source.get("scenario_id"))
+                if source_sha256 != source.get("source_sha256"):
+                    raise ValueError("controlled source authority does not match")
+            elif (
+                app.get("track") == "R-OBSERVED"
+                and self._registered_runtime_configured
+            ):
+                source = app.get("source")
+                envelope = app.get("envelope")
+                context = (
+                    envelope.get("authenticated_context")
+                    if isinstance(envelope, dict)
+                    else None
+                )
+                if not isinstance(source, dict) or not isinstance(context, dict):
+                    raise ValueError("registered source authority is unavailable")
+                tenant_id = context.get("tenant_id")
+                source_system_id = context.get("source_id")
+                # Single result object (explicitly required)
+                result_content = self._registered_source_boundary.read_object(
+                    tenant_id=tenant_id,
+                    source_system_id=source_system_id,
+                    object_ref=source.get("source_result_object_ref"),
+                )
+                if (
+                    len(result_content) != source.get("source_result_size_bytes")
+                    or hashlib.sha256(result_content).hexdigest()
+                    != source.get("source_result_sha256")
+                ):
+                    raise ValueError("registered result object does not match")
+                # Exactly one target observation object, if it carries a loc
+                if isinstance(target_observation, dict):
+                    object_ref = target_observation.get("source_object_ref")
+                    source_sha256 = target_observation.get("source_sha256")
+                    if object_ref is not None or source_sha256 is not None:
+                        if not isinstance(object_ref, str) or not isinstance(
+                            source_sha256, str
+                        ):
+                            raise ValueError("registered source location is invalid")
+                        content = self._registered_source_boundary.read_object(
+                            tenant_id=tenant_id,
+                            source_system_id=source_system_id,
+                            object_ref=object_ref,
+                        )
+                        if hashlib.sha256(content).hexdigest() != source_sha256:
+                            raise ValueError("registered source object does not match")
+        except Exception:
+            return False
+        return True
+
     def _review_write_gate(
         self,
         *,
@@ -11318,11 +11389,8 @@ class ControlledScenarioService:
         *,
         principal: S01CommandPrincipal,
         work_item: dict[str, Any],
-        app: dict[str, Any],
+        app: dict[str, Any] | None,
         observation_id: str,
-        purpose: str,
-        reason: str,
-        classification: str,
         expected_fence: int,
         expected_context: dict[str, Any],
         idempotency_key: str,
@@ -11332,6 +11400,7 @@ class ControlledScenarioService:
         now: int,
         policy_decision: dict[str, Any] | None = None,
         store_result: bool = True,
+        audit_vocabulary: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Append one safe S15 reveal outcome and, except for an
         idempotency-conflict observation, bind it atomically for replay.
@@ -11342,6 +11411,14 @@ class ControlledScenarioService:
         context digest, policy pin and stable result/reason.  A write fault,
         storage failure or CAS race produces ``unavailable`` with no binding
         and no raw; callers never swallow those failures.
+
+        ``audit_vocabulary`` carries the governed purpose/reason/classification
+        and is only supplied after the C19 decision confirms each value.
+        Before that decision the event omits these keys entirely so no
+        caller-controlled code or free text can enter the security audit.
+        ``app`` may be absent when current application authority cannot be
+        proven; the audit then records the authentic work-item reference and
+        schema-supported unknown (``None``) revisions, never invented ones.
         """
         context_bytes = json.dumps(
             expected_context,
@@ -11356,68 +11433,97 @@ class ControlledScenarioService:
             for key, value in result.items()
             if key != "source_text"
         }
+        lifecycle_revision: int | None = None
+        evidence_revision: int | None = None
+        if isinstance(app, dict):
+            candidate_lifecycle = app.get("lifecycle_revision")
+            candidate_evidence = app.get("evidence_revision")
+            if not isinstance(candidate_lifecycle, bool) and isinstance(
+                candidate_lifecycle, int
+            ):
+                lifecycle_revision = candidate_lifecycle
+            if not isinstance(candidate_evidence, bool) and isinstance(
+                candidate_evidence, int
+            ):
+                evidence_revision = candidate_evidence
         try:
             self._before_write("reveal.audit")
-            staged.audit_events.append(
-                {
-                    "event_id": self._stable_id(
-                        "audit",
-                        f"evidence_source_revealed:{work_item['work_item_id']}:{observation_id}:{now}:{result.get('status')}:{len(staged.audit_events) + 1}",
-                    ),
-                    "action": "evidence_source_revealed",
-                    "subject": principal.subject,
-                    "role": principal.role,
-                    "scope": work_item["visibility_scope"],
-                    "source_id": principal.source_id,
-                    "application_id": app["application_id"],
-                    "work_item_id": work_item["work_item_id"],
-                    "observation_id": observation_id,
-                    "result": result.get("status"),
-                    "reason_code": (
-                        "SOURCE_REVEAL_AUTHORIZED"
-                        if result.get("status") == "revealed"
-                        else result.get("reason_code")
-                    ),
-                    "purpose": purpose,
-                    "verification_reason": reason,
-                    "classification": classification,
-                    "idempotency_fingerprint": command_fingerprint,
-                    "idempotency_binding": binding_key,
-                    "context_digest": context_digest,
-                    "lifecycle_revision": int(app.get("lifecycle_revision", 0) or 0),
-                    "evidence_revision": int(app.get("evidence_revision", 0) or 0),
-                    "claim_fence": int(expected_fence),
-                    "claim_expires_at": int(result.get("claim_expires_at") or 0),
-                    "policy_id": (
-                        policy_decision.get("policy_id") if policy_decision else None
-                    ),
-                    "policy_digest": (
-                        policy_decision.get("policy_digest") if policy_decision else None
-                    ),
-                    "policy_version": (
-                        policy_decision.get("policy_version") if policy_decision else None
-                    ),
-                    "policy_term_seconds": (
-                        policy_decision.get("max_term_seconds") if policy_decision else None
-                    ),
-                    "schema_version": self._REVEAL_AUDIT_SCHEMA,
-                    **self._audit_time_fields(staged, now=now),
-                }
-            )
+            event: dict[str, Any] = {
+                "event_id": self._stable_id(
+                    "audit",
+                    f"evidence_source_revealed:{work_item['work_item_id']}:{observation_id}:{now}:{result.get('status')}:{len(staged.audit_events) + 1}",
+                ),
+                "action": "evidence_source_revealed",
+                "subject": principal.subject,
+                "role": principal.role,
+                "scope": work_item["visibility_scope"],
+                "source_id": principal.source_id,
+                "application_id": work_item["application_id"],
+                "work_item_id": work_item["work_item_id"],
+                "observation_id": observation_id,
+                "result": result.get("status"),
+                "reason_code": (
+                    "SOURCE_REVEAL_AUTHORIZED"
+                    if result.get("status") == "revealed"
+                    else result.get("reason_code")
+                ),
+                "idempotency_fingerprint": command_fingerprint,
+                "idempotency_binding": binding_key,
+                "context_digest": context_digest,
+                "lifecycle_revision": lifecycle_revision,
+                "evidence_revision": evidence_revision,
+                "claim_fence": int(expected_fence),
+                "claim_expires_at": int(result.get("claim_expires_at") or 0),
+                "policy_id": (
+                    policy_decision.get("policy_id") if policy_decision else None
+                ),
+                "policy_digest": (
+                    policy_decision.get("policy_digest") if policy_decision else None
+                ),
+                "policy_version": (
+                    policy_decision.get("policy_version") if policy_decision else None
+                ),
+                "policy_term_seconds": (
+                    policy_decision.get("max_term_seconds")
+                    if policy_decision
+                    else None
+                ),
+                "schema_version": self._REVEAL_AUDIT_SCHEMA,
+                **self._audit_time_fields(staged, now=now),
+            }
+            if audit_vocabulary is not None:
+                event["purpose"] = audit_vocabulary["purpose"]
+                event["verification_reason"] = audit_vocabulary["reason"]
+                event["classification"] = audit_vocabulary["classification"]
+            staged.audit_events.append(event)
             if store_result:
                 self._before_write("reveal.idempotency")
                 staged.idempotency[binding_key] = (command_fingerprint, safe_result)
             staged.persist()
-        except (StaleStoreRevision, _StoreWriteFailure, OSError, RuntimeError, ValueError):
+        except (
+            StaleStoreRevision,
+            _StoreWriteFailure,
+            sqlite3.Error,
+            OSError,
+            RuntimeError,
+            ValueError,
+        ):
             # _StoreWriteFailure and all persistence errors are intentionally
             # collapsed to the same no-value fail-closed result.  Do not
             # install an idempotency binding because the protected audit
             # transaction did not commit.
-            self._reload_store()
+            # The response is built from the authentic work-item reference
+            # (never from a possibly-absent application dict), and the
+            # recovery reload is contained: its own failure still returns
+            # the same sanitized unavailable contract.
+            try:
+                self._reload_store()
+            except Exception:
+                pass
             return {
                 "status": "unavailable",
                 "replayed": False,
-                "application_id": app["application_id"],
+                "application_id": work_item["application_id"],
                 "work_item_id": work_item["work_item_id"],
                 "reason_code": "AUDIT_UNAVAILABLE"
                 if not self.audit_available
@@ -11487,15 +11593,48 @@ class ControlledScenarioService:
             raise ValueError("source reveal command is invalid")
 
         with self._lock:
-            self._reload_store()
-            work_item, state = self._review_work_item_authority(
-                principal=principal,
-                work_item_id=work_item_id,
-                now=reveal_time,
-            )
-            if work_item["application_id"] != application_id:
+            # Protected bootstrap: storage reload.  A genuine storage outage
+            # returns the stable unavailable response; nothing can be proven
+            # or audited in that state.
+            try:
+                self._reload_store()
+            except Exception:
+                return {
+                    "status": "unavailable",
+                    "replayed": False,
+                    "application_id": application_id,
+                    "work_item_id": work_item_id,
+                    "reason_code": "STORAGE_UNAVAILABLE",
+                }
+            # Minimal, scope-checked work reference: establishes a safe
+            # auditable identity (work item, application, visibility scope)
+            # before any authority reconstruction.  Unauthorized, cross-
+            # tenant, or unidentifiable resources keep QueryNotFound
+            # existence hiding with no audit.
+            visible_scopes = {principal.scope}
+            if principal.scope.startswith(self._SESSION_SCOPE_PREFIX):
+                visible_scopes.add("C-DEMO")
+            candidates = [
+                item
+                for item in self._store.work_items
+                if item.get("work_item_id") == work_item_id
+                and item.get("kind") == "manual_review"
+                and item.get("owner") == "Lifecycle"
+                and item.get("visibility_scope") in visible_scopes
+                and item.get("assigned_subject") == principal.subject
+            ]
+            if (
+                len(candidates) != 1
+                or candidates[0].get("application_id") != application_id
+            ):
                 raise QueryNotFound(work_item_id)
-            app, _, actual_context = self._review_current_context(work_item)
+            work_item: dict[str, Any] = candidates[0]
+            # Authentic application handle for audit revisions.  A missing
+            # application is authority damage: fail closed with schema-known
+            # unknown revisions (never a fabricated 0 fallback).
+            app: dict[str, Any] | None = self._store.applications.get(
+                work_item["application_id"]
+            )
             command_key, command_fingerprint = self._review_lifecycle_idempotency(
                 action=(
                     f"reveal_field_observation:{application_id}:{observation_id}:{purpose}:{reason}:{classification}:{expected_source_region}"
@@ -11511,6 +11650,8 @@ class ControlledScenarioService:
                 command_key,
                 action="reveal_field_observation",
             )
+            # Set only after the governed C19 decision confirms each value.
+            governed_vocabulary: dict[str, str] | None = None
 
             def outcome(
                 status: str,
@@ -11534,9 +11675,6 @@ class ControlledScenarioService:
                     work_item=work_item,
                     app=app,
                     observation_id=observation_id,
-                    purpose=purpose,
-                    reason=reason,
-                    classification=classification,
                     expected_fence=expected_fence,
                     expected_context=expected_context,
                     idempotency_key=idempotency_key,
@@ -11546,6 +11684,7 @@ class ControlledScenarioService:
                     now=reveal_time,
                     policy_decision=policy_decision,
                     store_result=store_result,
+                    audit_vocabulary=governed_vocabulary,
                 )
             previous = self._store.idempotency.get(binding_key)
             if previous is not None:
@@ -11559,6 +11698,107 @@ class ControlledScenarioService:
                 # the current source before returning the value below.
                 if previous_result.get("status") != "revealed":
                     return {**previous_result, "replayed": True}
+            if not isinstance(app, dict):
+                # Application authority is missing for a visible work item:
+                # one safe audited failure with authentic work-item reference
+                # and unknown (None) revisions, no raw, no invented facts.
+                return outcome("stopped", self._REVIEW_SOURCE_FAILURE)
+            # Full authority reconstruction.  Damage after a visible resource
+            # is identified is an audited fail-closed attempt through the
+            # common outcome writer; existence hiding still applies only to
+            # unauthorized/unidentifiable resources (QueryNotFound above).
+            try:
+                work_item, state = self._review_work_item_authority(
+                    principal=principal,
+                    work_item_id=work_item_id,
+                    now=reveal_time,
+                )
+            except QueryNotFound:
+                raise
+            except Exception:
+                return outcome("stopped", self._REVIEW_SOURCE_FAILURE)
+            if work_item["application_id"] != application_id:
+                raise QueryNotFound(work_item_id)
+            # Metadata-only link resolution before any _admitted_evidence or
+            # _assemble_evidence.  Directly use finding/link eligibility.
+            try:
+                links = [
+                    link
+                    for finding in self._store.findings
+                    if finding.get("application_id") == application_id
+                    and finding.get("run_id") == work_item["run_id"]
+                    and finding.get("finding_id") in work_item["finding_ids"]
+                    for link in finding.get("evidence_links", [])
+                    if link.get("observation_id") == observation_id
+                ]
+                if not links:
+                    return outcome("rejected", "SOURCE_REVEAL_UNAVAILABLE")
+                link = links[0]
+                binding = {
+                    key: link.get(key)
+                    for key in (
+                        "document_id",
+                        "document_role",
+                        "field",
+                        "source_sha256",
+                        "source_page",
+                        "source_region",
+                    )
+                }
+                if any(
+                    {
+                        key: candidate.get(key)
+                        for key in binding
+                    }
+                    != binding
+                    for candidate in links[1:]
+                ):
+                    return outcome("rejected", "SOURCE_REVEAL_AMBIGUOUS")
+                # S15 G4 prerequisite: metadata-only eligibility from the
+                # finding/link, before any _admitted_evidence or bulk source
+                # reads.  Zero evidence copy and zero read_object on failure.
+                if link.get("evidence_eligible") is not True:
+                    return outcome("rejected", "SOURCE_REVEAL_UNAVAILABLE")
+            except Exception:
+                # Malformed finding/link metadata is authority damage: the
+                # common stopped outcome, one safe audit, no raw.
+                return outcome("stopped", self._REVIEW_SOURCE_FAILURE)
+            # S15 exact region binding: the required expected_source_region
+            # must equal the public projected locator (``region:1``).
+            projected_region = None
+            try:
+                for proj in self._mandatory_blocker_projections(
+                    application_id, work_item["run_id"]
+                ):
+                    for plink in proj.get("evidence_links", []):
+                        if plink.get("observation_id") == observation_id:
+                            projected_region = plink.get("source_region")
+                            break
+                    if projected_region is not None:
+                        break
+            except Exception:
+                if not self.audit_available:
+                    return outcome("unavailable", "AUDIT_UNAVAILABLE")
+                if not self.storage_available:
+                    return outcome("unavailable", "STORAGE_UNAVAILABLE")
+                return outcome("stopped", self._REVIEW_SOURCE_FAILURE)
+            expected = (
+                projected_region
+                if isinstance(projected_region, str)
+                else binding["source_region"]
+            )
+            if expected_source_region != expected:
+                return outcome("rejected", "REVEAL_REGION_MISMATCH")
+            # Verified app and actual_context for remaining checks; map
+            # authority damage to a stable audited outcome.
+            try:
+                app, _, actual_context = self._review_current_context(work_item)
+            except Exception:
+                if not self.audit_available:
+                    return outcome("unavailable", "AUDIT_UNAVAILABLE")
+                if not self.storage_available:
+                    return outcome("unavailable", "STORAGE_UNAVAILABLE")
+                return outcome("stopped", self._REVIEW_SOURCE_FAILURE)
             # Tenant/resource context validation against the canonical
             # policy: only registered controlled scopes (institution tenant)
             # may authorize S15 reveal.  Synthetic C-DEMO sessions and
@@ -11585,6 +11825,13 @@ class ControlledScenarioService:
                 return outcome(
                     "rejected", "REVEAL_VOCABULARY_UNKNOWN", policy_decision=policy
                 )
+            # Governed confirmation: from here on the confirmed vocabulary is
+            # the only vocabulary that may enter the security audit.
+            governed_vocabulary = {
+                "purpose": purpose,
+                "reason": reason,
+                "classification": classification,
+            }
             # The S15 fingerprint covers the bounded authorization fields and
             # the exact region so a replay with a different purpose,
             # reason, classification or region is an idempotency conflict,
@@ -11645,82 +11892,83 @@ class ControlledScenarioService:
                 or app.get("evidence_revision") != work_item["evidence_revision"]
             ):
                 return outcome("stale", "STALE_REVIEW_CONTEXT")
-            gate = self._review_write_gate(app=app)
-            if gate is not None:
-                status, reason_code = gate
-                return outcome(status, reason_code)
-
-            links = [
-                link
-                for finding in self._store.findings
-                if finding.get("application_id") == application_id
-                and finding.get("run_id") == work_item["run_id"]
-                and finding.get("finding_id") in work_item["finding_ids"]
-                for link in finding.get("evidence_links", [])
-                if link.get("observation_id") == observation_id
-            ]
-            if not links:
-                return outcome("rejected", "SOURCE_REVEAL_UNAVAILABLE")
-            link = links[0]
-            binding = {
-                key: link.get(key)
-                for key in (
-                    "document_id",
-                    "document_role",
-                    "field",
-                    "source_sha256",
-                    "source_page",
-                    "source_region",
-                )
-            }
-            if any(
-                {
-                    key: candidate.get(key)
-                    for key in binding
-                }
-                != binding
-                for candidate in links[1:]
+            # Quick pre-checks that do not involve bulk source reads.  Any
+            # failure is audited via outcome().
+            if not self.audit_available:
+                return outcome("unavailable", "AUDIT_UNAVAILABLE")
+            if not self.storage_available:
+                return outcome("unavailable", "STORAGE_UNAVAILABLE")
+            if str(app.get("phase") or "") in {"Terminating", "Terminated"}:
+                return outcome("stale", self._S14_REVIEW_FENCE_REASON)
+            cohort_stop = self._local_cohort_stop or self._store.cohort_stop
+            if (
+                cohort_stop is not None
+                and cohort_stop.get("reason_code") == self._RUNTIME_STOP_REASON
             ):
-                return outcome("rejected", "SOURCE_REVEAL_AMBIGUOUS")
-            # Resolve the authoritative observation for the requested
-            # evidence link.  C-DEMO synthetic evidence is stored as fields
-            # in the assembled evidence, while R-OBSERVED registered
-            # evidence is stored as observations.  Both are verified with
-            # the full tuple (observation, document role/source identity,
-            # SHA, page, region) before any raw read.
-            evidence = self._admitted_evidence(app)
-            assembled = self._assemble_evidence(evidence)
-            selected: dict[str, Any] | None = None
-            if app.get("track") == "C-DEMO":
-                selected_documents = [
-                    document
-                    for document in assembled
-                    if document.get("document_id") == binding["document_id"]
-                    and document.get("document_role") == binding["document_role"]
-                ]
-                selected = (
-                    selected_documents[0].get("fields", {}).get(binding["field"])
-                    if len(selected_documents) == 1
-                    and isinstance(selected_documents[0].get("fields"), dict)
-                    else None
+                return (
+                    outcome(
+                        "stopped",
+                        str(
+                            cohort_stop.get("failure_reason_code")
+                            or self._RUNTIME_STOP_REASON
+                        ),
+                    )
                 )
-            else:
-                for doc in evidence:
-                    if doc.get("document_id") != binding["document_id"]:
-                        continue
-                    if doc.get("document_role") != binding["document_role"]:
-                        continue
-                    for obs in doc.get("observations", []) or []:
-                        if not isinstance(obs, dict):
+            s09_reasons = self._s09_currentness_block_reasons(self._store, app)
+            if "BLOCKED_POLICY_HOLD" in s09_reasons:
+                return outcome("stopped", "S09_POLICY_SAFETY_HOLD")
+            if s09_reasons:
+                return outcome("stale", "S09_CURRENTNESS_FENCED")
+            # Resolve the authoritative observation for the requested
+            # evidence link.  After eligibility passes, evidence is parsed
+            # with authority-damage mapping to a stable audited outcome.
+            try:
+                evidence = self._admitted_evidence(app)
+                assembled = self._assemble_evidence(evidence)
+            except Exception:
+                if not self.audit_available:
+                    return outcome("unavailable", "AUDIT_UNAVAILABLE")
+                if not self.storage_available:
+                    return outcome("unavailable", "STORAGE_UNAVAILABLE")
+                return outcome("stopped", self._REVIEW_SOURCE_FAILURE)
+            selected: dict[str, Any] | None = None
+            try:
+                if app.get("track") == "C-DEMO":
+                    selected_documents = [
+                        document
+                        for document in assembled
+                        if document.get("document_id") == binding["document_id"]
+                        and document.get("document_role") == binding["document_role"]
+                    ]
+                    selected = (
+                        selected_documents[0].get("fields", {}).get(binding["field"])
+                        if len(selected_documents) == 1
+                        and isinstance(selected_documents[0].get("fields"), dict)
+                        else None
+                    )
+                else:
+                    for doc in evidence:
+                        if doc.get("document_id") != binding["document_id"]:
                             continue
-                        if obs.get("observation_id") != observation_id:
+                        if doc.get("document_role") != binding["document_role"]:
                             continue
-                        if obs.get("field") != binding["field"]:
-                            continue
-                        selected = obs
-                        break
-                    if selected is not None:
-                        break
+                        for obs in doc.get("observations", []) or []:
+                            if not isinstance(obs, dict):
+                                continue
+                            if obs.get("observation_id") != observation_id:
+                                continue
+                            if obs.get("field") != binding["field"]:
+                                continue
+                            selected = obs
+                            break
+                        if selected is not None:
+                            break
+            except Exception:
+                if not self.audit_available:
+                    return outcome("unavailable", "AUDIT_UNAVAILABLE")
+                if not self.storage_available:
+                    return outcome("unavailable", "STORAGE_UNAVAILABLE")
+                return outcome("stopped", self._REVIEW_SOURCE_FAILURE)
             if (
                 not isinstance(selected, dict)
                 or selected.get("observation_id") != observation_id
@@ -11731,33 +11979,18 @@ class ControlledScenarioService:
                 ))
             ):
                 return outcome("stale", "STALE_REVIEW_CONTEXT")
-            # S15 exact region binding: the required expected_source_region
-            # must equal the public projected locator (``region:1``).  The
-            # authoritative stored link carries the original source path, but
-            # the client only ever learns the projected locator, so the
-            # request proves it targeted the exact workspace-visible region.
-            # Missing, malformed or mismatched regions fail closed before any
-            # raw read and are bound into the idempotency fingerprint.
-            projected_region = None
-            try:
-                for proj in self._mandatory_blocker_projections(
-                    application_id, work_item["run_id"]
-                ):
-                    for plink in proj.get("evidence_links", []):
-                        if plink.get("observation_id") == observation_id:
-                            projected_region = plink.get("source_region")
-                            break
-                    if projected_region is not None:
-                        break
-            except Exception:
-                projected_region = None
-            expected = (
-                projected_region
-                if isinstance(projected_region, str)
-                else binding["source_region"]
-            )
-            if expected_source_region != expected:
-                return outcome("rejected", "REVEAL_REGION_MISMATCH")
+            # Defense: selected must also be eligible; primary guard was
+            # the link, but keep the observation check after parsing.
+            if selected.get("evidence_eligible") is not True:
+                return outcome("rejected", "SOURCE_REVEAL_UNAVAILABLE")
+            # Targeted source integrity: only the result object and the
+            # requested observation's object.  No bulk scan.
+            if not self._review_target_source_readable(app, selected):
+                if not self.audit_available:
+                    return outcome("unavailable", "AUDIT_UNAVAILABLE")
+                if not self.storage_available:
+                    return outcome("unavailable", "STORAGE_UNAVAILABLE")
+                return outcome("stopped", self._REVIEW_SOURCE_FAILURE)
 
             source = app.get("source")
             # Source authority differs by track: C-DEMO reads the fixed
@@ -11848,9 +12081,6 @@ class ControlledScenarioService:
                 work_item=work_item,
                 app=app,
                 observation_id=observation_id,
-                purpose=purpose,
-                reason=reason,
-                classification=classification,
                 expected_fence=expected_fence,
                 expected_context=expected_context,
                 idempotency_key=idempotency_key,
@@ -11859,6 +12089,7 @@ class ControlledScenarioService:
                 result=result,
                 now=reveal_time,
                 policy_decision=policy,
+                audit_vocabulary=governed_vocabulary,
             )
 
     @classmethod

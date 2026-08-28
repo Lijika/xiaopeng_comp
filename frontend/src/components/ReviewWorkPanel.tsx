@@ -978,7 +978,8 @@ function WorkspaceSection({
               const revealedHere =
                 revealed !== null &&
                 revealed.observationId === link.observation_id &&
-                revealed.tokenKey === liveTokenKey(link.observation_id);
+                revealed.tokenKey === liveTokenKey(link.observation_id) &&
+                Date.now() / 1000 < revealed.expiresAt;
               const correctable =
                 typeof link.source_sha256 === "string" &&
                 typeof link.source_page === "number" &&
@@ -1044,8 +1045,12 @@ function WorkspaceSection({
                             const isRevealEligible =
                               work.reveal_eligibility != null &&
                               work.reveal_eligibility.eligible === true;
+                            const isLinkEligible = link.evidence_eligible === true;
                             const revealDisabled =
-                              controlsDisabled || !isRegionValid || !isRevealEligible;
+                              controlsDisabled ||
+                              !isRegionValid ||
+                              !isRevealEligible ||
+                              !isLinkEligible;
                             return (
                               <Button
                                 variant="outline"

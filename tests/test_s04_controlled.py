@@ -607,6 +607,7 @@ def test_safe_rerun_keeps_old_run_non_current_and_publishes_successor_route(
         "cycle": 1,
         "lifecycle_revision": completed.lifecycle_revision,
         "evidence_revision": completed.evidence_revision,
+        "evidence_ready": True,
         "evidence_snapshot_id": completed.evidence_snapshot_id,
         "evidence_snapshot_digest": new_run["evidence_snapshot_digest"],
         "release_id": completed.release_id,
@@ -641,6 +642,7 @@ def test_safe_rerun_keeps_old_run_non_current_and_publishes_successor_route(
     assert history["corrections"] == [
         {
             "correction_id": accepted["correction_id"],
+            "cycle": 1,
             "superseded_observation_id": correction["observation_id"],
             "successor_observation_id": accepted["observation_id"],
             "document_id": correction["document_id"],

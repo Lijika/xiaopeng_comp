@@ -13,6 +13,7 @@ import {
   restrictedDigest,
 } from "../test-utils";
 import type { RouteHandler } from "../test-utils";
+import { QueryClientProvider } from "@tanstack/react-query";
 
 const WORK_ID = "work_t02panel1234567890abcdef";
 const APP_ID = "app_t02panel9876543210fedcba";
@@ -2800,6 +2801,118 @@ describe("ReviewWorkPanel controlled reveal (T03)", () => {
     expectRestrictedAbsent(cached.join("\n"), CORRECTION_SENTINEL);
     expect(router.calls.filter((call) => call.method === "POST").length).toBe(2);
   });
+    it("expired reveal is not rendered even before timer cleanup — render race guard", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const nowSec = Math.floor(Date.now() / 1000);
+      const responseExpiry = nowSec + 2;
+      const router = fetchRouter({
+        ...baseRoutes(),
+        [`GET ${WORK_PATH}`]: () =>
+          jsonResponse(
+            claimedWorkPayload({ claim_expires_at: nowSec + 900 }),
+          ),
+        [`GET ${WORKSPACE_PATH}`]: () =>
+          jsonResponse(
+            workspacePayload({
+              claim_fence: 1,
+              claim_expires_at: nowSec + 900,
+              selected_finding: t03WorkspacePayload().selected_finding,
+            }),
+          ),
+        [`POST ${REVEAL_PATH}`]: () =>
+          jsonResponse(
+            revealResultPayload({
+              claim_expires_at: responseExpiry,
+              revealed_at: nowSec,
+            }),
+          ),
+      });
+      const { rerender, client } = renderWithQuery(
+        <ReviewWorkPanel workId={WORK_ID} />,
+      );
+      await waitForReviewReady();
+      await userEvent.click(
+        screen.getAllByRole("button", { name: "查看来源" })[0],
+      );
+      await findRestrictedElements("review-reveal-source");
+      // Advance system time beyond the response expiry without awaiting the
+      // scheduled expiry timer — the direct Date.now() guard in revealedHere
+      // must hide the value even in the timer/state race window.
+      vi.setSystemTime(new Date((responseExpiry + 1) * 1000));
+      rerender(
+        <QueryClientProvider client={client}>
+          <ReviewWorkPanel workId={WORK_ID} />
+        </QueryClientProvider>,
+      );
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(screen.queryByTestId("review-reveal-source")).not.toBeInTheDocument();
+      expectRestrictedAbsent(
+        restrictedElement("review-panel").textContent,
+        SOURCE_SENTINEL,
+      );
+      // Now let the scheduled expiry timer fire and verify the scrub remains.
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(screen.queryByTestId("review-reveal-source")).not.toBeInTheDocument();
+      vi.useRealTimers();
+      expect(router.calls.filter((call) => call.method === "POST").length).toBe(1);
+    });
+
+    it("mixed eligible/ineligible links keep UI and domain consistent", async () => {
+      const baseWs = t03WorkspacePayload();
+      const eligibleLink = {
+        ...baseWs.selected_finding.evidence_links[0],
+        observation_id: "observation_t02panel",
+        evidence_eligible: true,
+        eligibility_reason: "REGISTERED_SOURCE_PROVENANCE_VERIFIED",
+        source_region: "region:1",
+      };
+      const ineligibleLink = {
+        ...baseWs.selected_finding.evidence_links[0],
+        observation_id: "observation_t02panel_inelig",
+        evidence_eligible: false,
+        eligibility_reason: "PROVENANCE_MISSING",
+        source_region: "region:2",
+      };
+      const mixedWs = workspacePayload({
+        claim_fence: 1,
+        claim_expires_at: LIVE_CLAIM_EXPIRES_AT,
+        selected_finding: {
+          ...baseWs.selected_finding,
+          evidence_links: [eligibleLink, ineligibleLink],
+        },
+        mandatory_blockers: [
+          {
+            ...baseWs.selected_finding,
+            evidence_links: [eligibleLink, ineligibleLink],
+          },
+        ],
+      });
+      const router = fetchRouter({
+        ...baseRoutes(),
+        [`GET ${WORK_PATH}`]: () => jsonResponse(claimedWorkPayload()),
+        [`GET ${WORKSPACE_PATH}`]: () => jsonResponse(mixedWs),
+        [`POST ${REVEAL_PATH}`]: () => jsonResponse(revealResultPayload()),
+      });
+      renderWithQuery(<ReviewWorkPanel workId={WORK_ID} />);
+      await waitForReviewReady();
+      const revealButtons = screen.getAllByRole("button", { name: "查看来源" });
+      expect(revealButtons).toHaveLength(2);
+      expect(revealButtons[0]).toBeEnabled();
+      expect(revealButtons[1]).toBeDisabled();
+      // The ineligible action must not issue a backend reveal.
+      await userEvent.click(revealButtons[1]);
+      expect(router.calls.filter((call) => call.method === "POST").length).toBe(0);
+      // The eligible action remains reachable and renders exactly one restricted value.
+      await userEvent.click(revealButtons[0]);
+      const sources = await findRestrictedElements("review-reveal-source");
+      expect(sources.length).toBe(1);
+      expectRestrictedEqual(sources[0].textContent, SOURCE_SENTINEL);
+      // Backend still rejects an ineligible observation even if the UI guard
+      // were bypassed (domain remains the authority).
+      expect(router.calls.filter((call) => call.method === "POST").length).toBe(1);
+    });
 });
 
 describe("ReviewWorkPanel evidence correction rerun (T03)", () => {
