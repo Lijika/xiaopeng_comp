@@ -5170,6 +5170,27 @@ def test_backup_worker_lease_takeover_completes_prior_fence_quarantine(
         fence=1,
     )
     assert late["status"] == "stale", late
+    with backup._registry_connect() as connection:
+        old_intent = connection.execute(
+            "SELECT status FROM backup_deletion_intents "
+            "WHERE operation_id = ? AND fence = ?",
+            (job_id, 1),
+        ).fetchone()
+        open_intents = connection.execute(
+            "SELECT COUNT(*) FROM backup_deletion_intents "
+            "WHERE scope_fingerprint = ? "
+            "AND status IN ('staged', 'transitioned')",
+            (scope,),
+        ).fetchone()[0]
+        active = connection.execute(
+            "SELECT active_fence, source_fence FROM backup_operation_fences "
+            "WHERE operation_id = ?",
+            (job_id,),
+        ).fetchone()
+    assert old_intent is not None and old_intent[0] == "superseded"
+    assert open_intents == 0
+    assert active is not None and int(active[0]) == 2
+    assert int(active[1]) == 1
     receipt = s16.receipt(
         request_id=result2["request_id"], principal=GOVERNANCE_REGISTERED
     )
@@ -5177,6 +5198,21 @@ def test_backup_worker_lease_takeover_completes_prior_fence_quarantine(
     _assert_locator_free(receipt, backup_root, "target.sqlite3", ".s16_deletion")
     assert not saved.exists()
     assert backup._quarantine_has_residue() is False
+    absent = backup.delete(
+        {"absent-after-complete"},
+        scope_fingerprint=scope,
+        operation_id="op-scope-absent",
+        fence=1,
+    )
+    assert absent["status"] == "complete", absent
+    assert absent.get("already_absent") is True
+    replayed = backup.replay(
+        {"absent-after-complete"},
+        scope_fingerprint=scope,
+        operation_id="op-scope-absent",
+        fence=1,
+    )
+    assert replayed["status"] == "complete"
     third = s16.process_next_deletion_job(
         worker_id="w3", now=_now() + 1 + 2 * LEASE_SECONDS
     )
@@ -5238,3 +5274,64 @@ def test_backup_worker_fresh_missing_before_stage_fails_closed(
     )
     assert query["job"]["status"] != "complete"
     assert query.get("receipt") in (None, {})
+
+
+def test_backup_source_recreation_during_purge_blocks_complete(
+    tmp_path: Path,
+) -> None:
+    """R11 P1-1: recreating the capture source after rename keeps complete
+    unreachable until both source and quarantine are absent."""
+    backup_root = tmp_path / "backups"
+    backup = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
+    scope = "z" * 64
+    saved = backup_root / "recreate.bin"
+    payload = b"recreate-capture"
+    saved.write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    backup.capture(
+        scope_fingerprint=scope, copy_files=[("recreate.bin", digest)]
+    )
+    fingerprint = _replica_fingerprint(backup, scope)
+    _arm_backup_crash(backup, "after_transition")
+    with pytest.raises(_BackupDeleteCrash):
+        backup.delete(
+            {fingerprint},
+            scope_fingerprint=scope,
+            operation_id="op-recreate",
+            fence=1,
+        )
+    _disarm_backup_crash(backup)
+    assert not saved.exists()
+    saved.write_bytes(payload)
+    with pytest.raises(S16OwnerFailure) as excinfo:
+        backup.delete(
+            {fingerprint},
+            scope_fingerprint=scope,
+            operation_id="op-recreate",
+            fence=1,
+        )
+    assert excinfo.value.reason_code == S16_VERIFY_FAILED
+    assert excinfo.value.retryable is True
+    with backup._registry_connect() as connection:
+        bindings = connection.execute(
+            "SELECT COUNT(*) FROM backup_deletion_bindings "
+            "WHERE operation_id = ?",
+            ("op-recreate",),
+        ).fetchone()[0]
+        refs = connection.execute(
+            "SELECT COUNT(*) FROM backup_registry_refs"
+        ).fetchone()[0]
+    assert bindings == 0
+    assert refs == 1
+    assert saved.exists()
+    saved.unlink()
+    result = backup.delete(
+        {fingerprint},
+        scope_fingerprint=scope,
+        operation_id="op-recreate",
+        fence=1,
+    )
+    assert result["status"] == "complete", result
+    assert not saved.exists()
+    assert backup._quarantine_has_residue() is False
+    _assert_locator_free(result, backup_root, "recreate.bin")

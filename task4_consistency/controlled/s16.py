@@ -1712,6 +1712,70 @@ class BackupDeletionOwner:
         except OSError:
             return True
 
+    def _fail_unproven_purge(self) -> None:
+        raise S16OwnerFailure(
+            self.owner_id,
+            S16_VERIFY_FAILED,
+            retryable=True,
+            responsible_party="backup_operations_owner",
+            recovery_action="retry_backup_quarantine_purge",
+        )
+
+    def _assert_converted_absence(
+        self,
+        connection: sqlite3.Connection,
+        operation_id: str,
+        source_fence: int,
+        manifest_ids: Iterable[str],
+        identities: Iterable[str],
+    ) -> None:
+        """Prove this pass's sources and quarantine objects are gone.
+
+        Exclusive captures must be absent at the registry handle target
+        and at the bound quarantine path. Shared copies may keep the
+        source file. Handle/path errors fail closed without locators.
+        """
+        staged = {str(manifest_id) for manifest_id in manifest_ids}
+        try:
+            for manifest_id in staged:
+                if self._manifest_path(manifest_id).exists():
+                    self._fail_unproven_purge()
+                if self._quarantine_manifest_path(
+                    operation_id, int(source_fence), manifest_id
+                ).exists():
+                    self._fail_unproven_purge()
+            for identity in identities:
+                row = connection.execute(
+                    "SELECT handle FROM backup_registry "
+                    "WHERE connector_identity = ?",
+                    (identity,),
+                ).fetchone()
+                if row is None or not str(row[0]):
+                    self._fail_unproven_purge()
+                target = self._capture_target(str(row[0]))
+                remaining = connection.execute(
+                    "SELECT manifest_id FROM backup_registry_refs "
+                    "WHERE connector_identity = ?",
+                    (identity,),
+                ).fetchall()
+                still_referenced = any(
+                    str(ref[0]) not in staged for ref in remaining
+                )
+                quarantined = self._quarantine_capture_path(
+                    operation_id, int(source_fence), str(identity)
+                ).exists()
+                source_exists = target.exists()
+                if still_referenced:
+                    if quarantined:
+                        self._fail_unproven_purge()
+                    continue
+                if source_exists or quarantined:
+                    self._fail_unproven_purge()
+        except S16OwnerFailure:
+            raise
+        except (TypeError, ValueError, OSError, S16Unavailable):
+            self._fail_unproven_purge()
+
     def _purge_quarantine(
         self,
         operation_id: str,
@@ -1735,36 +1799,14 @@ class BackupDeletionOwner:
                 responsible_party="backup_operations_owner",
                 recovery_action="retry_backup_quarantine_purge",
             ) from error
-        for manifest_id in manifest_ids:
-            if self._manifest_path(str(manifest_id)).exists():
-                raise S16OwnerFailure(
-                    self.owner_id,
-                    S16_VERIFY_FAILED,
-                    retryable=True,
-                    responsible_party="backup_operations_owner",
-                    recovery_action="retry_backup_quarantine_purge",
-                )
-            if self._quarantine_manifest_path(
-                operation_id, int(source_fence), str(manifest_id)
-            ).exists():
-                raise S16OwnerFailure(
-                    self.owner_id,
-                    S16_VERIFY_FAILED,
-                    retryable=True,
-                    responsible_party="backup_operations_owner",
-                    recovery_action="retry_backup_quarantine_purge",
-                )
-        for identity in identities:
-            if self._quarantine_capture_path(
-                operation_id, int(source_fence), str(identity)
-            ).exists():
-                raise S16OwnerFailure(
-                    self.owner_id,
-                    S16_VERIFY_FAILED,
-                    retryable=True,
-                    responsible_party="backup_operations_owner",
-                    recovery_action="retry_backup_quarantine_purge",
-                )
+        with self._registry_connect() as connection:
+            self._assert_converted_absence(
+                connection,
+                operation_id,
+                int(source_fence),
+                manifest_ids,
+                identities,
+            )
         self._run_crash_hook("after_purge")
 
     def _bump_operation_fence(
@@ -2440,6 +2482,12 @@ class BackupDeletionOwner:
                     scope_fingerprint,
                     fingerprints_digest,
                 )
+                connection.execute(
+                    "UPDATE backup_deletion_intents SET status = ? "
+                    "WHERE operation_id = ? AND fence != ? "
+                    "AND status IN ('staged', 'transitioned')",
+                    ("superseded", operation_id, int(fence)),
+                )
                 identities = set(json.loads(prior[3] or "[]"))
                 unlinked_marker = set(json.loads(prior[6] or "[]"))
                 connection.commit()
@@ -3005,6 +3053,13 @@ class BackupDeletionOwner:
             identities,
         )
         connection.execute("BEGIN IMMEDIATE")
+        self._assert_converted_absence(
+            connection,
+            operation_id,
+            source_fence,
+            staged_manifest_ids,
+            identities,
+        )
         # Reference rows of the staged manifests are removed; registry
         # rows are removed only for identities with no remaining refs.
         connection.executemany(
