@@ -1732,8 +1732,10 @@ class BackupDeletionOwner:
         """Prove this pass's sources and quarantine objects are gone.
 
         Exclusive captures must be absent at the registry handle target
-        and at the bound quarantine path. Shared copies may keep the
-        source file. Handle/path errors fail closed without locators.
+        and at the bound quarantine path. Shared copies must still exist
+        at the handle target with the registry content digest, and must
+        not have a quarantine object. Handle/path errors fail closed
+        without locators.
         """
         staged = {str(manifest_id) for manifest_id in manifest_ids}
         try:
@@ -1746,13 +1748,14 @@ class BackupDeletionOwner:
                     self._fail_unproven_purge()
             for identity in identities:
                 row = connection.execute(
-                    "SELECT handle FROM backup_registry "
+                    "SELECT handle, content_sha256 FROM backup_registry "
                     "WHERE connector_identity = ?",
                     (identity,),
                 ).fetchone()
-                if row is None or not str(row[0]):
+                if row is None or not str(row[0]) or not str(row[1]):
                     self._fail_unproven_purge()
                 target = self._capture_target(str(row[0]))
+                expected_digest = str(row[1])
                 remaining = connection.execute(
                     "SELECT manifest_id FROM backup_registry_refs "
                     "WHERE connector_identity = ?",
@@ -1766,7 +1769,10 @@ class BackupDeletionOwner:
                 ).exists()
                 source_exists = target.exists()
                 if still_referenced:
-                    if quarantined:
+                    if quarantined or not source_exists:
+                        self._fail_unproven_purge()
+                    observed = hashlib.sha256(target.read_bytes()).hexdigest()
+                    if observed != expected_digest:
                         self._fail_unproven_purge()
                     continue
                 if source_exists or quarantined:
