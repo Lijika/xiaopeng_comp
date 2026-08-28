@@ -2788,7 +2788,8 @@ def test_backup_delete_resumes_after_crash_between_unlink_and_commit(
             "INSERT INTO backup_deletion_intents("
             "operation_id, fence, scope_fingerprint, fingerprints_digest, "
             "status, staged_at, identities_json, manifest_ids_json, "
-            "manifests_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "manifests_json, unlinked_manifest_ids_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 "op-crash",
                 1,
@@ -2824,6 +2825,9 @@ def test_backup_delete_resumes_after_crash_between_unlink_and_commit(
                     ],
                     separators=(",", ":"),
                 ),
+                # R8 (P1-1): the crash marker — this pass unlinked the
+                # manifest path before the process died.
+                json.dumps([staged_manifest_id], separators=(",", ":")),
             ),
         )
         connection.commit()
@@ -3690,7 +3694,7 @@ def test_backup_delete_conflicts_on_capture_after_stage_and_repairs_forward(
                 1,
                 {identity1},
                 [staged_manifest_id],
-                [staged_snapshot],
+                [staged_snapshot], set(),
                 resume=False,
             )
     assert excinfo.value.reason_code == S16_VERIFY_FAILED
@@ -3995,7 +3999,7 @@ def test_backup_staged_manifest_content_mutation_conflicts_and_repairs(
                 1,
                 {identity1},
                 [staged_manifest_id],
-                [snapshot],
+                [snapshot], set(),
                 resume=False,
             )
     assert excinfo.value.reason_code == S16_VERIFY_FAILED
@@ -4135,6 +4139,7 @@ def test_backup_staged_manifest_relocation_conflicts_and_preserves_scopes(
                 {identity},
                 [staged_manifest_id],
                 [snapshot],
+                set(),
                 resume=False,
             )
     assert excinfo.value.reason_code == S16_VERIFY_FAILED
@@ -4238,7 +4243,7 @@ def test_backup_staged_intent_missing_snapshot_fails_closed(
                 1,
                 {identity},
                 [staged_manifest_id, "manifest-ghost"],
-                [snapshot],
+                [snapshot], set(),
                 resume=False,
             )
     assert excinfo.value.reason_code == S16_VERIFY_FAILED
@@ -4291,3 +4296,214 @@ def test_s02_default_absence_ledger_binds_to_s16_state_parent(
     absence_path = Path(run.stdout.strip())
     assert absence_path == s16_parent / "s02_object_absence.sqlite3"
     assert absence_path != s01_parent / "s02_object_absence.sqlite3"
+
+
+
+# ---------------------------------------------------------------------------
+# R8 (P1-1) regressions
+# ---------------------------------------------------------------------------
+
+
+def _stage_backup_intent(
+    backup: BackupDeletionOwner,
+    *,
+    operation_id: str,
+    scope: str,
+    fingerprint: str,
+    staged_manifest: dict[str, Any],
+    snapshot: dict[str, Any],
+    unlinked_marker: list[str],
+) -> tuple[str, str]:
+    staged_manifest_id = str(staged_manifest["manifest_id"])
+    identity = snapshot["identities"][0]
+    with backup._registry_connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "INSERT INTO backup_deletion_intents("
+            "operation_id, fence, scope_fingerprint, fingerprints_digest, "
+            "status, staged_at, identities_json, manifest_ids_json, "
+            "manifests_json, unlinked_manifest_ids_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                operation_id,
+                1,
+                scope,
+                backup._bindings_digest({fingerprint}),
+                "staged",
+                int(_now()),
+                json.dumps([identity], separators=(",", ":")),
+                json.dumps([staged_manifest_id], separators=(",", ":")),
+                json.dumps([snapshot], separators=(",", ":")),
+                json.dumps(unlinked_marker, separators=(",", ":")),
+            ),
+        )
+        connection.commit()
+    return staged_manifest_id, identity
+
+
+def test_backup_resume_rejects_out_of_band_manifest_deletion(
+    tmp_path: Path,
+) -> None:
+    """R8 P1-1: a manifest missing WITHOUT this pass's crash marker is an
+    external/unknown deletion — the resume fails stable with zero
+    registry/ref changes, the file survives and the owner is
+    diagnostically unavailable; repair-forward after the orphan is cleared
+    completes healthy."""
+    backup_root = tmp_path / "backups"
+    backup = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
+    scope = "g" * 64
+    saved = backup_root / "oob.bin"
+    saved.write_bytes(b"oob-capture")
+    digest = hashlib.sha256(b"oob-capture").hexdigest()
+    backup.capture(
+        scope_fingerprint=scope, copy_files=[("oob.bin", digest)]
+    )
+    inv = backup.inventory(scope_fingerprint=scope)
+    fingerprint = [
+        e.identity_fingerprint for e in inv if e.copy_class == COPY_CLASS_REPLICA
+    ][0]
+    staged_manifest = backup._load_manifests()[0]
+    identity = backup._connector_identity("oob.bin", digest)
+    snapshot = {
+        "manifest_id": str(staged_manifest["manifest_id"]),
+        "scope_fingerprint": scope,
+        "entries_digest": str(staged_manifest.get("entries_digest") or ""),
+        "manifest_digest": _digest(staged_manifest),
+        "identities": [identity],
+    }
+    # Stage WITHOUT the pass unlink marker, then the manifest disappears
+    # out-of-band (external deletion; the file and registry/ref remain).
+    staged_manifest_id, _ = _stage_backup_intent(
+        backup,
+        operation_id="op-oob",
+        scope=scope,
+        fingerprint=fingerprint,
+        staged_manifest=staged_manifest,
+        snapshot=snapshot,
+        unlinked_marker=[],
+    )
+    backup._manifest_path(staged_manifest_id).unlink()
+    with pytest.raises(S16OwnerFailure) as excinfo:
+        backup.delete(
+            {fingerprint},
+            scope_fingerprint=scope,
+            operation_id="op-oob",
+            fence=1,
+        )
+    assert excinfo.value.reason_code == S16_VERIFY_FAILED
+    assert excinfo.value.retryable is False
+    # Zero registry/ref changes; the file survives; the owner is
+    # diagnostically unavailable (orphan registry row).
+    assert saved.exists()
+    with backup._registry_connect() as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM backup_registry"
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM backup_registry_refs"
+            ).fetchone()[0]
+            == 1
+        )
+        binding = connection.execute(
+            "SELECT COUNT(*) FROM backup_deletion_bindings "
+            "WHERE operation_id = 'op-oob'"
+        ).fetchone()[0]
+    assert binding == 0
+    assert backup.owner_healthy() is False
+    # Repair-forward: the operator clears the dead capture's bookkeeping;
+    # the same operation then completes with no unproven residue.
+    with backup._registry_connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "DELETE FROM backup_registry_refs WHERE connector_identity = ?",
+            (identity,),
+        )
+        connection.execute(
+            "DELETE FROM backup_registry WHERE connector_identity = ?",
+            (identity,),
+        )
+        connection.commit()
+    saved.unlink()
+    outcome = backup.delete(
+        {fingerprint},
+        scope_fingerprint=scope,
+        operation_id="op-oob",
+        fence=1,
+    )
+    assert outcome["status"] == "complete", outcome
+    assert backup.owner_healthy() is True
+
+
+def test_backup_resume_rejects_mismatched_unlink_marker(
+    tmp_path: Path,
+) -> None:
+    """R8 P1-1: a crash marker bound to a DIFFERENT manifest id never
+    proves this pass deleted the missing path — the resume fails stable
+    with zero changes."""
+    backup_root = tmp_path / "backups"
+    backup = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
+    scope = "h" * 64
+    saved = backup_root / "marker.bin"
+    saved.write_bytes(b"marker-capture")
+    digest = hashlib.sha256(b"marker-capture").hexdigest()
+    backup.capture(
+        scope_fingerprint=scope, copy_files=[("marker.bin", digest)]
+    )
+    inv = backup.inventory(scope_fingerprint=scope)
+    fingerprint = [
+        e.identity_fingerprint for e in inv if e.copy_class == COPY_CLASS_REPLICA
+    ][0]
+    staged_manifest = backup._load_manifests()[0]
+    identity = backup._connector_identity("marker.bin", digest)
+    snapshot = {
+        "manifest_id": str(staged_manifest["manifest_id"]),
+        "scope_fingerprint": scope,
+        "entries_digest": str(staged_manifest.get("entries_digest") or ""),
+        "manifest_digest": _digest(staged_manifest),
+        "identities": [identity],
+    }
+    staged_manifest_id, _ = _stage_backup_intent(
+        backup,
+        operation_id="op-marker",
+        scope=scope,
+        fingerprint=fingerprint,
+        staged_manifest=staged_manifest,
+        snapshot=snapshot,
+        # The marker names a DIFFERENT manifest: wrong binding.
+        unlinked_marker=["manifest-other"],
+    )
+    backup._manifest_path(staged_manifest_id).unlink()
+    with pytest.raises(S16OwnerFailure) as excinfo:
+        backup.delete(
+            {fingerprint},
+            scope_fingerprint=scope,
+            operation_id="op-marker",
+            fence=1,
+        )
+    assert excinfo.value.reason_code == S16_VERIFY_FAILED
+    assert excinfo.value.retryable is False
+    assert saved.exists()
+    with backup._registry_connect() as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM backup_registry"
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM backup_registry_refs"
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM backup_deletion_bindings "
+                "WHERE operation_id = 'op-marker'"
+            ).fetchone()[0]
+            == 0
+        )

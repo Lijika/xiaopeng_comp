@@ -1568,6 +1568,15 @@ class BackupDeletionOwner:
             except sqlite3.OperationalError:
                 # Column already present on a migrated database.
                 pass
+            try:
+                connection.execute(
+                    "ALTER TABLE backup_deletion_intents "
+                    "ADD COLUMN unlinked_manifest_ids_json "
+                    "TEXT NOT NULL DEFAULT '[]'"
+                )
+            except sqlite3.OperationalError:
+                # Column already present on a migrated database.
+                pass
             # R5 (P1-2): backfill reference rows for pre-R5 captures so old
             # backups keep reconciling under the ref-aware contract.
             for manifest in self._load_manifests():
@@ -1976,7 +1985,8 @@ class BackupDeletionOwner:
                 return {"status": "stale", "deleted_counts": {}}
             staged = connection.execute(
                 "SELECT scope_fingerprint, fingerprints_digest, "
-                "identities_json, manifest_ids_json, manifests_json "
+                "identities_json, manifest_ids_json, manifests_json, "
+                "unlinked_manifest_ids_json "
                 "FROM backup_deletion_intents "
                 "WHERE operation_id = ? AND fence = ?",
                 (operation_id, int(fence)),
@@ -1993,6 +2003,7 @@ class BackupDeletionOwner:
                         "reason_code": "S16_OWNER_BINDING_CONFLICT",
                     }
                 staged_manifest_ids = set(json.loads(staged[3] or "[]"))
+                unlinked_marker = set(json.loads(staged[5] or "[]"))
                 current_scope_manifests = [
                     manifest
                     for manifest in self._load_manifests()
@@ -2035,9 +2046,50 @@ class BackupDeletionOwner:
                     if current_snapshot != snapshot:
                         content_changed = True
                         break
-                if (current_scope_ids - staged_manifest_ids) or content_changed:
-                    # R5 (P1-3) repair-forward: a capture landed after the
-                    # stale intent was staged.  The stale intent is
+                missing_unproven = (
+                    staged_manifest_ids
+                    - current_scope_ids
+                    - unlinked_marker
+                )
+                if missing_unproven:
+                    # R8 (P1-1): a staged manifest missing WITHOUT this
+                    # pass's crash marker is an external/unknown deletion.
+                    # Fail closed with zero registry/ref changes and let
+                    # the worker record repair_required — unless the
+                    # operator's repair already cleared EVERY trace of the
+                    # staged captures (no manifests, no refs, no registry
+                    # rows), in which case re-staging the empty set is the
+                    # honest already-absent completion.
+                    residue_refs = connection.execute(
+                        "SELECT COUNT(*) FROM backup_registry_refs "
+                        "WHERE connector_identity = ?",
+                        (
+                            sorted(
+                                json.loads(staged[2] or "[]")
+                            )[0]
+                            if json.loads(staged[2] or "[]")
+                            else "",
+                        ),
+                    ).fetchone()[0]
+                    if current_scope_manifests or residue_refs:
+                        connection.execute("COMMIT")
+                        raise S16OwnerFailure(
+                            self.owner_id,
+                            S16_VERIFY_FAILED,
+                            retryable=False,
+                            responsible_party="backup_operations_owner",
+                            recovery_action=(
+                                "repair_backup_capture_and_resume_the_same_job"
+                            ),
+                        )
+                if (
+                    (current_scope_ids - staged_manifest_ids)
+                    or content_changed
+                    or missing_unproven
+                ):
+                    # R5 (P1-3) + R8 (P1-1) repair-forward: a capture
+                    # landed, content changed, or the staged residue was
+                    # already cleared by the operator.  The stale intent is
                     # replaced by a fresh stage over the CURRENT scope
                     # manifest set; the same job then completes with the
                     # whole set (nothing was unlinked by the failed pass).
@@ -2061,13 +2113,14 @@ class BackupDeletionOwner:
                 identities = set(json.loads(staged[2] or "[]"))
                 manifest_ids = json.loads(staged[3] or "[]")
                 snapshots = json.loads(staged[4] or "[]")
+                unlinked_marker = set(json.loads(staged[5] or "[]"))
                 connection.commit()
                 with self._registry_connect() as connection:
                     connection.execute("BEGIN IMMEDIATE")
                     return self._backup_delete_commit(
                         connection, scope_fingerprint, fingerprints_digest,
                         operation_id, fence, identities, manifest_ids,
-                        snapshots, resume=True,
+                        snapshots, unlinked_marker, resume=True,
                     )
             manifests = self._manifests_for_fingerprints(
                 fingerprints, scope_fingerprint=scope_fingerprint
@@ -2178,7 +2231,8 @@ class BackupDeletionOwner:
             "INSERT OR REPLACE INTO backup_deletion_intents("
             "operation_id, fence, scope_fingerprint, fingerprints_digest, "
             "status, staged_at, identities_json, manifest_ids_json, "
-            "manifests_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "manifests_json, unlinked_manifest_ids_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 operation_id,
                 int(fence),
@@ -2189,6 +2243,7 @@ class BackupDeletionOwner:
                 json.dumps(sorted(identities), separators=(",", ":")),
                 json.dumps(manifest_ids, separators=(",", ":")),
                 json.dumps(manifest_snapshots, separators=(",", ":")),
+                "[]",
             ),
         )
         connection.commit()
@@ -2198,7 +2253,7 @@ class BackupDeletionOwner:
                 connection, scope_fingerprint,
                 self._bindings_digest(fingerprints),
                 operation_id, fence, identities, manifest_ids,
-                manifest_snapshots, resume=False,
+                manifest_snapshots, set(), resume=False,
             )
 
     def _backup_delete_commit(
@@ -2211,6 +2266,7 @@ class BackupDeletionOwner:
         identities: set[str],
         manifest_ids: list[str],
         manifest_snapshots: list[dict[str, Any]],
+        unlinked_manifest_ids: set[str],
         *,
         resume: bool,
     ) -> dict[str, Any]:
@@ -2293,10 +2349,13 @@ class BackupDeletionOwner:
         for staged_id in sorted(staged_manifest_ids):
             current = by_id.get(staged_id)
             if current is None:
-                # A missing staged manifest is allowed ONLY when the
-                # crashed pass already removed it (resume); on a fresh
-                # commit an out-of-band removal is never unlinked around.
-                if resume:
+                # R8 (P1-1): a missing staged manifest is tolerated ONLY
+                # when this deletion pass's durable crash marker proves it
+                # unlinked the path (same operation + fence + manifest id).
+                # External deletion, an old intent, a missing or mismatched
+                # marker and cross-scope absence all fail closed with zero
+                # registry/ref changes and put the job in repair_required.
+                if resume and staged_id in unlinked_manifest_ids:
                     continue
                 connection.execute("ROLLBACK")
                 raise S16OwnerFailure(
@@ -2398,6 +2457,7 @@ class BackupDeletionOwner:
                     responsible_party="backup_operations_owner",
                     recovery_action="restore_and_verify_the_captured_copy",
                 )
+        unlinked_now: list[str] = []
         for manifest_id in sorted(staged_manifest_ids):
             manifest_path = self._manifest_path(manifest_id)
             if manifest_path.exists():
@@ -2411,7 +2471,8 @@ class BackupDeletionOwner:
                         responsible_party="backup_operations_owner",
                         recovery_action="verify_the_backup_manifest_removal",
                     )
-            elif not resume:
+                unlinked_now.append(manifest_id)
+            elif not resume and manifest_id not in unlinked_manifest_ids:
                 connection.execute("ROLLBACK")
                 raise S16OwnerFailure(
                     self.owner_id,
@@ -2420,6 +2481,22 @@ class BackupDeletionOwner:
                     responsible_party="backup_operations_owner",
                     recovery_action="restore_and_verify_the_backup_manifest",
                 )
+        # R8 (P1-1): the crash marker is durable in its OWN transaction —
+        # it records which manifest paths THIS pass unlinked, so a later
+        # resume can distinguish this pass's residue from external loss.
+        combined_marker = sorted(set(unlinked_manifest_ids) | set(unlinked_now))
+        connection.execute(
+            "UPDATE backup_deletion_intents "
+            "SET unlinked_manifest_ids_json = ? "
+            "WHERE operation_id = ? AND fence = ?",
+            (
+                json.dumps(combined_marker, separators=(",", ":")),
+                operation_id,
+                int(fence),
+            ),
+        )
+        connection.execute("COMMIT")
+        connection.execute("BEGIN IMMEDIATE")
         # Reference rows of the staged manifests are removed; registry
         # rows are removed only for identities with no remaining refs.
         connection.executemany(
