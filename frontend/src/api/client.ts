@@ -84,6 +84,11 @@ export type S16QueryResponse = components["schemas"]["S16QueryResponse"];
 export type S16ReceiptResponse = components["schemas"]["S16ReceiptResponse"];
 export type S16ProcessResponse = components["schemas"]["S16ProcessResponse"];
 
+export type S17PreviewResponse = components["schemas"]["S17PreviewResponse"];
+export type S17CommandResponse = components["schemas"]["S17CommandResponse"];
+export type S17QueryResponse = components["schemas"]["S17QueryResponse"];
+export type S17ReceiptResponse = components["schemas"]["S17ReceiptResponse"];
+
 /** A structured server rejection; never invents identifiers or evidence. */
 export class HttpError extends Error {
   readonly status: number;

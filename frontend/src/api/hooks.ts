@@ -51,10 +51,40 @@ import {
   type S16ProcessResponse,
   type S16QueryResponse,
   type S16ReceiptResponse,
+  type S17CommandResponse,
+  type S17PreviewResponse,
+  type S17QueryResponse,
+  type S17ReceiptResponse,
   type SubmitResult,
   type VerifyRecoveryResult,
   type WorkspaceResponse,
 } from "./client";
+
+export const S17_REQUEST_KEY = (requestId: string) => ["s17", "exports", requestId] as const;
+export const S17_RECEIPT_KEY = (requestId: string) => ["s17", "exports", requestId, "receipt"] as const;
+export interface S17PreviewCommand { purpose: string; fields: string[]; artifacts: string[]; recipient_id: string; classification: string; expiry: number; scope_reference: string; idempotency_key: string; }
+export interface S17RequestCommand { requestId: string; idempotency_key: string; }
+
+export function useS17Preview(): UseMutationResult<S17PreviewResponse, Error, S17PreviewCommand> {
+  const queryClient = useQueryClient();
+  return useMutation({ mutationFn: (body) => request<S17PreviewResponse>("/controlled/s17/api/exports/preview", { method: "POST", body: JSON.stringify(body) }), retry: false, onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["s17"] }); } });
+}
+export function useS17Query(requestId: string | null): UseQueryResult<S17QueryResponse> {
+  return useQuery({ queryKey: S17_REQUEST_KEY(requestId ?? ""), queryFn: () => request<S17QueryResponse>(`/controlled/s17/api/exports/${encodeURIComponent(requestId ?? "")}`), enabled: Boolean(requestId), retry: retryPolicy, gcTime: 0 });
+}
+export function useS17Receipt(requestId: string | null): UseQueryResult<S17ReceiptResponse> {
+  return useQuery({ queryKey: S17_RECEIPT_KEY(requestId ?? ""), queryFn: () => request<S17ReceiptResponse>(`/controlled/s17/api/exports/${encodeURIComponent(requestId ?? "")}/receipt`), enabled: Boolean(requestId), retry: retryPolicy, gcTime: 0 });
+}
+function useS17Command(path: string, method = "POST"): UseMutationResult<S17CommandResponse, Error, S17RequestCommand> {
+  const queryClient = useQueryClient();
+  return useMutation({ mutationFn: (command) => request<S17CommandResponse>(`/controlled/s17/api/exports/${encodeURIComponent(command.requestId)}${path}`, { method, body: JSON.stringify({ idempotency_key: command.idempotency_key }) }), retry: false, onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["s17"] }); } });
+}
+export function useS17Approve(): UseMutationResult<S17CommandResponse, Error, S17RequestCommand & { preview_digest: string }> {
+  const queryClient = useQueryClient();
+  return useMutation({ mutationFn: (command) => request<S17CommandResponse>(`/controlled/s17/api/exports/${encodeURIComponent(command.requestId)}/approve`, { method: "POST", body: JSON.stringify({ preview_digest: command.preview_digest, idempotency_key: command.idempotency_key }) }), retry: false, onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["s17"] }); } });
+}
+export function useS17Commit() { return useS17Command("/commit"); }
+export function useS17Revoke() { return useS17Command("/revoke"); }
 
 /** The restricted reveal and evidence-correction command results, bound to
  * the generated OpenAPI schemas (mirrors the sibling result aliases in

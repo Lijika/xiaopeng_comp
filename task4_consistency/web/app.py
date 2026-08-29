@@ -6961,6 +6961,26 @@ from task4_consistency.web.s16_http import register_router as register_s16_route
 
 register_s16_router(app, sys.modules[__name__])
 
+# --- S17 governed-export HTTP adapter -------------------------------------
+# S17 remains default-closed until the institution supplies all identities,
+# provider seams, recipient registry and storage/audit configuration.  The
+# adapter is registered unconditionally so a configured caller receives a
+# stable 503 instead of an absent route.
+S17_SERVICE = None
+S17_REQUESTER_CREDENTIAL = os.environ.get("TASK4_S17_REQUESTER_CREDENTIAL", "").strip()
+S17_REQUESTER_SUBJECT = os.environ.get("TASK4_S17_REQUESTER_SUBJECT", "").strip()
+S17_APPROVER_CREDENTIAL = os.environ.get("TASK4_S17_APPROVER_CREDENTIAL", "").strip()
+S17_APPROVER_SUBJECT = os.environ.get("TASK4_S17_APPROVER_SUBJECT", "").strip()
+S17_WORKER_CREDENTIAL = os.environ.get("TASK4_S17_WORKER_CREDENTIAL", "").strip()
+S17_WORKER_SUBJECT = os.environ.get("TASK4_S17_WORKER_SUBJECT", "").strip()
+S17_RECIPIENT_CREDENTIAL = os.environ.get("TASK4_S17_RECIPIENT_CREDENTIAL", "").strip()
+S17_RECIPIENT_SUBJECT = os.environ.get("TASK4_S17_RECIPIENT_SUBJECT", "").strip()
+S17_EXPORT_SCOPE = os.environ.get("TASK4_S17_EXPORT_SCOPE", "C-DEMO").strip() or "C-DEMO"
+S17_REACT_INDEX = S01_REACT_INDEX
+from task4_consistency.web.s17_http import register_router as register_s17_router
+
+register_s17_router(app, sys.modules[__name__])
+
 _S13_SHELL_ERROR_RESPONSES = {
     403: {
         "content": {

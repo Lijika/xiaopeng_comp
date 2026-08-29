@@ -17,6 +17,7 @@ import T16LifecyclePanel, {
 } from "./components/T16LifecyclePanel";
 import T15DeliveryPanel from "./components/T15DeliveryPanel";
 import S16GovernedDeletionPanel from "./components/S16GovernedDeletionPanel";
+import S17ExportPanel from "./components/S17ExportPanel";
 
 function readParam(name: string): string | null {
   return new URLSearchParams(window.location.search).get(name);
@@ -61,6 +62,10 @@ function isS13Shell(): boolean {
 function isS16Shell(): boolean {
   const pathname = window.location.pathname;
   return pathname === "/controlled/s16" || pathname === "/controlled/s16/react";
+}
+function isS17Shell(): boolean {
+  const pathname = window.location.pathname;
+  return pathname === "/controlled/s17" || pathname === "/controlled/s17/react";
 }
 
 /** The T16 lifecycle cancellation workbench mounted only for the S14
@@ -354,6 +359,10 @@ function GovernedDeletionShell() {
   );
 }
 
+function GovernedExportShell() {
+  return <div className="mx-auto max-w-4xl px-4 py-6"><header className="app-header"><h1>受控导出工作台</h1><span className="boundary">S17</span></header><main><S17ExportPanel /></main></div>;
+}
+
 /** The Reviewer workbench owns every S01 read; it is never mounted on the
  * Integrator shell, so no S01 query can fire there. */
 function ReviewerWorkbench() {
@@ -436,6 +445,9 @@ export default function App() {
   }
   if (isS16Shell()) {
     return <GovernedDeletionShell />;
+  }
+  if (isS17Shell()) {
+    return <GovernedExportShell />;
   }
   if (isS14SettlementShell()) {
     return <SettlementConsoleShell />;
