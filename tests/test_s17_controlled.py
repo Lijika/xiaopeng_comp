@@ -20,6 +20,7 @@ import pytest
 from task4_consistency.controlled.s01 import S01CommandPrincipal
 from task4_consistency.controlled.s17 import (
     S17_AUDIT_SEAM_UNAVAILABLE,
+    S17_APPROVAL_DENIED,
     S17_DIGEST_DRIFT,
     S17_FORBIDDEN,
     S17_INVALID_SCOPE,
@@ -466,6 +467,17 @@ def _approve(service: GovernedExportService, preview: dict[str, Any], **override
     return service.approve(**kwargs)
 
 
+def _deny(service: GovernedExportService, preview: dict[str, Any], **overrides: Any) -> dict[str, Any]:
+    kwargs = {
+        "request_id": preview["request_id"],
+        "preview_digest": preview["preview_digest"],
+        "principal": APPROVER,
+        "idempotency_key": "deny-1",
+    }
+    kwargs.update(overrides)
+    return service.deny(**kwargs)
+
+
 def _commit(service: GovernedExportService, preview: dict[str, Any], **overrides: Any) -> dict[str, Any]:
     kwargs = {
         "request_id": preview["request_id"],
@@ -685,6 +697,28 @@ def test_independent_approval_binds_exact_digest_and_rejects_self_approval(
     replayed = _approve(service, preview)
     assert replayed["replayed"] is True
     assert replayed["request_id"] == preview["request_id"]
+
+
+def test_independent_approver_can_deny_exact_request_and_block_commit(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    preview = _preview(service, idempotency_key="deny-preview")
+    denied = _deny(service, preview)
+    assert denied["status"] == "denied"
+    assert denied["reason_code"] == S17_APPROVAL_DENIED
+    assert service.query(request_id=preview["request_id"], principal=REQUESTER)["status"] == "denied"
+    replayed = _deny(service, preview)
+    assert replayed["replayed"] is True
+    with pytest.raises(S17Blocked) as approve:
+        _approve(service, preview)
+    assert approve.value.reason_code == S17_APPROVAL_DENIED
+    with pytest.raises(S17Blocked) as commit:
+        _commit(service, preview)
+    assert commit.value.reason_code == S17_APPROVAL_DENIED
+    with pytest.raises(S17Blocked) as revoke:
+        service.revoke(request_id=preview["request_id"], principal=REQUESTER, idempotency_key="deny-revoke")
+    assert revoke.value.reason_code == S17_APPROVAL_DENIED
 
 
 def test_commit_freezes_current_revisions_and_queues_one_obligation(

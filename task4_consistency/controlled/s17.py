@@ -25,6 +25,7 @@ S17_OBLIGATION_STATUSES = frozenset(
     {
         "previewed",
         "approved",
+        "denied",
         "queued",
         "delivered",
         "confirmed",
@@ -45,6 +46,7 @@ S17_INVALID_SCOPE = "S17_INVALID_SCOPE"
 S17_DIGEST_DRIFT = "S17_DIGEST_DRIFT"
 S17_SOURCE_DRIFT = "S17_SOURCE_DRIFT"
 S17_SELF_APPROVAL = "S17_SELF_APPROVAL"
+S17_APPROVAL_DENIED = "S17_APPROVAL_DENIED"
 S17_RECIPIENT_MISMATCH = "S17_RECIPIENT_MISMATCH"
 S17_TOKEN_EXPIRED = "S17_TOKEN_EXPIRED"
 S17_TOKEN_REPLAY = "S17_TOKEN_REPLAY"
@@ -481,7 +483,7 @@ class GovernedExportService:
         elif typ in {"delivery_attempt", "delivery_timeout", "delivery_reconciled"} and rid:
             self._deliveries[rid] = dict(event)
             self._requests.setdefault(rid, {})["status"] = event.get("status", "timeout")
-        elif typ in {"accessed", "confirmed", "revoked", "expired", "generation_failed"} and rid:
+        elif typ in {"accessed", "confirmed", "revoked", "expired", "denied", "generation_failed"} and rid:
             self._requests.setdefault(rid, {})["status"] = event.get("status", typ)
             if typ == "revoked":
                 for token in self._tokens.values():
@@ -673,6 +675,8 @@ class GovernedExportService:
             raise S17NotFound()
         if principal.subject == request.get("actor") or principal.subject == self.requester_subject:
             raise S17Blocked(S17_SELF_APPROVAL)
+        if request.get("status") == "denied":
+            raise S17Blocked(S17_APPROVAL_DENIED)
         if preview_digest != request.get("preview_digest"):
             raise S17Blocked(S17_DIGEST_DRIFT)
         binding_key = f"approve:{request_id}:{idempotency_key}"
@@ -687,6 +691,34 @@ class GovernedExportService:
         self._save_binding(binding_key, preview_digest, result)
         return result
 
+    def deny(self, *, request_id: str, preview_digest: str, principal: Any, idempotency_key: str) -> dict[str, Any]:
+        subject, _role, _scope, _source, _expires = self._principal_attrs(principal)
+        if subject == self.requester_subject:
+            raise S17Blocked(S17_SELF_APPROVAL)
+        self._require_approver(principal)
+        self._require_ready()
+        request = self._requests.get(request_id)
+        if request is None:
+            raise S17NotFound()
+        if principal.subject == request.get("actor") or principal.subject == self.requester_subject:
+            raise S17Blocked(S17_SELF_APPROVAL)
+        if preview_digest != request.get("preview_digest"):
+            raise S17Blocked(S17_DIGEST_DRIFT)
+        binding_key = f"deny:{request_id}:{idempotency_key}"
+        bound = self._binding(binding_key, preview_digest)
+        if bound is not None:
+            return bound | {"replayed": True}
+        if request.get("status") == "denied":
+            result = {"status": "denied", "request_id": request_id, "preview_digest": preview_digest, "reason_code": S17_APPROVAL_DENIED, "replayed": True}
+            self._save_binding(binding_key, preview_digest, result)
+            return result
+        if request.get("status") != "previewed" or request_id in self._approvals:
+            raise S17Blocked(S17_APPROVAL_DENIED)
+        self._append("denied", request_id, {"status": "denied", "preview_digest": preview_digest, "reason_code": S17_APPROVAL_DENIED, "actor": principal.subject})
+        result = {"status": "denied", "request_id": request_id, "preview_digest": preview_digest, "reason_code": S17_APPROVAL_DENIED, "replayed": False}
+        self._save_binding(binding_key, preview_digest, result)
+        return result
+
     def commit(self, *, request_id: str, principal: Any, idempotency_key: str) -> dict[str, Any]:
         self._require_requester(principal)
         self._require_ready()
@@ -694,6 +726,8 @@ class GovernedExportService:
         if request is None:
             raise S17NotFound()
         if request_id not in self._approvals:
+            if request.get("status") == "denied":
+                raise S17Blocked(S17_APPROVAL_DENIED)
             raise S17Blocked(S17_FORBIDDEN)
         scope_reference = self._resolve_source_reference(request)
         if not scope_reference:
@@ -860,6 +894,8 @@ class GovernedExportService:
         request = self._requests.get(request_id)
         if request is None:
             raise S17NotFound()
+        if request.get("status") == "denied":
+            raise S17Blocked(S17_APPROVAL_DENIED)
         binding_key = f"revoke:{request_id}:{idempotency_key}"
         bound = self._binding(binding_key, request_id)
         if bound is not None:
@@ -883,6 +919,8 @@ class GovernedExportService:
         request = self._requests.get(request_id)
         if request is None:
             raise S17NotFound()
+        if request.get("status") == "denied":
+            raise S17Blocked(S17_APPROVAL_DENIED)
         binding_key = f"expire:{request_id}:{idempotency_key}"
         bound = self._binding(binding_key, request_id)
         if bound is not None:

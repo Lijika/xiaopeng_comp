@@ -223,6 +223,15 @@ def s17_approve(request_id: str, body: S17ApproveBody, request: Request, respons
         raise _error(exc) from exc
 
 
+@s17_router.post("/controlled/s17/api/exports/{request_id}/deny", response_model=S17CommandResponse, responses=_ERRORS)
+def s17_deny(request_id: str, body: S17ApproveBody, request: Request, response: Response) -> dict[str, Any]:
+    _nocache(response)
+    try:
+        return _service(request).deny(request_id=request_id, principal=_principal(request, "approver"), **body.model_dump())
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
 @s17_router.post("/controlled/s17/api/exports/{request_id}/commit", response_model=S17CommandResponse, responses=_ERRORS)
 def s17_commit(request_id: str, body: S17CommitBody, request: Request, response: Response) -> dict[str, Any]:
     _nocache(response)

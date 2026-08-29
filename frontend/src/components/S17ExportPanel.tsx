@@ -6,6 +6,7 @@ import {
   useS17Approve,
   useS17Commit,
   useS17Confirm,
+  useS17Deny,
   useS17Expire,
   useS17Preview,
   useS17Process,
@@ -34,7 +35,7 @@ const initialDraft: Draft = {
   scope_reference: "APP-REF-1",
 };
 
-type OperationName = "preview" | "approve" | "commit" | "process" | "access" | "confirm" | "expire" | "revoke";
+type OperationName = "preview" | "approve" | "deny" | "commit" | "process" | "access" | "confirm" | "expire" | "revoke";
 
 function idempotencyKey(prefix: string, requestId = "") {
   return `${prefix}-${requestId}-${Date.now()}`;
@@ -107,6 +108,7 @@ export default function S17ExportPanel() {
 
   const preview = useS17Preview();
   const approve = useS17Approve();
+  const deny = useS17Deny();
   const commit = useS17Commit();
   const process = useS17Process();
   const access = useS17Access();
@@ -231,6 +233,13 @@ export default function S17ExportPanel() {
       { onSuccess: (result) => { setApproved(result.status === "approved" || result.status === "replayed"); setLastStatus(result.status); setApproverToken(""); approve.reset(); clearOperationKey("approve"); setUnknownActions((current) => { const next = new Set(current); next.delete("approve"); return next; }); }, onError: (error) => handleOperationError("approve", error, () => setApproverToken("")) },
     );
   };
+  const handleDeny = () => {
+    if (!requestId || !approverToken || !previewDigest) return;
+    deny.mutate(
+      { requestId, preview_digest: previewDigest, idempotency_key: getOperationKey("deny"), approverToken },
+      { onSuccess: (result) => { setApproved(false); setLastStatus(result.status); setApproverToken(""); deny.reset(); clearOperationKey("deny"); setUnknownActions((current) => { const next = new Set(current); next.delete("deny"); return next; }); }, onError: (error) => handleOperationError("deny", error, () => setApproverToken("")) },
+    );
+  };
   const handleCommit = () => {
     if (!requestId || !effectiveApproved || !commitConfirmed) return;
     commit.mutate(
@@ -304,7 +313,7 @@ export default function S17ExportPanel() {
               <div><dt>请求指纹</dt><dd>{requestId.slice(-12)}</dd></div>
               <div><dt>预览摘要</dt><dd>{previewDigest.slice(0, 12)}</dd></div>
             </dl>
-            <button type="button" data-testid="s17-deny-button" onClick={handleRevoke} disabled={revoke.isPending || status === "revoked" || status === "confirmed"}>撤销请求（拒绝导出）</button>
+            <button type="button" data-testid="s17-deny-button" onClick={handleRevoke} disabled={revoke.isPending || status === "revoked" || status === "denied" || status === "confirmed"}>撤销请求（拒绝导出）</button>
             {revoke.error ? <ErrorState error={revoke.error} action="撤销未被接受" unknown={unknownActions.has("revoke")} /> : null}
           </section>
 
@@ -312,10 +321,14 @@ export default function S17ExportPanel() {
 
           <section className="panel" data-testid="s17-approval" aria-labelledby="s17-approval-title">
             <h3 id="s17-approval-title">独立审批</h3>
-            <p data-testid="s17-approval-status">{status === "revoked" ? "已拒绝" : approved ? "已批准" : "等待独立审批"}</p>
-            <label>审批人凭据（仅本次动作）<input data-testid="s17-approver-token" type="password" autoComplete="off" value={approverToken} onChange={(event) => setApproverToken(event.target.value)} disabled={approved || approve.isPending} /></label>
-            <button type="button" data-testid="s17-approve-button" onClick={handleApprove} disabled={!approverToken || approved || approve.isPending || status === "revoked"}>{approve.isPending ? "提交中…" : "独立批准固定请求"}</button>
+            <p data-testid="s17-approval-status">{status === "revoked" || status === "denied" ? "已拒绝" : approved ? "已批准" : "等待独立审批"}</p>
+            <label>审批人凭据（仅本次动作）<input data-testid="s17-approver-token" type="password" autoComplete="off" value={approverToken} onChange={(event) => setApproverToken(event.target.value)} disabled={approved || status === "revoked" || status === "denied" || approve.isPending || deny.isPending} /></label>
+            <div className="demo-controls">
+              <button type="button" data-testid="s17-approve-button" onClick={handleApprove} disabled={!approverToken || approved || approve.isPending || deny.isPending || status === "revoked" || status === "denied"}>{approve.isPending ? "提交中…" : "独立批准固定请求"}</button>
+              <button type="button" data-testid="s17-approver-deny-button" onClick={handleDeny} disabled={!approverToken || approved || approve.isPending || deny.isPending || status === "revoked" || status === "denied"}>{deny.isPending ? "提交中…" : "独立拒绝固定请求"}</button>
+            </div>
             {approve.error ? <ErrorState error={approve.error} action="审批未被接受" unknown={unknownActions.has("approve")} /> : null}
+            {deny.error ? <ErrorState error={deny.error} action="拒绝未被接受" unknown={unknownActions.has("deny")} /> : null}
           </section>
 
           <section className="panel" data-testid="s17-generation" aria-labelledby="s17-generation-title">
@@ -335,9 +348,9 @@ export default function S17ExportPanel() {
 
           <section className="panel" data-testid="s17-delivery" aria-labelledby="s17-delivery-title">
             <h3 id="s17-delivery-title">一次性访问</h3>
-            <label>接收方会话凭据（仅本次动作）<input data-testid="s17-recipient-credential" type="password" autoComplete="off" value={recipientCredential} onChange={(event) => setRecipientCredential(event.target.value)} disabled={status === "expired" || status === "revoked" || status === "confirmed"} /></label>
-            <label>一次性投递凭据（仅本次动作）<input data-testid="s17-delivery-token" type="password" autoComplete="off" value={deliveryToken} onChange={(event) => setDeliveryToken(event.target.value)} disabled={status === "expired" || status === "revoked" || status === "confirmed"} /></label>
-            <button type="button" data-testid="s17-access-button" onClick={handleAccess} disabled={!deliveryToken || access.isPending || status === "expired" || status === "revoked"}>{access.isPending ? "校验中…" : "访问一次性结果"}</button>
+            <label>接收方会话凭据（仅本次动作）<input data-testid="s17-recipient-credential" type="password" autoComplete="off" value={recipientCredential} onChange={(event) => setRecipientCredential(event.target.value)} disabled={status === "expired" || status === "revoked" || status === "denied" || status === "confirmed"} /></label>
+            <label>一次性投递凭据（仅本次动作）<input data-testid="s17-delivery-token" type="password" autoComplete="off" value={deliveryToken} onChange={(event) => setDeliveryToken(event.target.value)} disabled={status === "expired" || status === "revoked" || status === "denied" || status === "confirmed"} /></label>
+            <button type="button" data-testid="s17-access-button" onClick={handleAccess} disabled={!deliveryToken || access.isPending || status === "expired" || status === "revoked" || status === "denied"}>{access.isPending ? "校验中…" : "访问一次性结果"}</button>
             <button type="button" data-testid="s17-confirm-button" onClick={handleConfirm} disabled={status !== "accessed" || confirm.isPending}>{confirm.isPending ? "确认中…" : "确认已接收"}</button>
             {access.error ? <ErrorState error={access.error} action="访问未被接受" unknown={unknownActions.has("access")} /> : null}
             {confirm.error ? <ErrorState error={confirm.error} action="确认未被接受" unknown={unknownActions.has("confirm")} /> : null}

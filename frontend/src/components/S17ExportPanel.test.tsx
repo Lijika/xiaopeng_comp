@@ -9,6 +9,7 @@ const REQUEST_ID = "s17req_test_00000001";
 const PREVIEW_PATH = "/controlled/s17/api/exports/preview";
 const REQUEST_PATH = `/controlled/s17/api/exports/${REQUEST_ID}`;
 const APPROVE_PATH = `${REQUEST_PATH}/approve`;
+const DENY_PATH = `${REQUEST_PATH}/deny`;
 const COMMIT_PATH = `${REQUEST_PATH}/commit`;
 const PROCESS_PATH = "/controlled/s17/api/process";
 const ACCESS_PATH = `${REQUEST_PATH}/access`;
@@ -126,6 +127,30 @@ describe("S17ExportPanel", () => {
     await user.type(screen.getByTestId("s17-approver-token"), "correct-token");
     await user.click(screen.getByTestId("s17-approve-button"));
     await waitFor(() => expect(screen.getByTestId("s17-approval-status")).toHaveTextContent("已批准"));
+  });
+
+  it("lets the independent approver deny the frozen request", async () => {
+    let status = "previewed";
+    const router = fetchRouter({
+      [`POST ${PREVIEW_PATH}`]: () => router.jsonResponse(previewPayload()),
+      [`GET ${REQUEST_PATH}`]: () => router.jsonResponse(queryPayload(status)),
+      [`POST ${DENY_PATH}`]: () => {
+        status = "denied";
+        return router.jsonResponse({ status, request_id: REQUEST_ID, reason_code: "S17_APPROVAL_DENIED" });
+      },
+    });
+    renderWithQuery(<S17ExportPanel />);
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("s17-preview-button"));
+    await screen.findByTestId("s17-approver-deny-button");
+    await user.type(screen.getByTestId("s17-approver-token"), "approver-token");
+    await user.click(screen.getByTestId("s17-approver-deny-button"));
+    await waitFor(() => expect(screen.getByTestId("s17-approval-status")).toHaveTextContent("已拒绝"));
+    expect(router.calls.find((call) => call.url === DENY_PATH)?.body).toEqual({
+      preview_digest: "a".repeat(64),
+      idempotency_key: expect.any(String),
+    });
+    expect(screen.getByTestId("s17-approver-token")).toHaveValue("");
   });
 
   it("drives server generation, one-time access, confirmation and value-free receipt", async () => {

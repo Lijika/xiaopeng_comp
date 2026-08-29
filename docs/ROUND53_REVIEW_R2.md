@@ -12,16 +12,15 @@ overflow and no cross-plane requests.
 
 PASS for the React contract exercised by the focused fixture and browser
 tracer. User-defined fixed request fields, independent approver header,
-approval/commit/process/access/confirm/expire/revoke controls, one-time replay
+approval/deny/commit/process/access/confirm/expire/revoke controls, one-time replay
 handling, watermark/encryption registration, cleanup, requester revocation,
 and typed error states are reachable and tested. Reveal and download controls
 remain absent.
 
-The released S17 authority exposes requester `revoke` and has no approver-deny
-command. The React surface therefore cannot offer an authoritative approver
-denial action; the existing revoke control is requester-owned and is labelled
-accordingly. Adding an approver-deny route and DTO is required to satisfy the
-literal approve-or-deny acceptance criterion.
+The S17 authority now exposes a dedicated approver `deny` command bound to the
+same preview digest and idempotency contract. Denied requests become terminal,
+cannot be approved or committed, and are covered by domain, HTTP, and React
+regressions.
 
 ## Follow-up authority verification
 

@@ -18,9 +18,9 @@ browser evidence.
   source values, result URLs, or credentials enter browser storage or rendered
   text.
 
-The released S17 API has requester revocation and no approver-deny command.
-The panel labels revocation as requester-owned; authoritative approver denial
-remains a backend contract gap.
+The S17 API exposes requester revocation and a separate approver denial command.
+The panel labels the two actions by owning identity and keeps denied requests
+outside generation and delivery controls.
 
 ## Verification
 
@@ -31,7 +31,7 @@ remains a backend contract gap.
 
 ```text
 npm run test:unit -- --run src/components/S17ExportPanel.test.tsx src/api/hooks.s17.test.tsx
-10 passed
+11 passed
 ```
 
 ```text

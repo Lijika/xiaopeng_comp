@@ -74,7 +74,7 @@ function assertAllowlistedRequests(requests) {
     { method: "GET", pattern: /^\/controlled\/s17\/api\/exports\/[^/]+$/ },
     { method: "GET", pattern: /^\/controlled\/s17\/api\/exports\/[^/]+\/receipt$/ },
     { method: "POST", pattern: /^\/controlled\/s17\/api\/exports\/preview$/ },
-    { method: "POST", pattern: /^\/controlled\/s17\/api\/exports\/[^/]+\/(?:approve|commit|access|confirm|revoke|expire)$/ },
+    { method: "POST", pattern: /^\/controlled\/s17\/api\/exports\/[^/]+\/(?:approve|deny|commit|access|confirm|revoke|expire)$/ },
     { method: "POST", pattern: /^\/controlled\/s17\/api\/process$/ },
   ];
   const violations = requests.filter(({ method, url }) => {

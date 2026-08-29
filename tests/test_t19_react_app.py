@@ -68,6 +68,9 @@ class FixtureExportService(GovernedExportService):
     def approve(self, **kwargs: Any) -> dict[str, Any]:
         return self._command(super().approve(**kwargs))
 
+    def deny(self, **kwargs: Any) -> dict[str, Any]:
+        return self._command(super().deny(**kwargs))
+
     def commit(self, **kwargs: Any) -> dict[str, Any]:
         return self._command(super().commit(**kwargs))
 
@@ -196,6 +199,48 @@ def test_t19_fixture_runs_the_fixed_request_and_one_time_delivery(
     assert queried.status_code == 200
     assert queried.json()["fields"] == ["application_fingerprint"]
     assert queried.json()["artifacts"] == ["route_metadata"]
+    denied_preview = client.post(
+        "/controlled/s17/api/exports/preview",
+        headers=requester,
+        json={
+            "purpose": "audit_response",
+            "fields": ["application_fingerprint"],
+            "artifacts": ["route_metadata"],
+            "recipient_id": RECIPIENT_SUBJECT,
+            "classification": "confidential",
+            "expiry": int(time.time()) + 3600,
+            "scope_reference": SCOPE_REFERENCE,
+            "idempotency_key": "t19-deny-preview",
+        },
+    ).json()
+    denied_id = denied_preview["request_id"]
+    denied = client.post(
+        f"/controlled/s17/api/exports/{denied_id}/deny",
+        headers={
+            **requester,
+            "X-S17-Approver-Token": f"Bearer {APPROVER_CREDENTIAL}",
+        },
+        json={
+            "preview_digest": denied_preview["preview_digest"],
+            "idempotency_key": "t19-deny",
+        },
+    )
+    assert denied.status_code == 200
+    assert denied.json()["status"] == "denied"
+    assert client.get(f"/controlled/s17/api/exports/{denied_id}", headers=requester).json()["status"] == "denied"
+    blocked = client.post(
+        f"/controlled/s17/api/exports/{denied_id}/approve",
+        headers={
+            **requester,
+            "X-S17-Approver-Token": f"Bearer {APPROVER_CREDENTIAL}",
+        },
+        json={
+            "preview_digest": denied_preview["preview_digest"],
+            "idempotency_key": "t19-deny-after",
+        },
+    )
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["reason_code"] == "S17_APPROVAL_DENIED"
     approved = client.post(
         f"/controlled/s17/api/exports/{request_id}/approve",
         headers={
