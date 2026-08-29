@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import email.policy
 import hmac
+import importlib
 import json
 import os
 import re
@@ -6977,13 +6978,116 @@ S17_RECIPIENT_CREDENTIAL = os.environ.get("TASK4_S17_RECIPIENT_CREDENTIAL", "").
 S17_RECIPIENT_SUBJECT = os.environ.get("TASK4_S17_RECIPIENT_SUBJECT", "").strip()
 S17_EXPORT_SCOPE = os.environ.get("TASK4_S17_EXPORT_SCOPE", "C-DEMO").strip() or "C-DEMO"
 S17_REACT_INDEX = S01_REACT_INDEX
-def _s17_service_factory():
-    # Institution adapters are injected by deployment.  The local process
-    # keeps the plane closed until all provider seams are present.
-    required = (S17_REQUESTER_CREDENTIAL, S17_REQUESTER_SUBJECT, S17_APPROVER_CREDENTIAL, S17_APPROVER_SUBJECT, S17_WORKER_CREDENTIAL, S17_WORKER_SUBJECT, S17_RECIPIENT_CREDENTIAL, S17_RECIPIENT_SUBJECT)
-    if not all(required):
+S17_STATE_PATH = os.environ.get("TASK4_S17_STATE_PATH", "").strip()
+S17_SOURCE_CONFIG = os.environ.get("TASK4_S17_SOURCE_CONFIG", "").strip()
+S17_RECIPIENT_CONFIG = os.environ.get("TASK4_S17_RECIPIENT_CONFIG", "").strip()
+S17_PROVIDER_CONFIG = os.environ.get("TASK4_S17_PROVIDER_CONFIG", "").strip()
+S17_AUDIT_CONFIG = os.environ.get("TASK4_S17_AUDIT_CONFIG", "").strip()
+S17_STORAGE_CONFIG = os.environ.get("TASK4_S17_STORAGE_CONFIG", "").strip()
+S17_SERVICE_FACTORY = os.environ.get("TASK4_S17_SERVICE_FACTORY", "").strip()
+S17_CONFIGURATION_ERROR: str | None = None
+
+
+def _s17_service_factory() -> Any | None:
+    """Load an institution-owned S17 adapter factory behind explicit gates."""
+    global S17_CONFIGURATION_ERROR
+    identities = (
+        S17_REQUESTER_CREDENTIAL,
+        S17_REQUESTER_SUBJECT,
+        S17_APPROVER_CREDENTIAL,
+        S17_APPROVER_SUBJECT,
+        S17_WORKER_CREDENTIAL,
+        S17_WORKER_SUBJECT,
+        S17_RECIPIENT_CREDENTIAL,
+        S17_RECIPIENT_SUBJECT,
+    )
+    if not all(identities):
+        S17_CONFIGURATION_ERROR = "S17 identities are incomplete"
         return None
-    return None
+    subjects = {
+        S17_REQUESTER_SUBJECT,
+        S17_APPROVER_SUBJECT,
+        S17_WORKER_SUBJECT,
+        S17_RECIPIENT_SUBJECT,
+    }
+    credentials = {
+        S17_REQUESTER_CREDENTIAL,
+        S17_APPROVER_CREDENTIAL,
+        S17_WORKER_CREDENTIAL,
+        S17_RECIPIENT_CREDENTIAL,
+    }
+    if len(subjects) != 4 or len(credentials) != 4:
+        S17_CONFIGURATION_ERROR = "S17 identities must be independent"
+        return None
+    controlled_subjects = {
+        str(globals().get(name, ""))
+        for name in (
+            "S01_DEMO_SUBJECT",
+            "S01_OPERATOR_SUBJECT",
+            "S01_AUDITOR_SUBJECT",
+            "S02_SUBJECT",
+            "S05_EXCEPTION_APPROVER_SUBJECT",
+            "S08_ADMIN_SUBJECT",
+            "S08_APPROVER_SUBJECT",
+            "S08_OPERATOR_SUBJECT",
+            "S09_REPLAY_SUBJECT",
+            "S09_SIMULATION_SUBJECT",
+            "S12_SUBJECT",
+            "S13_OPERATOR_SUBJECT",
+        )
+    }
+    controlled_credentials = {
+        str(globals().get(name, ""))
+        for name in (
+            "S01_DEMO_CREDENTIAL",
+            "S01_OPERATOR_CREDENTIAL",
+            "S01_AUDITOR_CREDENTIAL",
+            "S02_CREDENTIAL",
+            "S05_EXCEPTION_APPROVER_CREDENTIAL",
+            "S08_ADMIN_CREDENTIAL",
+            "S08_APPROVER_CREDENTIAL",
+            "S08_OPERATOR_CREDENTIAL",
+            "S09_REPLAY_CREDENTIAL",
+            "S09_SIMULATION_CREDENTIAL",
+            "S12_CREDENTIAL",
+            "S13_OPERATOR_CREDENTIAL",
+        )
+    }
+    if (subjects & controlled_subjects) or (credentials & controlled_credentials):
+        S17_CONFIGURATION_ERROR = "S17 identity aliases a controlled identity"
+        return None
+    configs = (
+        S17_STATE_PATH,
+        S17_SOURCE_CONFIG,
+        S17_RECIPIENT_CONFIG,
+        S17_PROVIDER_CONFIG,
+        S17_AUDIT_CONFIG,
+        S17_STORAGE_CONFIG,
+        S17_SERVICE_FACTORY,
+    )
+    if not all(configs):
+        S17_CONFIGURATION_ERROR = "S17 source, provider, recipient, audit, storage and factory configuration is required"
+        return None
+    module_name, separator, attribute = S17_SERVICE_FACTORY.partition(":")
+    if not separator or not module_name or not attribute:
+        S17_CONFIGURATION_ERROR = "TASK4_S17_SERVICE_FACTORY must use module:callable"
+        return None
+    try:
+        factory = getattr(importlib.import_module(module_name), attribute)
+        if not callable(factory):
+            raise TypeError("S17 service factory is not callable")
+        service = factory()
+        from task4_consistency.controlled.s17 import GovernedExportService
+
+        if not isinstance(service, GovernedExportService):
+            raise TypeError("S17 service factory returned an invalid service")
+        if not service.ready():
+            raise RuntimeError("S17 service is not ready")
+        return service
+    except Exception as exc:
+        S17_CONFIGURATION_ERROR = "S17 service factory is unavailable"
+        return None
+
 
 S17_SERVICE = _s17_service_factory()
 from task4_consistency.web.s17_http import register_router as register_s17_router
