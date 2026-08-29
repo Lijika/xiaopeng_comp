@@ -25,6 +25,11 @@ outside generation and delivery controls.
 ## Verification
 
 ```text
+.venv/bin/pytest -q tests/test_s17_controlled.py tests/test_s17_http.py tests/test_t19_react_app.py
+23 passed in 3.95s
+```
+
+```text
 .venv/bin/pytest -q tests/test_t19_react_app.py
 1 passed
 ```
