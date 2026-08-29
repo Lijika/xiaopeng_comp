@@ -88,6 +88,9 @@ class S17PreviewResponse(S17CommandResponse):
     watermark_plan: Any | None = None
 
 
+_S17_PREVIEW_FIELDS = frozenset(S17PreviewResponse.model_fields)
+
+
 class S17QueryResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     schema_version: str
@@ -203,7 +206,8 @@ def s17_preview(body: S17PreviewBody, request: Request, response: Response) -> d
     _nocache(response)
     try:
         p = _principal(request, "requester")
-        return _service(request).preview(**body.model_dump(), principal=p)
+        result = _service(request).preview(**body.model_dump(), principal=p)
+        return {key: result[key] for key in _S17_PREVIEW_FIELDS if key in result}
     except Exception as exc:
         raise _error(exc) from exc
 

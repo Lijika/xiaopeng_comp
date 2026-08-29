@@ -45,6 +45,10 @@ npx playwright test tests/test_t19_react.spec.js --workers=1
 2 passed (desktop 1280x800, mobile 390x844)
 ```
 
+The HTTP preview adapter projects full domain results to the closed response
+DTO. The fixture therefore exercises the same response validation boundary as
+configured production S17.
+
 The browser tracer uses separate requester and approver contexts, an isolated
 worker/recipient API context, one-time replay rejection, receipt cleanup proof,
 storage redaction, and horizontal-overflow checks.

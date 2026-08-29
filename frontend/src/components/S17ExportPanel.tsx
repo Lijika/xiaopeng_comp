@@ -229,6 +229,7 @@ export default function S17ExportPanel() {
               <div><dt>产物</dt><dd>{frozen.artifacts}</dd></div>
               <div><dt>分类</dt><dd>{frozen.classification}</dd></div>
               <div><dt>范围</dt><dd>{frozen.scope_reference}</dd></div>
+              <div><dt>有效期</dt><dd>{frozen.expiry} 秒</dd></div>
               <div><dt>请求指纹</dt><dd>{requestId.slice(-12)}</dd></div>
               <div><dt>预览摘要</dt><dd>{previewDigest.slice(0, 12)}</dd></div>
             </dl>

@@ -23,16 +23,12 @@ denial action; the existing revoke control is requester-owned and is labelled
 accordingly. Adding an approver-deny route and DTO is required to satisfy the
 literal approve-or-deny acceptance criterion.
 
-## Residual authority finding
+## Follow-up authority verification
 
-The released `task4_consistency/web/s17_http.py` preview route currently returns
-the domain preview dictionary through `S17PreviewResponse` with `extra="forbid"`.
-Configured S17 service responses therefore raise FastAPI
-`ResponseValidationError` for the domain's purpose, fields, artifacts,
-recipient, classification, expiry, source revisions, and policy digest keys.
-The T19 fixture adapts domain results to the closed command DTO to keep the
-frontend tracer focused. The HTTP authority owner must align the response DTO
-or return projection before claiming configured production preview evidence.
+The preview route now projects the domain result to the closed
+`S17PreviewResponse` field set before FastAPI validation. The T19 fixture uses
+the unadapted domain preview result, so `tests/test_t19_react_app.py` exercises
+the production response boundary and confirms the configured preview succeeds.
 
 Full repository pytest/Playwright, deployment packaging, live identity
 providers, and production rollback remain outside this ticket lane.
