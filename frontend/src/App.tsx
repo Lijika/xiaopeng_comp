@@ -360,7 +360,7 @@ function GovernedDeletionShell() {
 }
 
 function GovernedExportShell() {
-  return <div className="mx-auto max-w-4xl px-4 py-6"><header className="app-header"><h1>受控导出工作台</h1><span className="boundary">S17</span></header><main><S17ExportPanel /></main></div>;
+  return <div className="mx-auto max-w-4xl px-4 py-6"><header className="app-header"><h1>受控导出工作台</h1><span className="boundary" data-testid="s17-boundary-gate">S17</span></header><main><S17ExportPanel /></main></div>;
 }
 
 /** The Reviewer workbench owns every S01 read; it is never mounted on the

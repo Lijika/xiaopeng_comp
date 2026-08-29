@@ -64,27 +64,54 @@ export const S17_REQUEST_KEY = (requestId: string) => ["s17", "exports", request
 export const S17_RECEIPT_KEY = (requestId: string) => ["s17", "exports", requestId, "receipt"] as const;
 export interface S17PreviewCommand { purpose: string; fields: string[]; artifacts: string[]; recipient_id: string; classification: string; expiry: number; scope_reference: string; idempotency_key: string; }
 export interface S17RequestCommand { requestId: string; idempotency_key: string; }
+export interface S17ApproveCommand extends S17RequestCommand { preview_digest: string; approverToken?: string; }
+export interface S17AccessCommand { requestId: string; token: string; recipientToken?: string; }
+export interface S17WorkerCommand extends S17RequestCommand { workerToken?: string; }
+export interface S17ProcessCommand { workerToken?: string; }
 
 export function useS17Preview(): UseMutationResult<S17PreviewResponse, Error, S17PreviewCommand> {
   const queryClient = useQueryClient();
   return useMutation({ mutationFn: (body) => request<S17PreviewResponse>("/controlled/s17/api/exports/preview", { method: "POST", body: JSON.stringify(body) }), retry: false, onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["s17"] }); } });
 }
-export function useS17Query(requestId: string | null): UseQueryResult<S17QueryResponse> {
-  return useQuery({ queryKey: S17_REQUEST_KEY(requestId ?? ""), queryFn: () => request<S17QueryResponse>(`/controlled/s17/api/exports/${encodeURIComponent(requestId ?? "")}`), enabled: Boolean(requestId), retry: retryPolicy, gcTime: 0 });
+export function useS17Query(requestId: string | null, approverToken = ""): UseQueryResult<S17QueryResponse> {
+  return useQuery({ queryKey: S17_REQUEST_KEY(requestId ?? ""), queryFn: () => request<S17QueryResponse>(`/controlled/s17/api/exports/${encodeURIComponent(requestId ?? "")}`, { headers: approverToken ? { "X-S17-Approver-Token": `Bearer ${approverToken}` } : undefined }), enabled: Boolean(requestId), retry: retryPolicy, gcTime: 0, refetchOnWindowFocus: false, refetchInterval: (query) => ["queued", "processing", "timeout"].includes(query.state.data?.status ?? "") ? 1200 : false });
 }
-export function useS17Receipt(requestId: string | null): UseQueryResult<S17ReceiptResponse> {
-  return useQuery({ queryKey: S17_RECEIPT_KEY(requestId ?? ""), queryFn: () => request<S17ReceiptResponse>(`/controlled/s17/api/exports/${encodeURIComponent(requestId ?? "")}/receipt`), enabled: Boolean(requestId), retry: retryPolicy, gcTime: 0 });
+export function useS17Receipt(requestId: string | null, requested = true): UseQueryResult<S17ReceiptResponse> {
+  return useQuery({ queryKey: S17_RECEIPT_KEY(requestId ?? ""), queryFn: () => request<S17ReceiptResponse>(`/controlled/s17/api/exports/${encodeURIComponent(requestId ?? "")}/receipt`), enabled: Boolean(requestId) && requested, retry: retryPolicy, gcTime: 0, refetchOnWindowFocus: false });
 }
 function useS17Command(path: string, method = "POST"): UseMutationResult<S17CommandResponse, Error, S17RequestCommand> {
   const queryClient = useQueryClient();
   return useMutation({ mutationFn: (command) => request<S17CommandResponse>(`/controlled/s17/api/exports/${encodeURIComponent(command.requestId)}${path}`, { method, body: JSON.stringify({ idempotency_key: command.idempotency_key }) }), retry: false, onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["s17"] }); } });
 }
-export function useS17Approve(): UseMutationResult<S17CommandResponse, Error, S17RequestCommand & { preview_digest: string }> {
+export function useS17Approve(): UseMutationResult<S17CommandResponse, Error, S17ApproveCommand> {
   const queryClient = useQueryClient();
-  return useMutation({ mutationFn: (command) => request<S17CommandResponse>(`/controlled/s17/api/exports/${encodeURIComponent(command.requestId)}/approve`, { method: "POST", body: JSON.stringify({ preview_digest: command.preview_digest, idempotency_key: command.idempotency_key }) }), retry: false, onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["s17"] }); } });
+  return useMutation({ mutationFn: (command) => request<S17CommandResponse>(`/controlled/s17/api/exports/${encodeURIComponent(command.requestId)}/approve`, { method: "POST", headers: command.approverToken ? { "X-S17-Approver-Token": `Bearer ${command.approverToken}` } : undefined, body: JSON.stringify({ preview_digest: command.preview_digest, idempotency_key: command.idempotency_key }) }), retry: false, onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["s17"] }); } });
 }
 export function useS17Commit() { return useS17Command("/commit"); }
-export function useS17Revoke() { return useS17Command("/revoke"); }
+export function useS17Access(): UseMutationResult<S17CommandResponse, Error, S17AccessCommand> {
+  const queryClient = useQueryClient();
+  return useMutation({ mutationFn: (command) => request<S17CommandResponse>(`/controlled/s17/api/exports/${encodeURIComponent(command.requestId)}/access`, { method: "POST", headers: command.recipientToken ? { Authorization: `Bearer ${command.recipientToken}` } : undefined, body: JSON.stringify({ token: command.token }) }), retry: false, onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["s17"] }); } });
+}
+function useS17HeaderCommand(path: string, headerName: string): UseMutationResult<S17CommandResponse, Error, S17WorkerCommand> {
+  const queryClient = useQueryClient();
+  return useMutation({ mutationFn: (command) => request<S17CommandResponse>(`/controlled/s17/api/exports/${encodeURIComponent(command.requestId)}${path}`, { method: "POST", headers: { [headerName]: command.idempotency_key }, }), retry: false, onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["s17"] }); } });
+}
+export interface S17ConfirmCommand extends S17RequestCommand { recipientToken?: string; }
+export function useS17Confirm(): UseMutationResult<S17CommandResponse, Error, S17ConfirmCommand> {
+  const queryClient = useQueryClient();
+  return useMutation({ mutationFn: (command) => request<S17CommandResponse>(`/controlled/s17/api/exports/${encodeURIComponent(command.requestId)}/confirm`, { method: "POST", headers: { ...(command.recipientToken ? { Authorization: `Bearer ${command.recipientToken}` } : {}), "Idempotency-Key": command.idempotency_key } }), retry: false, onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["s17"] }); } });
+}
+export function useS17Revoke(): UseMutationResult<S17CommandResponse, Error, S17RequestCommand> {
+  return useS17HeaderCommand("/revoke", "Idempotency-Key");
+}
+export function useS17Expire(): UseMutationResult<S17CommandResponse, Error, S17WorkerCommand> {
+  const queryClient = useQueryClient();
+  return useMutation({ mutationFn: (command) => request<S17CommandResponse>(`/controlled/s17/api/exports/${encodeURIComponent(command.requestId)}/expire`, { method: "POST", headers: { Authorization: command.workerToken ? `Bearer ${command.workerToken}` : "", "Idempotency-Key": command.idempotency_key }, }), retry: false, onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["s17"] }); } });
+}
+export function useS17Process(): UseMutationResult<S17CommandResponse, Error, S17ProcessCommand> {
+  const queryClient = useQueryClient();
+  return useMutation({ mutationFn: (command) => request<S17CommandResponse>("/controlled/s17/api/process", { method: "POST", headers: command.workerToken ? { Authorization: `Bearer ${command.workerToken}` } : undefined }), retry: false, onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["s17"] }); } });
+}
 
 /** The restricted reveal and evidence-correction command results, bound to
  * the generated OpenAPI schemas (mirrors the sibling result aliases in
