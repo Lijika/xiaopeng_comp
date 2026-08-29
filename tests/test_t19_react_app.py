@@ -192,6 +192,11 @@ def test_t19_fixture_runs_the_fixed_request_and_one_time_delivery(
     assert preview.status_code == 200
     fixed = preview.json()
     request_id = fixed["request_id"]
+    queried = client.get(f"/controlled/s17/api/exports/{request_id}", headers=requester)
+    assert queried.status_code == 200
+    assert queried.json()["fields"] == ["application_fingerprint"]
+    assert queried.json()["artifacts"] == ["route_metadata"]
+    assert queried.json()["scope_reference"] == SCOPE_REFERENCE
     approved = client.post(
         f"/controlled/s17/api/exports/{request_id}/approve",
         headers={

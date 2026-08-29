@@ -98,6 +98,9 @@ class S17QueryResponse(BaseModel):
     status: str
     preview_digest: str | None = None
     scope_fingerprint: str | None = None
+    fields: tuple[str, ...] = ()
+    artifacts: tuple[str, ...] = ()
+    scope_reference: str | None = None
     purpose: str | None = None
     recipient_id: str | None = None
     classification: str | None = None

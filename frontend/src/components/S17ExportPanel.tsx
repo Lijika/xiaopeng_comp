@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { HttpError } from "../api/client";
 import {
   useS17Access,
@@ -33,8 +34,16 @@ const initialDraft: Draft = {
   scope_reference: "APP-REF-1",
 };
 
+type OperationName = "preview" | "approve" | "commit" | "process" | "access" | "confirm" | "expire" | "revoke";
+
 function idempotencyKey(prefix: string, requestId = "") {
   return `${prefix}-${requestId}-${Date.now()}`;
+}
+
+function isDefinitiveS17Rejection(error: unknown): boolean {
+  if (!(error instanceof HttpError)) return false;
+  if ([400, 401, 403, 404, 409, 422].includes(error.status)) return true;
+  return error.status === 503 && error.errorCode === "S17_UNAVAILABLE";
 }
 
 function parseList(value: string): string[] {
@@ -44,7 +53,7 @@ function parseList(value: string): string[] {
     .filter(Boolean);
 }
 
-function ErrorState({ error, action }: { error: Error; action?: string }) {
+function ErrorState({ error, action, unknown }: { error: Error; action?: string; unknown?: boolean }) {
   const code = error instanceof HttpError ? error.errorCode ?? `S17_HTTP_${error.status}` : "S17_HTTP_UNKNOWN";
   const reason = error instanceof HttpError ? error.reasonCode : undefined;
   return (
@@ -52,6 +61,7 @@ function ErrorState({ error, action }: { error: Error; action?: string }) {
       <p>{action ?? "导出操作失败"}</p>
       <p data-testid="s17-error-code">{code}</p>
       {reason ? <p data-testid="s17-error-reason">{reason}</p> : null}
+      {unknown ? <p data-testid="s17-unknown">结果未知，请查询权威状态后再决定是否重试。</p> : null}
     </div>
   );
 }
@@ -74,6 +84,7 @@ function StatusFacts({ status, query }: { status: string; query: ReturnType<type
 }
 
 export default function S17ExportPanel() {
+  const queryClient = useQueryClient();
   const [draft, setDraft] = useState<Draft>(initialDraft);
   const [requestId, setRequestId] = useState<string | null>(() => {
     if (typeof window === "undefined") return null;
@@ -90,6 +101,9 @@ export default function S17ExportPanel() {
   const [lastStatus, setLastStatus] = useState("draft");
   const [commitConfirmed, setCommitConfirmed] = useState(false);
   const [generationResult, setGenerationResult] = useState<{ status: string; reasonCode?: string }>({ status: "idle" });
+  const [unknownActions, setUnknownActions] = useState<Set<OperationName>>(new Set());
+  const [identityDenied, setIdentityDenied] = useState(false);
+  const operationKeys = useRef(new Map<string, string>());
 
   const preview = useS17Preview();
   const approve = useS17Approve();
@@ -101,32 +115,81 @@ export default function S17ExportPanel() {
   const revoke = useS17Revoke();
   const query = useS17Query(requestId);
   const receipt = useS17Receipt(requestId, showReceipt);
-  const status = lastStatus !== "draft" ? lastStatus : query.data?.status ?? lastStatus;
+  const status = query.data?.status ?? lastStatus;
   const effectiveApproved = approved || ["approved", "queued", "delivered", "accessed", "confirmed"].includes(status);
   const requestReady = useMemo(
     () => draft.purpose.trim() !== "" && draft.recipient_id.trim() !== "" && draft.scope_reference.trim() !== "" && (parseList(draft.fields).length > 0 || parseList(draft.artifacts).length > 0),
     [draft],
   );
-  const frozen = frozenDraft ?? draft;
+  const frozen: Draft = query.data
+    ? {
+        purpose: query.data.purpose ?? "",
+        recipient_id: query.data.recipient_id ?? "",
+        fields: (query.data.fields ?? []).join(", "),
+        artifacts: (query.data.artifacts ?? []).join(", "),
+        classification: query.data.classification ?? "",
+        expiry: query.data.expiry === null || query.data.expiry === undefined ? "" : String(query.data.expiry),
+        scope_reference: query.data.scope_reference ?? "",
+      }
+    : frozenDraft ?? draft;
   const disabled = requestId !== null;
 
+  const getOperationKey = (operation: OperationName, id = requestId ?? "") => {
+    const key = `${operation}:${id}`;
+    const existing = operationKeys.current.get(key);
+    if (existing) return existing;
+    const created = idempotencyKey(`s17-${operation}`, id);
+    operationKeys.current.set(key, created);
+    return created;
+  };
+  const clearOperationKey = (operation: OperationName, id = requestId ?? "") => {
+    operationKeys.current.delete(`${operation}:${id}`);
+  };
+  const handleOperationError = (operation: OperationName, error: Error, clearCredential?: () => void, keyId = requestId ?? "") => {
+    clearCredential?.();
+    if (error instanceof HttpError && error.status === 403) {
+      setApproverToken("");
+      setWorkerToken("");
+      setDeliveryToken("");
+      setRecipientCredential("");
+      return;
+    }
+    if (isDefinitiveS17Rejection(error)) {
+      clearOperationKey(operation, keyId);
+      setUnknownActions((current) => {
+        const next = new Set(current);
+        next.delete(operation);
+        return next;
+      });
+      return;
+    }
+    setUnknownActions((current) => new Set(current).add(operation));
+  };
+
   useEffect(() => {
+    if (query.error instanceof HttpError && query.error.status === 403) {
+      queryClient.removeQueries({ queryKey: ["s17"] });
+      setApproverToken("");
+      setWorkerToken("");
+      setDeliveryToken("");
+      setRecipientCredential("");
+      setIdentityDenied(true);
+      return;
+    }
     if (!query.data) return;
     if (!previewDigest && query.data.preview_digest) setPreviewDigest(query.data.preview_digest);
     if (!approved && ["approved", "queued", "delivered", "accessed", "confirmed"].includes(query.data.status)) setApproved(true);
-    if (!frozenDraft) {
-      setFrozenDraft({
-        ...draft,
-        purpose: query.data.purpose ?? draft.purpose,
-        recipient_id: query.data.recipient_id ?? draft.recipient_id,
-        classification: query.data.classification ?? draft.classification,
-        scope_reference: draft.scope_reference,
-        expiry: query.data.expiry ? String(query.data.expiry) : draft.expiry,
-      });
-    }
-  }, [approved, draft, frozenDraft, previewDigest, query.data]);
+  }, [approved, previewDigest, query.data, query.error, queryClient]);
 
-  const updateDraft = (key: keyof Draft, value: string) => setDraft((current) => ({ ...current, [key]: value }));
+  const updateDraft = (key: keyof Draft, value: string) => {
+    clearOperationKey("preview", "draft");
+    setUnknownActions((current) => {
+      const next = new Set(current);
+      next.delete("preview");
+      return next;
+    });
+    setDraft((current) => ({ ...current, [key]: value }));
+  };
   const handlePreview = () => {
     if (!requestReady) return;
     const expiry = Math.floor(Date.now() / 1000) + Math.max(1, Number.parseInt(draft.expiry, 10) || 1);
@@ -139,7 +202,7 @@ export default function S17ExportPanel() {
         classification: draft.classification.trim(),
         expiry,
         scope_reference: draft.scope_reference.trim(),
-        idempotency_key: idempotencyKey("s17-preview"),
+        idempotency_key: getOperationKey("preview", "draft"),
       },
       {
         onSuccess: (result) => {
@@ -148,12 +211,15 @@ export default function S17ExportPanel() {
           setPreviewDigest(result.preview_digest);
           setFrozenDraft({ ...draft });
           setLastStatus(result.status);
+          clearOperationKey("preview", "draft");
+          setUnknownActions((current) => { const next = new Set(current); next.delete("preview"); return next; });
           if (typeof window !== "undefined") {
             const params = new URLSearchParams(window.location.search);
             params.set("request", result.request_id);
             window.history.replaceState(null, "", `?${params.toString()}`);
           }
         },
+        onError: (error) => handleOperationError("preview", error, undefined, "draft"),
       },
     );
   };
@@ -161,43 +227,47 @@ export default function S17ExportPanel() {
   const handleApprove = () => {
     if (!requestId || !approverToken || !previewDigest) return;
     approve.mutate(
-      { requestId, preview_digest: previewDigest, idempotency_key: idempotencyKey("s17-approve", requestId), approverToken },
-      { onSuccess: (result) => { setApproved(result.status === "approved" || result.status === "replayed"); setLastStatus(result.status); setApproverToken(""); approve.reset(); }, onError: () => setApproverToken("") },
+      { requestId, preview_digest: previewDigest, idempotency_key: getOperationKey("approve"), approverToken },
+      { onSuccess: (result) => { setApproved(result.status === "approved" || result.status === "replayed"); setLastStatus(result.status); setApproverToken(""); approve.reset(); clearOperationKey("approve"); setUnknownActions((current) => { const next = new Set(current); next.delete("approve"); return next; }); }, onError: (error) => handleOperationError("approve", error, () => setApproverToken("")) },
     );
   };
   const handleCommit = () => {
     if (!requestId || !effectiveApproved || !commitConfirmed) return;
     commit.mutate(
-      { requestId, idempotency_key: idempotencyKey("s17-commit", requestId) },
-      { onSuccess: (result) => setLastStatus(result.status) },
+      { requestId, idempotency_key: getOperationKey("commit" ) },
+      { onSuccess: (result) => { setLastStatus(result.status); clearOperationKey("commit"); setUnknownActions((current) => { const next = new Set(current); next.delete("commit"); return next; }); }, onError: (error) => handleOperationError("commit", error) },
     );
   };
   const handleProcess = () => {
     if (!workerToken) return;
     process.mutate(
       { workerToken },
-      { onSuccess: (result) => { setLastStatus(result.status); setGenerationResult({ status: result.status, reasonCode: result.reason_code ?? undefined }); setWorkerToken(""); process.reset(); }, onError: () => setWorkerToken("") },
+      { onSuccess: (result) => { setLastStatus(result.status); setGenerationResult({ status: result.status, reasonCode: result.reason_code ?? undefined }); setWorkerToken(""); process.reset(); setUnknownActions((current) => { const next = new Set(current); next.delete("process"); return next; }); }, onError: (error) => handleOperationError("process", error, () => setWorkerToken("")) },
     );
   };
   const handleAccess = () => {
     if (!requestId || !deliveryToken) return;
     access.mutate(
       { requestId, token: deliveryToken, recipientToken: recipientCredential },
-      { onSuccess: (result) => { setLastStatus(result.status); setDeliveryToken(""); setRecipientCredential(""); access.reset(); }, onError: () => { setDeliveryToken(""); setRecipientCredential(""); } },
+      { onSuccess: (result) => { setLastStatus(result.status); setDeliveryToken(""); setRecipientCredential(""); access.reset(); setUnknownActions((current) => { const next = new Set(current); next.delete("access"); return next; }); }, onError: (error) => handleOperationError("access", error, () => { setDeliveryToken(""); setRecipientCredential(""); }) },
     );
   };
   const handleConfirm = () => {
     if (!requestId) return;
-    confirm.mutate({ requestId, idempotency_key: idempotencyKey("s17-confirm", requestId), recipientToken: recipientCredential }, { onSuccess: (result) => setLastStatus(result.status) });
+    confirm.mutate({ requestId, idempotency_key: getOperationKey("confirm"), recipientToken: recipientCredential }, { onSuccess: (result) => { setLastStatus(result.status); setRecipientCredential(""); clearOperationKey("confirm"); setUnknownActions((current) => { const next = new Set(current); next.delete("confirm"); return next; }); }, onError: (error) => handleOperationError("confirm", error, () => setRecipientCredential("")) });
   };
   const handleExpire = () => {
     if (!requestId || !workerToken) return;
-    expire.mutate({ requestId, idempotency_key: idempotencyKey("s17-expire", requestId), workerToken }, { onSuccess: (result) => { setLastStatus(result.status); setWorkerToken(""); expire.reset(); }, onError: () => setWorkerToken("") });
+    expire.mutate({ requestId, idempotency_key: getOperationKey("expire"), workerToken }, { onSuccess: (result) => { setLastStatus(result.status); setWorkerToken(""); expire.reset(); clearOperationKey("expire"); setUnknownActions((current) => { const next = new Set(current); next.delete("expire"); return next; }); }, onError: (error) => handleOperationError("expire", error, () => setWorkerToken("")) });
   };
   const handleRevoke = () => {
     if (!requestId) return;
-    revoke.mutate({ requestId, idempotency_key: idempotencyKey("s17-revoke", requestId) }, { onSuccess: (result) => setLastStatus(result.status) });
+    revoke.mutate({ requestId, idempotency_key: getOperationKey("revoke") }, { onSuccess: (result) => { setLastStatus(result.status); clearOperationKey("revoke"); setUnknownActions((current) => { const next = new Set(current); next.delete("revoke"); return next; }); }, onError: (error) => handleOperationError("revoke", error) });
   };
+
+  if (identityDenied) {
+    return <section className="panel" data-testid="s17-export-panel"><h2>受控导出</h2><ErrorState error={query.error ?? new HttpError(403, { error: "S17_FORBIDDEN" })} action="当前身份无权访问受控导出" /></section>;
+  }
 
   return (
     <section className="panel" data-testid="s17-export-panel">
@@ -215,10 +285,11 @@ export default function S17ExportPanel() {
           <label>范围引用<input data-testid="s17-scope" value={draft.scope_reference} onChange={(event) => updateDraft("scope_reference", event.target.value)} disabled={disabled} /></label>
         </div>
         <button type="button" data-testid="s17-preview-button" onClick={handlePreview} disabled={!requestReady || preview.isPending || disabled}>{preview.isPending ? "提交中…" : "预览并冻结请求"}</button>
-        {preview.error ? <ErrorState error={preview.error} action="预览未被接受" /> : null}
+        {preview.error ? <ErrorState error={preview.error} action="预览未被接受" unknown={unknownActions.has("preview")} /> : null}
       </section>
 
-      {requestId ? (
+      {requestId && query.error ? <ErrorState error={query.error} action="请求状态读取失败" /> : null}
+      {requestId && !query.error ? (
         <>
           <section className="panel" data-testid="s17-export-state" aria-labelledby="s17-fixed-title">
             <h3 id="s17-fixed-title">不可变请求</h3>
@@ -234,7 +305,7 @@ export default function S17ExportPanel() {
               <div><dt>预览摘要</dt><dd>{previewDigest.slice(0, 12)}</dd></div>
             </dl>
             <button type="button" data-testid="s17-deny-button" onClick={handleRevoke} disabled={revoke.isPending || status === "revoked" || status === "confirmed"}>撤销请求（拒绝导出）</button>
-            {revoke.error ? <ErrorState error={revoke.error} action="撤销未被接受" /> : null}
+            {revoke.error ? <ErrorState error={revoke.error} action="撤销未被接受" unknown={unknownActions.has("revoke")} /> : null}
           </section>
 
           <StatusFacts status={status} query={query} />
@@ -244,7 +315,7 @@ export default function S17ExportPanel() {
             <p data-testid="s17-approval-status">{status === "revoked" ? "已拒绝" : approved ? "已批准" : "等待独立审批"}</p>
             <label>审批人凭据（仅本次动作）<input data-testid="s17-approver-token" type="password" autoComplete="off" value={approverToken} onChange={(event) => setApproverToken(event.target.value)} disabled={approved || approve.isPending} /></label>
             <button type="button" data-testid="s17-approve-button" onClick={handleApprove} disabled={!approverToken || approved || approve.isPending || status === "revoked"}>{approve.isPending ? "提交中…" : "独立批准固定请求"}</button>
-            {approve.error ? <ErrorState error={approve.error} action="审批未被接受" /> : null}
+            {approve.error ? <ErrorState error={approve.error} action="审批未被接受" unknown={unknownActions.has("approve")} /> : null}
           </section>
 
           <section className="panel" data-testid="s17-generation" aria-labelledby="s17-generation-title">
@@ -256,9 +327,9 @@ export default function S17ExportPanel() {
               <button type="button" data-testid="s17-process-button" onClick={handleProcess} disabled={!workerToken || !effectiveApproved || process.isPending}>{process.isPending ? "生成中…" : "执行一次生成"}</button>
               <button type="button" data-testid="s17-expire-button" onClick={handleExpire} disabled={!workerToken || expire.isPending || status === "confirmed"}>{expire.isPending ? "处理中…" : "执行过期清理"}</button>
             </div>
-            {commit.error ? <ErrorState error={commit.error} action="生成请求未被接受" /> : null}
-            {process.error ? <ErrorState error={process.error} action="生成失败，临时产物已由服务端清理" /> : null}
-            {expire.error ? <ErrorState error={expire.error} action="过期处理未被接受" /> : null}
+            {commit.error ? <ErrorState error={commit.error} action="生成请求未被接受" unknown={unknownActions.has("commit")} /> : null}
+            {process.error ? <ErrorState error={process.error} action="生成失败，临时产物已由服务端清理" unknown={unknownActions.has("process")} /> : null}
+            {expire.error ? <ErrorState error={expire.error} action="过期处理未被接受" unknown={unknownActions.has("expire")} /> : null}
             {generationResult.reasonCode ? <p data-testid="s17-generation-failure" role="status">{generationResult.reasonCode} · 服务端已清理临时产物</p> : null}
           </section>
 
@@ -268,8 +339,8 @@ export default function S17ExportPanel() {
             <label>一次性投递凭据（仅本次动作）<input data-testid="s17-delivery-token" type="password" autoComplete="off" value={deliveryToken} onChange={(event) => setDeliveryToken(event.target.value)} disabled={status === "expired" || status === "revoked" || status === "confirmed"} /></label>
             <button type="button" data-testid="s17-access-button" onClick={handleAccess} disabled={!deliveryToken || access.isPending || status === "expired" || status === "revoked"}>{access.isPending ? "校验中…" : "访问一次性结果"}</button>
             <button type="button" data-testid="s17-confirm-button" onClick={handleConfirm} disabled={status !== "accessed" || confirm.isPending}>{confirm.isPending ? "确认中…" : "确认已接收"}</button>
-            {access.error ? <ErrorState error={access.error} action="访问未被接受" /> : null}
-            {confirm.error ? <ErrorState error={confirm.error} action="确认未被接受" /> : null}
+            {access.error ? <ErrorState error={access.error} action="访问未被接受" unknown={unknownActions.has("access")} /> : null}
+            {confirm.error ? <ErrorState error={confirm.error} action="确认未被接受" unknown={unknownActions.has("confirm")} /> : null}
           </section>
 
           <section className="panel" data-testid="s17-receipt-section" aria-labelledby="s17-receipt-title">

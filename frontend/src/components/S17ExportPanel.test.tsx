@@ -102,6 +102,32 @@ describe("S17ExportPanel", () => {
     expect(screen.getByTestId("s17-approver-token")).toHaveValue("");
   });
 
+  it("keeps the request available after an approver credential rejection", async () => {
+    let attempts = 0;
+    const router = fetchRouter({
+      [`POST ${PREVIEW_PATH}`]: () => router.jsonResponse(previewPayload()),
+      [`GET ${REQUEST_PATH}`]: () => router.jsonResponse(queryPayload()),
+      [`POST ${APPROVE_PATH}`]: () => {
+        attempts += 1;
+        return attempts === 1
+          ? router.errorResponse(403, "S17_FORBIDDEN")
+          : router.jsonResponse({ status: "approved", request_id: REQUEST_ID });
+      },
+    });
+    renderWithQuery(<S17ExportPanel />);
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("s17-preview-button"));
+    await screen.findByTestId("s17-approver-token");
+    await user.type(screen.getByTestId("s17-approver-token"), "wrong-token");
+    await user.click(screen.getByTestId("s17-approve-button"));
+    await screen.findByTestId("s17-error");
+    expect(screen.getByTestId("s17-export-state")).toBeVisible();
+    expect(screen.getByTestId("s17-approver-token")).toHaveValue("");
+    await user.type(screen.getByTestId("s17-approver-token"), "correct-token");
+    await user.click(screen.getByTestId("s17-approve-button"));
+    await waitFor(() => expect(screen.getByTestId("s17-approval-status")).toHaveTextContent("已批准"));
+  });
+
   it("drives server generation, one-time access, confirmation and value-free receipt", async () => {
     let status = "previewed";
     const router = fetchRouter({

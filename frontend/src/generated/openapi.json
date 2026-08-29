@@ -19590,6 +19590,14 @@
       "S17QueryResponse": {
         "additionalProperties": false,
         "properties": {
+          "artifacts": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Artifacts",
+            "type": "array"
+          },
           "attempt": {
             "default": 0,
             "title": "Attempt",
@@ -19627,6 +19635,14 @@
               }
             ],
             "title": "Expiry"
+          },
+          "fields": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Fields",
+            "type": "array"
           },
           "operation_id": {
             "anyOf": [
@@ -19723,6 +19739,17 @@
               }
             ],
             "title": "Scope Fingerprint"
+          },
+          "scope_reference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope Reference"
           },
           "source_revisions": {
             "additionalProperties": true,
