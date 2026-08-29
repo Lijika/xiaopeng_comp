@@ -1988,16 +1988,29 @@ class BackupDeletionOwner:
                     fence_n = self._parse_fence_int(fence)
                     source_n = self._parse_fence_int(source_fence)
                 except (TypeError, ValueError):
+                    # Keep the row's stable identity fields when a legacy
+                    # source fence is absent or a fence field is malformed.
+                    # The caller can then distinguish a pre-marker legacy
+                    # intent from damaged scope/status history without
+                    # writing a derived fence row.
+                    try:
+                        fence_n = self._coerce_live_fence_int(fence)
+                    except (TypeError, ValueError):
+                        fence_n = 0
+                    try:
+                        source_n = self._coerce_live_fence_int(source_fence)
+                    except (TypeError, ValueError):
+                        source_n = None
                     grouped.setdefault(op_id, []).append(
                         (
-                            0,
-                            "",
-                            "",
-                            "unknown",
-                            None,
+                            fence_n,
+                            str(scope or ""),
+                            str(digest or ""),
+                            str(status or ""),
+                            source_n,
                             kind,
-                            "[",
-                            "{",
+                            identities_json if identities_json is not None else "[]",
+                            manifest_ids_json if manifest_ids_json is not None else "[]",
                         )
                     )
                     continue
@@ -2182,6 +2195,10 @@ class BackupDeletionOwner:
             binding_terminal = {"complete", "committed"}
             intent_inflight = {"staged", "transitioned"}
             intent_terminal = {"complete", "committed"}
+            # ``unverified`` is a completed binding whose post-commit proof
+            # failed.  Its committed intent remains the source of the
+            # immutable proof while a later fence repairs the binding, so it
+            # is not an in-flight intent conflict.
             binding_inflight = {"staged", "transitioned"}
             if binding_statuses & binding_terminal and intent_statuses & intent_inflight:
                 raise ValueError("status conflict")
@@ -2317,17 +2334,68 @@ class BackupDeletionOwner:
             (operation_id,),
         ).fetchone()
         if row is None:
-            self._migrate_one_operation_fence(connection, operation_id)
-            if self._fence_migration_failed(connection, operation_id):
+            # Runtime command rejection must be observational when a legacy
+            # or manually staged intent has no derived fence row yet.  Startup
+            # performs durable migration; command paths derive an in-memory
+            # view and let their own marker/residue checks decide the result.
+            try:
+                grouped = self._operation_fence_history(connection, operation_id)
+                rows = grouped.get(operation_id, [])
+                if not rows:
+                    return False
+                high_water, active, source_fence, scope, digest = (
+                    self._derive_operation_fence(rows)
+                )
+                row = (
+                    operation_id,
+                    high_water,
+                    active,
+                    source_fence,
+                    scope,
+                    digest,
+                )
+            except sqlite3.Error:
+                self._record_fence_migration_failure(connection, operation_id)
                 return True
-            row = connection.execute(
-                "SELECT operation_id, high_water, active_fence, source_fence, "
-                "scope_fingerprint, fingerprints_digest "
-                "FROM backup_operation_fences WHERE operation_id = ?",
-                (operation_id,),
-            ).fetchone()
-            if row is None:
-                return False
+            except (TypeError, ValueError, json.JSONDecodeError):
+                # Preserve the durable fail-closed marker for malformed
+                # JSON/history rows. A legacy row with a missing source fence
+                # remains an owner-level rejection handled by delete() so it
+                # can report the marker/residue failure without creating a
+                # derived operation-fence row.
+                json_valid = True
+                for history_row in rows:
+                    try:
+                        self._fence_json_id_set(history_row[6])
+                        self._fence_json_id_set(history_row[7])
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        json_valid = False
+                        break
+                legacy_missing_source = bool(rows) and json_valid and all(
+                    isinstance(history_row[0], int)
+                    and history_row[0] > 0
+                    and bool(history_row[1])
+                    and bool(history_row[2])
+                    and history_row[3]
+                    in {
+                        "staged",
+                        "transitioned",
+                        "unverified",
+                        "complete",
+                        "committed",
+                        "superseded",
+                    }
+                    and history_row[4] is None
+                    for history_row in rows
+                )
+                malformed_history = not legacy_missing_source
+                if malformed_history:
+                    self._record_fence_migration_failure(connection, operation_id)
+                # Absence proofs must fail closed on any malformed history.
+                # Delete's allow-higher path still reaches its staged-intent
+                # marker/residue checks for legacy rows with a missing source
+                # fence, preserving their owner-specific failure envelope.
+                return malformed_history or not allow_higher
         else:
             if not self._validate_runtime_operation_fence(
                 connection, operation_id, row
@@ -3207,6 +3275,20 @@ class BackupDeletionOwner:
                             "repair_backup_capture_and_resume_the_same_job"
                         ),
                     )
+                # A repair-forward fence keeps the original source fence
+                # that established the operation.  The active fence advances
+                # for the takeover while the source proof remains bound to
+                # the first staged pass.
+                source_row = connection.execute(
+                    "SELECT source_fence FROM backup_operation_fences "
+                    "WHERE operation_id = ?",
+                    (operation_id,),
+                ).fetchone()
+                source_fence = (
+                    int(source_row[0])
+                    if source_row is not None and source_row[0] is not None
+                    else int(fence)
+                )
                 connection.execute(
                     "INSERT INTO backup_deletion_bindings("
                     "operation_id, fence, scope_fingerprint, "
@@ -3222,14 +3304,14 @@ class BackupDeletionOwner:
                         int(self._clock()),
                         "[]",
                         "[]",
-                        int(fence),
+                        source_fence,
                     ),
                 )
                 self._bump_operation_fence(
                     connection,
                     operation_id,
                     int(fence),
-                    int(fence),
+                    source_fence,
                     scope_fingerprint,
                     fingerprints_digest,
                 )
@@ -3313,6 +3395,16 @@ class BackupDeletionOwner:
                         "repair_backup_capture_and_resume_the_same_job"
                     ),
                 )
+            source_row = connection.execute(
+                "SELECT source_fence FROM backup_operation_fences "
+                "WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            source_fence = (
+                int(source_row[0])
+                if source_row is not None and source_row[0] is not None
+                else int(fence)
+            )
             connection.execute(
                 "INSERT OR REPLACE INTO backup_deletion_bindings("
                 "operation_id, fence, scope_fingerprint, "
@@ -3328,7 +3420,7 @@ class BackupDeletionOwner:
                     int(self._clock()),
                     "[]",
                     "[]",
-                    int(fence),
+                    source_fence,
                 ),
             )
             connection.execute("COMMIT")
