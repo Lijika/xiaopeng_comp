@@ -1986,9 +1986,7 @@ class BackupDeletionOwner:
                 op_id = str(op)
                 try:
                     fence_n = self._parse_fence_int(fence)
-                    source_n = self._parse_fence_int(
-                        source_fence, allow_none=True
-                    )
+                    source_n = self._parse_fence_int(source_fence)
                 except (TypeError, ValueError):
                     grouped.setdefault(op_id, []).append(
                         (
@@ -2018,10 +2016,8 @@ class BackupDeletionOwner:
         return grouped
 
     @staticmethod
-    def _parse_fence_int(value: Any, *, allow_none: bool = False) -> int | None:
+    def _parse_fence_int(value: Any) -> int:
         if value is None:
-            if allow_none:
-                return None
             raise ValueError("null")
         if isinstance(value, bool):
             raise ValueError("bool")
@@ -2137,7 +2133,7 @@ class BackupDeletionOwner:
                 or status not in known
             ):
                 raise ValueError("invalid row")
-            if source_fence is not None and (
+            if source_fence is None or (
                 not isinstance(source_fence, int)
                 or source_fence < 1
                 or source_fence > fence
@@ -2245,6 +2241,26 @@ class BackupDeletionOwner:
             return False
         return True
 
+    def _validate_runtime_operation_fence(
+        self,
+        connection: sqlite3.Connection,
+        operation_id: str,
+        existing: tuple[Any, ...],
+    ) -> bool:
+        """Re-check the complete binding before using an existing fence."""
+        try:
+            grouped = self._operation_fence_history(connection, operation_id)
+            rows = grouped.get(operation_id, [])
+            if not rows:
+                self._record_fence_migration_failure(connection, operation_id)
+                return False
+            return self._validate_existing_operation_fence(
+                connection, operation_id, rows, existing
+            )
+        except (TypeError, ValueError, sqlite3.Error, json.JSONDecodeError):
+            self._record_fence_migration_failure(connection, operation_id)
+            return False
+
     def _migrate_operation_fence_rows(
         self,
         connection: sqlite3.Connection,
@@ -2295,8 +2311,9 @@ class BackupDeletionOwner:
         if self._fence_migration_failed(connection, operation_id):
             return True
         row = connection.execute(
-            "SELECT high_water, active_fence FROM backup_operation_fences "
-            "WHERE operation_id = ?",
+            "SELECT operation_id, high_water, active_fence, source_fence, "
+            "scope_fingerprint, fingerprints_digest "
+            "FROM backup_operation_fences WHERE operation_id = ?",
             (operation_id,),
         ).fetchone()
         if row is None:
@@ -2304,24 +2321,21 @@ class BackupDeletionOwner:
             if self._fence_migration_failed(connection, operation_id):
                 return True
             row = connection.execute(
-                "SELECT high_water, active_fence FROM backup_operation_fences "
-                "WHERE operation_id = ?",
+                "SELECT operation_id, high_water, active_fence, source_fence, "
+                "scope_fingerprint, fingerprints_digest "
+                "FROM backup_operation_fences WHERE operation_id = ?",
                 (operation_id,),
             ).fetchone()
             if row is None:
                 return False
         else:
-            try:
-                grouped = self._operation_fence_history(connection, operation_id)
-            except (TypeError, ValueError, sqlite3.Error, json.JSONDecodeError):
-                self._record_fence_migration_failure(connection, operation_id)
-                return True
-            if not grouped.get(operation_id):
-                self._record_fence_migration_failure(connection, operation_id)
+            if not self._validate_runtime_operation_fence(
+                connection, operation_id, row
+            ):
                 return True
         try:
-            high_water = self._coerce_live_fence_int(row[0])
-            active = self._coerce_live_fence_int(row[1])
+            high_water = self._coerce_live_fence_int(row[1])
+            active = self._coerce_live_fence_int(row[2])
             requested = self._coerce_live_fence_int(fence)
         except (TypeError, ValueError):
             self._record_fence_migration_failure(connection, operation_id)
@@ -2852,6 +2866,10 @@ class BackupDeletionOwner:
         durably staged BEFORE any file is unlinked; a crash between unlink
         and the registry commit leaves a staged intent that the next attempt
         (or replay) resumes instead of failing verification forever."""
+        try:
+            fence = self._parse_fence_int(fence)
+        except (TypeError, ValueError):
+            return {"status": "stale", "deleted_counts": {}}
         fingerprints = set(copy_fingerprints)
         fingerprints_digest = self._bindings_digest(fingerprints)
         with self._registry_connect() as connection:
@@ -3899,7 +3917,7 @@ class BackupDeletionOwner:
         *,
         scope_fingerprint: str,
         operation_id: str = "s16-backup-replay",
-        fence: int = 0,
+        fence: int = 1,
     ) -> dict[str, Any]:
         return self.delete(
             copy_fingerprints,
@@ -3923,6 +3941,18 @@ class BackupDeletionOwner:
             if self._quarantine_has_residue():
                 return False
             with self._registry_connect() as connection:
+                fence_rows = connection.execute(
+                    "SELECT operation_id, high_water, active_fence, "
+                    "source_fence, scope_fingerprint, fingerprints_digest "
+                    "FROM backup_operation_fences"
+                ).fetchall()
+                if any(
+                    not self._validate_runtime_operation_fence(
+                        connection, str(row[0]), row
+                    )
+                    for row in fence_rows
+                ):
+                    return False
                 failed = connection.execute(
                     "SELECT COUNT(*) FROM backup_fence_migration_failures"
                 ).fetchone()[0]
@@ -6378,6 +6408,7 @@ class GovernedDeletionService:
         ]
         if not pending_owners:
             return 0
+        replay_fence = max(1, int(job.get("fence") or 0))
         for owner_id in pending_owners:
             self._owners[owner_id].replay(
                 fingerprints_by_owner[owner_id],
@@ -6385,7 +6416,7 @@ class GovernedDeletionService:
                 operation_id=self._replay_operation_id(
                     job_id, owner_id, scope_fingerprint
                 ),
-                fence=0,
+                fence=replay_fence,
             )
         for owner_id in pending_owners:
             self._owners[owner_id].verify_absent(
@@ -6394,7 +6425,7 @@ class GovernedDeletionService:
                 operation_id=self._replay_operation_id(
                     job_id, owner_id, scope_fingerprint
                 ),
-                fence=0,
+                fence=replay_fence,
             )
         replay = {
             "replay_id": _stable_id("s16replay", f"{job_id}:{self._now()}"),

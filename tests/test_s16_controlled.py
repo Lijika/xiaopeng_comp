@@ -2154,6 +2154,19 @@ def test_single_owner_restore_closes_readiness_until_replayed(
     assert s16.ready() is False
     replayed = s16.replay_restore_if_needed()
     assert replayed["jobs"] >= 1
+    job = s16._job_for_request(result["request_id"])
+    assert job is not None
+    replay_operation = s16._replay_operation_id(
+        str(job["job_id"]), "backup", result["scope_fingerprint"]
+    )
+    with backup._registry_connect() as connection:
+        replay_fence = connection.execute(
+            "SELECT high_water, active_fence, source_fence "
+            "FROM backup_operation_fences WHERE operation_id = ?",
+            (replay_operation,),
+        ).fetchone()
+    assert replay_fence is not None
+    assert tuple(int(value) for value in replay_fence) == (1, 1, 1)
     assert s16.ready() is True
     assert not saved.exists()
 
@@ -3649,8 +3662,8 @@ def test_backup_delete_conflicts_on_capture_after_stage_and_repairs_forward(
         connection.execute(
             "INSERT INTO backup_deletion_intents("
             "operation_id, fence, scope_fingerprint, fingerprints_digest, "
-            "status, staged_at, identities_json, manifest_ids_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "status, staged_at, identities_json, manifest_ids_json, "
+            "source_fence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 "op-race",
                 1,
@@ -3663,6 +3676,7 @@ def test_backup_delete_conflicts_on_capture_after_stage_and_repairs_forward(
                     separators=(",", ":"),
                 ),
                 json.dumps([staged_manifest_id], separators=(",", ":")),
+                1,
             ),
         )
         connection.commit()
@@ -3957,7 +3971,7 @@ def test_backup_staged_manifest_content_mutation_conflicts_and_repairs(
             "INSERT INTO backup_deletion_intents("
             "operation_id, fence, scope_fingerprint, fingerprints_digest, "
             "status, staged_at, identities_json, manifest_ids_json, "
-            "manifests_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "manifests_json, source_fence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 "op-mut",
                 1,
@@ -3968,6 +3982,7 @@ def test_backup_staged_manifest_content_mutation_conflicts_and_repairs(
                 json.dumps([identity1], separators=(",", ":")),
                 json.dumps([staged_manifest_id], separators=(",", ":")),
                 json.dumps([snapshot], separators=(",", ":")),
+                1,
             ),
         )
         connection.commit()
@@ -4106,7 +4121,7 @@ def test_backup_staged_manifest_relocation_conflicts_and_preserves_scopes(
             "INSERT INTO backup_deletion_intents("
             "operation_id, fence, scope_fingerprint, fingerprints_digest, "
             "status, staged_at, identities_json, manifest_ids_json, "
-            "manifests_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "manifests_json, source_fence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 "op-reloc",
                 1,
@@ -4117,6 +4132,7 @@ def test_backup_staged_manifest_relocation_conflicts_and_preserves_scopes(
                 json.dumps([identity], separators=(",", ":")),
                 json.dumps([staged_manifest_id], separators=(",", ":")),
                 json.dumps([snapshot], separators=(",", ":")),
+                1,
             ),
         )
         connection.commit()
@@ -4219,7 +4235,7 @@ def test_backup_staged_intent_missing_snapshot_fails_closed(
             "INSERT INTO backup_deletion_intents("
             "operation_id, fence, scope_fingerprint, fingerprints_digest, "
             "status, staged_at, identities_json, manifest_ids_json, "
-            "manifests_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "manifests_json, source_fence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 "op-snap",
                 1,
@@ -4231,6 +4247,7 @@ def test_backup_staged_intent_missing_snapshot_fails_closed(
                 # A staged ID with NO snapshot entry: partial snapshot.
                 json.dumps([staged_manifest_id, "manifest-ghost"], separators=(",", ":")),
                 json.dumps([snapshot], separators=(",", ":")),
+                1,
             ),
         )
         connection.commit()
@@ -4324,8 +4341,8 @@ def _stage_backup_intent(
             "INSERT INTO backup_deletion_intents("
             "operation_id, fence, scope_fingerprint, fingerprints_digest, "
             "status, staged_at, identities_json, manifest_ids_json, "
-            "manifests_json, unlinked_manifest_ids_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "manifests_json, unlinked_manifest_ids_json, source_fence) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 operation_id,
                 1,
@@ -4337,6 +4354,7 @@ def _stage_backup_intent(
                 json.dumps([staged_manifest_id], separators=(",", ":")),
                 json.dumps([snapshot], separators=(",", ":")),
                 json.dumps(unlinked_marker, separators=(",", ":")),
+                1,
             ),
         )
         connection.commit()
@@ -4563,7 +4581,7 @@ def _backup_bookkeeping(backup: BackupDeletionOwner) -> dict[str, Any]:
 def _backup_effect_state(snapshot: dict[str, Any]) -> dict[str, Any]:
     return {
         key: snapshot[key]
-        for key in ("registry", "refs", "bindings", "intents")
+        for key in ("registry", "refs", "bindings", "intents", "fences")
     }
 
 
@@ -4853,8 +4871,8 @@ def test_backup_resume_rejects_second_identity_registry_residue(
             "INSERT INTO backup_deletion_intents("
             "operation_id, fence, scope_fingerprint, fingerprints_digest, "
             "status, staged_at, identities_json, manifest_ids_json, "
-            "manifests_json, unlinked_manifest_ids_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "manifests_json, unlinked_manifest_ids_json, source_fence) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 "op-multi",
                 1,
@@ -4866,6 +4884,7 @@ def test_backup_resume_rejects_second_identity_registry_residue(
                 json.dumps([staged_manifest_id], separators=(",", ":")),
                 json.dumps([snapshot], separators=(",", ":")),
                 "[]",
+                1,
             ),
         )
         connection.execute(
@@ -7349,3 +7368,83 @@ def test_backup_non_numeric_fence_fields_fail_closed(tmp_path: Path) -> None:
     assert _backup_bookkeeping(migrated) == before
     with pytest.raises(S16OwnerFailure):
         migrated.inventory(scope_fingerprint=scope)
+
+
+def test_backup_null_source_fence_fails_closed(tmp_path: Path) -> None:
+    """R20 P1-2: a NULL source fence is ambiguous migration state."""
+    backup_root = tmp_path / "backups"
+    backup = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
+    scope = "j" * 64
+    fingerprints = {"fp-null-source"}
+    digest = backup._bindings_digest(fingerprints)
+    with backup._registry_connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "INSERT INTO backup_deletion_bindings("
+            "operation_id, fence, scope_fingerprint, fingerprints_digest, "
+            "status, completed_at, source_fence) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("op-null-source", 1, scope, digest, "complete", int(_now()), None),
+        )
+        connection.execute("COMMIT")
+    migrated = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
+    assert migrated.owner_healthy() is False
+    with migrated._registry_connect() as connection:
+        failed = connection.execute(
+            "SELECT operation_id FROM backup_fence_migration_failures"
+        ).fetchall()
+        fences = connection.execute(
+            "SELECT COUNT(*) FROM backup_operation_fences "
+            "WHERE operation_id = ?",
+            ("op-null-source",),
+        ).fetchone()[0]
+    assert failed == [("op-null-source",)]
+    assert fences == 0
+    _assert_fence_migration_fail_closed(
+        migrated,
+        operation_id="op-null-source",
+        scope=scope,
+        fingerprints=fingerprints,
+    )
+
+
+def test_backup_runtime_fence_metadata_mismatch_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """R20 P1-1: a live fence with altered binding metadata is rejected."""
+    backup_root = tmp_path / "backups"
+    backup = BackupDeletionOwner(backup_root, clock=_CdemoSessionClock())
+    scope = "k" * 64
+    saved = backup_root / "runtime.bin"
+    saved.write_bytes(b"runtime-fence")
+    digest = hashlib.sha256(saved.read_bytes()).hexdigest()
+    backup.capture(scope_fingerprint=scope, copy_files=[(saved.name, digest)])
+    fingerprint = _replica_fingerprint(backup, scope)
+    assert backup.delete(
+        {fingerprint},
+        scope_fingerprint=scope,
+        operation_id="op-runtime-fence",
+        fence=1,
+    )["status"] == "complete"
+    with backup._registry_connect() as connection:
+        connection.execute(
+            "UPDATE backup_operation_fences SET scope_fingerprint = ? "
+            "WHERE operation_id = ?",
+            ("z" * 64, "op-runtime-fence"),
+        )
+        connection.commit()
+    before = _backup_bookkeeping(backup)
+    stale = backup.delete(
+        {fingerprint},
+        scope_fingerprint=scope,
+        operation_id="op-runtime-fence",
+        fence=1,
+    )
+    assert stale["status"] == "stale"
+    assert _backup_effect_state(_backup_bookkeeping(backup)) == before
+    with backup._registry_connect() as connection:
+        failed = connection.execute(
+            "SELECT operation_id FROM backup_fence_migration_failures "
+            "WHERE operation_id = ?",
+            ("op-runtime-fence",),
+        ).fetchone()
+    assert failed == ("op-runtime-fence",)
