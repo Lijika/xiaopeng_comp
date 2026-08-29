@@ -53,6 +53,11 @@ The browser tracer uses separate requester and approver contexts, an isolated
 worker/recipient API context, one-time replay rejection, receipt cleanup proof,
 storage redaction, and horizontal-overflow checks.
 
+The repository-wide `.venv/bin/pytest -q` run reached 731 passed, 25 failed,
+and 1 skipped before interruption. The failures are concentrated in existing
+S03 HTTP audit/projection cases and S08 governance/pinned-artifact cases; the
+targeted S17 suite remains green.
+
 ## Scope
 
 Only the existing typed S17 hooks, React panel, shared shell marker, CSS,
