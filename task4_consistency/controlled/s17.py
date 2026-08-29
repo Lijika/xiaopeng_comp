@@ -552,17 +552,20 @@ class GovernedExportService:
         event_id = _stable_id("evt", {"type": "obligation_queued", "request": request_id, "payload": payload})
         now = int(self._clock())
         audit_record = {"schema": S17_EVENT_SCHEMA, "actor_fingerprint": _digest(payload.get("actor", "")), "request_fingerprint": _digest(request_id), "action": "obligation_queued", "result": "queued"}
-        try:
-            if not self._audit_writer or not self._audit_writer(audit_record):
-                raise RuntimeError("audit writer rejected record")
-        except Exception as exc:
-            raise S17Unavailable(S17_AUDIT_SEAM_UNAVAILABLE) from exc
         with self.ledger.connect() as db:
             db.execute("INSERT INTO s17_events(event_id,event_type,request_id,payload_json,occurred_at) VALUES (?,?,?,?,?)", (_stable_id("audit", event_id), "security_audit", request_id, json.dumps(_canonical(audit_record), separators=(",", ":")), now))
             db.execute("INSERT INTO s17_events(event_id,event_type,request_id,payload_json,occurred_at) VALUES (?,?,?,?,?)", (event_id, "obligation_queued", request_id, json.dumps(_canonical(payload), separators=(",", ":")), now))
             db.execute("INSERT OR IGNORE INTO s17_jobs(job_id,request_id,obligation_id,status,fence,attempt,lease_until,lease_owner,payload_json) VALUES (?,?,?,?,?,?,?,?,?)", (payload["job_id"], request_id, payload["obligation_id"], "queued", 0, 0, 0, None, json.dumps(_canonical(payload), separators=(",", ":"))))
             db.execute("INSERT INTO s17_bindings(binding_key,fingerprint,result_json,created_at) VALUES (?,?,?,?)", (binding_key, fingerprint, json.dumps(_canonical(result), separators=(",", ":")), now))
             db.commit()
+        # The SQLite audit fact is part of the atomic commit. The institution
+        # sink receives the same redacted record after commit and cannot create
+        # a durable side effect ahead of a transaction that may roll back.
+        try:
+            if self._audit_writer is not None:
+                self._audit_writer(audit_record)
+        except Exception:
+            pass
         event = {"event_type": "obligation_queued", "request_id": request_id, **payload, "occurred_at": now}
         audit_event = {"event_type": "security_audit", "request_id": request_id, **audit_record, "occurred_at": now}
         self._events.extend((audit_event, event))

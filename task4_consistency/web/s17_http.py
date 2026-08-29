@@ -142,6 +142,18 @@ def _module(request: Request) -> Any:
     return module
 
 
+def _configuration_unavailable(module: Any) -> HTTPException:
+    return HTTPException(
+        503,
+        detail={
+            "error": "S17_UNAVAILABLE",
+            "reason_code": "S17_CONFIGURATION_ERROR",
+            "message": "Controlled S17 plane is unavailable",
+        },
+        headers=_NO_STORE,
+    )
+
+
 def _bearer(request: Request, header: str = "Authorization") -> str:
     scheme, sep, value = request.headers.get(header, "").partition(" ")
     return value if sep and scheme.lower() == "bearer" else ""
@@ -163,7 +175,7 @@ def _service(request: Request) -> GovernedExportService:
     module = _module(request)
     service = getattr(module, "S17_SERVICE", None)
     if service is None:
-        raise HTTPException(503, detail={"error": "S17_UNAVAILABLE", "message": "Controlled S17 plane is unavailable"}, headers=_NO_STORE)
+        raise _configuration_unavailable(module)
     return service
 
 

@@ -938,6 +938,42 @@ def test_audit_or_deletion_ledger_outage_has_zero_export_effect(
     assert closed._events == []
 
 
+def test_commit_db_failure_does_not_emit_external_audit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    recorded, writer = _writer()
+    service = _service(tmp_path, security_audit_writer=writer)
+    preview = _preview(service)
+    _approve(service, preview)
+    recorded.clear()
+    events_before = list(service._events)
+
+    class BrokenConnection:
+        def __enter__(self) -> "BrokenConnection":
+            return self
+
+        def __exit__(self, *_args: Any) -> bool:
+            return False
+
+        def execute(self, *_args: Any, **_kwargs: Any) -> None:
+            raise sqlite3.OperationalError("injected ledger outage")
+
+    monkeypatch.setattr(service.ledger, "connect", lambda: BrokenConnection())
+    with sqlite3.connect(tmp_path / "s17.sqlite3") as connection:
+        events_before_db = connection.execute(
+            "SELECT COUNT(*) FROM s17_events"
+        ).fetchone()
+    with pytest.raises(sqlite3.OperationalError):
+        _commit(service, preview)
+    assert recorded == []
+    assert service._events == events_before
+    with sqlite3.connect(tmp_path / "s17.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM s17_events").fetchone() == events_before_db
+        assert connection.execute(
+            "SELECT COUNT(*) FROM s17_events WHERE event_type = 'obligation_queued'"
+        ).fetchone() == (0,)
+        assert connection.execute("SELECT COUNT(*) FROM s17_jobs").fetchone() == (0,)
+        assert connection.execute("SELECT COUNT(*) FROM s17_bindings").fetchone() == (2,)
+
+
 def test_export_does_not_rewrite_lifecycle_or_evidence_and_survives_restart(
     tmp_path: Path,
 ) -> None:
