@@ -129,7 +129,7 @@ export default function S17ExportPanel() {
         artifacts: (query.data.artifacts ?? []).join(", "),
         classification: query.data.classification ?? "",
         expiry: query.data.expiry === null || query.data.expiry === undefined ? "" : String(query.data.expiry),
-        scope_reference: query.data.scope_reference ?? "",
+        scope_reference: frozenDraft?.scope_reference ?? "已冻结",
       }
     : frozenDraft ?? draft;
   const disabled = requestId !== null;

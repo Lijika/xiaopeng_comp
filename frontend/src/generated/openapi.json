@@ -19740,17 +19740,6 @@
             ],
             "title": "Scope Fingerprint"
           },
-          "scope_reference": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Scope Reference"
-          },
           "source_revisions": {
             "additionalProperties": true,
             "title": "Source Revisions",

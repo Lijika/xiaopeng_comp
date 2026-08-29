@@ -9499,8 +9499,6 @@ export interface components {
             schema_version: string;
             /** Scope Fingerprint */
             scope_fingerprint?: string | null;
-            /** Scope Reference */
-            scope_reference?: string | null;
             /** Source Revisions */
             source_revisions?: {
                 [key: string]: unknown;
