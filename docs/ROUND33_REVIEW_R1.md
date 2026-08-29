@@ -16,3 +16,7 @@ Findings from the independent review
 Focused controlled tests cover minimum scope, SoD, provider ordering, recipient/token binding, reconciliation, cleanup, audit and restart projections. HTTP/OpenAPI smoke covers route registration and generated schemas. React smoke covers panel mount and query-key separation. Full browser, institution provider, and A01-A14 retirement evidence remain unverified.
 
 Verdict is Standards conditional and Spec focused-pass with the documented G5 prerequisites outstanding.
+
+R2 repair status
+
+Worker lease owner/fence/attempt fields and CAS terminal updates now persist in `s17_jobs`; restart reload reads durable jobs and tokens. Lifecycle idempotency bindings cover confirm/revoke/expire/reconcile. The app exposes an explicit S17 factory gate that keeps missing institution inputs unavailable. Focused tests remain green. Atomic event/job/binding transaction and durable source-reference adapter still require production integration evidence.

@@ -243,6 +243,9 @@ class ExportDeliveryRequest:
 
 
 class ExportSource(Protocol):
+    def resolve_reference(self, *, tenant_scope: str, scope_fingerprint: str) -> str | None:
+        ...
+
     def pin(
         self,
         *,
@@ -313,6 +316,7 @@ CREATE TABLE IF NOT EXISTS s17_jobs (
     fence INTEGER NOT NULL,
     attempt INTEGER NOT NULL,
     lease_until INTEGER NOT NULL,
+    lease_owner TEXT,
     payload_json TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS s17_bindings (
@@ -339,6 +343,10 @@ class S17Ledger:
         self._lock = threading.RLock()
         with self.connect() as connection:
             connection.executescript(_LEDGER_SQL)
+            try:
+                connection.execute("ALTER TABLE s17_jobs ADD COLUMN lease_owner TEXT")
+            except sqlite3.OperationalError:
+                pass
             connection.commit()
 
     def connect(self) -> sqlite3.Connection:
@@ -349,12 +357,8 @@ class S17Ledger:
         connection.execute("PRAGMA foreign_keys=ON")
         return connection
 
-# The source reference stays process-local.  The ledger stores only its
-# fingerprint; a restarted worker in the same service process can resume the
-# queued job without putting a locator in the audit trail.
-_RUNTIME_SCOPE_REFS: dict[str, str] = {}
-
-
+# Source locators stay behind the registered ExportSource resolver. The ledger
+# stores scope fingerprints only, so restart recovery remains value-free.
 class GovernedExportService:
     """Deep S17 interface for the governed export lifecycle."""
 
@@ -424,7 +428,7 @@ class GovernedExportService:
                 "SELECT token_fingerprint, request_id, recipient_id, expiry, consumed, revoked FROM s17_tokens"
             ).fetchall()
             job_rows = db.execute(
-                "SELECT job_id, request_id, obligation_id, status, fence, attempt, lease_until, payload_json FROM s17_jobs"
+                "SELECT job_id, request_id, obligation_id, status, fence, attempt, lease_until, lease_owner, payload_json FROM s17_jobs"
             ).fetchall()
         for row in rows:
             payload = json.loads(row["payload_json"])
@@ -454,6 +458,7 @@ class GovernedExportService:
                 "fence": int(row["fence"]),
                 "attempt": int(row["attempt"]),
                 "lease_until": int(row["lease_until"]),
+                "lease_owner": row["lease_owner"],
             }
 
     def _apply_event(self, event: dict[str, Any]) -> None:
@@ -542,6 +547,27 @@ class GovernedExportService:
             db.execute("INSERT OR REPLACE INTO s17_bindings(binding_key,fingerprint,result_json,created_at) VALUES (?,?,?,?)", (key, fingerprint, json.dumps(_canonical(result), separators=(",", ":")), int(self._clock())))
             db.commit()
 
+    def _commit_transaction(self, request_id: str, payload: dict[str, Any], binding_key: str, fingerprint: str, result: dict[str, Any]) -> None:
+        """Persist commit event, job projection and idempotency binding atomically."""
+        event_id = _stable_id("evt", {"type": "obligation_queued", "request": request_id, "payload": payload})
+        now = int(self._clock())
+        audit_record = {"schema": S17_EVENT_SCHEMA, "actor_fingerprint": _digest(payload.get("actor", "")), "request_fingerprint": _digest(request_id), "action": "obligation_queued", "result": "queued"}
+        try:
+            if not self._audit_writer or not self._audit_writer(audit_record):
+                raise RuntimeError("audit writer rejected record")
+        except Exception as exc:
+            raise S17Unavailable(S17_AUDIT_SEAM_UNAVAILABLE) from exc
+        with self.ledger.connect() as db:
+            db.execute("INSERT INTO s17_events(event_id,event_type,request_id,payload_json,occurred_at) VALUES (?,?,?,?,?)", (_stable_id("audit", event_id), "security_audit", request_id, json.dumps(_canonical(audit_record), separators=(",", ":")), now))
+            db.execute("INSERT INTO s17_events(event_id,event_type,request_id,payload_json,occurred_at) VALUES (?,?,?,?,?)", (event_id, "obligation_queued", request_id, json.dumps(_canonical(payload), separators=(",", ":")), now))
+            db.execute("INSERT OR IGNORE INTO s17_jobs(job_id,request_id,obligation_id,status,fence,attempt,lease_until,lease_owner,payload_json) VALUES (?,?,?,?,?,?,?,?,?)", (payload["job_id"], request_id, payload["obligation_id"], "queued", 0, 0, 0, None, json.dumps(_canonical(payload), separators=(",", ":"))))
+            db.execute("INSERT INTO s17_bindings(binding_key,fingerprint,result_json,created_at) VALUES (?,?,?,?)", (binding_key, fingerprint, json.dumps(_canonical(result), separators=(",", ":")), now))
+            db.commit()
+        event = {"event_type": "obligation_queued", "request_id": request_id, **payload, "occurred_at": now}
+        audit_event = {"event_type": "security_audit", "request_id": request_id, **audit_record, "occurred_at": now}
+        self._events.extend((audit_event, event))
+        self._apply_event(event)
+
     @staticmethod
     def _principal_attrs(principal: Any) -> tuple[str, str, str, str, float]:
         return (
@@ -588,6 +614,12 @@ class GovernedExportService:
             reason = S17_AUDIT_SEAM_UNAVAILABLE if not self.audit_available or not callable(self._audit_writer) else S17_STORAGE_UNAVAILABLE if not self.storage_available else S17_PROVIDER_UNAVAILABLE
             raise S17Unavailable(reason)
 
+    def _resolve_source_reference(self, request: dict[str, Any]) -> str | None:
+        resolver = getattr(self._source, "resolve_reference", None)
+        if callable(resolver):
+            return resolver(tenant_scope=self.export_scope, scope_fingerprint=str(request.get("scope_fingerprint", "")))
+        return None
+
     # -- request, approval and commit -------------------------------------------
     def preview(self, *, purpose: str, fields: Iterable[str], artifacts: Iterable[str], recipient_id: str, classification: str, expiry: int, scope_reference: str, principal: Any, idempotency_key: str) -> dict[str, Any]:
         subject, role, scope, source, _expires = self._principal_attrs(principal)
@@ -619,7 +651,6 @@ class GovernedExportService:
             if existing.get("preview_digest") != fingerprint:
                 raise S17Blocked(S17_DIGEST_DRIFT)
             return self._preview_result(existing, replayed=True)
-        _RUNTIME_SCOPE_REFS[str(self.ledger_path)] = scope_reference
         event = self._append("previewed", request_id, {"status": "previewed", "preview_digest": fingerprint, "purpose": purpose, "fields": fields_t, "artifacts": artifacts_t, "recipient_id": recipient_id, "recipient_registration_digest": registration.registration_digest, "classification": classification, "expiry": expiry, "scope_fingerprint": scope_fp, "source_revisions": source_revisions, "policy_digest": policy_digest, "field_count": len(fields_t), "artifact_count": len(artifacts_t), "watermark_plan": WATERMARK_PLAN, "actor": principal.subject})
         result = self._preview_result(event)
         self._save_binding(binding_key, fingerprint, result)
@@ -661,7 +692,9 @@ class GovernedExportService:
             raise S17NotFound()
         if request_id not in self._approvals:
             raise S17Blocked(S17_FORBIDDEN)
-        scope_reference = _RUNTIME_SCOPE_REFS.get(str(self.ledger_path), "")
+        scope_reference = self._resolve_source_reference(request)
+        if not scope_reference:
+            raise S17Blocked(S17_SOURCE_DRIFT)
         pin = self._source.pin(tenant_scope=self.export_scope, scope_reference=scope_reference, fields=tuple(request.get("fields", ())), artifacts=tuple(request.get("artifacts", ())))
         if pin is None:
             raise S17Blocked(S17_SOURCE_DRIFT)
@@ -677,12 +710,8 @@ class GovernedExportService:
         obligation_id = _stable_id("s17obl", {"request": request_id, "digest": request["preview_digest"]})
         job_id = _stable_id("s17job", obligation_id)
         payload = {"status": "queued", "obligation_id": obligation_id, "job_id": job_id, "preview_digest": request["preview_digest"], "purpose": request["purpose"], "recipient_id": request["recipient_id"], "recipient_registration_digest": request["recipient_registration_digest"], "classification": request["classification"], "expiry": request["expiry"], "scope_fingerprint": request["scope_fingerprint"], "source_revisions": request["source_revisions"], "policy_digest": request["policy_digest"], "attempt": 0, "fence": 0, "actor": principal.subject}
-        self._append("obligation_queued", request_id, payload)
-        with self.ledger.connect() as db:
-            db.execute("INSERT OR REPLACE INTO s17_jobs(job_id,request_id,obligation_id,status,fence,attempt,lease_until,payload_json) VALUES (?,?,?,?,?,?,?,?)", (job_id, request_id, obligation_id, "queued", 0, 0, 0, json.dumps(_canonical(payload), separators=(",", ":"))))
-            db.commit()
         result = {"status": "queued", "request_id": request_id, "obligation_id": obligation_id, "job_id": job_id, "replayed": False}
-        self._save_binding(binding_key, request["preview_digest"], result)
+        self._commit_transaction(request_id, payload, binding_key, request["preview_digest"], result)
         return result
 
     # -- generation and delivery -----------------------------------------------
@@ -690,24 +719,40 @@ class GovernedExportService:
         self._require_worker(principal)
         self._require_ready()
         with self._lock:
-            job = next((j for j in self._jobs.values() if j.get("status") == "queued"), None)
+            now = int(self._clock())
+            job = next(
+                (
+                    j
+                    for j in self._jobs.values()
+                    if j.get("status") in {"queued", "timeout"}
+                    or (
+                        j.get("status") == "processing"
+                        and int(j.get("lease_until", 0)) <= now
+                    )
+                ),
+                None,
+            )
             if job is None:
                 return {"status": "idle"}
             rid = job["request_id"]
+            previous_job = dict(job)
             job["status"] = "processing"
             job["attempt"] = int(job.get("attempt", 0)) + 1
             job["fence"] = int(job.get("fence", 0)) + 1
-            job["lease_until"] = int(self._clock()) + LEASE_SECONDS
+            job["lease_until"] = now + LEASE_SECONDS
             with self.ledger.connect() as db:
-                updated = db.execute("UPDATE s17_jobs SET status='processing', fence=?, attempt=?, lease_until=? WHERE job_id=? AND status IN ('queued','timeout') AND fence=?", (job["fence"], job["attempt"], job["lease_until"], job["job_id"], job["fence"] - 1)).rowcount
+                updated = db.execute("UPDATE s17_jobs SET status='processing', fence=?, attempt=?, lease_until=?, lease_owner=? WHERE job_id=? AND status IN ('queued','timeout','processing') AND fence=? AND (lease_until=0 OR lease_until<=?)", (job["fence"], job["attempt"], job["lease_until"], self.worker_id, job["job_id"], job["fence"] - 1, now)).rowcount
                 db.commit()
             if updated != 1:
-                job["status"] = "queued"
+                job.clear()
+                job.update(previous_job)
                 return {"status": "idle"}
             request = self._requests[rid]
             obligation_id = job["obligation_id"]
-            scope_reference = _RUNTIME_SCOPE_REFS.get(str(self.ledger_path), "")
             try:
+                scope_reference = self._resolve_source_reference(request)
+                if not scope_reference:
+                    raise S17Unavailable(S17_SOURCE_DRIFT)
                 plaintext = self._source.snapshot(tenant_scope=self.export_scope, scope_reference=scope_reference, fields=tuple(request.get("fields", ())), artifacts=tuple(request.get("artifacts", ())), source_revisions=dict(request.get("source_revisions", {})))
                 predicted_digest = _digest({"obligation_id": obligation_id, "plaintext": plaintext, "source_revisions": request.get("source_revisions", {})})
                 watermark = self._watermark.bind(obligation_id=obligation_id, recipient_id=request["recipient_id"], expiry=int(request["expiry"]), purpose=request["purpose"], package_digest=predicted_digest)
@@ -730,12 +775,12 @@ class GovernedExportService:
                     self._append("delivery_timeout", rid, {"status": "timeout", "operation_id": operation_id, "package_id": package_id, "package_digest": encrypted.package_digest, "attempt": delivery_request.attempt, "fence": delivery_request.fence, "actor": principal.subject, "reason_code": result.get("reason_code", "S17_DELIVERY_TIMEOUT")})
                     job["status"] = "timeout"
                     with self.ledger.connect() as db:
-                        db.execute("UPDATE s17_jobs SET status='timeout', lease_until=0 WHERE job_id=?", (job["job_id"],)); db.commit()
+                        db.execute("UPDATE s17_jobs SET status='timeout', lease_until=0 WHERE job_id=? AND lease_owner=? AND fence=? AND attempt=?", (job["job_id"], self.worker_id, job["fence"], job["attempt"])); db.commit()
                     return {"status": "timeout", "request_id": rid, "job_id": job["job_id"], "attempt": delivery_request.attempt, "reason_code": result.get("reason_code", "S17_DELIVERY_TIMEOUT")}
                 self._append("delivery_attempt", rid, {"status": "delivered", "operation_id": operation_id, "package_id": package_id, "package_digest": encrypted.package_digest, "attempt": delivery_request.attempt, "fence": delivery_request.fence, "actor": principal.subject})
                 job["status"] = "delivered"
                 with self.ledger.connect() as db:
-                    db.execute("UPDATE s17_jobs SET status='delivered', lease_until=0 WHERE job_id=?", (job["job_id"],)); db.commit()
+                    db.execute("UPDATE s17_jobs SET status='delivered', lease_until=0 WHERE job_id=? AND lease_owner=? AND fence=? AND attempt=?", (job["job_id"], self.worker_id, job["fence"], job["attempt"])); db.commit()
                 self._temp_partials.discard(rid)
                 return {"status": "delivered", "request_id": rid, "job_id": job["job_id"], "package_id": package_id, "attempt": delivery_request.attempt}
             except S17Unavailable as exc:
@@ -744,7 +789,7 @@ class GovernedExportService:
                 self._append("partial_cleaned", rid, {"status": "failed", "reason_code": exc.reason_code, "attempt": int(job.get("attempt", 0)) + 1, "actor": principal.subject})
                 job["status"] = "queued"
                 with self.ledger.connect() as db:
-                    db.execute("UPDATE s17_jobs SET status='queued', lease_until=0 WHERE job_id=?", (job["job_id"],)); db.commit()
+                    db.execute("UPDATE s17_jobs SET status='queued', lease_until=0 WHERE job_id=? AND lease_owner=? AND fence=? AND attempt=?", (job["job_id"], self.worker_id, job["fence"], job["attempt"])); db.commit()
                 return {"status": "failed", "request_id": rid, "job_id": job["job_id"], "reason_code": exc.reason_code}
             except Exception:
                 self._temp_partials.add(rid)
@@ -752,7 +797,7 @@ class GovernedExportService:
                 self._append("partial_cleaned", rid, {"status": "failed", "reason_code": S17_PROVIDER_UNAVAILABLE, "attempt": int(job.get("attempt", 0)) + 1, "actor": principal.subject})
                 job["status"] = "queued"
                 with self.ledger.connect() as db:
-                    db.execute("UPDATE s17_jobs SET status='queued', lease_until=0 WHERE job_id=?", (job["job_id"],)); db.commit()
+                    db.execute("UPDATE s17_jobs SET status='queued', lease_until=0 WHERE job_id=? AND lease_owner=? AND fence=? AND attempt=?", (job["job_id"], self.worker_id, job["fence"], job["attempt"])); db.commit()
                 return {"status": "failed", "request_id": rid, "job_id": job["job_id"], "reason_code": S17_PROVIDER_UNAVAILABLE}
 
     def _temp_unregistered(self) -> tuple[str, ...]:
@@ -863,6 +908,16 @@ class GovernedExportService:
         if outcome.get("outcome") in {"confirmed", "delivered"}:
             self._append("delivery_reconciled", request_id, {"status": "delivered", "operation_id": delivery.get("operation_id"), "package_id": self._packages.get(request_id, {}).get("package_id"), "actor": principal.subject})
             self._requests[request_id]["status"] = "delivered"
+            job = self._jobs.get(self._obligations.get(request_id, {}).get("job_id", ""))
+            if job is not None:
+                with self.ledger.connect() as db:
+                    db.execute(
+                        "UPDATE s17_jobs SET status='delivered', lease_until=0 WHERE job_id=? AND status='timeout' AND lease_owner=? AND fence=? AND attempt=?",
+                        (job["job_id"], self.worker_id, int(job.get("fence", 0)), int(job.get("attempt", 0))),
+                    )
+                    db.commit()
+                job["status"] = "delivered"
+                job["lease_until"] = 0
             result = {"status": "delivered", "request_id": request_id, "replayed": False}
             self._save_binding(binding_key, request_id, result)
             return result

@@ -27,6 +27,7 @@ from task4_consistency.controlled.s17 import (
     S17_RECIPIENT_MISMATCH,
     S17_SELF_APPROVAL,
     S17_STORAGE_UNAVAILABLE,
+    S17_SOURCE_DRIFT,
     S17_TOKEN_EXPIRED,
     S17_TOKEN_REPLAY,
     S17_TOKEN_REVOKED,
@@ -210,6 +211,12 @@ class FakeExportSource:
         if dict(item["revisions"]) != dict(source_revisions):
             raise S17Blocked(S17_DIGEST_DRIFT)
         return bytes(item["payload"])
+
+    def resolve_reference(self, *, tenant_scope: str, scope_fingerprint: str) -> str | None:
+        for (tenant, reference), item in self._scopes.items():
+            if tenant == tenant_scope and item["scope_fingerprint"] == scope_fingerprint:
+                return reference
+        return None
 
     def fact_counts(self) -> dict[str, int]:
         return {
@@ -998,3 +1005,49 @@ def test_restart_cleanup_receipt_audit_and_fence_recovery(
         dumped = json.dumps(fact)
         assert SCOPE_REFERENCE not in dumped
         assert PLAINTEXT.decode() not in dumped
+
+
+def test_worker_source_resolver_failure_releases_claim_for_retry(tmp_path: Path) -> None:
+    source = FakeExportSource()
+    source.register(tenant=TENANT, reference=SCOPE_REFERENCE)
+    service = _service(tmp_path, export_source=source)
+    preview = _preview(service)
+    _approve(service, preview)
+    _commit(service, preview)
+
+    source.resolve_reference = lambda **_kwargs: None  # type: ignore[method-assign]
+    failed = service.process_next_export(principal=WORKER)
+    assert failed["status"] == "failed"
+    assert failed["reason_code"] == S17_SOURCE_DRIFT
+    assert service.query(request_id=preview["request_id"], principal=REQUESTER)["status"] == "queued"
+    with sqlite3.connect(tmp_path / "s17.sqlite3") as connection:
+        row = connection.execute(
+            "SELECT status, lease_until FROM s17_jobs WHERE job_id = ?",
+            (failed["job_id"],),
+        ).fetchone()
+    assert row == ("queued", 0)
+
+    del source.resolve_reference
+    processed = service.process_next_export(principal=WORKER)
+    assert processed["status"] == "delivered"
+
+
+def test_expired_processing_lease_is_reclaimed_after_restart(tmp_path: Path) -> None:
+    source = FakeExportSource()
+    source.register(tenant=TENANT, reference=SCOPE_REFERENCE)
+    ledger = tmp_path / "s17.sqlite3"
+    service = _service(tmp_path, export_source=source, ledger_path=ledger)
+    preview = _preview(service)
+    _approve(service, preview)
+    committed = _commit(service, preview)
+
+    with sqlite3.connect(ledger) as connection:
+        connection.execute(
+            "UPDATE s17_jobs SET status='processing', fence=1, attempt=1, lease_until=?, lease_owner=? WHERE job_id=?",
+            (NOW - 1, "dead-worker", committed["job_id"]),
+        )
+        connection.commit()
+
+    restarted = _service(tmp_path, export_source=source, ledger_path=ledger)
+    processed = restarted.process_next_export(principal=WORKER)
+    assert processed["status"] == "delivered"

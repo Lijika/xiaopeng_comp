@@ -6977,6 +6977,15 @@ S17_RECIPIENT_CREDENTIAL = os.environ.get("TASK4_S17_RECIPIENT_CREDENTIAL", "").
 S17_RECIPIENT_SUBJECT = os.environ.get("TASK4_S17_RECIPIENT_SUBJECT", "").strip()
 S17_EXPORT_SCOPE = os.environ.get("TASK4_S17_EXPORT_SCOPE", "C-DEMO").strip() or "C-DEMO"
 S17_REACT_INDEX = S01_REACT_INDEX
+def _s17_service_factory():
+    # Institution adapters are injected by deployment.  The local process
+    # keeps the plane closed until all provider seams are present.
+    required = (S17_REQUESTER_CREDENTIAL, S17_REQUESTER_SUBJECT, S17_APPROVER_CREDENTIAL, S17_APPROVER_SUBJECT, S17_WORKER_CREDENTIAL, S17_WORKER_SUBJECT, S17_RECIPIENT_CREDENTIAL, S17_RECIPIENT_SUBJECT)
+    if not all(required):
+        return None
+    return None
+
+S17_SERVICE = _s17_service_factory()
 from task4_consistency.web.s17_http import register_router as register_s17_router
 
 register_s17_router(app, sys.modules[__name__])

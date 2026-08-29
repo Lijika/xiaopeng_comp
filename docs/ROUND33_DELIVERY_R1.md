@@ -10,6 +10,8 @@ Focused verification
 - `npx tsc --noEmit -p frontend/tsconfig.json` -> passed.
 - `.venv/bin/python -m py_compile task4_consistency/controlled/s17.py task4_consistency/web/s17_http.py` -> passed.
 - OpenAPI inspection confirms all S17 API and shell paths are registered.
+- `npm run test:unit -- src/components/S17ExportPanel.test.tsx src/api/hooks.s17.test.tsx` -> 2 passed.
+- R3 repair focused tests -> 18 backend tests passed, 2 React tests passed, and generated API check passed.
 
 The test providers are C-DEMO/C-DEV-REG seams. Institution KMS/AEAD, recipient registry, audit WORM/SIEM, storage, IdP/MFA and A01-A14 retirement evidence remain G5 prerequisites and are unverified in this repository.
 
