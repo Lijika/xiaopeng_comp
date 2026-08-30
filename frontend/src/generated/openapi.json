@@ -9,7 +9,10 @@
             "type": "integer"
           },
           "data_scope": {
-            "const": "synthetic",
+            "enum": [
+              "synthetic",
+              "uploaded"
+            ],
             "title": "Data Scope",
             "type": "string"
           },
@@ -161,18 +164,22 @@
       "DemoBatchRequest": {
         "additionalProperties": false,
         "properties": {
+          "applications": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Applications",
+            "type": "array"
+          },
           "fixture_ids": {
             "items": {
               "type": "string"
             },
-            "minItems": 1,
             "title": "Fixture Ids",
             "type": "array"
           }
         },
-        "required": [
-          "fixture_ids"
-        ],
         "title": "DemoBatchRequest",
         "type": "object"
       },
@@ -305,14 +312,41 @@
       "DemoCheckRequest": {
         "additionalProperties": false,
         "properties": {
+          "application": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Application"
+          },
+          "file_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "File Name"
+          },
           "fixture_id": {
-            "title": "Fixture Id",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fixture Id"
           }
         },
-        "required": [
-          "fixture_id"
-        ],
         "title": "DemoCheckRequest",
         "type": "object"
       },
@@ -334,7 +368,10 @@
             "$ref": "#/components/schemas/DemoConfigInfo"
           },
           "data_scope": {
-            "const": "synthetic",
+            "enum": [
+              "synthetic",
+              "uploaded"
+            ],
             "title": "Data Scope",
             "type": "string"
           },
@@ -346,8 +383,15 @@
             "type": "array"
           },
           "fixture_id": {
-            "title": "Fixture Id",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fixture Id"
           },
           "summary": {
             "$ref": "#/components/schemas/DemoSummary"
@@ -361,12 +405,10 @@
         "required": [
           "track",
           "data_scope",
-          "fixture_id",
           "application_id",
           "summary",
           "checks",
-          "config",
-          "evidence_links"
+          "config"
         ],
         "title": "DemoCheckResponse",
         "type": "object"
@@ -459,6 +501,91 @@
           }
         },
         "title": "DemoDiffHighlight",
+        "type": "object"
+      },
+      "DemoDirectoryResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "active_application_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Application Id"
+          },
+          "current_role_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Role Id"
+          },
+          "deletion_application_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deletion Application Id"
+          },
+          "deletion_reference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deletion Reference"
+          },
+          "exhibit": {
+            "default": false,
+            "title": "Exhibit",
+            "type": "boolean"
+          },
+          "late_application_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Late Application Id"
+          },
+          "roles": {
+            "items": {
+              "$ref": "#/components/schemas/DemoExhibitRole"
+            },
+            "title": "Roles",
+            "type": "array"
+          },
+          "supplement_request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplement Request Id"
+          }
+        },
+        "title": "DemoDirectoryResponse",
         "type": "object"
       },
       "DemoErrorDetail": {
@@ -721,6 +848,49 @@
         "title": "DemoEvidenceLink",
         "type": "object"
       },
+      "DemoExhibitRole": {
+        "additionalProperties": false,
+        "properties": {
+          "duty": {
+            "title": "Duty",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "subject": {
+            "title": "Subject",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "duty",
+          "subject"
+        ],
+        "title": "DemoExhibitRole",
+        "type": "object"
+      },
+      "DemoExhibitRoleBody": {
+        "additionalProperties": false,
+        "properties": {
+          "role_id": {
+            "title": "Role Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "role_id"
+        ],
+        "title": "DemoExhibitRoleBody",
+        "type": "object"
+      },
       "DemoFixtureOption": {
         "additionalProperties": false,
         "properties": {
@@ -900,6 +1070,272 @@
           }
         },
         "title": "DemoSummary",
+        "type": "object"
+      },
+      "ExhibitApprovalBody": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "approve",
+              "exception",
+              "reject"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "note": {
+            "default": "",
+            "title": "Note",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "title": "ExhibitApprovalBody",
+        "type": "object"
+      },
+      "ExhibitCaseResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "application_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Application Id"
+          },
+          "approval": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approval"
+          },
+          "attachments": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Attachments",
+            "type": "array"
+          },
+          "checks": {
+            "items": {
+              "$ref": "#/components/schemas/ExhibitCheckItem"
+            },
+            "title": "Checks",
+            "type": "array"
+          },
+          "documents": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Documents",
+            "type": "array"
+          },
+          "file_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "File Name"
+          },
+          "governance": {
+            "additionalProperties": true,
+            "title": "Governance",
+            "type": "object"
+          },
+          "report": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Report"
+          },
+          "review": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review"
+          }
+        },
+        "title": "ExhibitCaseResponse",
+        "type": "object"
+      },
+      "ExhibitCheckItem": {
+        "additionalProperties": false,
+        "properties": {
+          "diff_detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diff Detail"
+          },
+          "diff_left": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diff Left"
+          },
+          "diff_right": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diff Right"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "rule_id": {
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "severity": {
+            "title": "Severity",
+            "type": "string"
+          },
+          "snapshots": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Snapshots",
+            "type": "array"
+          },
+          "verdict": {
+            "title": "Verdict",
+            "type": "string"
+          }
+        },
+        "required": [
+          "rule_id",
+          "name",
+          "verdict",
+          "severity",
+          "message"
+        ],
+        "title": "ExhibitCheckItem",
+        "type": "object"
+      },
+      "ExhibitGovernanceActionBody": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "deliver",
+              "cancel",
+              "settle",
+              "delete",
+              "export"
+            ],
+            "title": "Action",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "title": "ExhibitGovernanceActionBody",
+        "type": "object"
+      },
+      "ExhibitReviewBody": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "confirm",
+              "need_material",
+              "exception"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "note": {
+            "default": "",
+            "title": "Note",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "title": "ExhibitReviewBody",
+        "type": "object"
+      },
+      "ExhibitSupplementBody": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "default": "file",
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "note": {
+            "default": "",
+            "title": "Note",
+            "type": "string"
+          },
+          "size": {
+            "default": 0,
+            "title": "Size",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "ExhibitSupplementBody",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -20944,9 +21380,179 @@
         "summary": "Api Check Batch"
       }
     },
+    "/api/demo/case": {
+      "get": {
+        "operationId": "exhibit_case_api_demo_case_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExhibitCaseResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Exhibit Case"
+      }
+    },
+    "/api/demo/case/approval": {
+      "post": {
+        "operationId": "exhibit_case_approval_api_demo_case_approval_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExhibitApprovalBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExhibitCaseResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Exhibit Case Approval"
+      }
+    },
+    "/api/demo/case/governance": {
+      "post": {
+        "operationId": "exhibit_case_governance_api_demo_case_governance_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExhibitGovernanceActionBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExhibitCaseResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Exhibit Case Governance"
+      }
+    },
+    "/api/demo/case/review": {
+      "post": {
+        "operationId": "exhibit_case_review_api_demo_case_review_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExhibitReviewBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExhibitCaseResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Exhibit Case Review"
+      }
+    },
+    "/api/demo/case/supplement": {
+      "post": {
+        "operationId": "exhibit_case_supplement_api_demo_case_supplement_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExhibitSupplementBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExhibitCaseResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Exhibit Case Supplement"
+      }
+    },
     "/api/demo/check": {
       "post": {
-        "description": "Run exactly one server-resident synthetic fixture through the active\nrules and project a typed C-DEMO report with Step2 evidence metadata.",
+        "description": "Run one uploaded Application JSON, or one server-resident fixture.",
         "operationId": "demo_check_api_demo_check_post",
         "requestBody": {
           "content": {
@@ -20968,6 +21574,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemoErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
           },
           "404": {
             "content": {
@@ -21015,7 +21631,7 @@
     },
     "/api/demo/check/batch": {
       "post": {
-        "description": "One bounded synchronous run of server-resident synthetic fixtures.\n\nThe count cap is enforced before any fixture I/O or allow-list work, and\nan unknown id fails closed before any check runs.  Each item is an\nexplicit completed/failed terminal outcome; the enclosing outcome is\ncompleted/partial/failed.  No async queue, job, or evaluate batch exists.",
+        "description": "One bounded synchronous run of fixtures and/or uploaded applications.",
         "operationId": "demo_batch_check_api_demo_check_batch_post",
         "requestBody": {
           "content": {
@@ -21082,6 +21698,25 @@
         "summary": "Demo Batch Check"
       }
     },
+    "/api/demo/directory": {
+      "get": {
+        "description": "Read-only exhibit directory: sample ids plus the local role roster.",
+        "operationId": "demo_directory_api_demo_directory_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemoDirectoryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Demo Directory"
+      }
+    },
     "/api/demo/evaluate/summary": {
       "get": {
         "description": "Read-only fixed-main evaluation summary projection.\n\nThe computation stays on the existing evaluate_suite('main') authority;\nonly summary counts/rates, warnings, the honesty note, and the\nserver-owned claim metadata cross the API — no legacy HTML, pairs,\nper-application labels, pass_thresholds, or rules paths.  An empty/smoke\ncorpus is an explicit empty state with nullable rates; unavailable\nevaluation is a distinct closed 503.",
@@ -21109,6 +21744,45 @@
           }
         },
         "summary": "Demo Evaluate Summary"
+      }
+    },
+    "/api/demo/exhibit-role": {
+      "post": {
+        "description": "Pin the local exhibit role.  Only active when TASK4_EXHIBIT=1.",
+        "operationId": "set_exhibit_role_api_demo_exhibit_role_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DemoExhibitRoleBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemoDirectoryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Exhibit Role"
       }
     },
     "/api/demo/fixtures": {

@@ -39,10 +39,10 @@ describe("T15DeliveryPanel", () => {
         "status",
       );
       for (const name of [
-        "Verification Completed",
-        "Verification Routing",
-        "Delivery Obligation",
-        "Delivery Receipt",
+        "核验是否完成",
+        "结论怎么送到下游",
+        "待投递的结论",
+        "下游有没有签收",
       ]) {
         expect(screen.getByRole("heading", { name })).toBeInTheDocument();
       }

@@ -48,6 +48,19 @@ function errorResponse(status: number, error: string, reasonCode?: string): Resp
   return jsonResponse({ detail }, status);
 }
 
+function emptyDirectory() {
+  return {
+    active_application_id: null,
+    late_application_id: null,
+    supplement_request_id: null,
+    deletion_reference: null,
+    deletion_application_id: null,
+    exhibit: false,
+    current_role_id: null,
+    roles: [],
+  };
+}
+
 /**
  * Fetch boundary mock: routes "METHOD /pathname" to a handler, records every
  * call, and rejects with a network TypeError for unmocked routes (so a
@@ -66,6 +79,24 @@ export function fetchRouter(routes: Record<string, RouteHandler>) {
     });
     const handler = routes[`${method} ${pathname}`];
     if (!handler) {
+      if (method === "GET" && pathname === "/api/demo/directory") {
+        return Promise.resolve(jsonResponse(emptyDirectory()));
+      }
+      if (method === "GET" && pathname === "/api/demo/case") {
+        return Promise.resolve(
+          jsonResponse({
+            application_id: null,
+            file_name: null,
+            report: null,
+            checks: [],
+            documents: [],
+            review: null,
+            approval: null,
+            attachments: [],
+            governance: {},
+          }),
+        );
+      }
       return Promise.reject(
         new TypeError(`no mocked route for ${method} ${pathname}`),
       );

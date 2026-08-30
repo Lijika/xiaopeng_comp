@@ -1,40 +1,41 @@
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
 import type {
   DemoBatchCheckResponse,
   DemoEvaluationSummaryResponse,
-  DemoFixtureOption,
 } from "../api/client";
+import { writeExhibitUploads } from "../lib/exhibitSession";
 import { fetchRouter, renderWithQuery } from "../test-utils";
 import DemoBatchSummaryPanel from "./DemoBatchSummaryPanel";
 
 const FIXTURE_OK = "app_demo_step2_ok";
 const FIXTURE_BAD_VIN = "app_demo_step2_bad_vin";
 
-function options(): DemoFixtureOption[] {
-  return [
+function seedUploads() {
+  writeExhibitUploads([
     {
-      fixture_id: FIXTURE_OK,
-      title: "演示样例 1",
-      description: "预置合成多单据校验样例",
-      field_source: "synthetic",
-      step2_sample_id: "JFL25P02L080310-01",
+      id: FIXTURE_OK,
+      fileName: "ok.json",
+      application: { application_id: "APP-OK", documents: [] },
+      documents: [],
+      checks: [],
     },
     {
-      fixture_id: FIXTURE_BAD_VIN,
-      title: "演示样例 2",
-      description: "预置合成多单据校验样例",
-      field_source: "synthetic",
-      step2_sample_id: "JFL25P02L086208-01",
+      id: FIXTURE_BAD_VIN,
+      fileName: "bad.json",
+      application: { application_id: "APP-BAD", documents: [] },
+      documents: [],
+      checks: [],
     },
-  ];
+  ]);
 }
 
-function fixturesPayload() {
-  return { fixtures: options(), batch_max_n: 50 };
-}
+beforeEach(() => {
+  sessionStorage.clear();
+  seedUploads();
+});
 
 function completedBatchPayload(): DemoBatchCheckResponse {
   return {
@@ -179,9 +180,7 @@ function emptySummaryPayload(): DemoEvaluationSummaryResponse {
 
 describe("DemoBatchSummaryPanel", () => {
   it("renders native checkbox controls and the server-owned cap, firing no batch POST and no summary GET on mount", async () => {
-    const router = fetchRouter({
-      "GET /api/demo/fixtures": () => router.jsonResponse(fixturesPayload()),
-    });
+    const router = fetchRouter({});
     renderWithQuery(<DemoBatchSummaryPanel />);
     await screen.findByTestId("demo-batch-panel");
     expect(
@@ -211,7 +210,6 @@ describe("DemoBatchSummaryPanel", () => {
       release = resolve;
     });
     const router = fetchRouter({
-      "GET /api/demo/fixtures": () => router.jsonResponse(fixturesPayload()),
       "POST /api/demo/check/batch": async () => {
         await held;
         return router.jsonResponse(completedBatchPayload());
@@ -247,11 +245,15 @@ describe("DemoBatchSummaryPanel", () => {
     ).toHaveTextContent("已完成");
     expect(
       screen.getByTestId(`demo-batch-item-${FIXTURE_BAD_VIN}`),
-    ).toHaveTextContent("R_VIN_CROSS");
+    ).toHaveTextContent("车辆识别代号");
     const posts = router.calls.filter((call) => call.method === "POST");
     expect(posts).toHaveLength(1);
     expect(posts[0].body).toEqual({
-      fixture_ids: [FIXTURE_OK, FIXTURE_BAD_VIN],
+      applications: [
+        { application_id: "APP-OK", documents: [] },
+        { application_id: "APP-BAD", documents: [] },
+      ],
+      fixture_ids: [],
     });
   });
 
@@ -261,7 +263,6 @@ describe("DemoBatchSummaryPanel", () => {
       release = resolve;
     });
     const router = fetchRouter({
-      "GET /api/demo/fixtures": () => router.jsonResponse(fixturesPayload()),
       "POST /api/demo/check/batch": async () => {
         await held;
         return router.jsonResponse(completedBatchPayload());
@@ -317,7 +318,6 @@ describe("DemoBatchSummaryPanel", () => {
 
   it("shows the fixed generic request failure with no reflected code or internal detail", async () => {
     const router = fetchRouter({
-      "GET /api/demo/fixtures": () => router.jsonResponse(fixturesPayload()),
       "POST /api/demo/check/batch": () =>
         new Response(
           JSON.stringify({
@@ -369,7 +369,6 @@ describe("DemoBatchSummaryPanel", () => {
 
   it("renders the cap rejection as a terminal failed status with fixed bound-specific copy and the server cap separately visible", async () => {
     const router = fetchRouter({
-      "GET /api/demo/fixtures": () => router.jsonResponse(fixturesPayload()),
       "POST /api/demo/check/batch": () =>
         new Response(
           JSON.stringify({
@@ -415,7 +414,6 @@ describe("DemoBatchSummaryPanel", () => {
 
   it("renders a partial batch: partial outcome, fixed generic failed-item error, totals exclude failed items", async () => {
     const router = fetchRouter({
-      "GET /api/demo/fixtures": () => router.jsonResponse(fixturesPayload()),
       "POST /api/demo/check/batch": () =>
         router.jsonResponse(partialBatchPayload()),
     });
@@ -443,59 +441,9 @@ describe("DemoBatchSummaryPanel", () => {
     expect(screen.getByTestId("demo-batch-totals")).toHaveTextContent("一致 5");
   });
 
-  it("shows explicit loading/error/empty states for the fixture list", async () => {
-    // loading
-    let release = () => {};
-    const held = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const router = fetchRouter({
-      "GET /api/demo/fixtures": async () => {
-        await held;
-        return router.jsonResponse(fixturesPayload());
-      },
-    });
-    const loadingView = renderWithQuery(<DemoBatchSummaryPanel />);
-    expect(
-      await screen.findByTestId("demo-batch-fixtures-loading"),
-    ).toBeInTheDocument();
-    release();
-    await waitFor(() =>
-      expect(
-        screen.queryByTestId("demo-batch-fixtures-loading"),
-      ).not.toBeInTheDocument(),
-    );
-    loadingView.unmount();
-
-    // list failure: the fixed generic alert, no reflected code (the shared
-    // fixture query retries transient 503s, so the wait must cover all
-    // bounded attempts)
-    const errorRouter = fetchRouter({
-      "GET /api/demo/fixtures": () =>
-        errorRouter.jsonResponse(
-          { detail: { error: "DEMO_FIXTURE_UNAVAILABLE", message: "演示样例暂不可用" } },
-          503,
-        ),
-    });
-    renderWithQuery(<DemoBatchSummaryPanel />);
-    await waitFor(
-      () =>
-        expect(screen.getByTestId("demo-batch-fixtures-error")).toBeInTheDocument(),
-      { timeout: 6_000 },
-    );
-    expect(screen.getByTestId("demo-batch-fixtures-error")).toHaveAttribute(
-      "role",
-      "alert",
-    );
-    expect(screen.getByTestId("demo-batch-fixtures-error").textContent).not.toContain(
-      "DEMO_FIXTURE_UNAVAILABLE",
-    );
-
-    // empty list: explicit empty state
-    const emptyRouter = fetchRouter({
-      "GET /api/demo/fixtures": () =>
-        emptyRouter.jsonResponse({ fixtures: [], batch_max_n: 50 }),
-    });
+  it("shows an empty uploaded-application list when none have been checked yet", async () => {
+    sessionStorage.clear();
+    fetchRouter({});
     renderWithQuery(<DemoBatchSummaryPanel />);
     await waitFor(() =>
       expect(screen.getByTestId("demo-batch-fixtures-empty")).toBeInTheDocument(),
@@ -504,7 +452,6 @@ describe("DemoBatchSummaryPanel", () => {
 
   it("loads the read-only summary only on explicit click with server-owned claim labels and no PASS", async () => {
     const router = fetchRouter({
-      "GET /api/demo/fixtures": () => router.jsonResponse(fixturesPayload()),
       "GET /api/demo/evaluate/summary": () =>
         router.jsonResponse(availableSummaryPayload()),
     });
@@ -547,7 +494,6 @@ describe("DemoBatchSummaryPanel", () => {
 
   it("shows the explicit empty state with nullable counts/rates and no zero-success claim", async () => {
     const router = fetchRouter({
-      "GET /api/demo/fixtures": () => router.jsonResponse(fixturesPayload()),
       "GET /api/demo/evaluate/summary": () =>
         router.jsonResponse(emptySummaryPayload()),
     });
@@ -576,7 +522,6 @@ describe("DemoBatchSummaryPanel", () => {
   it("shows the fixed unavailable state and refetches only on a second explicit click", async () => {
     let fail = true;
     const router = fetchRouter({
-      "GET /api/demo/fixtures": () => router.jsonResponse(fixturesPayload()),
       "GET /api/demo/evaluate/summary": () =>
         fail
           ? new Response(
@@ -630,7 +575,6 @@ describe("DemoBatchSummaryPanel", () => {
       releaseReload = resolve;
     });
     const router = fetchRouter({
-      "GET /api/demo/fixtures": () => router.jsonResponse(fixturesPayload()),
       "GET /api/demo/evaluate/summary": () => {
         if (fail) {
           return heldReload.then(() =>

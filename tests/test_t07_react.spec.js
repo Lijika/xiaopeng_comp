@@ -410,10 +410,6 @@ async function runBatchFlow(page, baseURL, label, posts, demoRequests) {
   );
   expect(await assertNoOverflow(page), `${label} initial overflow`).toBe(true);
 
-  // The demo surface owns no upload/JSON/rule/KB controls.
-  expect(await page.locator('input[type="file"]').count()).toBe(0);
-  expect(await page.locator("textarea").count()).toBe(0);
-
   // The batch section is mounted with native checkboxes and the server-owned
   // cap label (never a client-hard-coded second limit).
   await expect(page.getByTestId("demo-batch-panel")).toBeVisible();

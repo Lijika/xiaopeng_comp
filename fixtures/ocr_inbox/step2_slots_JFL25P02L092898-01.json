@@ -1,0 +1,202 @@
+{
+  "schema": "task4.external_ocr_slots.v1",
+  "sample_id": "JFL25P02L092898-01",
+  "doc_type": "机动车登记证书",
+  "source": "step2_page_order+1.zip",
+  "note": "raw 为空：需外部 OCR 填写；仅提供框与影像定位",
+  "n_slots": 12,
+  "slots": [
+    {
+      "field": "vin",
+      "class_name_cn": "车辆识别代号/车架号",
+      "bbox": [
+        129,
+        971,
+        548,
+        1010
+      ],
+      "confidence_det": 0.9246137142181396,
+      "page_order": 1,
+      "page_type": "注册页",
+      "image_filename": "0613a1b186e956fbdc087cb5d7ce123f.png",
+      "zip_member": "1/JFL25P02L092898-01/0613a1b186e956fbdc087cb5d7ce123f.png",
+      "raw": null
+    },
+    {
+      "field": "manufacturer",
+      "class_name_cn": "制造厂名称",
+      "bbox": [
+        133,
+        1104,
+        497,
+        1143
+      ],
+      "confidence_det": 0.9192397594451904,
+      "page_order": 1,
+      "page_type": "注册页",
+      "image_filename": "0613a1b186e956fbdc087cb5d7ce123f.png",
+      "zip_member": "1/JFL25P02L092898-01/0613a1b186e956fbdc087cb5d7ce123f.png",
+      "raw": null
+    },
+    {
+      "field": "vehicle_brand",
+      "class_name_cn": "车辆品牌",
+      "bbox": [
+        738,
+        889,
+        973,
+        925
+      ],
+      "confidence_det": 0.8882171511650085,
+      "page_order": 1,
+      "page_type": "注册页",
+      "image_filename": "0613a1b186e956fbdc087cb5d7ce123f.png",
+      "zip_member": "1/JFL25P02L092898-01/0613a1b186e956fbdc087cb5d7ce123f.png",
+      "raw": null
+    },
+    {
+      "field": "fuel_type",
+      "class_name_cn": "燃料种类",
+      "bbox": [
+        129,
+        1060,
+        416,
+        1099
+      ],
+      "confidence_det": 0.8772965669631958,
+      "page_order": 1,
+      "page_type": "注册页",
+      "image_filename": "0613a1b186e956fbdc087cb5d7ce123f.png",
+      "zip_member": "1/JFL25P02L092898-01/0613a1b186e956fbdc087cb5d7ce123f.png",
+      "raw": null
+    },
+    {
+      "field": "vehicle_model",
+      "class_name_cn": "车辆型号",
+      "bbox": [
+        130,
+        927,
+        458,
+        966
+      ],
+      "confidence_det": 0.7898814082145691,
+      "page_order": 1,
+      "page_type": "注册页",
+      "image_filename": "0613a1b186e956fbdc087cb5d7ce123f.png",
+      "zip_member": "1/JFL25P02L092898-01/0613a1b186e956fbdc087cb5d7ce123f.png",
+      "raw": null
+    },
+    {
+      "field": "reg_cert_no",
+      "class_name_cn": "登记证书编号",
+      "bbox": [
+        861,
+        115,
+        1137,
+        140
+      ],
+      "confidence_det": 0.7568976879119873,
+      "page_order": 1,
+      "page_type": "注册页",
+      "image_filename": "0613a1b186e956fbdc087cb5d7ce123f.png",
+      "zip_member": "1/JFL25P02L092898-01/0613a1b186e956fbdc087cb5d7ce123f.png",
+      "raw": null
+    },
+    {
+      "field": "engine_no",
+      "class_name_cn": "发动机号",
+      "bbox": [
+        129,
+        1014,
+        470,
+        1056
+      ],
+      "confidence_det": 0.5548778176307678,
+      "page_order": 1,
+      "page_type": "注册页",
+      "image_filename": "0613a1b186e956fbdc087cb5d7ce123f.png",
+      "zip_member": "1/JFL25P02L092898-01/0613a1b186e956fbdc087cb5d7ce123f.png",
+      "raw": null
+    },
+    {
+      "field": "vehicle_type",
+      "class_name_cn": "车辆类型",
+      "bbox": [
+        133,
+        884,
+        467,
+        923
+      ],
+      "confidence_det": 0.30212581157684326,
+      "page_order": 1,
+      "page_type": "注册页",
+      "image_filename": "0613a1b186e956fbdc087cb5d7ce123f.png",
+      "zip_member": "1/JFL25P02L092898-01/0613a1b186e956fbdc087cb5d7ce123f.png",
+      "raw": null
+    },
+    {
+      "field": "vehicle_type",
+      "class_name_cn": "车辆类型",
+      "bbox": [
+        133,
+        884,
+        461,
+        924
+      ],
+      "confidence_det": 0.2582768499851227,
+      "page_order": 1,
+      "page_type": "注册页",
+      "image_filename": "0613a1b186e956fbdc087cb5d7ce123f.png",
+      "zip_member": "1/JFL25P02L092898-01/0613a1b186e956fbdc087cb5d7ce123f.png",
+      "raw": null
+    },
+    {
+      "field": "reg_cert_no",
+      "class_name_cn": "登记证书编号(数字)",
+      "bbox": [
+        768,
+        89,
+        1139,
+        118
+      ],
+      "confidence_det": 0.824628472328186,
+      "page_order": 2,
+      "page_type": "登记页",
+      "image_filename": "f29c6f0d69f9d65f467c898222a0d34c.png",
+      "zip_member": "1/JFL25P02L092898-01/f29c6f0d69f9d65f467c898222a0d34c.png",
+      "raw": null
+    },
+    {
+      "field": "reg_cert_no",
+      "class_name_cn": "登记证书编号(数字)",
+      "bbox": [
+        752,
+        102,
+        1124,
+        132
+      ],
+      "confidence_det": 0.4969049394130707,
+      "page_order": 3,
+      "page_type": "登记页",
+      "image_filename": "cf217a6bb31cc53f93b5608d992ce890.png",
+      "zip_member": "1/JFL25P02L092898-01/cf217a6bb31cc53f93b5608d992ce890.png",
+      "raw": null
+    },
+    {
+      "field": "reg_cert_no",
+      "class_name_cn": "登记证书编号(数字)",
+      "bbox": [
+        753,
+        102,
+        1124,
+        132
+      ],
+      "confidence_det": 0.4631378650665283,
+      "page_order": 3,
+      "page_type": "登记页",
+      "image_filename": "cf217a6bb31cc53f93b5608d992ce890.png",
+      "zip_member": "1/JFL25P02L092898-01/cf217a6bb31cc53f93b5608d992ce890.png",
+      "raw": null
+    }
+  ]
+}

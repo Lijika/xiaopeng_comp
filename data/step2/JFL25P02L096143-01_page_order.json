@@ -1,0 +1,424 @@
+{
+  "sample_id": "JFL25P02L096143-01",
+  "generated_time": "2026-07-24 20:49:11",
+  "pages": [
+    {
+      "order": 1,
+      "filename": "7fecab75c54014731d2f1b268f0a3b23.png",
+      "page_numbers": [
+        1,
+        2
+      ],
+      "inferred": false,
+      "page_type": "注册页",
+      "has_reg_marker": true,
+      "has_rec_marker": false,
+      "detections": [
+        {
+          "bbox": [
+            198,
+            350,
+            1038,
+            773
+          ],
+          "confidence": 0.9671245217323303,
+          "class_id": 5,
+          "class_name_cn": "转移摘要(大框)"
+        },
+        {
+          "bbox": [
+            197,
+            840,
+            1097,
+            1439
+          ],
+          "confidence": 0.9626973867416382,
+          "class_id": 6,
+          "class_name_cn": "车辆信息(大框)"
+        },
+        {
+          "bbox": [
+            211,
+            876,
+            474,
+            906
+          ],
+          "confidence": 0.931860089302063,
+          "class_id": 11,
+          "class_name_cn": "车辆类型"
+        },
+        {
+          "bbox": [
+            520,
+            332,
+            696,
+            359
+          ],
+          "confidence": 0.9200097322463989,
+          "class_id": 2,
+          "class_name_cn": "转移摘要"
+        },
+        {
+          "bbox": [
+            520,
+            240,
+            696,
+            266
+          ],
+          "confidence": 0.9179977178573608,
+          "class_id": 1,
+          "class_name_cn": "登记摘要"
+        },
+        {
+          "bbox": [
+            527,
+            826,
+            732,
+            854
+          ],
+          "confidence": 0.9085025191307068,
+          "class_id": 3,
+          "class_name_cn": "车辆信息"
+        },
+        {
+          "bbox": [
+            208,
+            1019,
+            443,
+            1050
+          ],
+          "confidence": 0.9077308177947998,
+          "class_id": 16,
+          "class_name_cn": "燃料种类"
+        },
+        {
+          "bbox": [
+            210,
+            983,
+            488,
+            1012
+          ],
+          "confidence": 0.8974313139915466,
+          "class_id": 15,
+          "class_name_cn": "发动机号"
+        },
+        {
+          "bbox": [
+            774,
+            242,
+            993,
+            261
+          ],
+          "confidence": 0.8871569037437439,
+          "class_id": 8,
+          "class_name_cn": "登记证书编号"
+        },
+        {
+          "bbox": [
+            593,
+            765,
+            646,
+            787
+          ],
+          "confidence": 0.8819154500961304,
+          "class_id": 0,
+          "class_name_cn": "页码"
+        },
+        {
+          "bbox": [
+            619,
+            1433,
+            679,
+            1457
+          ],
+          "confidence": 0.8812609910964966,
+          "class_id": 0,
+          "class_name_cn": "页码"
+        },
+        {
+          "bbox": [
+            703,
+            858,
+            941,
+            885
+          ],
+          "confidence": 0.8782982230186462,
+          "class_id": 12,
+          "class_name_cn": "车辆品牌"
+        },
+        {
+          "bbox": [
+            210,
+            911,
+            477,
+            940
+          ],
+          "confidence": 0.8671835064888,
+          "class_id": 13,
+          "class_name_cn": "车辆型号"
+        },
+        {
+          "bbox": [
+            208,
+            258,
+            991,
+            340
+          ],
+          "confidence": 0.8426243662834167,
+          "class_id": 4,
+          "class_name_cn": "登记摘要(大框)"
+        },
+        {
+          "bbox": [
+            211,
+            948,
+            553,
+            975
+          ],
+          "confidence": 0.5962203741073608,
+          "class_id": 14,
+          "class_name_cn": "车辆识别代号/车架号"
+        },
+        {
+          "bbox": [
+            211,
+            947,
+            552,
+            976
+          ],
+          "confidence": 0.5266780257225037,
+          "class_id": 14,
+          "class_name_cn": "车辆识别代号/车架号"
+        },
+        {
+          "bbox": [
+            221,
+            1055,
+            593,
+            1084
+          ],
+          "confidence": 0.48136958479881287,
+          "class_id": 17,
+          "class_name_cn": "制造厂名称"
+        },
+        {
+          "bbox": [
+            215,
+            1055,
+            598,
+            1085
+          ],
+          "confidence": 0.32943490147590637,
+          "class_id": 17,
+          "class_name_cn": "制造厂名称"
+        }
+      ]
+    },
+    {
+      "order": 2,
+      "filename": "1dde5d26467183c69da233226c63c4d9.png",
+      "page_numbers": [
+        3,
+        4
+      ],
+      "inferred": false,
+      "page_type": "登记页",
+      "has_reg_marker": false,
+      "has_rec_marker": true,
+      "detections": [
+        {
+          "bbox": [
+            579,
+            936,
+            665,
+            959
+          ],
+          "confidence": 0.9120821356773376,
+          "class_id": 7,
+          "class_name_cn": "登记栏"
+        },
+        {
+          "bbox": [
+            689,
+            392,
+            951,
+            417
+          ],
+          "confidence": 0.9103583693504333,
+          "class_id": 10,
+          "class_name_cn": "登记证书编号(数字)"
+        },
+        {
+          "bbox": [
+            560,
+            418,
+            641,
+            440
+          ],
+          "confidence": 0.9102646708488464,
+          "class_id": 7,
+          "class_name_cn": "登记栏"
+        },
+        {
+          "bbox": [
+            594,
+            879,
+            641,
+            898
+          ],
+          "confidence": 0.8890120983123779,
+          "class_id": 0,
+          "class_name_cn": "页码"
+        },
+        {
+          "bbox": [
+            613,
+            1476,
+            663,
+            1496
+          ],
+          "confidence": 0.8822058439254761,
+          "class_id": 0,
+          "class_name_cn": "页码"
+        }
+      ]
+    },
+    {
+      "order": 3,
+      "filename": "eaedf717ead4ae68eb179a8286e93e4c.png",
+      "page_numbers": [
+        5,
+        6
+      ],
+      "inferred": false,
+      "page_type": "登记页",
+      "has_reg_marker": false,
+      "has_rec_marker": true,
+      "detections": [
+        {
+          "bbox": [
+            718,
+            315,
+            1000,
+            341
+          ],
+          "confidence": 0.9161449670791626,
+          "class_id": 10,
+          "class_name_cn": "登记证书编号(数字)"
+        },
+        {
+          "bbox": [
+            600,
+            908,
+            690,
+            932
+          ],
+          "confidence": 0.8979469537734985,
+          "class_id": 7,
+          "class_name_cn": "登记栏"
+        },
+        {
+          "bbox": [
+            578,
+            345,
+            666,
+            368
+          ],
+          "confidence": 0.8742067217826843,
+          "class_id": 7,
+          "class_name_cn": "登记栏"
+        },
+        {
+          "bbox": [
+            637,
+            1475,
+            690,
+            1498
+          ],
+          "confidence": 0.8722837567329407,
+          "class_id": 0,
+          "class_name_cn": "页码"
+        },
+        {
+          "bbox": [
+            614,
+            842,
+            663,
+            863
+          ],
+          "confidence": 0.8489370942115784,
+          "class_id": 0,
+          "class_name_cn": "页码"
+        }
+      ]
+    },
+    {
+      "order": 4,
+      "filename": "登记证_202512111040222484e900.jpg",
+      "page_numbers": [
+        7,
+        8
+      ],
+      "inferred": false,
+      "page_type": "登记页",
+      "has_reg_marker": false,
+      "has_rec_marker": true,
+      "detections": [
+        {
+          "bbox": [
+            601,
+            1484,
+            664,
+            1510
+          ],
+          "confidence": 0.7904728055000305,
+          "class_id": 0,
+          "class_name_cn": "页码"
+        },
+        {
+          "bbox": [
+            593,
+            740,
+            655,
+            765
+          ],
+          "confidence": 0.7625535726547241,
+          "class_id": 0,
+          "class_name_cn": "页码"
+        },
+        {
+          "bbox": [
+            567,
+            150,
+            672,
+            179
+          ],
+          "confidence": 0.7527222037315369,
+          "class_id": 7,
+          "class_name_cn": "登记栏"
+        },
+        {
+          "bbox": [
+            573,
+            820,
+            683,
+            852
+          ],
+          "confidence": 0.6407455801963806,
+          "class_id": 7,
+          "class_name_cn": "登记栏"
+        }
+      ]
+    }
+  ],
+  "statistics": {
+    "total_pages": 4,
+    "with_ocr_number": 4,
+    "inferred_number": 0,
+    "page_type_counts": {
+      "注册页": 1,
+      "登记页": 3
+    }
+  },
+  "warnings": []
+}

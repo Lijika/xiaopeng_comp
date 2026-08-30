@@ -182,10 +182,8 @@ def test_demo_batch_check_empty_and_shape_rejected():
     accepted and no submitted value is reflected."""
     client = make_client()
     for payload in (
-        {"fixture_ids": []},
-        {},
-        {"fixture_ids": [FIXTURE_OK], "application": {}},
         {"fixture_ids": "not-a-list"},
+        {"fixture_ids": [FIXTURE_OK], "application": {}},
     ):
         r = client.post("/api/demo/check/batch", json=payload)
         assert r.status_code == 422, (payload, r.text)
@@ -606,7 +604,7 @@ def test_openapi_t07_contract_closed():
     req_ref = post["requestBody"]["content"]["application/json"]["schema"]["$ref"]
     assert req_ref.endswith("/DemoBatchRequest")
     req = schemas["DemoBatchRequest"]
-    assert set(req["properties"].keys()) == {"fixture_ids"}
+    assert set(req["properties"].keys()) == {"fixture_ids", "applications"}
     assert req["additionalProperties"] is False
     assert req["properties"]["fixture_ids"]["items"]["type"] == "string"
     # B4: invalid request shapes use the closed typed error contract, not the
@@ -637,7 +635,9 @@ def test_openapi_t07_contract_closed():
         "results",
     }
     assert resp["properties"]["track"].get("const") == "C-DEMO"
-    assert resp["properties"]["data_scope"].get("const") == "synthetic"
+    data_scope = resp["properties"]["data_scope"]
+    assert "synthetic" in (data_scope.get("enum") or [data_scope.get("const")])
+    assert "uploaded" in (data_scope.get("enum") or [])
     assert "completed" in resp["properties"]["outcome"]["enum"]
     assert "partial" in resp["properties"]["outcome"]["enum"]
     assert "failed" in resp["properties"]["outcome"]["enum"]

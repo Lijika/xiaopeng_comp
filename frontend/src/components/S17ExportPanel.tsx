@@ -275,12 +275,12 @@ export default function S17ExportPanel() {
   };
 
   if (identityDenied) {
-    return <section className="panel" data-testid="s17-export-panel"><h2>受控导出</h2><ErrorState error={query.error ?? new HttpError(403, { error: "S17_FORBIDDEN" })} action="当前身份无权访问受控导出" /></section>;
+    return <section className="panel" data-testid="s17-export-panel"><h2>导出报告（需独立批准，只能取一次）</h2><ErrorState error={query.error ?? new HttpError(403, { error: "S17_FORBIDDEN" })} action="当前身份无权访问受控导出" /></section>;
   }
 
   return (
     <section className="panel" data-testid="s17-export-panel">
-      <h2>受控导出</h2>
+      <h2>导出报告（需独立批准，只能取一次）</h2>
       <p className="demo-status" data-testid="s17-privacy-note">请求只保留摘要；凭据、原始值、包内容与结果地址不会进入页面状态。</p>
       <section className="panel" data-testid="s17-request-form" aria-labelledby="s17-request-title">
         <h3 id="s17-request-title">固定导出请求</h3>

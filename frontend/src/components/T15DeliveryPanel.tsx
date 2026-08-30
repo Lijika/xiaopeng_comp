@@ -77,16 +77,16 @@ function EmptyProjection() {
       <p data-testid="s13-no-application" role="status" aria-live="polite">
         请选择应用以查看投递视图
       </p>
-      <Section id="s13-gate-title" title="Verification Completed" testId="s13-gate-section">
+      <Section id="s13-gate-title" title="核验是否完成" testId="s13-gate-section">
         <p data-testid="s13-gate-empty">—</p>
       </Section>
-      <Section id="s13-routing-title" title="Verification Routing" testId="s13-routing-section">
+      <Section id="s13-routing-title" title="结论怎么送到下游" testId="s13-routing-section">
         <p data-testid="s13-routing-empty">—</p>
       </Section>
-      <Section id="s13-obligation-title" title="Delivery Obligation" testId="s13-obligation-section">
+      <Section id="s13-obligation-title" title="待投递的结论" testId="s13-obligation-section">
         <p data-testid="s13-obligation-empty">—</p>
       </Section>
-      <Section id="s13-receipt-title" title="Delivery Receipt" testId="s13-receipt-section">
+      <Section id="s13-receipt-title" title="下游有没有签收" testId="s13-receipt-section">
         <p data-testid="s13-receipt-empty">—</p>
       </Section>
     </div>
@@ -221,7 +221,7 @@ export default function T15DeliveryPanel({
   const obligation = data.obligation;
   return (
     <div data-testid="s13-delivery-panel">
-      <Section id="s13-gate-title" title="Verification Completed" testId="s13-gate-section">
+      <Section id="s13-gate-title" title="核验是否完成" testId="s13-gate-section">
         <dl className="facts">
           <div>
             <dt>Verification Completed</dt>
@@ -244,7 +244,7 @@ export default function T15DeliveryPanel({
         </dl>
       </Section>
 
-      <Section id="s13-routing-title" title="Verification Routing" testId="s13-routing-section">
+      <Section id="s13-routing-title" title="结论怎么送到下游" testId="s13-routing-section">
         <dl className="facts">
           <div>
             <dt>Current Route</dt>
@@ -264,7 +264,7 @@ export default function T15DeliveryPanel({
         <RoutingHistory data={data} />
       </Section>
 
-      <Section id="s13-obligation-title" title="Delivery Obligation" testId="s13-obligation-section">
+      <Section id="s13-obligation-title" title="待投递的结论" testId="s13-obligation-section">
         {obligation === null ? (
           <p data-testid="s13-obligation-none" role="status">
             No delivery obligation
@@ -309,7 +309,7 @@ export default function T15DeliveryPanel({
         )}
       </Section>
 
-      <Section id="s13-receipt-title" title="Delivery Receipt" testId="s13-receipt-section">
+      <Section id="s13-receipt-title" title="下游有没有签收" testId="s13-receipt-section">
         <dl className="facts">
           <div>
             <dt>Delivery Status</dt>

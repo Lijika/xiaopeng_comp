@@ -151,6 +151,7 @@ def _build_workflows(work_root: Path) -> ControlledScenarioService:
                 "schema_version": "t16-browser-fixture/1",
                 "active_application_id": str(admitted.application_id),
                 "late_application_id": late_application_id,
+                "supplement_request_id": str(request["request_id"]),
             },
             sort_keys=True,
         ),

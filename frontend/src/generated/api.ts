@@ -83,6 +83,91 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/demo/case": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Exhibit Case */
+        get: operations["exhibit_case_api_demo_case_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/demo/case/approval": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Exhibit Case Approval */
+        post: operations["exhibit_case_approval_api_demo_case_approval_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/demo/case/governance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Exhibit Case Governance */
+        post: operations["exhibit_case_governance_api_demo_case_governance_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/demo/case/review": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Exhibit Case Review */
+        post: operations["exhibit_case_review_api_demo_case_review_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/demo/case/supplement": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Exhibit Case Supplement */
+        post: operations["exhibit_case_supplement_api_demo_case_supplement_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/demo/check": {
         parameters: {
             query?: never;
@@ -94,8 +179,7 @@ export interface paths {
         put?: never;
         /**
          * Demo Check
-         * @description Run exactly one server-resident synthetic fixture through the active
-         *     rules and project a typed C-DEMO report with Step2 evidence metadata.
+         * @description Run one uploaded Application JSON, or one server-resident fixture.
          */
         post: operations["demo_check_api_demo_check_post"];
         delete?: never;
@@ -115,14 +199,29 @@ export interface paths {
         put?: never;
         /**
          * Demo Batch Check
-         * @description One bounded synchronous run of server-resident synthetic fixtures.
-         *
-         *     The count cap is enforced before any fixture I/O or allow-list work, and
-         *     an unknown id fails closed before any check runs.  Each item is an
-         *     explicit completed/failed terminal outcome; the enclosing outcome is
-         *     completed/partial/failed.  No async queue, job, or evaluate batch exists.
+         * @description One bounded synchronous run of fixtures and/or uploaded applications.
          */
         post: operations["demo_batch_check_api_demo_check_batch_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/demo/directory": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Demo Directory
+         * @description Read-only exhibit directory: sample ids plus the local role roster.
+         */
+        get: operations["demo_directory_api_demo_directory_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -150,6 +249,26 @@ export interface paths {
         get: operations["demo_evaluate_summary_api_demo_evaluate_summary_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/demo/exhibit-role": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Set Exhibit Role
+         * @description Pin the local exhibit role.  Only active when TASK4_EXHIBIT=1.
+         */
+        post: operations["set_exhibit_role_api_demo_exhibit_role_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2915,9 +3034,9 @@ export interface components {
             completed: number;
             /**
              * Data Scope
-             * @constant
+             * @enum {string}
              */
-            data_scope: "synthetic";
+            data_scope: "synthetic" | "uploaded";
             /** Failed */
             failed: number;
             /**
@@ -2969,8 +3088,12 @@ export interface components {
         };
         /** DemoBatchRequest */
         DemoBatchRequest: {
+            /** Applications */
+            applications?: {
+                [key: string]: unknown;
+            }[];
             /** Fixture Ids */
-            fixture_ids: string[];
+            fixture_ids?: string[];
         };
         /** DemoBatchTotals */
         DemoBatchTotals: {
@@ -3027,8 +3150,14 @@ export interface components {
         };
         /** DemoCheckRequest */
         DemoCheckRequest: {
+            /** Application */
+            application?: {
+                [key: string]: unknown;
+            } | null;
+            /** File Name */
+            file_name?: string | null;
             /** Fixture Id */
-            fixture_id: string;
+            fixture_id?: string | null;
         };
         /** DemoCheckResponse */
         DemoCheckResponse: {
@@ -3039,13 +3168,13 @@ export interface components {
             config: components["schemas"]["DemoConfigInfo"];
             /**
              * Data Scope
-             * @constant
+             * @enum {string}
              */
-            data_scope: "synthetic";
+            data_scope: "synthetic" | "uploaded";
             /** Evidence Links */
-            evidence_links: components["schemas"]["DemoEvidenceLink"][];
+            evidence_links?: components["schemas"]["DemoEvidenceLink"][];
             /** Fixture Id */
-            fixture_id: string;
+            fixture_id?: string | null;
             summary: components["schemas"]["DemoSummary"];
             /**
              * Track
@@ -3072,6 +3201,28 @@ export interface components {
             pos?: number | null;
             /** Right */
             right?: string | null;
+        };
+        /** DemoDirectoryResponse */
+        DemoDirectoryResponse: {
+            /** Active Application Id */
+            active_application_id?: string | null;
+            /** Current Role Id */
+            current_role_id?: string | null;
+            /** Deletion Application Id */
+            deletion_application_id?: string | null;
+            /** Deletion Reference */
+            deletion_reference?: string | null;
+            /**
+             * Exhibit
+             * @default false
+             */
+            exhibit: boolean;
+            /** Late Application Id */
+            late_application_id?: string | null;
+            /** Roles */
+            roles?: components["schemas"]["DemoExhibitRole"][];
+            /** Supplement Request Id */
+            supplement_request_id?: string | null;
         };
         /**
          * DemoErrorDetail
@@ -3188,6 +3339,22 @@ export interface components {
             /** Sample Id */
             sample_id: string;
         };
+        /** DemoExhibitRole */
+        DemoExhibitRole: {
+            /** Duty */
+            duty: string;
+            /** Id */
+            id: string;
+            /** Label */
+            label: string;
+            /** Subject */
+            subject: string;
+        };
+        /** DemoExhibitRoleBody */
+        DemoExhibitRoleBody: {
+            /** Role Id */
+            role_id: string;
+        };
         /** DemoFixtureOption */
         DemoFixtureOption: {
             /** Description */
@@ -3269,6 +3436,116 @@ export interface components {
              * @default 0
              */
             uncertain: number;
+        };
+        /** ExhibitApprovalBody */
+        ExhibitApprovalBody: {
+            /**
+             * Action
+             * @enum {string}
+             */
+            action: "approve" | "exception" | "reject";
+            /**
+             * Note
+             * @default
+             */
+            note: string;
+        };
+        /** ExhibitCaseResponse */
+        ExhibitCaseResponse: {
+            /** Application Id */
+            application_id?: string | null;
+            /** Approval */
+            approval?: {
+                [key: string]: unknown;
+            } | null;
+            /** Attachments */
+            attachments?: {
+                [key: string]: unknown;
+            }[];
+            /** Checks */
+            checks?: components["schemas"]["ExhibitCheckItem"][];
+            /** Documents */
+            documents?: {
+                [key: string]: unknown;
+            }[];
+            /** File Name */
+            file_name?: string | null;
+            /** Governance */
+            governance?: {
+                [key: string]: unknown;
+            };
+            /** Report */
+            report?: {
+                [key: string]: unknown;
+            } | null;
+            /** Review */
+            review?: {
+                [key: string]: unknown;
+            } | null;
+        };
+        /** ExhibitCheckItem */
+        ExhibitCheckItem: {
+            /** Diff Detail */
+            diff_detail?: string | null;
+            /** Diff Left */
+            diff_left?: string | null;
+            /** Diff Right */
+            diff_right?: string | null;
+            /** Message */
+            message: string;
+            /** Name */
+            name: string;
+            /** Rule Id */
+            rule_id: string;
+            /** Severity */
+            severity: string;
+            /** Snapshots */
+            snapshots?: {
+                [key: string]: unknown;
+            }[];
+            /** Verdict */
+            verdict: string;
+        };
+        /** ExhibitGovernanceActionBody */
+        ExhibitGovernanceActionBody: {
+            /**
+             * Action
+             * @enum {string}
+             */
+            action: "deliver" | "cancel" | "settle" | "delete" | "export";
+        };
+        /** ExhibitReviewBody */
+        ExhibitReviewBody: {
+            /**
+             * Action
+             * @enum {string}
+             */
+            action: "confirm" | "need_material" | "exception";
+            /**
+             * Note
+             * @default
+             */
+            note: string;
+        };
+        /** ExhibitSupplementBody */
+        ExhibitSupplementBody: {
+            /**
+             * Kind
+             * @default file
+             */
+            kind: string;
+            /** Name */
+            name: string;
+            /**
+             * Note
+             * @default
+             */
+            note: string;
+            /**
+             * Size
+             * @default 0
+             */
+            size: number;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -9996,6 +10273,158 @@ export interface operations {
             };
         };
     };
+    exhibit_case_api_demo_case_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExhibitCaseResponse"];
+                };
+            };
+        };
+    };
+    exhibit_case_approval_api_demo_case_approval_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExhibitApprovalBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExhibitCaseResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    exhibit_case_governance_api_demo_case_governance_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExhibitGovernanceActionBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExhibitCaseResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    exhibit_case_review_api_demo_case_review_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExhibitReviewBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExhibitCaseResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    exhibit_case_supplement_api_demo_case_supplement_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExhibitSupplementBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExhibitCaseResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     demo_check_api_demo_check_post: {
         parameters: {
             query?: never;
@@ -10016,6 +10445,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DemoCheckResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DemoErrorResponse"];
                 };
             };
             /** @description Not Found */
@@ -10116,6 +10554,26 @@ export interface operations {
             };
         };
     };
+    demo_directory_api_demo_directory_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DemoDirectoryResponse"];
+                };
+            };
+        };
+    };
     demo_evaluate_summary_api_demo_evaluate_summary_get: {
         parameters: {
             query?: never;
@@ -10141,6 +10599,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DemoErrorResponse"];
+                };
+            };
+        };
+    };
+    set_exhibit_role_api_demo_exhibit_role_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DemoExhibitRoleBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DemoDirectoryResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

@@ -37,6 +37,304 @@ body {
   color: var(--foreground);
 }
 
+button:not([class*="bg-"]):not([class*="inline-flex"]) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-block-size: 2.25rem;
+  padding: 0.375rem 0.875rem;
+  border: 1px solid transparent;
+  border-radius: 0.375rem;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1.25;
+  cursor: pointer;
+}
+
+button:not([class*="bg-"]):not([class*="inline-flex"]):hover,
+button:not([class*="bg-"]):not([class*="inline-flex"]):focus-visible {
+  filter: brightness(1.08);
+}
+
+button:not([class*="bg-"]):not([class*="inline-flex"]):focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+button:not([class*="bg-"]):not([class*="inline-flex"]):disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+select,
+input[type="text"],
+input[type="password"],
+input[type="number"],
+input:not([type]) {
+  min-block-size: 2.25rem;
+}
+
+.app-frame {
+  display: grid;
+  grid-template-columns: 5.75rem minmax(0, 1fr);
+  grid-template-rows: auto 1fr;
+  min-block-size: 100vh;
+}
+
+.app-shell {
+  display: contents;
+}
+
+.workspace-rail {
+  grid-row: 1 / span 2;
+  grid-column: 1;
+  position: sticky;
+  inset-block-start: 0;
+  display: grid;
+  align-content: start;
+  gap: 0.375rem;
+  min-block-size: 100vh;
+  padding: 0.75rem 0.4rem;
+  border-inline-end: 1px solid var(--border);
+  background: color-mix(in oklch, var(--background) 82%, var(--primary) 18%);
+}
+
+.flow-nav {
+  grid-column: 2;
+  grid-row: 1;
+  border-block-end: 1px solid var(--border);
+  background: color-mix(in oklch, var(--background) 88%, var(--primary) 12%);
+}
+
+.app-main {
+  grid-column: 2;
+  grid-row: 2;
+  min-inline-size: 0;
+}
+
+.workspace-rail-brand {
+  margin: 0 0 0.35rem;
+  text-align: center;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--muted-foreground);
+}
+
+.workspace-rail-item {
+  display: grid;
+  place-items: center;
+  min-block-size: 2.5rem;
+  border: 1px solid transparent;
+  border-radius: 0.5rem;
+  padding: 0.45rem 0.25rem;
+  color: var(--foreground);
+  text-align: center;
+  text-decoration: none;
+  font-size: 0.875rem;
+  font-weight: 700;
+  line-height: 1.2;
+  background: color-mix(in oklch, var(--background) 70%, transparent);
+}
+
+.workspace-rail-item:hover,
+.workspace-rail-item:focus-visible {
+  border-color: var(--primary);
+  background: var(--background);
+}
+
+.workspace-rail-item[aria-current="page"] {
+  border-color: var(--primary);
+  background: var(--background);
+  box-shadow: inset 0 0 0 1px var(--primary);
+}
+
+.app-main {
+  min-inline-size: 0;
+}
+
+.flow-nav {
+  border-block-end: 1px solid var(--border);
+  background: color-mix(in oklch, var(--background) 88%, var(--primary) 12%);
+}
+
+.flow-nav-inner {
+  display: grid;
+  gap: 0.65rem;
+  max-inline-size: 72rem;
+  margin-inline: auto;
+  padding: 0.7rem 1rem 0.85rem;
+}
+
+.flow-nav-brand {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.flow-nav-brand strong {
+  font-size: 1.05rem;
+}
+
+.flow-nav-brand span {
+  color: var(--muted-foreground);
+  font-size: 0.875rem;
+  max-inline-size: 52rem;
+}
+
+.exhibit-switcher {
+  display: grid;
+  gap: 0.375rem;
+  max-inline-size: 28rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 0.75rem 0.875rem;
+  background: var(--background);
+}
+
+.exhibit-switcher-title {
+  margin: 0;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.exhibit-switcher-duty {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 0.8125rem;
+}
+
+.exhibit-switcher select {
+  min-block-size: 2.25rem;
+  border: 1px solid var(--border);
+  border-radius: 0.375rem;
+  padding: 0.25rem 0.5rem;
+  background: var(--background);
+  color: var(--foreground);
+}
+
+.flow-group {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.flow-group-title {
+  margin: 0;
+  font-size: 0.8125rem;
+  font-weight: 700;
+}
+
+.flow-group-hint {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+}
+
+.flow-steps {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+  gap: 0.4rem;
+}
+
+.flow-nav a.flow-step {
+  display: grid;
+  gap: 0.15rem;
+  min-block-size: 0;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 0.45rem 0.6rem;
+  background: var(--background);
+  color: var(--foreground);
+  text-decoration: none;
+  box-shadow: 0 1px 0 color-mix(in oklch, var(--foreground) 8%, transparent);
+}
+
+.flow-nav a.flow-step:hover,
+.flow-nav a.flow-step:focus-visible {
+  border-color: var(--primary);
+  background: var(--secondary);
+}
+
+.flow-nav a.flow-step[aria-current="page"] {
+  border-color: var(--primary);
+  background: color-mix(in oklch, var(--primary) 12%, var(--background));
+  box-shadow: inset 0 0 0 1px var(--primary);
+}
+
+.flow-step-label {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+
+.flow-step-n {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 1.25rem;
+  block-size: 1.25rem;
+  border-radius: 9999px;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-size: 0.75rem;
+}
+
+.flow-step-desc {
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+  line-height: 1.35;
+}
+
+.page-guide {
+  margin-block: 0.75rem 0;
+  border: 1px solid color-mix(in oklch, var(--primary) 35%, var(--border));
+  border-radius: 0.5rem;
+  padding: 0.75rem 1rem;
+  background: color-mix(in oklch, var(--primary) 8%, var(--background));
+}
+
+.page-guide-kicker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0 0 0.375rem;
+  font-size: 0.75rem;
+}
+
+.page-guide-step {
+  font-weight: 700;
+  color: var(--primary);
+}
+
+.page-guide-audience {
+  color: var(--muted-foreground);
+}
+
+.page-guide-title,
+.page-guide-what,
+.page-guide-how {
+  margin: 0.25rem 0 0;
+}
+
+.page-guide-title {
+  font-weight: 700;
+}
+
+.page-guide-what,
+.page-guide-how {
+  color: var(--muted-foreground);
+  font-size: 0.875rem;
+}
+
+.page-guide-how::before {
+  content: "怎么操作：";
+  font-weight: 600;
+  color: var(--foreground);
+}
+
 .panel {
   border: 1px solid var(--border);
   border-radius: 0.5rem;
@@ -69,8 +367,51 @@ body {
 }
 
 .facts dt {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.375rem;
   font-size: 0.75rem;
   color: var(--muted-foreground);
+}
+
+.metric-label {
+  color: var(--foreground);
+  font-weight: 600;
+}
+
+.metric-key {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.6875rem;
+}
+
+.metric-hint {
+  margin: 0.125rem 0 0;
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+  line-height: 1.35;
+}
+
+.metric-highlight {
+  padding: 0.5rem;
+  border: 1px solid color-mix(in oklch, var(--primary) 25%, var(--border));
+  border-radius: 0.5rem;
+  background: color-mix(in oklch, var(--primary) 6%, var(--background));
+}
+
+.demo-eval-h {
+  margin: 1rem 0 0.375rem;
+  font-size: 0.875rem;
+}
+
+.case-docs {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.case-doc h4 {
+  margin: 0 0 0.375rem;
+  font-size: 0.875rem;
 }
 
 .facts dd {
@@ -260,6 +601,25 @@ body {
   border: 1px solid var(--border);
   border-radius: 9999px;
   padding: 0.125rem 0.5rem;
+  font-weight: 600;
+}
+
+.verdict-consistent {
+  background: oklch(0.94 0.05 145);
+  border-color: oklch(0.72 0.12 145);
+  color: oklch(0.35 0.1 145);
+}
+
+.verdict-inconsistent {
+  background: oklch(0.94 0.05 25);
+  border-color: oklch(0.72 0.14 25);
+  color: oklch(0.4 0.14 25);
+}
+
+.verdict-uncertain {
+  background: oklch(0.95 0.06 85);
+  border-color: oklch(0.78 0.12 85);
+  color: oklch(0.42 0.1 85);
 }
 
 .severity {
@@ -307,9 +667,46 @@ body {
   overflow-wrap: anywhere;
 }
 
-.demo-limitation {
+.step-pager {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-block-start: 1.25rem;
+}
+
+.decision-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-block: 0.75rem 0.5rem;
+}
+
+.decision-hints {
+  margin: 0;
+  padding-inline-start: 1.1rem;
   color: var(--muted-foreground);
   font-size: 0.8125rem;
+}
+
+textarea {
+  width: 100%;
+  min-block-size: 4.5rem;
+  margin-block: 0.375rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.375rem;
+  padding: 0.5rem 0.625rem;
+  background: var(--background);
+  color: var(--foreground);
+}
+
+.case-docs {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.case-doc h4 {
+  margin: 0 0 0.375rem;
+  font-size: 0.875rem;
 }
 
 /* T07 demo shell: bounded batch check + read-only evaluation summary */

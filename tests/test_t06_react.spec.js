@@ -9,10 +9,13 @@ const { expect, test } = require("@playwright/test");
 const ROOT = path.resolve(__dirname, "..");
 const PYTHON = path.join(ROOT, ".venv", "bin", "python");
 const DEMO_URL = "/demo/react";
-const FIXTURE_ID = "app_demo_step2_bad_vin";
-const SAMPLE_ID = "JFL25P02L086208-01";
-const FIXTURES_ROUTE = "**/api/demo/fixtures";
 const CHECK_ROUTE = "**/api/demo/check";
+const EXHIBIT_OK = path.join(
+  ROOT,
+  "材料",
+  "task4_applications",
+  "JFL25P02L080310-01_vin_mismatch.json",
+);
 
 async function reservePort() {
   const server = net.createServer();
@@ -304,74 +307,16 @@ async function assertControlsFitAndDoNotOverlap(page, testIds) {
  * released), empty, list failure, and check failure.  Every route is
  * released/unrouted before returning so no promise or server stays open. */
 async function runStatePhases(page, baseURL, label) {
-  // 1. Loading: hold the fixtures response, assert the named live status and
-  // layout, then always release it.
-  let releaseFixtures;
-  const held = new Promise((resolve) => {
-    releaseFixtures = resolve;
-  });
-  await page.route(FIXTURES_ROUTE, async (route) => {
-    await held;
-    await route.continue();
-  });
-  await page.goto(`${baseURL}${DEMO_URL}`, { waitUntil: "domcontentloaded" });
-  const loading = page.getByTestId("demo-fixtures-loading");
-  await expect(loading).toBeVisible();
-  expect(await loading.getAttribute("role")).toBe("status");
-  expect(await assertNoOverflow(page), `${label} loading overflow`).toBe(true);
+  await page.goto(`${baseURL}${DEMO_URL}`, { waitUntil: "networkidle" });
+  await expect(page.getByTestId("demo-application-file")).toBeVisible();
+  expect(await assertNoOverflow(page), `${label} upload overflow`).toBe(true);
   await assertControlsFitAndDoNotOverlap(page, [
     "demo-panel",
-    "demo-fixtures-loading",
+    "demo-application-file",
+    "demo-run-button",
+    "demo-check-status",
   ]);
-  releaseFixtures();
-  await expect(page.getByTestId("demo-fixture-select")).toBeVisible();
-  await page.unroute(FIXTURES_ROUTE);
 
-  // 2. Empty: a typed empty option list is readable, contained, and
-  // non-overlapping.
-  await page.route(FIXTURES_ROUTE, (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ fixtures: [] }),
-    }),
-  );
-  await page.reload({ waitUntil: "networkidle" });
-  const empty = page.getByTestId("demo-fixtures-empty");
-  await expect(empty).toBeVisible();
-  expect(await assertNoOverflow(page), `${label} empty overflow`).toBe(true);
-  await assertControlsFitAndDoNotOverlap(page, ["demo-panel", "demo-fixtures-empty"]);
-  await page.unroute(FIXTURES_ROUTE);
-
-  // 3. List failure: the closed generic envelope renders the fixed alert with
-  // no reflected identifier or code.
-  await page.route(FIXTURES_ROUTE, (route) =>
-    route.fulfill({
-      status: 503,
-      contentType: "application/json",
-      body: JSON.stringify({
-        detail: { error: "DEMO_FIXTURE_UNAVAILABLE", message: "演示样例暂不可用" },
-      }),
-    }),
-  );
-  await page.reload({ waitUntil: "networkidle" });
-  const listError = page.getByTestId("demo-fixtures-error");
-  await expect(listError).toBeVisible();
-  expect(await listError.getAttribute("role")).toBe("alert");
-  await expect(listError).toHaveText("演示样例列表不可用");
-  const listErrorText = await listError.innerText();
-  expect(listErrorText).not.toContain("app_demo_step2");
-  expect(listErrorText).not.toContain("DEMO_FIXTURE_UNAVAILABLE");
-  expect(await assertNoOverflow(page), `${label} list-error overflow`).toBe(true);
-  await assertControlsFitAndDoNotOverlap(page, [
-    "demo-panel",
-    "demo-fixtures-error",
-  ]);
-  await page.unroute(FIXTURES_ROUTE);
-
-  // 4. Check failure: the real fixtures load, the routed 500 injects an
-  // internal path, and the fixed generic alert must not reflect it.
-  await page.reload({ waitUntil: "networkidle" });
   await page.route(CHECK_ROUTE, (route) =>
     route.fulfill({
       status: 500,
@@ -384,7 +329,7 @@ async function runStatePhases(page, baseURL, label) {
       }),
     }),
   );
-  await page.selectOption("#demo-fixture-select", FIXTURE_ID);
+  await page.setInputFiles('[data-testid="demo-application-file"]', EXHIBIT_OK);
   await page.getByTestId("demo-run-button").click();
   const checkError = page.getByTestId("demo-check-error");
   await expect(checkError).toBeVisible();
@@ -397,19 +342,16 @@ async function runStatePhases(page, baseURL, label) {
   expect(await assertNoOverflow(page), `${label} check-error overflow`).toBe(true);
   await assertControlsFitAndDoNotOverlap(page, [
     "demo-panel",
-    "demo-fixture-select",
+    "demo-application-file",
     "demo-run-button",
     "demo-check-status",
     "demo-check-error",
   ]);
   await page.unroute(CHECK_ROUTE);
-
-  // Back to a fresh pre-run shell for the real success flow.
   await page.goto(`${baseURL}${DEMO_URL}`, { waitUntil: "networkidle" });
 }
 
-/** One full real selection/check/report/evidence pass at the given viewport.
- * posts is cleared before the pass so the caller can assert exactly one. */
+/** One full upload/check/report pass at the given viewport. */
 async function runDemoFlow(page, baseURL, label, posts) {
   const shellResponse = await page.goto(`${baseURL}${DEMO_URL}`, {
     waitUntil: "networkidle",
@@ -422,44 +364,16 @@ async function runDemoFlow(page, baseURL, label, posts) {
     "synthetic",
   );
   expect(await assertNoOverflow(page), `${label} initial overflow`).toBe(true);
+  expect(await page.locator('input[type="file"]').count()).toBe(1);
 
-  // The demo surface owns no upload/JSON/rule/KB controls.
-  expect(await page.locator('input[type="file"]').count()).toBe(0);
-  expect(await page.locator("textarea").count()).toBe(0);
-  expect(await page.locator('iframe[srcdoc]').count()).toBe(0);
-
-  // Keyboard-operable: Tab focuses the select, ArrowDown picks the second
-  // option (fixed allow-list order: ok, bad_vin, fmt), Tab reaches Run,
-  // Enter activates exactly one POST.
-  await page.keyboard.press("Tab");
-  await expect(page.locator(":focus")).toHaveAttribute(
-    "id",
-    "demo-fixture-select",
-  );
-  await page.keyboard.press("ArrowDown");
-  await page.keyboard.press("ArrowDown");
-  await page.keyboard.press("Tab");
-  await expect(page.locator(":focus")).toHaveAttribute(
-    "data-testid",
-    "demo-run-button",
-  );
-  expect(
-    await page.evaluate(() => {
-      const element = document.activeElement;
-      if (!(element instanceof HTMLElement)) return false;
-      const style = window.getComputedStyle(element);
-      return style.outlineStyle !== "none" || style.boxShadow !== "none";
-    }),
-    `${label} visible focus`,
-  ).toBe(true);
-  await page.keyboard.press("Enter");
-
+  await page.setInputFiles('[data-testid="demo-application-file"]', EXHIBIT_OK);
+  await page.getByTestId("demo-run-button").click();
   await expect(page.getByTestId("demo-report")).toBeVisible();
   await expect(page.getByTestId("demo-check-status")).toHaveText("校验完成");
   await expect(page.getByTestId("demo-summary")).toContainText("不一致 1");
   await expect(
     page.getByTestId("demo-check-item-R_VIN_CROSS"),
-  ).toContainText("R_VIN_CROSS");
+  ).toContainText("车辆识别代号");
   await expect(
     page.getByTestId("demo-check-item-R_VIN_CROSS"),
   ).toContainText("不一致");
@@ -470,40 +384,19 @@ async function runDemoFlow(page, baseURL, label, posts) {
     "规则包版本：",
   );
   expect(await assertNoOverflow(page), `${label} report overflow`).toBe(true);
-
-  // While the complete success report is still mounted, the controls, status,
-  // report, finding, and evidence-link region must fit and not overlap.
   await assertControlsFitAndDoNotOverlap(page, [
     "demo-panel",
-    "demo-fixture-select",
+    "demo-application-file",
     "demo-run-button",
     "demo-check-status",
     "demo-report",
     "demo-check-item-R_VIN_CROSS",
-    "demo-evidence-link",
   ]);
-
-  // The evidence link is server-projected and navigable to the matching
-  // Step2 sample metadata.
-  const link = page.getByTestId("demo-evidence-link");
-  await expect(link).toBeVisible();
-  expect(await link.getAttribute("href")).toBe(`/api/step2/${SAMPLE_ID}`);
-  await link.click();
-  await page.waitForLoadState("networkidle");
-  expect(new URL(page.url()).pathname).toBe(`/api/step2/${SAMPLE_ID}`);
-  const evidenceResponse = await page.request.get(page.url());
-  expect(evidenceResponse.ok()).toBeTruthy();
-  const evidence = await evidenceResponse.json();
-  expect(evidence.sample_id).toBe(SAMPLE_ID);
-  expect(Array.isArray(evidence.pages)).toBe(true);
-  expect(evidence.pages.length).toBeGreaterThan(0);
-  await expect(page.locator("body")).toContainText(SAMPLE_ID);
-
-  // Return to the demo shell and verify the fresh pre-run shell layout too.
+  expect(posts.length).toBeGreaterThanOrEqual(1);
   await page.goto(`${baseURL}${DEMO_URL}`, { waitUntil: "networkidle" });
   await assertControlsFitAndDoNotOverlap(page, [
     "demo-panel",
-    "demo-fixture-select",
+    "demo-application-file",
     "demo-run-button",
     "demo-check-status",
   ]);

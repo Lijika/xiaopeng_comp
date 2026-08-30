@@ -44,6 +44,8 @@ export type DemoBatchCheckResponse =
 export type DemoBatchItem = components["schemas"]["DemoBatchItem"];
 export type DemoEvaluationSummaryResponse =
   components["schemas"]["DemoEvaluationSummaryResponse"];
+export type DemoDirectoryResponse =
+  components["schemas"]["DemoDirectoryResponse"];
 export type S08CandidateWorkspaceResponse =
   components["schemas"]["S08CandidateWorkspaceResponse"];
 export type S08ImportLegacyResponse =

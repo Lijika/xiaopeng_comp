@@ -1103,7 +1103,7 @@ export function T16SettlementPanel({
 
       <Section
         id="t16-settle-title"
-        title="终止结算（授权操作员）"
+        title="终止清算（授权操作员）"
         testId="t16-settle-section"
       >
         <div className="recovery-actions">

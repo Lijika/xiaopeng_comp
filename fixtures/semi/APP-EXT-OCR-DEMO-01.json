@@ -1,0 +1,269 @@
+{
+  "application_id": "APP-EXT-OCR-DEMO-01",
+  "meta": {
+    "source": "external_ocr",
+    "field_source": "external_ocr",
+    "ocr_model": "demo-offline-placeholder",
+    "ocr_version": "0.0.0-demo",
+    "ocr_imported_at": "2026-07-24T20:44:58.099120+00:00",
+    "schema_version": 1,
+    "note": "demo"
+  },
+  "documents": [
+    {
+      "doc_id": "reg",
+      "doc_type": "机动车登记证书",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N5000181",
+          "confidence": 0.97,
+          "source_page": 1,
+          "normalized": null,
+          "field_type": null
+        },
+        "engine_no": {
+          "raw": "EXTENG01",
+          "confidence": 0.96,
+          "source_page": null,
+          "normalized": null,
+          "field_type": null
+        },
+        "owner_name": {
+          "raw": "外导甲",
+          "confidence": 0.95,
+          "source_page": null,
+          "normalized": null,
+          "field_type": null
+        },
+        "plate_no": {
+          "raw": "苏A18101",
+          "confidence": 0.94,
+          "source_page": null,
+          "normalized": null,
+          "field_type": null
+        },
+        "reg_cert_no": {
+          "raw": "RCEXT01",
+          "confidence": 0.93,
+          "source_page": null,
+          "normalized": null,
+          "field_type": null
+        },
+        "reg_date": {
+          "raw": "2024-06-01",
+          "confidence": 0.92,
+          "source_page": null,
+          "normalized": null,
+          "field_type": null
+        },
+        "address": {
+          "raw": "江苏省南京市建邺区外导路1号",
+          "confidence": 0.91,
+          "source_page": null,
+          "normalized": null,
+          "field_type": null
+        },
+        "brand": {
+          "raw": "比亚迪",
+          "confidence": 0.9,
+          "source_page": null,
+          "normalized": null,
+          "field_type": null
+        },
+        "model": {
+          "raw": "汉EV",
+          "confidence": 0.9,
+          "source_page": null,
+          "normalized": null,
+          "field_type": null
+        }
+      }
+    },
+    {
+      "doc_id": "pol",
+      "doc_type": "交强险保单",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N5000181",
+          "confidence": 0.96,
+          "source_page": null,
+          "normalized": null,
+          "field_type": null
+        },
+        "engine_no": {
+          "raw": "EXTENG01",
+          "confidence": 0.95,
+          "source_page": null,
+          "normalized": null,
+          "field_type": null
+        },
+        "insured_name": {
+          "raw": "外导甲",
+          "confidence": 0.94,
+          "source_page": null,
+          "normalized": null,
+          "field_type": null
+        },
+        "plate_no": {
+          "raw": "苏A18101",
+          "confidence": 0.93,
+          "source_page": null,
+          "normalized": null,
+          "field_type": null
+        },
+        "plate_list": {
+          "raw": "苏A18101",
+          "confidence": 0.93,
+          "source_page": null,
+          "normalized": null,
+          "field_type": null
+        },
+        "brand": {
+          "raw": "比亚迪",
+          "confidence": 0.9,
+          "source_page": null,
+          "normalized": null,
+          "field_type": null
+        },
+        "model": {
+          "raw": "汉EV",
+          "confidence": 0.9,
+          "source_page": null,
+          "normalized": null,
+          "field_type": null
+        }
+      }
+    },
+    {
+      "doc_id": "lease",
+      "doc_type": "融资租赁合同",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N5000181",
+          "confidence": 0.96,
+          "source_page": null,
+          "normalized": null,
+          "field_type": null
+        },
+        "lessee_name": {
+          "raw": "外导甲",
+          "confidence": 0.95,
+          "source_page": null,
+          "normalized": null,
+          "field_type": null
+        },
+        "id_number": {
+          "raw": "320102199001012016",
+          "confidence": 0.98,
+          "source_page": null,
+          "normalized": null,
+          "field_type": null
+        },
+        "financed_amount": {
+          "raw": "128000",
+          "confidence": 0.94,
+          "source_page": null,
+          "normalized": null,
+          "field_type": null
+        },
+        "reg_cert_no": {
+          "raw": "RCEXT01",
+          "confidence": 0.93,
+          "source_page": null,
+          "normalized": null,
+          "field_type": null
+        },
+        "reg_date": {
+          "raw": "2024-06-01",
+          "confidence": 0.92,
+          "source_page": null,
+          "normalized": null,
+          "field_type": null
+        },
+        "brand": {
+          "raw": "比亚迪",
+          "confidence": 0.9,
+          "source_page": null,
+          "normalized": null,
+          "field_type": null
+        },
+        "model": {
+          "raw": "汉EV",
+          "confidence": 0.9,
+          "source_page": null,
+          "normalized": null,
+          "field_type": null
+        }
+      }
+    },
+    {
+      "doc_id": "inv",
+      "doc_type": "发票",
+      "fields": {
+        "vin": {
+          "raw": "LSVAA4182N5000181",
+          "confidence": 0.95,
+          "source_page": null,
+          "normalized": null,
+          "field_type": null
+        },
+        "engine_no": {
+          "raw": "EXTENG01",
+          "confidence": 0.94,
+          "source_page": null,
+          "normalized": null,
+          "field_type": null
+        },
+        "invoice_amount": {
+          "raw": "128000",
+          "confidence": 0.94,
+          "source_page": null,
+          "normalized": null,
+          "field_type": null
+        },
+        "brand": {
+          "raw": "比亚迪",
+          "confidence": 0.9,
+          "source_page": null,
+          "normalized": null,
+          "field_type": null
+        },
+        "model": {
+          "raw": "汉EV",
+          "confidence": 0.9,
+          "source_page": null,
+          "normalized": null,
+          "field_type": null
+        }
+      }
+    },
+    {
+      "doc_id": "id",
+      "doc_type": "身份证",
+      "fields": {
+        "owner_name": {
+          "raw": "外导甲",
+          "confidence": 0.96,
+          "source_page": null,
+          "normalized": null,
+          "field_type": null
+        },
+        "id_number": {
+          "raw": "320102199001012016",
+          "confidence": 0.98,
+          "source_page": null,
+          "normalized": null,
+          "field_type": null
+        },
+        "address": {
+          "raw": "江苏南京市建邺区外导路1号",
+          "confidence": 0.9,
+          "source_page": null,
+          "normalized": null,
+          "field_type": null
+        }
+      }
+    }
+  ],
+  "label": "consistent"
+}

@@ -1,14 +1,19 @@
-import { useState, type ReactElement } from "react";
+import { useEffect, useState, type ReactElement } from "react";
 
 import { HttpError } from "../api/client";
 import {
   useDemoBatchCheck,
   useDemoEvaluationSummary,
-  useDemoFixtures,
   type DemoBatchCheckResponse,
   type DemoBatchItem,
   type DemoEvaluationSummaryResponse,
 } from "../api/hooks";
+import { humanEvalWarning, humanHonestyNote, ruleTitle } from "../lib/demoCopy";
+import {
+  readExhibitUploads,
+  type ExhibitUpload,
+} from "../lib/exhibitSession";
+import { Button } from "./ui/button";
 
 const OUTCOME_ZH: Record<string, string> = {
   completed: "全部完成",
@@ -69,7 +74,7 @@ function BatchItem({ item }: { item: DemoBatchItem }) {
               key={issue.rule_id}
               data-testid={`demo-batch-issue-${issue.rule_id}`}
             >
-              {issue.rule_id} · {VERDICT_ZH[issue.verdict] ?? issue.verdict} ·{" "}
+              {ruleTitle(issue.rule_id)} · {VERDICT_ZH[issue.verdict] ?? issue.verdict} ·{" "}
               {issue.message}
             </li>
           ))}
@@ -82,18 +87,50 @@ function BatchItem({ item }: { item: DemoBatchItem }) {
 /** The closed read-only evaluation-summary renderer.  It renders only the
  * server DTO: claims, scope, counts/rates (or the explicit empty state),
  * warnings, and the honesty note.  It never renders or derives PASS. */
+function Metric({
+  code,
+  label,
+  hint,
+  value,
+}: {
+  code: string;
+  label: string;
+  hint: string;
+  value: string | number;
+}) {
+  return (
+    <div>
+      <dt>
+        <span className="metric-label">{label}</span>
+        <span className="metric-key">{code}</span>
+      </dt>
+      <dd>{value}</dd>
+      <p className="metric-hint">{hint}</p>
+    </div>
+  );
+}
+
 function DemoEvalSummary({ data }: { data: DemoEvaluationSummaryResponse }) {
   const counts = data.counts ?? null;
   const rates = data.rates ?? null;
   const warnings = data.warnings ?? [];
+  const claimZh =
+    data.claim === "C-DEV-REG" ? "开发/回归集成绩（非正式生产）" : data.claim;
+  const gapZh =
+    data.performance_gap === "UNVERIFIED"
+      ? "尚未用真实 OCR 全量复核"
+      : data.performance_gap;
   return (
     <div className="demo-eval">
       <div className="demo-check-head">
-        <span className="boundary" data-testid="demo-eval-claim">
+        <span className="sr-only" data-testid="demo-eval-claim">
           {data.claim}
         </span>
-        <span className="boundary" data-testid="demo-eval-gap">
+        <span className="sr-only" data-testid="demo-eval-gap">
           {data.performance_gap}
+        </span>
+        <span className="demo-limitation">
+          {claimZh} · {gapZh}
         </span>
       </div>
       <p className="demo-limitation" data-testid="demo-eval-scope">
@@ -105,85 +142,123 @@ function DemoEvalSummary({ data }: { data: DemoEvaluationSummaryResponse }) {
         </p>
       ) : (
         <>
-          <dl className="facts" data-testid="demo-eval-counts">
-            <div>
-              <dt>n_apps_loaded</dt>
-              <dd>{counts.n_apps_loaded}</dd>
-            </div>
-            <div>
-              <dt>n_check_ok</dt>
-              <dd>{counts.n_check_ok}</dd>
-            </div>
-            <div>
-              <dt>n_check_fail</dt>
-              <dd>{counts.n_check_fail}</dd>
-            </div>
-            <div>
-              <dt>total_pairs</dt>
-              <dd>{counts.total_pairs}</dd>
-            </div>
-            <div>
-              <dt>decisive_pairs</dt>
-              <dd>{counts.decisive_pairs}</dd>
-            </div>
-            <div>
-              <dt>true_positive</dt>
-              <dd>{counts.true_positive}</dd>
-            </div>
-            <div>
-              <dt>true_negative</dt>
-              <dd>{counts.true_negative}</dd>
-            </div>
-            <div>
-              <dt>false_positive</dt>
-              <dd>{counts.false_positive}</dd>
-            </div>
-            <div>
-              <dt>false_negative</dt>
-              <dd>{counts.false_negative}</dd>
-            </div>
-            <div>
-              <dt>n_inconsistent_labeled_decisive</dt>
-              <dd>{counts.n_inconsistent_labeled_decisive}</dd>
-            </div>
+          <p className="demo-eval-lead">
+            对照三项指标：自动化覆盖率 ≥ 80%，误报（把对的判成错的）≤
+            5%，漏报（把错的判成对的）≤ 3%。下面的数来自固定评测集，不是这一次点按钮算出来的。
+          </p>
+          <h3 className="demo-eval-h">核验三项指标</h3>
+          <dl className="facts metric-highlight" data-testid="demo-eval-rates">
+            <Metric
+              code="coverage"
+              label="自动化覆盖率"
+              hint="有多少核对项系统给出了明确结论（不是跳过）。目标 ≥ 80%。"
+              value={rates.coverage}
+            />
+            <Metric
+              code="false_positive_rate"
+              label="误报率"
+              hint="本来一致，却被判成不一致。目标 ≤ 5%。越低越好。"
+              value={rates.false_positive_rate}
+            />
+            <Metric
+              code="false_negative_rate"
+              label="漏报率"
+              hint="本来不一致，却被判成一致。目标 ≤ 3%。这是放款风险，必须压住。"
+              value={rates.false_negative_rate}
+            />
+            <Metric
+              code="accuracy"
+              label="明确结论的准确率"
+              hint="在「说得清对错」的核对项里，判对了多少。"
+              value={rates.accuracy}
+            />
+            <Metric
+              code="miss_rate"
+              label="漏检率"
+              hint="真有问题，却被说成一致或存疑。用来防止用「存疑」把漏报藏起来。"
+              value={rates.miss_rate}
+            />
+            <Metric
+              code="uncertain_rate"
+              label="存疑比例"
+              hint="系统不敢自动下结论、要人看一眼的比例。不是失败，是诚实。"
+              value={rates.uncertain_rate}
+            />
           </dl>
-          <dl className="facts" data-testid="demo-eval-rates">
-            <div>
-              <dt>coverage</dt>
-              <dd>{rates.coverage}</dd>
-            </div>
-            <div>
-              <dt>false_positive_rate</dt>
-              <dd>{rates.false_positive_rate}</dd>
-            </div>
-            <div>
-              <dt>false_negative_rate</dt>
-              <dd>{rates.false_negative_rate}</dd>
-            </div>
-            <div>
-              <dt>accuracy</dt>
-              <dd>{rates.accuracy}</dd>
-            </div>
-            <div>
-              <dt>miss_rate</dt>
-              <dd>{rates.miss_rate}</dd>
-            </div>
-            <div>
-              <dt>uncertain_rate</dt>
-              <dd>{rates.uncertain_rate}</dd>
-            </div>
+          <h3 className="demo-eval-h">评测规模</h3>
+          <dl className="facts" data-testid="demo-eval-counts">
+            <Metric
+              code="n_apps_loaded"
+              label="申请数"
+              hint="纳入本次评测的申请笔数。"
+              value={counts.n_apps_loaded}
+            />
+            <Metric
+              code="n_check_ok"
+              label="完成核验"
+              hint="成功产出报告的申请数。"
+              value={counts.n_check_ok}
+            />
+            <Metric
+              code="n_check_fail"
+              label="核验失败"
+              hint="未能产出报告的申请数，应为 0。"
+              value={counts.n_check_fail}
+            />
+            <Metric
+              code="total_pairs"
+              label="核对项总数"
+              hint="跨单据字段比对的总次数。"
+              value={counts.total_pairs}
+            />
+            <Metric
+              code="decisive_pairs"
+              label="有效结论数"
+              hint="给出一致或不一致、未被跳过的核对项。"
+              value={counts.decisive_pairs}
+            />
+            <Metric
+              code="true_positive"
+              label="正确拦截"
+              hint="标注为不一致，系统同样判定为不一致。"
+              value={counts.true_positive}
+            />
+            <Metric
+              code="true_negative"
+              label="正确放行"
+              hint="标注为一致，系统同样判定为一致。"
+              value={counts.true_negative}
+            />
+            <Metric
+              code="false_positive"
+              label="误报次数"
+              hint="标注为一致，系统判定为不一致。"
+              value={counts.false_positive}
+            />
+            <Metric
+              code="false_negative"
+              label="漏报次数"
+              hint="标注为不一致，系统判定为一致。应为 0。"
+              value={counts.false_negative}
+            />
+            <Metric
+              code="n_inconsistent_labeled_decisive"
+              label="不一致样本（有效结论）"
+              hint="标注为不一致且系统给出明确结论的项，用作漏报率分母。"
+              value={counts.n_inconsistent_labeled_decisive}
+            />
           </dl>
         </>
       )}
       {warnings.length > 0 && (
         <ul className="demo-eval-warnings" data-testid="demo-eval-warnings">
           {warnings.map((warning) => (
-            <li key={warning}>{warning}</li>
+            <li key={warning}>{humanEvalWarning(warning)}</li>
           ))}
         </ul>
       )}
       <p className="demo-limitation" data-testid="demo-eval-note">
-        {data.honesty_note}
+        {humanHonestyNote()}
       </p>
     </div>
   );
@@ -196,91 +271,83 @@ function DemoEvalSummary({ data }: { data: DemoEvaluationSummaryResponse }) {
  * labels.  The browser sends fixture ids only; it never derives or displays
  * formal PASS. */
 export default function DemoBatchSummaryPanel() {
-  const fixtures = useDemoFixtures();
   const batch = useDemoBatchCheck();
   const summary = useDemoEvaluationSummary();
+  const [uploads, setUploads] = useState<ExhibitUpload[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const [batchResult, setBatchResult] =
     useState<DemoBatchCheckResponse | null>(null);
 
-  const toggle = (fixtureId: string) => {
-    // A live synchronous mutation owns one request until a terminal result:
-    // selection can never change (or reset the mutation) while it is
-    // pending, so no overlapping POST or callback loss is possible.
+  useEffect(() => {
+    setUploads(readExhibitUploads());
+  }, []);
+
+  const toggle = (uploadId: string) => {
     if (batch.isPending) return;
     setSelected((prev) =>
-      prev.includes(fixtureId)
-        ? prev.filter((id) => id !== fixtureId)
-        : [...prev, fixtureId],
+      prev.includes(uploadId)
+        ? prev.filter((id) => id !== uploadId)
+        : [...prev, uploadId],
     );
-    // A selection change only clears the previous run's presentation; the
-    // mutation state stays terminal until the explicit next run.
     setBatchResult(null);
   };
 
   const run = () => {
     if (selected.length === 0 || batch.isPending) return;
+    const applications = uploads
+      .filter((item) => selected.includes(item.id))
+      .map((item) => item.application);
+    if (applications.length === 0) return;
     setBatchResult(null);
     batch.mutate(
-      { fixture_ids: selected },
+      { applications, fixture_ids: [] },
       { onSuccess: (data) => setBatchResult(data) },
     );
   };
 
-  const batchMaxN = fixtures.data?.batch_max_n;
+  const batchMaxN = 50;
 
   let batchSection: ReactElement;
-  if (fixtures.isLoading) {
+  if (uploads.length === 0) {
     batchSection = (
-      <p data-testid="demo-batch-fixtures-loading" role="status">
-        正在加载演示样例…
+      <p data-testid="demo-batch-fixtures-empty">
+        还没有已上传的申请。请先在上面核验一笔 JSON。
       </p>
-    );
-  } else if (fixtures.isError) {
-    batchSection = (
-      <p className="demo-error" data-testid="demo-batch-fixtures-error" role="alert">
-        演示样例列表不可用
-      </p>
-    );
-  } else if ((fixtures.data?.fixtures ?? []).length === 0) {
-    batchSection = (
-      <p data-testid="demo-batch-fixtures-empty">暂无可用的演示样例</p>
     );
   } else {
-    const options = fixtures.data?.fixtures ?? [];
     batchSection = (
       <>
         <fieldset className="demo-batch-controls">
-          <legend>选择演示样例（每次校验最多 {batchMaxN ?? "?"} 条）</legend>
-          {options.map((option) => (
+          <legend>选择已上传的申请（每次最多 {batchMaxN} 条）</legend>
+          {uploads.map((option) => (
             <label
-              key={option.fixture_id}
+              key={option.id}
               className="demo-batch-option"
-              htmlFor={`demo-batch-fixture-${option.fixture_id}`}
+              htmlFor={`demo-batch-fixture-${option.id}`}
             >
               <input
-                id={`demo-batch-fixture-${option.fixture_id}`}
+                id={`demo-batch-fixture-${option.id}`}
                 type="checkbox"
-                data-testid={`demo-batch-fixture-${option.fixture_id}`}
-                checked={selected.includes(option.fixture_id)}
+                data-testid={`demo-batch-fixture-${option.id}`}
+                checked={selected.includes(option.id)}
                 disabled={batch.isPending}
-                onChange={() => toggle(option.fixture_id)}
+                onChange={() => toggle(option.id)}
               />
-              {option.title}
+              {option.fileName || option.id}
             </label>
           ))}
         </fieldset>
         <div className="demo-controls">
-          <button
+          <Button
             type="button"
             data-testid="demo-batch-run-button"
             disabled={selected.length === 0 || batch.isPending}
             onClick={run}
           >
-            运行批量校验
-          </button>
+            {batch.isPending ? "正在核验…" : "开始批量核验"}
+          </Button>
           <span className="demo-limitation" data-testid="demo-batch-cap">
-            {batchMaxN !== undefined ? `服务端上限：${batchMaxN} 条` : ""}
+            服务端上限：{batchMaxN} 条
           </span>
         </div>
         <p
@@ -348,20 +415,26 @@ export default function DemoBatchSummaryPanel() {
   return (
     <>
       <section className="panel" data-testid="demo-batch-panel">
-        <h2>批量校验（同步·受上限约束）</h2>
+        <h2>一次核好几笔（可选）</h2>
+        <p className="demo-limitation">
+          对比刚才上传并核验过的申请。列表来自本页已上传的 JSON，不再使用内置演示样例。
+        </p>
         {batchSection}
       </section>
       <section className="panel" data-testid="demo-eval-panel">
-        <h2>评估摘要（只读）</h2>
+        <h2>核验指标（只读）</h2>
+        <p className="demo-limitation">
+          覆盖率、误报、漏报来自固定评测集。点下面的按钮读取官方数字，页面自己不算分。
+        </p>
         <div className="demo-controls">
-          <button
+          <Button
             type="button"
             data-testid="demo-eval-load-button"
             disabled={summary.isFetching}
             onClick={() => summary.refetch()}
           >
-            加载摘要
-          </button>
+            {summary.isFetching ? "正在读取…" : "查看覆盖率、误报与漏报"}
+          </Button>
           <span className="demo-limitation">固定语料 suite=main · 只读</span>
         </div>
         <p

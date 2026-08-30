@@ -74,7 +74,7 @@ export default function QueuePanel({
       aria-labelledby="queue-title"
     >
       <header className="flex items-baseline justify-between gap-2">
-        <h2 id="queue-title">受控审核队列</h2>
+        <h2 id="queue-title">待人工复核的申请</h2>
         <span className="text-sm text-muted-foreground">
           投影水位{" "}
           <span data-testid="queue-watermark">

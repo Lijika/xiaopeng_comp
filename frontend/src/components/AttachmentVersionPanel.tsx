@@ -61,8 +61,12 @@ function dispositionAnnouncement(
  * browser parses and transports the registered envelope JSON; it never
  * recreates domain validation.
  */
-export default function AttachmentVersionPanel() {
-  const requestId = readParam("request");
+export default function AttachmentVersionPanel({
+  requestId: requestIdProp,
+}: {
+  requestId?: string | null;
+} = {}) {
+  const requestId = requestIdProp ?? readParam("request");
   const projection = useIntegratorSupplementRequest(requestId);
   const submit = useSubmitAttachmentVersion();
 
@@ -167,7 +171,7 @@ export default function AttachmentVersionPanel() {
         aria-labelledby="integrator-title"
       >
         <h2 id="integrator-title" tabIndex={-1} ref={headingRef}>
-          附件版本提交
+          提交新一版材料
         </h2>
         <p data-testid="integrator-no-request">
           未指定补充材料请求（?request=…）
@@ -184,7 +188,7 @@ export default function AttachmentVersionPanel() {
         aria-labelledby="integrator-title"
       >
         <h2 id="integrator-title" tabIndex={-1} ref={headingRef}>
-          附件版本提交
+          提交新一版材料
         </h2>
         <p data-testid="integrator-projection-loading">请求投影加载中…</p>
       </section>
@@ -201,7 +205,7 @@ export default function AttachmentVersionPanel() {
         aria-labelledby="integrator-title"
       >
         <h2 id="integrator-title" tabIndex={-1} ref={headingRef}>
-          附件版本提交
+          提交新一版材料
         </h2>
         <p data-testid="integrator-projection-error">
           {notFound ? "请求未找到或无权访问" : "请求投影不可用"}

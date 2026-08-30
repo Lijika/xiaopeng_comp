@@ -664,7 +664,7 @@ function CompletedSurface({
   // value-free receipt key is live here.
   return (
     <section className="panel" data-testid="s16-governed-deletion" aria-labelledby="s16-title">
-      <h2 id="s16-title">合规删除（服务端权威）</h2>
+      <h2 id="s16-title">删除申请数据（先预览，两人批准后才删）</h2>
       <p data-testid="s16-complete-only" role="status">
         删除已完成：仅保留无原值凭证。
       </p>
@@ -685,11 +685,13 @@ function CompletedSurface({
 function ActiveSurface({
   onComplete,
   onIdentityDenied,
+  initialReference = "",
 }: {
   onComplete: (requestId: string) => void;
   onIdentityDenied: (error?: Error) => void;
+  initialReference?: string;
 }) {
-  const [reference, setReference] = useState("");
+  const [reference, setReference] = useState(initialReference);
   const [requestId, setRequestId] = useState<string | null>(null);
   const [preflight, setPreflight] = useState<S16PreflightResponse | null>(null);
   const [preflightUnknown, setPreflightUnknown] = useState(false);
@@ -773,7 +775,7 @@ function ActiveSurface({
 
   return (
     <section className="panel" data-testid="s16-governed-deletion" aria-labelledby="s16-title">
-      <h2 id="s16-title">合规删除（服务端权威）</h2>
+      <h2 id="s16-title">删除申请数据（先预览，两人批准后才删）</h2>
       <div className="demo-controls">
         <label htmlFor="s16-reference">申请引用（按当前授权范围）</label>
         <input
@@ -860,7 +862,11 @@ function ActiveSurface({
  * rendered; every request carries its own idempotency key and a lost
  * response keeps the key for exact replay.
  */
-export default function S16GovernedDeletionPanel() {
+export default function S16GovernedDeletionPanel({
+  initialReference = "",
+}: {
+  initialReference?: string | null;
+} = {}) {
   const queryClient = useQueryClient();
   const [identityDenied, setIdentityDenied] = useState(false);
   const [deniedError, setDeniedError] = useState<Error | null>(null);
@@ -880,7 +886,7 @@ export default function S16GovernedDeletionPanel() {
     // commit surface survives.
     return (
       <section className="panel" data-testid="s16-governed-deletion" aria-labelledby="s16-title">
-        <h2 id="s16-title">合规删除（服务端权威）</h2>
+        <h2 id="s16-title">删除申请数据（先预览，两人批准后才删）</h2>
         {deniedError !== null ? (
           <S16ErrorState error={deniedError} />
         ) : (
@@ -903,6 +909,7 @@ export default function S16GovernedDeletionPanel() {
     <ActiveSurface
       onComplete={setCompletedRequestId}
       onIdentityDenied={handleIdentityDenied}
+      initialReference={initialReference ?? ""}
     />
   );
 }

@@ -373,6 +373,7 @@ except Exception as error:
     S01_CONFIGURATION_ERROR = str(error)
 S01_DEMO_CREDENTIAL = os.environ.get("TASK4_S01_DEMO_CREDENTIAL", "").strip()
 S01_DEMO_SUBJECT = os.environ.get("TASK4_S01_DEMO_SUBJECT", "").strip()
+DEMO_DIRECTORY_PATH: Path | None = None
 S01_OPERATOR_CREDENTIAL = os.environ.get("TASK4_S01_OPERATOR_CREDENTIAL", "").strip()
 S01_OPERATOR_SUBJECT = os.environ.get("TASK4_S01_OPERATOR_SUBJECT", "").strip()
 S13_OPERATOR_CREDENTIAL = os.environ.get("TASK4_S13_OPERATOR_CREDENTIAL", "").strip()
@@ -1168,6 +1169,87 @@ class OptionalTokenAuth(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+EXHIBIT_ROLE_COOKIE = "task4_exhibit_role"
+_EXHIBIT_ROLE_AUTH: dict[str, tuple[str, str]] = {
+    "reviewer": ("full-demo-integrator", "Authorization"),
+    "material": ("full-demo-source", "Authorization"),
+    "exception-approver": ("full-demo-exception-approver", "Authorization"),
+    "policy-admin": ("full-demo-admin", "Authorization"),
+    "policy-approver": ("full-demo-policy-approver", "Authorization"),
+    "operator": ("full-demo-operator", "Authorization"),
+    "evaluation": ("full-demo-evaluation", "Authorization"),
+    "governance": ("full-demo-governance", "Authorization"),
+    "exporter": ("t19-requester-credential", "Authorization"),
+}
+
+
+class FullDemoAuthMiddleware(BaseHTTPMiddleware):
+    """Inject the local fixture identities for a loopback-only full demo.
+
+    The switch is set only by ``task4_consistency.web.full_demo``.  Explicit
+    caller headers always win, so this adapter has no effect on deployments
+    using the normal app entry point or on browser/API tests with credentials.
+    In exhibit mode the browser may also pin a role via ``task4_exhibit_role``.
+    """
+
+    @staticmethod
+    def _credential(path: str, method: str, role_id: str | None = None) -> tuple[str, str] | None:
+        if role_id in _EXHIBIT_ROLE_AUTH and not path.startswith("/controlled/"):
+            return _EXHIBIT_ROLE_AUTH[role_id]
+        if path.startswith("/controlled/s02"):
+            return "full-demo-source", "Authorization"
+        if path.startswith("/controlled/s05"):
+            return "full-demo-exception-approver", "Authorization"
+        if path.startswith("/controlled/s08") or path.startswith("/controlled/s09"):
+            return "full-demo-admin", "Authorization"
+        if path.startswith("/controlled/s12"):
+            return "full-demo-evaluation", "Authorization"
+        if path.startswith("/controlled/s13"):
+            return "full-demo-delivery-operator", "Authorization"
+        if path.startswith("/controlled/s16"):
+            if "/approve" in path:
+                return "full-demo-deletion-approver-1", "X-S16-Approver-Token"
+            return "full-demo-governance", "Authorization"
+        if path.startswith("/controlled/s17"):
+            if "/approve" in path or "/deny" in path:
+                return "t19-approver-credential", "X-S17-Approver-Token"
+            if "/process" in path or "/expire" in path:
+                return "t19-worker-credential", "Authorization"
+            if "/access" in path or "/confirm" in path:
+                return "t19-recipient-credential", "Authorization"
+            return "t19-requester-credential", "Authorization"
+        if path.startswith("/controlled/s14/settlement"):
+            return "full-demo-operator", "Authorization"
+        if path.startswith("/controlled/s14"):
+            return "full-demo-integrator", "Authorization"
+        if path.startswith("/controlled/s01"):
+            if "audit-timeline" in path:
+                return "full-demo-auditor", "Authorization"
+            if any(token in path for token in ("settlement", "terminate", "reopen", "process-termination")):
+                return "full-demo-operator", "Authorization"
+            return "full-demo-integrator", "Authorization"
+        return None
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        if os.environ.get("TASK4_FULL_DEMO", "").strip() == "1":
+            client = request.scope.get("client")
+            loopback = isinstance(client, tuple) and client and client[0] in {
+                "127.0.0.1",
+                "::1",
+                "localhost",
+            }
+            if loopback:
+                role_id = request.cookies.get(EXHIBIT_ROLE_COOKIE, "").strip() or None
+                credential = self._credential(request.url.path, request.method, role_id)
+                if credential is not None:
+                    value, header = credential
+                    headers = request.scope.setdefault("headers", [])
+                    names = {name.lower() for name, _ in headers}
+                    if header.lower().encode("latin-1") not in names:
+                        headers.append((header.lower().encode("latin-1"), f"Bearer {value}".encode("latin-1")))
+        return await call_next(request)
+
+
 app.add_middleware(OptionalTokenAuth)
 app.add_middleware(ReactShellCachePolicy)
 
@@ -1230,6 +1312,7 @@ class S16RestoreReadinessGate(BaseHTTPMiddleware):
 # policy wrap every controlled path (last registered = outermost).
 app.add_middleware(S16RestoreReadinessGate)
 app.add_middleware(S16NoStorePolicy)
+app.add_middleware(FullDemoAuthMiddleware)
 
 
 class S01ResponsePolicy(BaseHTTPMiddleware):
@@ -7693,6 +7776,8 @@ _DEMO_ERRORS: dict[str, tuple[int, str]] = {
         f"批量校验数量超过服务端上限 {BATCH_CHECK_MAX_N}",
     ),
     "DEMO_EVALUATION_UNAVAILABLE": (503, "评估摘要暂不可用"),
+    "DEMO_DIRECTORY_UNAVAILABLE": (404, "演示目录暂不可用"),
+    "DEMO_APPLICATION_INVALID": (400, "申请 JSON 无法核验，请检查格式"),
 }
 
 
@@ -7723,7 +7808,9 @@ class DemoFixturesResponse(BaseModel):
 class DemoCheckRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    fixture_id: str
+    fixture_id: str | None = None
+    application: dict[str, Any] | None = None
+    file_name: str | None = None
 
 
 class DemoSummary(BaseModel):
@@ -7799,13 +7886,13 @@ class DemoCheckResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     track: Literal["C-DEMO"]
-    data_scope: Literal["synthetic"]
-    fixture_id: str
+    data_scope: Literal["synthetic", "uploaded"]
+    fixture_id: str | None = None
     application_id: str
     summary: DemoSummary
     checks: list[DemoCheckItem]
     config: DemoConfigInfo
-    evidence_links: list[DemoEvidenceLink]
+    evidence_links: list[DemoEvidenceLink] = Field(default_factory=list)
 
 
 class DemoErrorDetail(BaseModel):
@@ -7878,41 +7965,88 @@ def demo_fixtures() -> DemoFixturesResponse:
     )
 
 
+def _application_from_upload(payload: dict[str, Any]) -> Application:
+    if not isinstance(payload, dict):
+        raise _demo_error("DEMO_APPLICATION_INVALID")
+    documents = payload.get("documents")
+    if not isinstance(documents, list) or not documents:
+        raise _demo_error("DEMO_APPLICATION_INVALID")
+    try:
+        app_obj = Application.from_dict(payload)
+    except Exception as error:
+        raise _demo_error("DEMO_APPLICATION_INVALID") from error
+    if not app_obj.application_id or not app_obj.documents:
+        raise _demo_error("DEMO_APPLICATION_INVALID")
+    return app_obj
+
+
+def _demo_report_response(
+    *,
+    app_obj: Application,
+    fixture_id: str | None,
+    data_scope: Literal["synthetic", "uploaded"],
+    evidence_links: list[DemoEvidenceLink],
+    file_name: str | None = None,
+) -> DemoCheckResponse:
+    try:
+        report = _run_check(app_obj, _active_rules_path())
+    except Exception as error:
+        raise _demo_error("DEMO_CHECK_FAILED") from error
+    report_dict = report.to_dict()
+    response = DemoCheckResponse(
+        track="C-DEMO",
+        data_scope=data_scope,
+        fixture_id=fixture_id,
+        application_id=report.application_id,
+        summary=DemoSummary(**report_dict["summary"]),
+        checks=[DemoCheckItem(**item) for item in report_dict["checks"]],
+        config=DemoConfigInfo(
+            rule_config_version=report_dict["rule_config_version"],
+            rule_package=report_dict.get("rule_package"),
+            rule_changelog=report_dict.get("rule_changelog") or [],
+        ),
+        evidence_links=evidence_links,
+    )
+    _store_exhibit_case_from_check(
+        app_obj=app_obj, report=response, file_name=file_name
+    )
+    return response
+
+
 @app.post(
     "/api/demo/check",
     response_model=DemoCheckResponse,
     responses={
+        400: {"model": DemoErrorResponse},
         404: {"model": DemoErrorResponse},
         500: {"model": DemoErrorResponse},
         503: {"model": DemoErrorResponse},
     },
 )
 def demo_check(body: DemoCheckRequest) -> DemoCheckResponse:
-    """Run exactly one server-resident synthetic fixture through the active
-    rules and project a typed C-DEMO report with Step2 evidence metadata."""
+    """Run one uploaded Application JSON, or one server-resident fixture."""
+    if body.application is not None:
+        app_obj = _application_from_upload(body.application)
+        return _demo_report_response(
+            app_obj=app_obj,
+            fixture_id=None,
+            data_scope="uploaded",
+            evidence_links=[],
+            file_name=body.file_name,
+        )
+    if not body.fixture_id:
+        raise _demo_error("DEMO_APPLICATION_INVALID")
     data = _load_demo_fixture(body.fixture_id)
     try:
         app_obj = Application.from_dict(data)
-        report = _run_check(app_obj, _active_rules_path())
-    except Exception as e:
-        # Bounded 500: the fixed generic message only; exception text and
-        # internal paths stay in the server logs via chaining.
-        raise _demo_error("DEMO_CHECK_FAILED") from e
+    except Exception as error:
+        raise _demo_error("DEMO_CHECK_FAILED") from error
     meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
     sid = str(meta["step2_sample_id"])
-    report_dict = report.to_dict()
-    return DemoCheckResponse(
-        track="C-DEMO",
-        data_scope="synthetic",
+    return _demo_report_response(
+        app_obj=app_obj,
         fixture_id=body.fixture_id,
-        application_id=report.application_id,
-        summary=DemoSummary(**report_dict["summary"]),
-        checks=[DemoCheckItem(**c) for c in report_dict["checks"]],
-        config=DemoConfigInfo(
-            rule_config_version=report_dict["rule_config_version"],
-            rule_package=report_dict.get("rule_package"),
-            rule_changelog=report_dict.get("rule_changelog") or [],
-        ),
+        data_scope="synthetic",
         evidence_links=[
             DemoEvidenceLink(
                 kind="step2_sample",
@@ -7944,6 +8078,396 @@ def demo_react_shell() -> HTMLResponse:
     return response
 
 
+class DemoExhibitRole(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    label: str
+    duty: str
+    subject: str
+
+
+class DemoExhibitRoleBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    role_id: str
+
+
+class DemoDirectoryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    active_application_id: str | None = None
+    late_application_id: str | None = None
+    supplement_request_id: str | None = None
+    deletion_reference: str | None = None
+    deletion_application_id: str | None = None
+    exhibit: bool = False
+    current_role_id: str | None = None
+    roles: list[DemoExhibitRole] = Field(default_factory=list)
+
+
+def _exhibit_enabled() -> bool:
+    return os.environ.get("TASK4_EXHIBIT", "").strip() == "1"
+
+
+def _exhibit_roles_from_directory() -> list[DemoExhibitRole]:
+    if DEMO_DIRECTORY_PATH is None or not DEMO_DIRECTORY_PATH.is_file():
+        return []
+    try:
+        payload = json.loads(DEMO_DIRECTORY_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    raw = payload.get("exhibit_roles") if isinstance(payload, dict) else None
+    if not isinstance(raw, list):
+        return []
+    roles: list[DemoExhibitRole] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        role_id = item.get("id")
+        label = item.get("label")
+        duty = item.get("duty")
+        subject = item.get("subject")
+        if not all(isinstance(value, str) and value.strip() for value in (role_id, label, duty, subject)):
+            continue
+        roles.append(
+            DemoExhibitRole(
+                id=str(role_id),
+                label=str(label),
+                duty=str(duty),
+                subject=str(subject),
+            )
+        )
+    return roles
+
+
+@app.get(
+    "/api/demo/directory",
+    response_model=DemoDirectoryResponse,
+)
+def demo_directory(request: Request) -> DemoDirectoryResponse:
+    """Read-only exhibit directory: sample ids plus the local role roster."""
+    roles = _exhibit_roles_from_directory() if _exhibit_enabled() else []
+    current = request.cookies.get(EXHIBIT_ROLE_COOKIE, "").strip() or None
+    if current not in {role.id for role in roles}:
+        current = None
+    empty = DemoDirectoryResponse(
+        exhibit=_exhibit_enabled(),
+        current_role_id=current,
+        roles=roles,
+    )
+    if DEMO_DIRECTORY_PATH is None or not DEMO_DIRECTORY_PATH.is_file():
+        return empty
+    try:
+        payload = json.loads(DEMO_DIRECTORY_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return empty
+    if not isinstance(payload, dict):
+        return empty
+    return DemoDirectoryResponse(
+        active_application_id=_optional_id(payload.get("active_application_id")),
+        late_application_id=_optional_id(payload.get("late_application_id")),
+        supplement_request_id=_optional_id(payload.get("supplement_request_id")),
+        deletion_reference=_optional_id(payload.get("deletion_reference")),
+        deletion_application_id=_optional_id(payload.get("deletion_application_id")),
+        exhibit=_exhibit_enabled(),
+        current_role_id=current,
+        roles=roles,
+    )
+
+
+@app.post(
+    "/api/demo/exhibit-role",
+    response_model=DemoDirectoryResponse,
+)
+def set_exhibit_role(
+    body: DemoExhibitRoleBody,
+    request: Request,
+    response: Response,
+) -> DemoDirectoryResponse:
+    """Pin the local exhibit role.  Only active when TASK4_EXHIBIT=1."""
+    if not _exhibit_enabled():
+        raise HTTPException(
+            404,
+            detail={"error": "DEMO_DIRECTORY_UNAVAILABLE", "message": "展会身份切换未启用"},
+        )
+    roles = _exhibit_roles_from_directory()
+    if body.role_id not in {role.id for role in roles}:
+        raise HTTPException(
+            422,
+            detail={"error": "DEMO_ROLE_UNKNOWN", "message": "未知岗位"},
+        )
+    response.set_cookie(
+        EXHIBIT_ROLE_COOKIE,
+        body.role_id,
+        max_age=S01_SESSION_TTL_SECONDS,
+        httponly=True,
+        samesite="strict",
+        secure=False,
+    )
+    _s01_disable_cache(response)
+    directory = demo_directory(request)
+    directory.current_role_id = body.role_id
+    return directory
+
+
+def _optional_id(value: object) -> str | None:
+    if isinstance(value, str) and value.strip() and value.strip() == value:
+        return value
+    return None
+
+
+_EXHIBIT_CASE_LOCK = threading.Lock()
+_EXHIBIT_CASE: dict[str, Any] | None = None
+
+
+def _exhibit_empty_governance() -> dict[str, Any]:
+    return {
+        "delivered": False,
+        "delivered_at": None,
+        "cancelled": False,
+        "cancelled_at": None,
+        "settled": False,
+        "settled_at": None,
+        "deleted": False,
+        "deleted_at": None,
+        "export_note": None,
+        "exported_at": None,
+    }
+
+
+class ExhibitCheckItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rule_id: str
+    name: str
+    verdict: str
+    severity: str
+    message: str
+    snapshots: list[dict[str, Any]] = Field(default_factory=list)
+    diff_left: str | None = None
+    diff_right: str | None = None
+    diff_detail: str | None = None
+
+
+class ExhibitReviewBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["confirm", "need_material", "exception"]
+    note: str = ""
+
+
+class ExhibitApprovalBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["approve", "exception", "reject"]
+    note: str = ""
+
+
+class ExhibitSupplementBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    size: int = 0
+    kind: str = "file"
+    note: str = ""
+
+
+class ExhibitGovernanceActionBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["deliver", "cancel", "settle", "delete", "export"]
+
+
+class ExhibitCaseResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    application_id: str | None = None
+    file_name: str | None = None
+    report: dict[str, Any] | None = None
+    checks: list[ExhibitCheckItem] = Field(default_factory=list)
+    documents: list[dict[str, Any]] = Field(default_factory=list)
+    review: dict[str, Any] | None = None
+    approval: dict[str, Any] | None = None
+    attachments: list[dict[str, Any]] = Field(default_factory=list)
+    governance: dict[str, Any] = Field(default_factory=_exhibit_empty_governance)
+
+
+def _exhibit_case_response(case: dict[str, Any] | None) -> ExhibitCaseResponse:
+    if case is None:
+        return ExhibitCaseResponse()
+    return ExhibitCaseResponse(
+        application_id=case.get("application_id"),
+        file_name=case.get("file_name"),
+        report=case.get("report"),
+        checks=[ExhibitCheckItem(**item) for item in case.get("checks") or []],
+        documents=list(case.get("documents") or []),
+        review=case.get("review"),
+        approval=case.get("approval"),
+        attachments=list(case.get("attachments") or []),
+        governance=case.get("governance") or _exhibit_empty_governance(),
+    )
+
+
+def _store_exhibit_case_from_check(
+    *,
+    app_obj: Application,
+    report: DemoCheckResponse,
+    file_name: str | None,
+) -> None:
+    global _EXHIBIT_CASE
+    checks = [
+        {
+            "rule_id": item.rule_id,
+            "name": item.name,
+            "verdict": item.verdict,
+            "severity": item.severity,
+            "message": item.message,
+            "snapshots": [
+                {
+                    "doc_type": snap.doc_type,
+                    "field": snap.field,
+                    "raw": snap.raw,
+                    "normalized": snap.normalized,
+                }
+                for snap in (item.snapshots or [])
+            ],
+            "diff_left": item.diff_highlight.left if item.diff_highlight else None,
+            "diff_right": item.diff_highlight.right if item.diff_highlight else None,
+            "diff_detail": item.diff_highlight.detail if item.diff_highlight else None,
+        }
+        for item in report.checks
+    ]
+    documents = [
+        {
+            "doc_id": doc.doc_id,
+            "doc_type": doc.doc_type,
+            "fields": [
+                {
+                    "field": name,
+                    "raw": value.raw if hasattr(value, "raw") else str(value),
+                }
+                for name, value in (doc.fields or {}).items()
+            ],
+        }
+        for doc in app_obj.documents
+    ]
+    with _EXHIBIT_CASE_LOCK:
+        _EXHIBIT_CASE = {
+            "application_id": report.application_id,
+            "file_name": file_name,
+            "report": {
+                "application_id": report.application_id,
+                "consistent": report.summary.consistent,
+                "inconsistent": report.summary.inconsistent,
+                "uncertain": report.summary.uncertain,
+                "skipped": report.summary.skipped,
+            },
+            "checks": checks,
+            "documents": documents,
+            "review": None,
+            "approval": None,
+            "attachments": [],
+            "governance": _exhibit_empty_governance(),
+        }
+
+
+@app.get("/api/demo/case", response_model=ExhibitCaseResponse)
+def exhibit_case() -> ExhibitCaseResponse:
+    with _EXHIBIT_CASE_LOCK:
+        return _exhibit_case_response(_EXHIBIT_CASE)
+
+
+@app.post("/api/demo/case/review", response_model=ExhibitCaseResponse)
+def exhibit_case_review(body: ExhibitReviewBody) -> ExhibitCaseResponse:
+    global _EXHIBIT_CASE
+    with _EXHIBIT_CASE_LOCK:
+        if _EXHIBIT_CASE is None:
+            raise _demo_error("DEMO_APPLICATION_INVALID")
+        _EXHIBIT_CASE["review"] = {
+            "action": body.action,
+            "note": body.note.strip(),
+            "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        return _exhibit_case_response(_EXHIBIT_CASE)
+
+
+@app.post("/api/demo/case/approval", response_model=ExhibitCaseResponse)
+def exhibit_case_approval(body: ExhibitApprovalBody) -> ExhibitCaseResponse:
+    global _EXHIBIT_CASE
+    with _EXHIBIT_CASE_LOCK:
+        if _EXHIBIT_CASE is None:
+            raise _demo_error("DEMO_APPLICATION_INVALID")
+        _EXHIBIT_CASE["approval"] = {
+            "action": body.action,
+            "note": body.note.strip(),
+            "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        return _exhibit_case_response(_EXHIBIT_CASE)
+
+
+@app.post("/api/demo/case/supplement", response_model=ExhibitCaseResponse)
+def exhibit_case_supplement(body: ExhibitSupplementBody) -> ExhibitCaseResponse:
+    global _EXHIBIT_CASE
+    with _EXHIBIT_CASE_LOCK:
+        if _EXHIBIT_CASE is None:
+            raise _demo_error("DEMO_APPLICATION_INVALID")
+        attachments = list(_EXHIBIT_CASE.get("attachments") or [])
+        attachments.append(
+            {
+                "name": body.name,
+                "size": body.size,
+                "kind": body.kind,
+                "note": body.note,
+                "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+        )
+        _EXHIBIT_CASE["attachments"] = attachments
+        return _exhibit_case_response(_EXHIBIT_CASE)
+
+
+@app.post("/api/demo/case/governance", response_model=ExhibitCaseResponse)
+def exhibit_case_governance(body: ExhibitGovernanceActionBody) -> ExhibitCaseResponse:
+    global _EXHIBIT_CASE
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    with _EXHIBIT_CASE_LOCK:
+        if _EXHIBIT_CASE is None:
+            raise _demo_error("DEMO_APPLICATION_INVALID")
+        gov = dict(_EXHIBIT_CASE.get("governance") or _exhibit_empty_governance())
+        approval = (_EXHIBIT_CASE.get("approval") or {}).get("action")
+        if body.action == "deliver":
+            if approval == "reject":
+                raise HTTPException(
+                    409,
+                    detail={"error": "DEMO_CASE_BLOCKED", "message": "已拒绝的申请不能投递"},
+                )
+            gov["delivered"] = True
+            gov["delivered_at"] = stamp
+        elif body.action == "cancel":
+            gov["cancelled"] = True
+            gov["cancelled_at"] = stamp
+        elif body.action == "settle":
+            if not gov.get("cancelled") and approval != "reject":
+                raise HTTPException(
+                    409,
+                    detail={"error": "DEMO_CASE_BLOCKED", "message": "请先取消或拒绝后再收尾"},
+                )
+            gov["settled"] = True
+            gov["settled_at"] = stamp
+        elif body.action == "delete":
+            gov["deleted"] = True
+            gov["deleted_at"] = stamp
+        elif body.action == "export":
+            report = _EXHIBIT_CASE.get("report") or {}
+            gov["export_note"] = (
+                f"已导出核验摘要（一致 {report.get('consistent', 0)} / "
+                f"不一致 {report.get('inconsistent', 0)}）"
+            )
+            gov["exported_at"] = stamp
+        _EXHIBIT_CASE["governance"] = gov
+        return _exhibit_case_response(_EXHIBIT_CASE)
+
+
 # --- T07 / Issue #41: bounded demo batch check + read-only fixed-main
 # evaluation-summary projection ---------------------------------------------
 
@@ -7959,7 +8483,8 @@ _DEMO_EVAL_SCOPE = "合成开发/回归语料（suite=main）"
 class DemoBatchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    fixture_ids: list[str] = Field(min_length=1)
+    fixture_ids: list[str] = Field(default_factory=list)
+    applications: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class DemoBatchTotals(BaseModel):
@@ -7996,7 +8521,7 @@ class DemoBatchCheckResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     track: Literal["C-DEMO"]
-    data_scope: Literal["synthetic"]
+    data_scope: Literal["synthetic", "uploaded"]
     requested: int
     completed: int
     failed: int
@@ -8018,42 +8543,42 @@ class DemoBatchCheckResponse(BaseModel):
     },
 )
 def demo_batch_check(body: DemoBatchRequest) -> DemoBatchCheckResponse:
-    """One bounded synchronous run of server-resident synthetic fixtures.
-
-    The count cap is enforced before any fixture I/O or allow-list work, and
-    an unknown id fails closed before any check runs.  Each item is an
-    explicit completed/failed terminal outcome; the enclosing outcome is
-    completed/partial/failed.  No async queue, job, or evaluate batch exists.
-    """
-    ids = body.fixture_ids
-    if len(ids) > BATCH_CHECK_MAX_N:
+    """One bounded synchronous run of fixtures and/or uploaded applications."""
+    ids = list(body.fixture_ids or [])
+    uploads = list(body.applications or [])
+    requested = len(ids) + len(uploads)
+    if requested == 0:
+        raise _demo_error("DEMO_APPLICATION_INVALID")
+    if requested > BATCH_CHECK_MAX_N:
         raise _demo_error("DEMO_BATCH_TOO_LARGE")
     for fixture_id in ids:
         if fixture_id not in DEMO_FIXTURES:
             raise _demo_error("DEMO_FIXTURE_NOT_FOUND")
+    data_scope: Literal["synthetic", "uploaded"] = (
+        "uploaded" if uploads and not ids else "synthetic"
+    )
 
-    # One synchronous request observes exactly one rules/engine snapshot:
-    # the engine is built once and every item runs on it, so no mixed rule
-    # versions can combine in one response.
+    jobs: list[tuple[str, dict[str, Any] | None]] = [(fid, None) for fid in ids]
+    for index, payload in enumerate(uploads):
+        jobs.append((f"upload-{index + 1}", payload))
+
     try:
         engine = _engine()
     except Exception:
-        # Bounded closed failure: no engine snapshot could be built; every
-        # requested item fails generically with zero completed-only totals.
         failed_items = [
             DemoBatchItem(
-                fixture_id=fid,
+                fixture_id=job_id,
                 outcome="failed",
                 error=_DEMO_BATCH_ITEM_FAILED,
             )
-            for fid in ids
+            for job_id, _ in jobs
         ]
         return DemoBatchCheckResponse(
             track="C-DEMO",
-            data_scope="synthetic",
-            requested=len(ids),
+            data_scope=data_scope,
+            requested=requested,
             completed=0,
-            failed=len(ids),
+            failed=requested,
             outcome="failed",
             totals=DemoBatchTotals(),
             results=failed_items,
@@ -8061,10 +8586,13 @@ def demo_batch_check(body: DemoBatchRequest) -> DemoBatchCheckResponse:
 
     results: list[DemoBatchItem] = []
     totals = DemoBatchTotals()
-    for fixture_id in ids:
+    for job_id, payload in jobs:
         try:
-            data = _load_demo_fixture(fixture_id)
-            app_obj = Application.from_dict(data)
+            if payload is None:
+                data = _load_demo_fixture(job_id)
+                app_obj = Application.from_dict(data)
+            else:
+                app_obj = _application_from_upload(payload)
             report = engine.run(app_obj)
             summary = report.summary
             issues = [
@@ -8078,26 +8606,21 @@ def demo_batch_check(body: DemoBatchRequest) -> DemoBatchCheckResponse:
                 if c.verdict.value in ("inconsistent", "uncertain")
             ]
             item = DemoBatchItem(
-                fixture_id=fixture_id,
+                fixture_id=job_id,
                 outcome="completed",
                 application_id=report.application_id,
                 summary=DemoSummary(**summary.to_dict()),
                 issues=issues,
             )
-            # Commit counts to completed-only totals only after the whole
-            # item (including the issue projection) succeeded, so a late
-            # failure can never leave partial counts.
             results.append(item)
             totals.consistent += summary.consistent
             totals.inconsistent += summary.inconsistent
             totals.uncertain += summary.uncertain
             totals.skipped += summary.skipped
         except Exception:
-            # Bounded per-item failure: the fixed generic message only;
-            # exception text and internal paths stay in the server logs.
             results.append(
                 DemoBatchItem(
-                    fixture_id=fixture_id,
+                    fixture_id=job_id,
                     outcome="failed",
                     error=_DEMO_BATCH_ITEM_FAILED,
                 )
@@ -8112,8 +8635,8 @@ def demo_batch_check(body: DemoBatchRequest) -> DemoBatchCheckResponse:
         outcome = "partial"
     return DemoBatchCheckResponse(
         track="C-DEMO",
-        data_scope="synthetic",
-        requested=len(ids),
+        data_scope=data_scope,
+        requested=requested,
         completed=completed,
         failed=failed,
         outcome=outcome,

@@ -148,6 +148,7 @@ export type DemoBatchCheckResponse =
 export type DemoBatchItem = components["schemas"]["DemoBatchItem"];
 export type DemoEvaluationSummaryResponse =
   components["schemas"]["DemoEvaluationSummaryResponse"];
+export type DemoDirectoryResponse = components["schemas"]["DemoDirectoryResponse"];
 
 /**
  * The demo batch POST body is bound to the generated OpenAPI request schema;
@@ -157,6 +158,7 @@ export type DemoBatchCommand = paths["/api/demo/check/batch"]["post"]["requestBo
 
 export const DEMO_FIXTURES_KEY = ["demo", "fixtures"] as const;
 export const DEMO_EVAL_SUMMARY_KEY = ["demo", "evaluate-summary"] as const;
+export const DEMO_DIRECTORY_KEY = ["demo", "directory"] as const;
 
 export const QUEUE_KEY = ["s01", "queue"] as const;
 export const WORK_KEY = (workId: string) =>
@@ -762,6 +764,105 @@ export function useDemoEvaluationSummary(): UseQueryResult<DemoEvaluationSummary
       request<DemoEvaluationSummaryResponse>("/api/demo/evaluate/summary"),
     enabled: false,
     retry: false,
+  });
+}
+
+export function useDemoDirectory(
+  enabled = true,
+): UseQueryResult<DemoDirectoryResponse> {
+  return useQuery({
+    queryKey: DEMO_DIRECTORY_KEY,
+    queryFn: () => request<DemoDirectoryResponse>("/api/demo/directory"),
+    enabled,
+    retry: retryPolicy,
+  });
+}
+
+export const DEMO_CASE_KEY = ["demo", "case"] as const;
+
+export type ExhibitCaseResponse = components["schemas"]["ExhibitCaseResponse"];
+
+export function useExhibitCase(): UseQueryResult<ExhibitCaseResponse> {
+  return useQuery({
+    queryKey: DEMO_CASE_KEY,
+    queryFn: () => request<ExhibitCaseResponse>("/api/demo/case"),
+    retry: retryPolicy,
+  });
+}
+
+export function useExhibitCaseReview(): UseMutationResult<
+  ExhibitCaseResponse,
+  Error,
+  { action: "confirm" | "need_material" | "exception"; note: string }
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body) =>
+      request<ExhibitCaseResponse>("/api/demo/case/review", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    retry: false,
+    onSuccess: (data) => {
+      queryClient.setQueryData(DEMO_CASE_KEY, data);
+    },
+  });
+}
+
+export function useExhibitCaseApproval(): UseMutationResult<
+  ExhibitCaseResponse,
+  Error,
+  { action: "approve" | "exception" | "reject"; note: string }
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body) =>
+      request<ExhibitCaseResponse>("/api/demo/case/approval", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    retry: false,
+    onSuccess: (data) => {
+      queryClient.setQueryData(DEMO_CASE_KEY, data);
+    },
+  });
+}
+
+export function useExhibitCaseSupplement(): UseMutationResult<
+  ExhibitCaseResponse,
+  Error,
+  { name: string; size: number; kind: string; note: string }
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body) =>
+      request<ExhibitCaseResponse>("/api/demo/case/supplement", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    retry: false,
+    onSuccess: (data) => {
+      queryClient.setQueryData(DEMO_CASE_KEY, data);
+    },
+  });
+}
+
+export function useExhibitCaseGovernance(): UseMutationResult<
+  ExhibitCaseResponse,
+  Error,
+  "deliver" | "cancel" | "settle" | "delete" | "export"
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (action) =>
+      request<ExhibitCaseResponse>("/api/demo/case/governance", {
+        method: "POST",
+        body: JSON.stringify({ action }),
+      }),
+    retry: false,
+    onSuccess: (data) => {
+      queryClient.setQueryData(DEMO_CASE_KEY, data);
+    },
   });
 }
 

@@ -212,7 +212,7 @@ export default function S12EvaluationOperator() {
 
   return (
     <section className="panel" data-testid="s12-operator" aria-labelledby="s12-operator-title">
-      <h2 id="s12-operator-title">评价操作台（服务端权威）</h2>
+      <h2 id="s12-operator-title">核验指标（服务端封存，页面不算分）</h2>
 
       <div className="demo-controls">
         <label htmlFor="s12-plan-select">已冻结评价计划</label>

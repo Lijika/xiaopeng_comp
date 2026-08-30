@@ -351,7 +351,7 @@ function DraftWorkflowSection({
 
   return (
     <section className="panel" data-testid="t08-draft-workflow">
-      <h2>治理策略候选工作台</h2>
+      <h2>待发布的规则版本</h2>
       <dl className="facts">
         <div>
           <dt>发布流程</dt>
@@ -1205,7 +1205,7 @@ function WorkspaceSection({
 
   return (
     <section className="panel" data-testid="t08-workspace">
-      <h2>治理策略候选工作区</h2>
+      <h2>待发布的规则版本</h2>
       <dl className="facts">
         <div>
           <dt>候选标识</dt>
@@ -1770,7 +1770,7 @@ export function GovernanceWorkspacePanel() {
   return (
     <>
       <section className="panel" data-testid="t09-workspace">
-        <h2>治理影响与安全冻结工作区</h2>
+        <h2>改规则会影响哪些在途申请</h2>
         {staleWorkspace && (
           <div data-testid="t09-stale" role="alert">
             <p>

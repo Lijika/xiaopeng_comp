@@ -181,6 +181,34 @@ def test_demo_check_ok_fixture_consistent():
     assert body["application_id"] == "DEMO-STEP2-JFL25P02L080310-01-OK"
 
 
+def test_demo_check_uploaded_application():
+    """An uploaded Application JSON runs through the same checker."""
+    client = make_client()
+    application = json.loads(
+        (ROOT / "材料" / "task4_applications" / "JFL25P02L080310-01_ok.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    r = client.post("/api/demo/check", json={"application": application})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["data_scope"] == "uploaded"
+    assert body["fixture_id"] is None
+    assert body["summary"]["inconsistent"] == 0
+    assert body["summary"]["consistent"] >= 1
+    assert body["evidence_links"] == []
+
+
+def test_demo_check_uploaded_application_invalid():
+    client = make_client()
+    r = client.post("/api/demo/check", json={"application": {"documents": []}})
+    _assert_closed_error(
+        r,
+        400,
+        {"error": "DEMO_APPLICATION_INVALID", "message": "申请 JSON 无法核验，请检查格式"},
+    )
+
+
 def test_demo_check_unknown_and_shape_rejected():
     """Unknown/path-like/extra/shape values fail closed; only bare fixture_id.
     The 404 is the exact closed envelope and never reflects caller input."""
@@ -198,16 +226,20 @@ def test_demo_check_unknown_and_shape_rejected():
         assert "app_demo_step2_ok" not in r.text
         assert "etc" not in r.text
 
-    # extra field -> typed 422
+    # extra unknown field -> typed 422
     r = client.post(
         "/api/demo/check",
-        json={"fixture_id": "app_demo_step2_ok", "application": {}},
+        json={"fixture_id": "app_demo_step2_ok", "not_a_field": True},
     )
     assert r.status_code == 422, r.text
 
-    # missing field -> typed 422
+    # missing both fixture_id and application -> closed 400
     r = client.post("/api/demo/check", json={})
-    assert r.status_code == 422, r.text
+    _assert_closed_error(
+        r,
+        400,
+        {"error": "DEMO_APPLICATION_INVALID", "message": "申请 JSON 无法核验，请检查格式"},
+    )
 
 
 def test_demo_check_fail_closed_missing_file(tmp_path, monkeypatch):
@@ -399,10 +431,10 @@ def test_openapi_demo_contract_closed():
     req_ref = post["requestBody"]["content"]["application/json"]["schema"]["$ref"]
     assert req_ref.endswith("/DemoCheckRequest")
     req = schemas["DemoCheckRequest"]
-    assert set(req["properties"].keys()) == {"fixture_id"}
+    assert set(req["properties"].keys()) == {"fixture_id", "application", "file_name"}
     assert req["additionalProperties"] is False
-    # POST 404/500/503 all reference the closed nested error envelope
-    for status in ("404", "500", "503"):
+    # POST 400/404/500/503 all reference the closed nested error envelope
+    for status in ("400", "404", "500", "503"):
         err_ref = post["responses"][status]["content"]["application/json"][
             "schema"
         ]["$ref"]
@@ -435,7 +467,9 @@ def test_openapi_demo_contract_closed():
         "evidence_links",
     }
     assert resp["properties"]["track"].get("const") == "C-DEMO"
-    assert resp["properties"]["data_scope"].get("const") == "synthetic"
+    data_scope = resp["properties"]["data_scope"]
+    assert "synthetic" in (data_scope.get("enum") or [data_scope.get("const")])
+    assert "uploaded" in (data_scope.get("enum") or [])
 
     fixtures_schema = schemas["DemoFixturesResponse"]
     assert set(fixtures_schema["properties"].keys()) == {

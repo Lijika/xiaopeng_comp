@@ -1,10 +1,22 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import {
-  useDemoCheck,
-  useDemoFixtures,
-  type DemoCheckResponse,
-} from "../api/hooks";
+  useMutation,
+  type UseMutationResult,
+} from "@tanstack/react-query";
+
+import { request } from "../api/client";
+import { type DemoCheckResponse } from "../api/hooks";
+import { ruleTitle } from "../lib/demoCopy";
+import {
+  documentsFromApplication,
+  readExhibitCurrent,
+  readExhibitUploads,
+  upsertExhibitUpload,
+  writeExhibitCurrent,
+  writeExhibitUploads,
+} from "../lib/exhibitSession";
+import { Button } from "./ui/button";
 
 const VERDICT_ZH: Record<string, string> = {
   consistent: "一致",
@@ -20,28 +32,44 @@ const SEVERITY_ZH: Record<string, string> = {
   info: "提示",
 };
 
-/** The failure state renders one fixed generic message only: the server
- * error body is never copied into the UI, so no caller or internal detail
- * (paths, identifiers, exception text) can surface to the user. */
 const CHECK_FAILURE_TEXT = "校验失败，请稍后重试";
+const INVALID_JSON_TEXT = "请上传任务4申请 JSON（需包含 documents）";
 
-/** The closed demo report renderer.  It renders only the server DTO and
- * never reproduces matching, grading, or expected-verdict comparison. */
+function useUploadedCheck(): UseMutationResult<
+  DemoCheckResponse,
+  Error,
+  { application: Record<string, unknown>; fileName: string }
+> {
+  return useMutation({
+    mutationFn: ({
+      application,
+    }: {
+      application: Record<string, unknown>;
+      fileName: string;
+    }) =>
+      request<DemoCheckResponse>("/api/demo/check", {
+        method: "POST",
+        body: JSON.stringify({ application }),
+      }),
+    retry: false,
+  });
+}
+
 function DemoReport({ report }: { report: DemoCheckResponse }) {
   return (
     <div className="demo-report" data-testid="demo-report">
       <div className="app-header">
         <h2>校验报告</h2>
-        <span className="boundary track" data-testid="demo-report-track">
-          {report.track}
-        </span>
-        <span className="boundary" data-testid="demo-report-scope">
-          {report.data_scope}
-        </span>
       </div>
+      <span className="sr-only" data-testid="demo-report-track">
+        {report.track}
+      </span>
+      <span className="sr-only" data-testid="demo-report-scope">
+        {report.data_scope}
+      </span>
       <p data-testid="demo-summary">
-        一致 {report.summary.consistent} · 不一致 {report.summary.inconsistent} ·
-        存疑 {report.summary.uncertain} · 跳过 {report.summary.skipped}
+        一致 {report.summary.consistent} 条 · 不一致 {report.summary.inconsistent}{" "}
+        条 · 存疑 {report.summary.uncertain} 条 · 跳过 {report.summary.skipped} 条
       </p>
       <p data-testid="demo-config-version">
         规则包版本：{report.config.rule_config_version ?? "未知"}
@@ -53,9 +81,15 @@ function DemoReport({ report }: { report: DemoCheckResponse }) {
             data-testid={`demo-check-item-${check.rule_id}`}
           >
             <div className="demo-check-head">
-              <span className="demo-rule-id">{check.rule_id}</span>
-              <span className="verdict">{VERDICT_ZH[check.verdict] ?? check.verdict}</span>
-              <span className="severity">{SEVERITY_ZH[check.severity] ?? check.severity}</span>
+              <span className="demo-rule-id">
+                {ruleTitle(check.rule_id, check.name)}
+              </span>
+              <span className={`verdict verdict-${check.verdict}`}>
+                {VERDICT_ZH[check.verdict] ?? check.verdict}
+              </span>
+              <span className="severity">
+                {SEVERITY_ZH[check.severity] ?? check.severity}
+              </span>
             </div>
             <p className="demo-check-message">{check.message}</p>
             {(check.snapshots ?? []).length > 0 && (
@@ -83,113 +117,166 @@ function DemoReport({ report }: { report: DemoCheckResponse }) {
                 </tbody>
               </table>
             )}
-            {check.diff_highlight !== null && check.diff_highlight !== undefined && (
-              <p
-                className="demo-diff"
-                data-testid={`demo-diff-${check.rule_id}`}
-              >
-                差异：{check.diff_highlight.left ?? "—"} →{" "}
-                {check.diff_highlight.right ?? "—"}
-                {check.diff_highlight.detail
-                  ? `（${check.diff_highlight.detail}）`
-                  : ""}
-              </p>
-            )}
+            {check.diff_highlight !== null &&
+              check.diff_highlight !== undefined && (
+                <p
+                  className="demo-diff"
+                  data-testid={`demo-diff-${check.rule_id}`}
+                >
+                  差异：{check.diff_highlight.left ?? "—"} →{" "}
+                  {check.diff_highlight.right ?? "—"}
+                  {check.diff_highlight.detail
+                    ? `（${check.diff_highlight.detail}）`
+                    : ""}
+                </p>
+              )}
           </li>
         ))}
       </ul>
-      <div className="demo-evidence">
-        <h3>证据元数据</h3>
-        {report.evidence_links.map((link) => (
-          <p key={link.href} className="demo-evidence-link">
-            <a href={link.href} data-testid="demo-evidence-link">
-              {link.label}
-            </a>
-            <span className="demo-limitation"> {link.limitation}</span>
-          </p>
-        ))}
-      </div>
+      {(report.evidence_links ?? []).length > 0 && (
+        <div className="demo-evidence">
+          <h3>对照材料</h3>
+          {(report.evidence_links ?? []).map((link) => (
+            <p key={link.href} className="demo-evidence-link">
+              <a href={link.href} data-testid="demo-evidence-link">
+                {link.label}
+              </a>
+              <span className="demo-limitation"> {link.limitation}</span>
+            </p>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
-/** The T06 demo check panel: server-owned fixture selection, one explicit
- * click-driven mutation, and the closed report.  The browser never sends a
- * filename, path, application, rules, knowledge, or label value. */
 export default function DemoCheckPanel() {
-  const fixtures = useDemoFixtures();
-  const check = useDemoCheck();
-  const [fixtureId, setFixtureId] = useState("");
-  const [report, setReport] = useState<DemoCheckResponse | null>(null);
+  const check = useUploadedCheck();
+  const fileRef = useRef<HTMLInputElement>(null);
+  const saved = readExhibitCurrent();
+  const [fileName, setFileName] = useState(saved?.fileName ?? "");
+  const [application, setApplication] = useState<Record<string, unknown> | null>(
+    saved?.application ?? null,
+  );
+  const [parseError, setParseError] = useState<string | null>(null);
+  const [report, setReport] = useState<DemoCheckResponse | null>(
+    saved?.fullReport ? (saved.fullReport as DemoCheckResponse) : null,
+  );
+
+  const onFile = async (file: File | undefined) => {
+    setReport(null);
+    check.reset();
+    if (file === undefined) {
+      setFileName("");
+      setApplication(null);
+      setParseError(null);
+      return;
+    }
+    setFileName(file.name);
+    try {
+      const text = await file.text();
+      const parsed: unknown = JSON.parse(text);
+      if (
+        parsed === null ||
+        typeof parsed !== "object" ||
+        Array.isArray(parsed) ||
+        !Array.isArray((parsed as { documents?: unknown }).documents)
+      ) {
+        setApplication(null);
+        setParseError(INVALID_JSON_TEXT);
+        return;
+      }
+      setApplication(parsed as Record<string, unknown>);
+      setParseError(null);
+    } catch {
+      setApplication(null);
+      setParseError(INVALID_JSON_TEXT);
+    }
+  };
 
   const run = () => {
-    if (fixtureId === "" || check.isPending) return;
+    if (application === null || check.isPending) return;
     setReport(null);
-    check.mutate(fixtureId, {
-      onSuccess: (data) => setReport(data),
+    check.mutate(
+      { application, fileName },
+      {
+        onSuccess: (data) => {
+        setReport(data);
+        const id =
+          typeof application.application_id === "string" &&
+          application.application_id !== ""
+            ? application.application_id
+            : data.application_id;
+        const record = {
+          id,
+          fileName,
+          application,
+          documents: documentsFromApplication(application),
+          report: {
+            application_id: data.application_id,
+            consistent: data.summary.consistent,
+            inconsistent: data.summary.inconsistent,
+            uncertain: data.summary.uncertain,
+            skipped: data.summary.skipped,
+          },
+          checks: data.checks.map((item) => ({
+            rule_id: item.rule_id,
+            name: item.name,
+            verdict: item.verdict,
+            severity: item.severity,
+            message: item.message,
+            snapshots: (item.snapshots ?? []).map((snap) => ({
+              doc_type: snap.doc_type,
+              field: snap.field,
+              raw: snap.raw ?? null,
+              normalized: snap.normalized ?? null,
+            })),
+            diff_left: item.diff_highlight?.left ?? null,
+            diff_right: item.diff_highlight?.right ?? null,
+            diff_detail: item.diff_highlight?.detail ?? null,
+          })),
+          fullReport: data as unknown as Record<string, unknown>,
+        };
+        writeExhibitCurrent(record);
+        writeExhibitUploads(upsertExhibitUpload(readExhibitUploads(), record));
+      },
     });
   };
 
-  // Selecting a different fixture resets the previous report; presentation
-  // state never survives a selection change.
-  const select = (next: string) => {
-    setFixtureId(next);
-    setReport(null);
-    check.reset();
-  };
-
-  if (fixtures.isLoading) {
-    return (
-      <section className="panel" data-testid="demo-panel">
-        <p data-testid="demo-fixtures-loading" role="status">
-          正在加载演示样例…
-        </p>
-      </section>
-    );
-  }
-  if (fixtures.isError) {
-    return (
-      <section className="panel" data-testid="demo-panel">
-        <p data-testid="demo-fixtures-error" role="alert">
-          演示样例列表不可用
-        </p>
-      </section>
-    );
-  }
-  const options = fixtures.data?.fixtures ?? [];
-  if (options.length === 0) {
-    return (
-      <section className="panel" data-testid="demo-panel">
-        <p data-testid="demo-fixtures-empty">暂无可用的演示样例</p>
-      </section>
-    );
-  }
-
   return (
     <section className="panel" data-testid="demo-panel">
+      <h2>上传申请 JSON，看跨单据是否对得上</h2>
+      <p className="demo-limitation">
+        只接收任务4申请 JSON（含 documents）。展会文件在
+        材料/task4_applications/：登记证字段来自 ocr_out，保单/合同/发票/身份证按同一辆车补齐。不要上传图片。
+      </p>
       <div className="demo-controls">
-        <label htmlFor="demo-fixture-select">演示样例</label>
-        <select
-          id="demo-fixture-select"
-          data-testid="demo-fixture-select"
-          value={fixtureId}
-          onChange={(event) => select(event.target.value)}
+        <input
+          id="demo-application-file"
+          ref={fileRef}
+          type="file"
+          accept="application/json,.json"
+          data-testid="demo-application-file"
+          className="sr-only"
+          onChange={(event) => {
+            void onFile(event.target.files?.[0]);
+          }}
+        />
+        <Button
+          type="button"
+          variant="outline"
+          onClick={() => fileRef.current?.click()}
         >
-          <option value="">请选择…</option>
-          {options.map((option) => (
-            <option key={option.fixture_id} value={option.fixture_id}>
-              {option.title}
-            </option>
-          ))}
-        </select>
-        <button
+          {fileName ? `已选 ${fileName}` : "选择申请 JSON"}
+        </Button>
+        <Button
           type="button"
           data-testid="demo-run-button"
-          disabled={fixtureId === "" || check.isPending}
+          disabled={application === null || check.isPending}
           onClick={run}
         >
-          运行校验
-        </button>
+          {check.isPending ? "正在核验…" : "开始核验"}
+        </Button>
       </div>
       <p
         className="demo-status"
@@ -197,8 +284,19 @@ export default function DemoCheckPanel() {
         role="status"
         aria-live="polite"
       >
-        {check.isPending ? "校验中…" : report !== null ? "校验完成" : "等待运行"}
+        {check.isPending
+          ? "校验中…"
+          : report !== null
+            ? "校验完成"
+            : fileName !== ""
+              ? `已选择 ${fileName}`
+              : "等待上传"}
       </p>
+      {parseError !== null && (
+        <p className="demo-error" data-testid="demo-parse-error" role="alert">
+          {parseError}
+        </p>
+      )}
       {check.isError && (
         <p className="demo-error" data-testid="demo-check-error" role="alert">
           {CHECK_FAILURE_TEXT}

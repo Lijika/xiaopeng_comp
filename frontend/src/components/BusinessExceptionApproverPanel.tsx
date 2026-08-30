@@ -221,7 +221,7 @@ export default function BusinessExceptionApproverPanel({
   if (requestId === null) {
     return (
       <section className="panel" data-testid="approver-empty">
-        <h2>业务例外审批</h2>
+        <h2>特批（需专人签字，审核员自己不能放行）</h2>
         <p>未指定请求编号（request 参数）</p>
       </section>
     );
@@ -229,7 +229,7 @@ export default function BusinessExceptionApproverPanel({
   if (view.isPending) {
     return (
       <section className="panel" data-testid="approver-loading">
-        <h2>业务例外审批</h2>
+        <h2>特批（需专人签字，审核员自己不能放行）</h2>
         <p>请求加载中…</p>
       </section>
     );
@@ -243,7 +243,7 @@ export default function BusinessExceptionApproverPanel({
       // keeps the one reconciliation control alive for another attempt.
       return (
         <section className="panel" data-testid="approver-unavailable">
-          <h2>业务例外审批</h2>
+          <h2>特批（需专人签字，审核员自己不能放行）</h2>
           <p>{notFound ? "未找到或无权访问" : "请求不可用"}</p>
           <p
             role="status"
@@ -259,7 +259,7 @@ export default function BusinessExceptionApproverPanel({
     }
     return (
       <section className="panel" data-testid="approver-not-found">
-        <h2>业务例外审批</h2>
+        <h2>特批（需专人签字，审核员自己不能放行）</h2>
         <p>{notFound ? "未找到或无权访问" : "请求不可用"}</p>
       </section>
     );
@@ -284,7 +284,7 @@ export default function BusinessExceptionApproverPanel({
       data-testid="approver-view"
       aria-labelledby="approver-title"
     >
-      <h2 id="approver-title">业务例外审批（服务端权威）</h2>
+      <h2 id="approver-title">特批（需专人签字，审核员自己不能放行）</h2>
       <dl className="facts">
         <div>
           <dt>请求编号</dt>
