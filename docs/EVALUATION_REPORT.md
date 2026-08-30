@@ -30,14 +30,14 @@
 | 场景覆盖 | 全一致、VIN/金额/姓名/证件/发动机/登记证/地址/车牌/日期/品牌/型号不一致、OCR 噪声、格式变体、低置信、约数金额、二手车过户、价税合计、品牌合资、I/O/Q、歧义日期、placeholder、ID15/18、buyer 错位等 |
 | **边界（强制声明）** | **合成 + 业务规则驱动构造**，非主办方官方全量标注集；未接任务1–3 真实 OCR 全链路。结论外推到生产须追加真实样本复测。 |
 
-半真实资产：`data/step2/*_page_order.json`（页序/检测框，无 OCR 文本值）经 `adapters/step2_page_order.py` 可转占位结构；Round12/13 fixtures 绑定 `meta.step2_sample_id`（字段值仍合成）。
+半真实资产：`data/registration_layout/*_page_order.json`（页序/检测框，无抽取文本）经 `adapters/registration_layout.py` 可转占位结构；部分 fixtures 绑定 `meta.layout_sample_id`（字段值仍合成）。
 
 ---
 
 ## 3. 复现命令
 
 ```bash
-cd /home/lhjysyx/xiaopeng_comp
+cd /path/to/xiaopeng_comp
 bash scripts/ci_gate.sh          # 推荐：pytest + evaluate main + 对抗 + smoke_web + bench
 # 或分项：
 .venv/bin/pytest -q
@@ -78,7 +78,7 @@ CLI：`evaluate --suite main` → **THRESHOLD PASS**。
 
 | 项 | 说明 |
 |----|------|
-| 路径 | `fixtures/semi/`（import 自 `ocr_inbox` 中间 JSON） |
+| 路径 | `fixtures/semi/`（import 自 `layout_slots` 中间 JSON） |
 | mode | **smoke**（无 embedded expected_verdicts 时） |
 | 可报 | `n_apps_loaded` / `n_check_ok` / `n_check_fail` / `verdict_counts` / `uncertain_rate` |
 | **禁报** | coverage / FPR / FNR / miss_rate /「漏报≤3%」 |
@@ -86,7 +86,7 @@ CLI：`evaluate --suite main` → **THRESHOLD PASS**。
 
 示例导入：
 ```bash
-.venv/bin/python scripts/import_external_ocr.py fixtures/ocr_inbox/example.json -o fixtures/semi/ --demo-note demo
+.venv/bin/python scripts/import_external_ocr.py fixtures/layout_slots/example.json -o fixtures/semi/ --demo-note demo
 .venv/bin/python -m task4_consistency evaluate -c configs/rules_auto_lease.yaml --suite semi -o out/metrics_semi.json
 ```
 

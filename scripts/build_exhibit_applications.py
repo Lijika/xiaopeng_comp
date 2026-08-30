@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build Task-4 Application JSON from registration-certificate OCR.
 
-主办方只提供了登记证影像。本脚本读取 ``材料/ocr_out/*/…_compact.json`` 中的
+主办方只提供了登记证影像。本脚本读取 ``材料/registration_extract/*/…_compact.json`` 中的
 真实抽字段（VIN / 发动机号 / 登记证编号 / 品牌 / 型号），再按同一辆车补齐
 保单、合同、发票、身份证上任务4规则需要的字段，才能做跨单据核验展示。
 
@@ -19,7 +19,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-OCR_ROOT = ROOT / "材料" / "ocr_out"
+OCR_ROOT = ROOT / "材料" / "registration_extract"
 OUT_DIR = ROOT / "材料" / "task4_applications"
 
 OCR_FIELD_MAP = {
@@ -126,12 +126,12 @@ def build_application(sample_id: str, ocr: dict[str, str], *, mismatch_vin: bool
         "application_id": f"EXHIBIT-{sample_id}{'-BADVIN' if mismatch_vin else '-OK'}",
         "meta": {
             "field_source": "exhibit-ocr-completed",
-            "step2_sample_id": sample_id,
-            "ocr_source": f"材料/ocr_out/{sample_id}",
+            "layout_sample_id": sample_id,
+            "ocr_source": f"材料/registration_extract/{sample_id}",
             "ocr_fields": ocr_keys,
             "completed_fields": completed,
             "note": (
-                "登记证 VIN/发动机号/登记证编号/品牌/型号来自 ocr_out；"
+                "登记证 VIN/发动机号/登记证编号/品牌/型号来自抽取结果；"
                 "保单/合同/发票/身份证由同一辆车补齐，用于跨单据核验展示。"
                 "补齐字段不是主办方原文。"
             ),
@@ -233,7 +233,7 @@ def main() -> int:
             [
                 "# 展会用任务4申请 JSON",
                 "",
-                "由 `scripts/build_exhibit_applications.py` 从 `材料/ocr_out` 生成。",
+                "由 `scripts/build_exhibit_applications.py` 从登记证抽取结果生成。",
                 "",
                 "- `*_ok.json`：登记证 OCR 字段 + 同车补齐的保单/合同/发票/身份证，跨单应对齐。",
                 "- `*_vin_mismatch.json`：合同 VIN 最后一位被改掉，应用于展示「不一致」。",

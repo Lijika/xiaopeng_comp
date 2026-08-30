@@ -18,11 +18,11 @@
 
 | 资产 | 内容 | 对任务4的含义 |
 |------|------|----------------|
-| 赛题 docx | 任务定义与指标 | 需求源 |
-| `1.zip` | 21 本机动车登记证影像（约 100+ 页） | 上游影像，非任务4主输入 |
-| `step2-排序.zip` | 10 本 page_order：页序/页类型/字段检测框 | 有字段 **位置**，无字段 **文本值** |
+| 赛题说明 | 任务定义与指标 | 需求源 |
+| 登记证影像 | 多页机动车登记证书 | 上游影像，非任务4主输入 |
+| 登记证版面 | 页序 / 页类型 / 检测框 | 有字段位置，无字段文本 |
 
-结论：任务4 MVP 以 **结构化 JSON 输入** 为主；用合成跨单据 fixture 验证规则与指标。step2 仅做可选适配器，方便后续接 OCR。
+结论：任务4 MVP 以 **结构化 JSON 输入** 为主；用合成跨单据 fixture 验证规则与指标。版面适配器可选，把检测框接到申请单 schema（`raw` 仍为空）。
 
 ## 3. MVP 系统边界
 
@@ -84,7 +84,7 @@ xiaopeng_comp/
     report.py
     evaluate.py
     adapters/
-      step2_page_order.py
+      registration_layout.py
     cli.py
   fixtures/
     applications/
@@ -107,7 +107,7 @@ xiaopeng_comp/
     REVIEW.md
   out/                 # gitignore 运行产物
   data/
-    step2/             # 解压后的 page_order
+    registration_layout/  # 登记证页序与检测框
 ```
 
 ## 5. 数据契约
@@ -240,7 +240,7 @@ rules:
 | P2 | 规则引擎 + 默认规则 YAML | dev |
 | P3 | fixtures + evaluate + 指标 | dev |
 | P4 | report 可解释 + README/接口文档 | dev |
-| P5 | step2 adapter（可选） | dev |
+| P5 | 登记证版面适配器（可选） | dev |
 | P6 | review → fix → 收口 | review + dev + manager |
 
 ## 9. 风险与缓解

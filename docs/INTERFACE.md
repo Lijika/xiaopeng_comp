@@ -142,7 +142,7 @@ python -m task4_consistency.cli evaluate [apps_dir] -c <rules.yaml> \
   [--suite main|semi|all] [--mode labeled|smoke] \
   [-o metrics.json] [--html metrics.html] [-l labels.json] [--max-miss-rate 0.1]
 # 离线 external OCR 中间 JSON → fixtures/semi
-.venv/bin/python scripts/import_external_ocr.py fixtures/ocr_inbox/example.json -o fixtures/semi/ --demo-note demo
+.venv/bin/python scripts/import_external_ocr.py fixtures/layout_slots/example.json -o fixtures/semi/ --demo-note demo
 bash scripts/demo.sh
 .venv/bin/python scripts/bench.py
 ```
@@ -219,9 +219,9 @@ import 后 `meta` 强制：`source=external_ocr`, `field_source=external_ocr`, `
 
 | 值 | 含义 |
 |----|------|
-| `synthetic` | 手写/业务构造（含 step2 绑定假字） |
+| `synthetic` | 手写/业务构造（可绑定登记证版面样本，字段仍为合成） |
 | `external_ocr` | 经 import schema |
-| `null` | step2 adapter 仅框、raw=null |
+| `null` | 版面适配器仅框、`raw=null` |
 
 `field_source≠external_ocr` **不得**宣传真实 OCR 评估。
 
@@ -293,14 +293,14 @@ metrics = evaluate_directory("fixtures/applications", "configs/rules_auto_lease.
 | 证件号 | 大写 X、去分隔 |
 | 地址 | 去空白 + 省市别名归一 |
 
-## 7. step2 适配器
+## 7. 登记证版面适配器
 
 ```python
-from task4_consistency.adapters.step2_page_order import load_page_order
-app = load_page_order("data/step2/xxx_page_order.json")
+from task4_consistency.adapters.registration_layout import load_page_order
+app = load_page_order("data/registration_layout/xxx_page_order.json")
 ```
 
-检测类名映射到逻辑字段；无 OCR 时 `raw=null`，仅保留 bbox 置信度与页码。
+检测类名映射到逻辑字段；无抽取文本时 `raw=null`，仅保留检测置信度与页码。
 
 ## 审计 JSONL 信封（Round43 · schema_ver=1）
 

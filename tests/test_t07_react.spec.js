@@ -12,9 +12,9 @@ const DEMO_URL = "/demo/react";
 const FIXTURES_ROUTE = "**/api/demo/fixtures";
 const BATCH_ROUTE = "**/api/demo/check/batch";
 const SUMMARY_ROUTE = "**/api/demo/evaluate/summary";
-const FIXTURE_OK = "app_demo_step2_ok";
-const FIXTURE_BAD_VIN = "app_demo_step2_bad_vin";
-const FIXTURE_FMT = "app_demo_step2_fmt";
+const FIXTURE_OK = "app_demo_layout_ok";
+const FIXTURE_BAD_VIN = "app_demo_layout_bad_vin";
+const FIXTURE_FMT = "app_demo_layout_fmt";
 const BATCH_CAP = 50;
 
 async function reservePort() {

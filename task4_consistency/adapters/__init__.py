@@ -1,1 +1,1 @@
-"""Optional adapters for upstream OCR / page_order data."""
+"""Optional adapters for upstream extract / page-order data."""

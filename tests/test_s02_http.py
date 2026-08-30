@@ -314,14 +314,14 @@ def test_integrator_receipt_reaches_minimized_reviewer_trace_over_http(
         assert hidden_workspace.status == 404
 
 
-def test_step2_membership_provenance_reaches_typed_workspace_and_history(
+def test_layout_membership_provenance_reaches_typed_workspace_and_history(
     tmp_path: Path,
 ) -> None:
     environment, submission = _configured_http_source(
         tmp_path,
-        source_shape="step2-page-order/unversioned",
+        source_shape="registration-layout/unversioned",
         result={
-            "sample_id": "http-step2-membership",
+            "sample_id": "http-layout-membership",
             "pages": [
                 {
                     "filename": "page.png",
@@ -347,7 +347,7 @@ def test_step2_membership_provenance_reaches_typed_workspace_and_history(
         admission = server.request(
             "POST",
             "/controlled/s02/api/commands/submit",
-            body={"idempotency_key": "http-step2-command", "submission": submission},
+            body={"idempotency_key": "http-layout-command", "submission": submission},
             headers=request_headers,
             use_session=False,
         )
@@ -382,7 +382,7 @@ def test_step2_membership_provenance_reaches_typed_workspace_and_history(
     assert workspace_response.status == 200, workspace_response.text
     assert history_response.status == 200, history_response.text
     expected_provenance = {
-        "adapter_id": "step2-page-order",
+        "adapter_id": "registration-layout",
         "adapter_version": "1",
         "source_filename": "page.png",
         "source_pointer": "/pages/0",

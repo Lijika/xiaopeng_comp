@@ -18,10 +18,10 @@
 | R2 | `.venv/bin/python -m task4_consistency.cli evaluate fixtures/applications -c configs/rules_auto_lease.yaml -o out/metrics.json` | `suite=main`、`mode=labeled`；159 个样本均加载，1,920 个带标签对，coverage 0.9885、FPR/FNR/miss_rate 均 0；四个门槛通过。运行输出明确 main 为 synthetic/Step2-bound 轨，不是 real OCR 声明。 |
 | R3 | `.venv/bin/python scripts/attack_probes.py` | 19 个探针均为 `CLOSED`，`release_open=0`、`r7_open=0`。 |
 | R4 | `.venv/bin/python scripts/smoke_web.py` | `health`、fixtures、一次 `/api/check` 和 HTML shell 均通过；159 个 fixtures，`SMOKE_WEB PASS`。 |
-| R5 | Step2 适配器 CLI：`.venv/bin/python -m task4_consistency.adapters.step2_page_order data/step2/JFL25P02L080310-01_page_order.json`，随后以同一规则包执行 | 生成一份登记证 document、17 个字段，所有 `raw=null`、`field_source=null`；规则执行结果为 10 uncertain、2 skipped、1 consistent。 |
+| R5 | Step2 适配器 CLI：`.venv/bin/python -m task4_consistency.adapters.registration_layout data/registration_layout/JFL25P02L080310-01_page_order.json`，随后以同一规则包执行 | 生成一份登记证 document、17 个字段，所有 `raw=null`、`field_source=null`；规则执行结果为 10 uncertain、2 skipped、1 consistent。 |
 | R6 | 外部 OCR adapter 在临时目录调用 `import_external_ocr_to_dir(...)` | 写出 `APP-EXT-OCR-DEMO-01.json`（6,770 bytes），输出同时含 `field_source=external_ocr` 与 `source=external_ocr`；未写入仓库 fixture。 |
 | R7 | `.venv/bin/python -m task4_consistency.cli evaluate --suite semi --mode smoke -c configs/rules_auto_lease.yaml -o out/metrics-semi-smoke.json` | 1 个 external-OCR fixture 读取和执行成功；无可靠标签，FP/FN/coverage gates 不计算。 |
-| R8 | `TestClient` 只读调用 `/api/step2/samples`、`/api/ocr_inbox`、`/api/check/batch` | HTTP interface 返回 10 个 Step2 样本、10 个 slot manifests；两份 fixture batch 返回 `n=2`，汇总为 21 consistent、1 inconsistent、0 uncertain、4 skipped。 |
+| R8 | `TestClient` 只读调用 `/api/layout/samples`、`/api/layout/slots`、`/api/check/batch` | HTTP interface 返回 10 个 Step2 样本、10 个 slot manifests；两份 fixture batch 返回 `n=2`，汇总为 21 consistent、1 inconsistent、0 uncertain、4 skipped。 |
 | D1 | 当前 fixture/data/config 结构化汇总 | 159 个 main fixtures，全部 `field_source=synthetic` 且全部带嵌入式 `expected_verdicts`；1 个 semi fixture；10 个 Step2 page-order 文件；10 个 slot manifests。 |
 
 ## 资产矩阵
@@ -76,18 +76,18 @@
 
 ### A7. Step2 page-order adapter
 
-- **权威 owner 与 interface：** `adapters/step2_page_order.py:11-90`；`page_order_to_application(data)`、`load_page_order(path)` 以及 `python -m task4_consistency.adapters.step2_page_order`。
-- **可观察行为：** adapter 将 page-order detection 的 class 映射到少数 field keys，保留最高 confidence detection 的 page order；没有 OCR 文本时将 `raw=None`，并设 `source=step2_page_order`、`field_source=None`。R5 的实际 CLI/engine 运行证明该 interface 生成 layout-only application 而不是可完成的多 document 一致性输入。
-- **调用者与 blast radius：** `tests/test_adapter_step2.py`、`tests/test_external_ocr_import.py` 和 Step2-related fixtures/tests 使用它；Web 读取同一 `data/step2` 的文件但不是调用该 adapter。
+- **权威 owner 与 interface：** `adapters/registration_layout.py:11-90`；`page_order_to_application(data)`、`load_page_order(path)` 以及 `python -m task4_consistency.adapters.registration_layout`。
+- **可观察行为：** adapter 将 page-order detection 的 class 映射到少数 field keys，保留最高 confidence detection 的 page order；没有 OCR 文本时将 `raw=None`，并设 `source=registration_layout`、`field_source=None`。R5 的实际 CLI/engine 运行证明该 interface 生成 layout-only application 而不是可完成的多 document 一致性输入。
+- **调用者与 blast radius：** `tests/test_adapter_registration_layout.py`、`tests/test_external_ocr_import.py` 和 layout-related fixtures/tests 使用它；Web 读取同一 `data/registration_layout` 的文件但不是调用该 adapter。
 - **当前耦合、隐含假设与 adapter seam：** class label 到 field key 的映射固定在 `_CLASS_TO_FIELD`；未知 class 被保存为 `det_<id>`；sample_id 同时成为 application_id 和 document_id，默认 document type 为登记证。这个 adapter seam 保留位置与 confidence，却假设一份 page-order 样本可表示一份单 document application。
 - **未证实项：** 未见该 detection 结果与原始页图、OCR 文本、多个 document instance 或真实业务 application 的端到端绑定证据。
 
 ### A8. Step2 OCR slot-manifest adapter
 
-- **权威 owner 与 interface：** `adapters/step2_slots.py:13-81`；`validate_step2_slots()`、`load_step2_slots()`、`list_step2_slot_files()`；schema 是 `task4.external_ocr_slots.v1`。
-- **可观察行为：** module 只验证 sample_id、doc_type、slot 的 field/bbox/raw 和可选 n_slots；raw 可为 null 或字符串。R8 的 HTTP 列表返回 10 个 manifests；`tests/test_step2_slots.py` 覆盖 schema、bbox、空字段和列举行为。
+- **权威 owner 与 interface：** `adapters/layout_slots.py:13-81`；`validate_layout_slots()`、`load_layout_slots()`、`list_layout_slot_files()`；schema 是 `task4.external_ocr_slots.v1`。
+- **可观察行为：** module 只验证 sample_id、doc_type、slot 的 field/bbox/raw 和可选 n_slots；raw 可为 null 或字符串。R8 的 HTTP 列表返回 10 个 manifests；`tests/test_layout_slots.py` 覆盖 schema、bbox、空字段和列举行为。
 - **调用者与 blast radius：** 当前 Web 仅列出 manifest 摘要（`web/app.py:384-409`）；测试直接调用 validator/loader。完整文件未提供 slot-to-`Application` 转换 interface。
-- **当前耦合、隐含假设与 locality：** manifest interface 将 crop/OCR 前置结构集中在 `fixtures/ocr_inbox`，但其输出没有同 current application seam 的 adapter；OCR 填值、页面区域与后续 document field 的关联需要在该 module 之外发生。
+- **当前耦合、隐含假设与 locality：** manifest interface 将 crop/OCR 前置结构集中在 `fixtures/layout_slots`，但其输出没有同 current application seam 的 adapter；OCR 填值、页面区域与后续 document field 的关联需要在该 module 之外发生。
 - **未证实项：** 未见 crop 生成、外部 OCR 回填、bbox 坐标系、slot 与 source page 的生产级关联或失败恢复的运行证据。
 
 ### A9. 外部 OCR 中间格式 adapter
@@ -118,7 +118,7 @@
 
 - **权威 owner 与 interface：** `web/app.py:33-836`，包括 health、fixture/Step2/slot 列表、单笔/批量 check、evaluation、rules、KB、audit routes；`OptionalTokenAuth` 位于 `web/app.py:48-90`。
 - **可观察行为：** R4 通过 health、fixture、check 和 HTML shell；R8 通过 Step2、slot 和 batch check。单笔 check 可以选择 `rules_path`，batch 上限 50（`web/app.py:457-602`）；rules 写路径验证后用临时同级文件/`os.replace()`，KB 及 audit 均有可变文件副作用。
-- **调用者与 blast radius：** 浏览器 JS、TestClient tests、Web smoke 与攻击脚本跨此 seam；`tests/test_web_kb.py`、`tests/test_step2_api.py`、`tests/test_round14.py`、`tests/test_round16.py`、`tests/test_round20.py` 是代表覆盖。
+- **调用者与 blast radius：** 浏览器 JS、TestClient tests、Web smoke 与攻击脚本跨此 seam；`tests/test_web_kb.py`、`tests/test_layout_api.py`、`tests/test_round14.py`、`tests/test_round16.py`、`tests/test_round20.py` 是代表覆盖。
 - **当前耦合、隐含假设与 depth：** 一个 HTTP interface 聚合 engine、report、KB、audit 和 filesystem runtime rules，具有调用侧 leverage，也令这些 module 的状态在同一部署 seam 汇合。未设置 `TASK4_WEB_TOKEN` 时 middleware 放行；设置时 health/static/index 保持公开、其余 routes 需 token。`rules_path` 相对路径会加 ROOT，绝对路径保留为绝对路径，随后只检查存在并由 loader 读取（`web/app.py:488-502`）。
 - **未证实项：** 未见角色分工、持久化 application lifecycle、多进程文件锁、队列/取消/重试、部署环境或实际浏览器认证流的运行证据。
 
@@ -132,7 +132,7 @@
 
 ### A14. Fixture、测试与运行 harness
 
-- **权威 owner 与 interface：** `fixtures/applications`、`fixtures/semi`、`data/step2`、`fixtures/ocr_inbox`、`tests/` 与 `scripts/`；主要执行 interfaces 是 pytest、CLI evaluate、`scripts/attack_probes.py`、`scripts/smoke_web.py` 和 `scripts/demo.sh`。
+- **权威 owner 与 interface：** `fixtures/applications`、`fixtures/semi`、`data/registration_layout`、`fixtures/layout_slots`、`tests/` 与 `scripts/`；主要执行 interfaces 是 pytest、CLI evaluate、`scripts/attack_probes.py`、`scripts/smoke_web.py` 和 `scripts/demo.sh`。
 - **可观察行为：** D1 和 R1-R8 共同证明当前 corpus/harness 可重复运行；R2 的输出文件为 `out/metrics.json`，R7 为 `out/metrics-semi-smoke.json`。main 的 159 份 fixture 全部含 embedded expected verdicts，evaluation 代码优先读取该字段（`evaluate.py:113-142,382-433`）。
 - **调用者与 blast radius：** 规则、normalizer、engine、reports、HTTP routes、adapter 与 KB 都由 tests/harness 触达；该群是当前行为回归的主要可执行证据和 caller 集合。
 - **当前耦合、隐含假设与 leverage：** 单一 fixture protocol 同时承担 demo、规则预期、评估分母和攻击样例，带来较高测试 leverage；它也使指标与 fixture 内嵌标签具有共同数据 owner。`scripts/run_web.sh` 启动带 reload 的 Uvicorn，`scripts/demo.sh` 写 `out/demo`；这些路径与本地文件系统和可选 Web dependencies 耦合。
@@ -141,7 +141,7 @@
 ## 当前端到端路径（事实摘要）
 
 1. **Synthetic demo/evaluation：** fixture JSON -> `Application` transport seam -> `RuleEngine.run()` -> `Report` -> CLI/HTTP/browser render。R2、R4、R8 证明该路径可执行。
-2. **Step2 layout path：** `data/step2/*_page_order.json` -> Step2 adapter 或 Web listing -> raw-null document fields -> engine yields uncertain/skipped for unavailable values。R5 证明该路径不会自行成为跨 document字段值输入。
+2. **Step2 layout path：** `data/registration_layout/*_page_order.json` -> Step2 adapter 或 Web listing -> raw-null document fields -> engine yields uncertain/skipped for unavailable values。R5 证明该路径不会自行成为跨 document字段值输入。
 3. **External OCR intermediate path：** schema-v1 JSON -> validate/convert adapter -> semi fixture JSON -> engine/evaluate smoke。R6-R7 证明格式转换和执行，不证明有标签的准确率。
 4. **Policy/knowledge mutation path：** browser HTTP interface -> rules/KB writer -> runtime YAML/KB JSON -> active engine / audit JSONL。源码与测试证明该 path 存在；本票据未调用其可变 HTTP routes。
 

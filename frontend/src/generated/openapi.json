@@ -821,7 +821,7 @@
             "type": "string"
           },
           "kind": {
-            "const": "step2_sample",
+            "const": "layout_sample",
             "title": "Kind",
             "type": "string"
           },
@@ -907,8 +907,8 @@
             "title": "Fixture Id",
             "type": "string"
           },
-          "step2_sample_id": {
-            "title": "Step2 Sample Id",
+          "layout_sample_id": {
+            "title": "Layout Sample Id",
             "type": "string"
           },
           "title": {
@@ -921,7 +921,7 @@
           "title",
           "description",
           "field_source",
-          "step2_sample_id"
+          "layout_sample_id"
         ],
         "title": "DemoFixtureOption",
         "type": "object"
@@ -21787,7 +21787,7 @@
     },
     "/api/demo/fixtures": {
       "get": {
-        "description": "The closed option list: only validated synthetic Step2-bound fixtures,\nwith neutral code-owned copy that never reveals the expected outcome.",
+        "description": "The closed option list: only validated synthetic layout-bound fixtures,\nwith neutral code-owned copy that never reveals the expected outcome.",
         "operationId": "demo_fixtures_api_demo_fixtures_get",
         "responses": {
           "200": {
@@ -21981,17 +21981,17 @@
         "summary": "Kb Graph"
       }
     },
-    "/api/ocr_inbox": {
+    "/api/layout/samples": {
       "get": {
-        "description": "List step2→OCR slot manifests (raw usually null until external OCR).",
-        "operationId": "list_ocr_inbox_api_ocr_inbox_get",
+        "description": "List competition-side page_order extractions (bboxes, no OCR text).",
+        "operationId": "list_layout_samples_api_layout_samples_get",
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
                   "additionalProperties": true,
-                  "title": "Response List Ocr Inbox Api Ocr Inbox Get",
+                  "title": "Response List Layout Samples Api Layout Samples Get",
                   "type": "object"
                 }
               }
@@ -21999,7 +21999,69 @@
             "description": "Successful Response"
           }
         },
-        "summary": "List Ocr Inbox"
+        "summary": "List Layout Samples"
+      }
+    },
+    "/api/layout/slots": {
+      "get": {
+        "description": "List layout slot manifests (raw usually null until external OCR).",
+        "operationId": "list_layout_slots_api_api_layout_slots_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Layout Slots Api Api Layout Slots Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Layout Slots Api"
+      }
+    },
+    "/api/layout/{sample_id}": {
+      "get": {
+        "operationId": "get_layout_sample_api_layout__sample_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sample_id",
+            "required": true,
+            "schema": {
+              "title": "Sample Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Layout Sample Api Layout  Sample Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Layout Sample"
       }
     },
     "/api/rules": {
@@ -22061,68 +22123,6 @@
           }
         },
         "summary": "Validate Rules"
-      }
-    },
-    "/api/step2/samples": {
-      "get": {
-        "description": "List competition-side page_order extractions (bboxes, no OCR text).",
-        "operationId": "list_step2_samples_api_step2_samples_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Step2 Samples Api Step2 Samples Get",
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "List Step2 Samples"
-      }
-    },
-    "/api/step2/{sample_id}": {
-      "get": {
-        "operationId": "get_step2_sample_api_step2__sample_id__get",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "sample_id",
-            "required": true,
-            "schema": {
-              "title": "Sample Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Step2 Sample Api Step2  Sample Id  Get",
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Get Step2 Sample"
       }
     },
     "/controlled/s01": {

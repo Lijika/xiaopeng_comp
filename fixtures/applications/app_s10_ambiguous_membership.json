@@ -2,10 +2,10 @@
   "application_id": "APP-S10-AMBIGUOUS-MEMBERSHIP",
   "label": "S10 单页多候选/未解析/显式未归集 一致性 C-DEMO fixture",
   "meta": {
-    "source": "semi_real_step2",
-    "step2_sample_id": "JFL25P02L080310-01",
-    "step2_file": "JFL25P02L080310-01_page_order.json",
-    "step2_pages": 7,
+    "source": "semi_real_layout",
+    "layout_sample_id": "JFL25P02L080310-01",
+    "layout_file": "JFL25P02L080310-01_page_order.json",
+    "layout_pages": 7,
     "field_source": "synthetic",
     "round": 68,
     "s10_note": "Documents are mutually consistent; the only mandatory blockers are page-membership decisions (ambiguous + unresolved). One page is explicitly unassigned so it must stay outside the blocker set."
@@ -129,7 +129,7 @@
           "document_role": "机动车登记证书"
         },
         "provenance": {
-          "adapter_id": "step2-page-order",
+          "adapter_id": "registration-layout",
           "adapter_version": "1",
           "source_pointer": "/pages/0",
           "source_filename": "registration-page-pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp.png",
@@ -152,7 +152,7 @@
           "document_role": "机动车登记证书"
         },
         "provenance": {
-          "adapter_id": "step2-page-order",
+          "adapter_id": "registration-layout",
           "adapter_version": "1",
           "source_pointer": "/pages/0",
           "source_filename": "page-1-alternate.png",
@@ -175,7 +175,7 @@
           "document_role": "机动车登记证书"
         },
         "provenance": {
-          "adapter_id": "step2-page-order",
+          "adapter_id": "registration-layout",
           "adapter_version": "1",
           "source_pointer": "/pages/1",
           "source_filename": "page-2.png",

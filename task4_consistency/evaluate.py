@@ -95,7 +95,7 @@ SUITE_DIRS: dict[str, list[Path]] = {
 
 HONESTY_MAIN = (
     "Official delivery metrics from suite=main only. "
-    "field_source=synthetic/step2-bound fixtures are not external OCR. "
+    "field_source=synthetic/layout-bound fixtures are not external OCR. "
     "Do not claim real-OCR evaluation unless field_source=external_ocr. "
     "C-DEV-REG development regression only; never formal acceptance "
     "(formal evaluation reads S12 sealed bundles)."
@@ -409,12 +409,12 @@ def evaluate_paths(
         if fs is None and suite == "main":
             fs_warn.append(fp.name)
 
-        # honesty: step2 synthetic must not claim external_ocr
+        # honesty: layout-bound synthetic must not claim external_ocr
         nested_meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
         src = nested_meta.get("source") or data.get("source")
-        if src == "semi_real_step2" and fs == "external_ocr":
+        if src == "semi_real_layout" and fs == "external_ocr":
             warnings.warn(
-                f"{fp}: source=semi_real_step2 cannot use field_source=external_ocr",
+                f"{fp}: source=semi_real_layout cannot use field_source=external_ocr",
                 stacklevel=2,
             )
 

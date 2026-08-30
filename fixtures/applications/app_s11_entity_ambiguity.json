@@ -2,10 +2,10 @@
   "application_id": "APP-S11-ENTITY-AMBIGUITY",
   "label": "S11 应用内实体链接歧义/未解析/冲突 一致性 C-DEMO fixture",
   "meta": {
-    "source": "semi_real_step2",
-    "step2_sample_id": "JFL25P02L080310-01",
-    "step2_file": "JFL25P02L080310-01_page_order.json",
-    "step2_pages": 7,
+    "source": "semi_real_layout",
+    "layout_sample_id": "JFL25P02L080310-01",
+    "layout_file": "JFL25P02L080310-01_page_order.json",
+    "layout_pages": 7,
     "field_source": "synthetic",
     "round": 69,
     "s11_note": "Documents are mutually consistent on checked fields; the only mandatory blockers are entity-link decisions (ambiguous org mention, unresolved low-confidence city mention, and a not_same_as brand conflict). Candidate confidence, matcher provenance and frozen knowledge-release facts are immutable application-local facts; no candidate auto-links."

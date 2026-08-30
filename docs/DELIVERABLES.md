@@ -29,7 +29,7 @@
 | **D6** Web 集成演示 | 端到端 | `scripts/run_web.sh` · `scripts/smoke_web.py` · `GET /api/health` |
 | **D7** 文档包 | README + 接口/部署/配置/评估 + 日志 | 见 §3；状态：[`STATUS.md`](../STATUS.md)（根目录） |
 | **D8** 审查与对抗 | 无开放 P0 | `scripts/attack_probes.py` · `scripts/attack_web_kb.py` · [`ATTACK_CASES.md`](ATTACK_CASES.md) · [`REVIEW.md`](REVIEW.md) |
-| **D9** 契约 | schema + adapter | [`INTERFACE.md`](INTERFACE.md) · `adapters/step2_page_order.py` · `adapters/external_ocr_import.py` · `fixtures/` · `fixtures/ocr_inbox/` |
+| **D9** 契约 | schema + adapter | [`INTERFACE.md`](INTERFACE.md) · `adapters/registration_layout.py` · `adapters/external_ocr_import.py` · `fixtures/` · `fixtures/layout_slots/` |
 
 ---
 
@@ -80,9 +80,9 @@
 |----|------|
 | suite=main | `fixtures/applications/*.json`（`meta.field_source=synthetic`） |
 | suite=semi | `fixtures/semi/`（external_ocr import） |
-| OCR 中间样例 | `fixtures/ocr_inbox/example.json` |
+| OCR 中间样例 | `fixtures/layout_slots/example.json` |
 | 标签索引 | `fixtures/labels/expected_verdicts.json`（若存在） |
-| step2 布局 | `data/step2/*_page_order.json` |
+| 登记证版面 | `data/registration_layout/*_page_order.json` |
 
 ### 4.4 关键脚本
 
@@ -123,7 +123,7 @@ bash scripts/run_web.sh                      # 人工浏览器
 
 | 项 | 状态 |
 |----|------|
-| 主评估集 `field_source` | **synthetic**（可绑 step2 页序元数据） |
+| 主评估集 `field_source` | **synthetic**（可绑登记证版面元数据） |
 | 真实 OCR 全链路 | `import_external_ocr` → `fixtures/semi`；无 label → **smoke only** |
 | 任务1–3 视觉/OCR 训练 | **非本模块** |
 | 生产鉴权 | 可选 `TASK4_WEB_TOKEN`；审计 `out/audit.log` |
@@ -143,4 +143,4 @@ bash scripts/run_web.sh                      # 人工浏览器
 | 官方指标 | cov **0.9818** · TP **79** · FPR/FNR/miss **0** · THRESHOLD PASS |
 | ci_gate | `bash scripts/ci_gate.sh` → **PASS**（见 ITERATION_LOG Round33） |
 
-- docs/TASK4_DATA_REQUIREMENTS_AND_STEP2_ANALYSIS.md — 任务4数据需求与 step2 归属分析
+- docs/TASK4_DATA_REQUIREMENTS_AND_LAYOUT_ANALYSIS.md — 任务4数据需求与登记证版面归属分析

@@ -1,176 +1,174 @@
-# 任务4：跨单据字段对齐与鲁棒一致性校验（MVP）
+# 任务4：跨单据一致性校验
 
-面向汽车融资租赁场景：同一申请下多份单据（登记证、保单、合同、发票、身份证等）的关键字段交叉核验。
+同一笔汽车融资租赁申请下，登记证、保单、合同、发票、身份证等单据的关键字段交叉核验。
 
-**库版本：** `task4_consistency.__version__` ≡ `pyproject.toml` → **0.1.0**（与规则包 `configs/rules_auto_lease.yaml` 的 `version` 字段独立；规则包当前 `1.9.0`）。
+输入是结构化 JSON，不是影像。引擎先标准化（VIN / 日期 / 金额 / 地址 / 姓名 / 车牌 / 证件号），再按 YAML 规则比对，给出 **一致 / 不一致 / 存疑** 三态结论和可解释报告。
 
-## 一键验收（Round30）
+| 项 | 值 |
+|----|----|
+| 包 | `task4_consistency` **0.1.0** |
+| 规则包 | `configs/rules_auto_lease.yaml` **1.9.0**（与库版本独立） |
+| Python | ≥ 3.10 |
+| 默认 Web | http://127.0.0.1:8765/ |
+
+这是赛题对齐与可复现评估的 MVP，**不是**生产核贷终审系统。合成 fixture 上的指标达标，不能宣传为真实 OCR 成绩。
+
+---
+
+## 安装
 
 ```bash
-cd /path/to/xiaopeng_comp        # 换成你的克隆路径
-source .venv/bin/activate        # 若尚未创建：python3 -m venv .venv && pip install -e ".[dev,web]"
-
-# 1) 全部门禁（pytest + evaluate main + 对抗 + smoke_web + bench）
-bash scripts/ci_gate.sh
-# 期望：=== CI GATE PASS ===
-
-# 2) Web 演示（另开终端）
-bash scripts/run_web.sh
-# 浏览器：http://127.0.0.1:8765/  ·  health: curl -s localhost:8765/api/health | jq .
+python3 -m venv .venv
+source .venv/bin/activate # Windows: .venv\Scripts\activate
+pip install -U pip
+pip install -e ".[dev,web]"
 ```
 
-查版本：
+系统 Python 受 PEP 668 限制时必须用 venv。也可 `pip install -r requirements.txt`。
 
 ```bash
 python -c "import task4_consistency as t; print(t.__version__)"
 python -m task4_consistency --version
 ```
 
-## 能力
+## 运行
 
-1. **字段标准化与实体链接**：VIN / 日期 / 金额 / 地址 / 姓名 / 车牌 / 证件号等
-2. **多层级一致性规则（YAML）**：exact / fuzzy / numeric_tolerance / list_contains / conditional_required
-3. **三态结论 + 可解释报告**：一致 / 不一致 / 存疑，含字段快照与 diff 高亮
-
-## 安装
+### Web
 
 ```bash
-cd /path/to/xiaopeng_comp
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-# 或: pip install -r requirements.txt
+bash scripts/run_web.sh
 ```
 
-Python ≥ 3.10；依赖轻量（PyYAML + 标准库）。系统 Python 若受 PEP 668 限制，请用 venv。
+打开 http://127.0.0.1:8765/ ，必要时强制刷新。岗位在页面右上角切换。步骤见 [`docs/DEMO_GUIDE.md`](docs/DEMO_GUIDE.md)。
 
-## 入口图（Round21）
-
-| 入口 | 命令 | 说明 |
+| 变量 | 默认 | 说明 |
 |------|------|------|
-| **CI 门禁** | `bash scripts/ci_gate.sh` | pytest + evaluate main + attack_web_kb + attack_probes + smoke_web + bench |
-| **交付索引** | [`docs/DELIVERABLES.md`](docs/DELIVERABLES.md) | 赛题任务4 交付清单 ↔ 仓库路径 |
-| **Web smoke** | `python scripts/smoke_web.py` | TestClient：`/api/health` + check fixture |
-| **CLI check** | `python -m task4_consistency check <app.json> -c configs/rules_auto_lease.yaml` | 单申请三态报告 |
-| **evaluate main** | `python -m task4_consistency evaluate -c configs/rules_auto_lease.yaml --suite main -o out/metrics_main.json` | **唯一交付数字** |
-| **evaluate semi** | `… --suite semi -o out/metrics_semi.json` | external_ocr 集；无 label 时仅 smoke |
-| **Web 演示** | `bash scripts/run_web.sh` → http://127.0.0.1:8765/ | 默认提供统一导航的全流程本地演示；`TASK4_WEB_MODE=basic` 保留业务演示模式 |
-| **合规删除 S16** | `/controlled/s16`（独立数据治理身份，Ticket #32） | 已终止申请的九类副本聚合 dry-run → 双审批（提前删除）→ 短事务 commit → 持久 worker → 无原值 receipt；独立 SQLite 账本，旧备份恢复先重放删除清单再开放查询。配置见 `docs/DEPLOY.md` §5.3；S17 导出保持关闭 |
-| **OCR 导入** | `python scripts/import_external_ocr.py fixtures/ocr_inbox/example.json -o fixtures/semi/` | 离线中间 JSON，无 OCR 引擎 |
-| **bench** | `python scripts/bench.py` | → `out/bench.json`（mean≪50ms） |
-| **demo** | `bash scripts/demo.sh` | 报告样例 + evaluate + probes |
+| `HOST` / `PORT` | `127.0.0.1` / `8765` | 端口占用：`PORT=8767 bash scripts/run_web.sh` |
+| `TASK4_S01_STATE_PATH` | `<仓库根>/out/s01.sqlite3` | S01 权威账本，必须是绝对路径；未设置时由脚本按仓库根生成 |
+| `TASK4_FULL_DEMO_ROOT` | `/tmp/task4-full-demo.XXXXXX` | 全流程会话目录，每次启动新建；排查时指定绝对路径 |
+| `TASK4_WEB_MODE` | `full` | `basic` 为旧业务演示入口 |
 
-## 快速运行
+`out/` 与 `*.sqlite3` 是运行产物，已忽略，不入库。仓库已包含当前 React 构建（`task4_consistency/web/static/react/`）。重建前端需要 Node 22 / npm 11：
 
 ```bash
-# 推荐：一键门禁（非 0 即失败）
-bash scripts/ci_gate.sh
+npm ci
+npm run build
+```
 
-# 单申请校验
-python -m task4_consistency.cli check fixtures/applications/app_consistent_01.json \
+生产安装见 [`docs/DEPLOY.md`](docs/DEPLOY.md)。
+
+### CLI
+
+```bash
+# 单申请
+python -m task4_consistency check fixtures/applications/app_consistent_01.json \
   -c configs/rules_auto_lease.yaml -o out/report_ok.json
 
-# 官方评估（suite=main）
+# 官方评估数字（suite=main）
 python -m task4_consistency evaluate \
   -c configs/rules_auto_lease.yaml --suite main -o out/metrics_main.json
 
-# 单元测试
+# 测试
 pytest -q
 
-# Web 全流程集成演示（统一导航）
-bash scripts/run_web.sh
-# 浏览器打开 http://127.0.0.1:8765/
-# 旧业务演示：TASK4_WEB_MODE=basic bash scripts/run_web.sh
-# 账本默认写到 <仓库>/out/s01.sqlite3（本机生成，不入库）；可覆盖 TASK4_S01_STATE_PATH
+# 一键门禁：pytest + evaluate main + 对抗 + smoke_web + bench
+bash scripts/ci_gate.sh
+# 期望：=== CI GATE PASS ===
 ```
+
+---
+
+## 能做什么
+
+1. **字段标准化与实体链接**：VIN、日期、金额、地址、姓名、车牌、证件号等
+2. **YAML 规则**：exact / fuzzy / numeric_tolerance / list_contains / conditional_required
+3. **三态报告**：一致 / 不一致 / 存疑，含字段快照与 diff
+4. **本地 Web**：核验 → 复核 → 补件 / 特批 → 规则发布 → 投递 / 取消 / 删除 / 导出（全流程演示）
+
+常用入口：
+
+| 入口 | 命令 |
+|------|------|
+| Web 演示 | `bash scripts/run_web.sh` |
+| 单申请校验 | `python -m task4_consistency check <app.json> -c configs/rules_auto_lease.yaml` |
+| 评估（交付数字） | `python -m task4_consistency evaluate --suite main -c configs/rules_auto_lease.yaml -o out/metrics_main.json` |
+| 半真实 OCR 导入集 | `… --suite semi -o out/metrics_semi.json`（无标签时仅 smoke） |
+| CI 门禁 | `bash scripts/ci_gate.sh` |
+| Web smoke | `python scripts/smoke_web.py` |
+| OCR 中间 JSON 导入 | `python scripts/import_external_ocr.py fixtures/layout_slots/example.json -o fixtures/semi/` |
+| 对抗探针 | `python scripts/attack_probes.py` |
+| 性能基线 | `python scripts/bench.py` |
+
+---
 
 ## 输入 / 输出
 
-- 输入：一笔申请的多单据结构化 JSON（见 `fixtures/applications/`）
+- 输入：一笔申请的多单据 JSON，见 `fixtures/applications/`
 - 规则：`configs/rules_auto_lease.yaml`
-- 输出：JSON 报告（可选 `--markdown` / `--html`）
+- 输出：JSON 报告，可选 `--markdown` / `--html`
 
-文档：
+改规则：编辑 YAML 的 `field_aliases` 与 `rules[]`。缺字段默认 `on_missing: uncertain`，避免误报。改完重新跑 `evaluate`。
 
-| 文档 | 内容 |
-|------|------|
-| [`docs/INTERFACE.md`](docs/INTERFACE.md) | 输入输出与 API |
-| [`docs/DEPLOY.md`](docs/DEPLOY.md) | 部署手册 |
-| [`docs/EVALUATION_REPORT.md`](docs/EVALUATION_REPORT.md) | 正式评估报告 |
-| [`docs/STEP2_TO_TASK4_PIPELINE.md`](docs/STEP2_TO_TASK4_PIPELINE.md) | step2 框位清单 → 外部 OCR → 任务4 衔接（`1.zip`+step2 不能单独当真跨单输入） |
-
-## 目录
-
-```
-task4_consistency/     # 核心包
-  normalize/ match/ rules/ kb/ web/
-  adapters/            # step2 + external_ocr_import
-  report.py / evaluate.py / cli.py
-configs/               # rules + kb + runtime
-fixtures/
-  applications/        # suite=main（field_source=synthetic）
-  semi/                # suite=semi（external_ocr import）
-  ocr_inbox/           # 离线 OCR 中间 JSON 样例
-scripts/
-  ci_gate.sh           # CI 一键门禁
-  run_web.sh demo.sh bench.py attack_*.py import_external_ocr.py
-tests/ docs/ out/
-```
-
-## 规则维护
-
-编辑 `configs/rules_auto_lease.yaml`：
-
-- `field_aliases`：跨单据同义字段映射（如 `owner_name` ↔ `lessee_name`）
-- `rules[]`：每条规则指定 `type` / `field` / `docs` / 容差或阈值
-- `on_missing: uncertain`：缺字段默认存疑，控制误报
-- `low_confidence_threshold`：低 OCR 置信度 → 存疑
-
-改规则后重新跑 `evaluate` 验证指标。
-
-## 评估指标（fixture 集）
+### 评估指标（合成 fixture）
 
 | 指标 | 目标 | 定义 |
 |------|------|------|
-| 自动化覆盖率 coverage | ≥ 80% | decisive / active_labeled（排除 skipped） |
-| 误报率 FPR | ≤ 5% | expected=consistent 且 decisive 中预测 inconsistent |
-| 漏报率 FNR | ≤ 3% | expected=inconsistent 且 decisive 中预测 consistent |
-| **miss_rate** | **≤ 10%**（硬门槛） | expected=inconsistent 中预测为 **consistent 或 uncertain**；CLI `--max-miss-rate` 可调 |
+| coverage | ≥ 80% | 有标签且得到 decisive 结论的比例 |
+| FPR | ≤ 5% | 标签 consistent，预测 inconsistent |
+| FNR | ≤ 3% | 标签 inconsistent，预测 consistent |
+| miss_rate | ≤ 10% | 标签 inconsistent，预测 consistent **或** uncertain |
 
-```bash
-python -m task4_consistency.cli evaluate fixtures/applications \
-  -c configs/rules_auto_lease.yaml -o out/metrics.json
-# 关注 pass_thresholds + miss_rate + n_inconsistent_labeled_decisive
+数字以 `evaluate --suite main` 为准。`suite=all` 只用于调试，不作交付口径。
+
+---
+
+## 仓库结构
+
+```
+task4_consistency/     # 核心包：normalize / match / rules / kb / web / adapters
+configs/               # 规则包与实体 KB
+fixtures/
+  applications/        # suite=main（synthetic）
+  semi/                # suite=semi（external OCR import）
+  layout_slots/        # 待填字的版面槽位 + 外部 OCR 导入样例
+data/registration_layout/  # 登记证页序 + 检测框（无文本）
+frontend/              # React 源码；构建写入 task4_consistency/web/static/react/
+scripts/               # run_web.sh / ci_gate.sh / demo.sh / bench / attack_*
+tests/  docs/  out/    # out/ 仅运行产物，git 只保留 .gitkeep
 ```
 
-## 商业边界声明（必读）
+登记证版面适配（页序与检测框 → 占位申请单，字段 `raw` 为空）：
 
-本仓库是 **任务4 规则/标准化 MVP**，用于赛题对齐与可复现评估，**不是**生产核贷终审系统。
+```bash
+python -m task4_consistency.adapters.registration_layout \
+  data/registration_layout/JFL25P02L080310-01_page_order.json -o out/layout_app.json
+```
+
+---
+
+## 文档
+
+| 文档 | 内容 |
+|------|------|
+| [`docs/DEMO_GUIDE.md`](docs/DEMO_GUIDE.md) | 浏览器操作路径 |
+| [`docs/DEPLOY.md`](docs/DEPLOY.md) | 安装、环境变量、生产发布 |
+| [`docs/INTERFACE.md`](docs/INTERFACE.md) | 输入输出与 API |
+| [`docs/CONFIG_GUIDE.md`](docs/CONFIG_GUIDE.md) | 规则与 KB |
+| [`docs/EVALUATION_REPORT.md`](docs/EVALUATION_REPORT.md) | 评估口径与结果 |
+| [`docs/DELIVERABLES.md`](docs/DELIVERABLES.md) | 交付清单 ↔ 仓库路径 |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | 模块边界 |
+
+---
+
+## 边界（必读）
 
 | 边界 | 说明 |
 |------|------|
-| 输入 | 结构化 JSON 字段；**不**含任务1–3 视觉/OCR 训练与全量 `1.zip` 抽取 |
-| 评估数据 | **合成 fixture**（含对抗 ADV 样例）；指标达标 ≠ 真实业务分布达标 |
-| FNR 分母 | 仅 decisive 预测；另用 **miss_rate** 覆盖 uncertain 隐匿真不一致 |
-| 品牌/VIN/日期 | Round3 已关 ADV-01/02/03；合资前缀、I/O/Q 纠错、歧义日期有明确策略 |
-| 低置信 | critical 规则可在低 conf 下仍报 **inconsistent+low_conf**（`critical_low_conf_compare`） |
-| 约数金额 | `约12.5万` 可解析但带 `money_approx` → **uncertain**，不自动放行 |
-| 人工复核 | HTML/Markdown 报告供复核；critical inconsistent 必须人工处理 |
+| 输入 | 结构化字段；不含任务 1–3 视觉/OCR 训练与影像包 |
+| 评估数据 | 合成 fixture（含对抗样例）；达标 ≠ 真实业务分布达标 |
+| miss_rate | 防止把真不一致藏进「存疑」来刷 FNR |
+| 约数金额 | `约12.5万` 可解析但带 `money_approx` → 存疑，不自动放行 |
+| 人工复核 | critical inconsistent 必须人工处理 |
+| 运行状态 | 账本、审计日志、`out/` 不入库；每次干净检出从空账本起步 |
 
-生产接入前请：换真实标注集、标定阈值、审计规则 version、与任务1–3 字段契约联调。
-
-## 可选：step2 适配
-
-```bash
-python -m task4_consistency.adapters.step2_page_order \
-  data/step2/JFL25P02L080310-01_page_order.json -o out/step2_app.json
-```
-
-将检测框映射为字段占位（无 OCR 文本时 `raw=null`），便于后续接任务1–3。
-
-## 设计要点
-
-- 任务4与 OCR **解耦**：只吃结构化字段
-- **先标准化再比对**
-- 规则配置化，业务改 YAML 不改代码
-- 三态结论优先可解释与控误报
+生产接入前：换真实标注集、标定阈值、审计规则 version，并与任务 1–3 字段契约联调。

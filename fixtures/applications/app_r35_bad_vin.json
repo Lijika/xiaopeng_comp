@@ -5,11 +5,11 @@
     "field_source": "synthetic",
     "round": 35,
     "r35_note": "VIN pol hard diverge",
-    "source": "semi_real_step2",
-    "step2_sample_id": "JFL25P02L099690-01",
-    "step2_file": "JFL25P02L099690-01_page_order.json",
-    "step2_pages": 4,
-    "step2_note": "OCR text synthetic"
+    "source": "semi_real_layout",
+    "layout_sample_id": "JFL25P02L099690-01",
+    "layout_file": "JFL25P02L099690-01_page_order.json",
+    "layout_pages": 4,
+    "layout_note": "OCR text synthetic"
   },
   "documents": [
     {

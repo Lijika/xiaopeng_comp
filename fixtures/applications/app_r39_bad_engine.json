@@ -5,11 +5,11 @@
     "field_source": "synthetic",
     "round": 39,
     "r39_note": "engine_no inv diverge",
-    "source": "semi_real_step2",
-    "step2_sample_id": "JFL26P02L001460-01",
-    "step2_file": "JFL26P02L001460-01_page_order.json",
-    "step2_pages": 6,
-    "step2_note": "OCR text synthetic"
+    "source": "semi_real_layout",
+    "layout_sample_id": "JFL26P02L001460-01",
+    "layout_file": "JFL26P02L001460-01_page_order.json",
+    "layout_pages": 6,
+    "layout_note": "OCR text synthetic"
   },
   "documents": [
     {

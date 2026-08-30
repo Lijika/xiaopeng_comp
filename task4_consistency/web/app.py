@@ -6634,7 +6634,7 @@ def list_fixtures() -> dict[str, Any]:
                     "file": fp.name,
                     "application_id": data.get("application_id"),
                     "label": data.get("label"),
-                    "step2_sample_id": meta.get("step2_sample_id"),
+                    "layout_sample_id": meta.get("layout_sample_id"),
                     "field_source": meta.get("field_source"),
                 }
             )
@@ -6643,14 +6643,14 @@ def list_fixtures() -> dict[str, Any]:
     return {"fixtures": items}
 
 
-@app.get("/api/step2/samples")
-def list_step2_samples() -> dict[str, Any]:
+@app.get("/api/layout/samples")
+def list_layout_samples() -> dict[str, Any]:
     """List competition-side page_order extractions (bboxes, no OCR text)."""
-    step2_dir = ROOT / "data" / "step2"
+    layout_dir = ROOT / "data" / "registration_layout"
     items: list[dict[str, Any]] = []
-    if not step2_dir.is_dir():
-        return {"samples": [], "note": "data/step2 missing"}
-    for fp in sorted(step2_dir.glob("*_page_order.json")):
+    if not layout_dir.is_dir():
+        return {"samples": [], "note": "data/registration_layout missing"}
+    for fp in sorted(layout_dir.glob("*_page_order.json")):
         try:
             data = json.loads(fp.read_text(encoding="utf-8"))
             sid = data.get("sample_id") or fp.name.replace("_page_order.json", "")
@@ -6661,7 +6661,7 @@ def list_step2_samples() -> dict[str, Any]:
                 try:
                     app = json.loads(fx.read_text(encoding="utf-8"))
                     meta = app.get("meta") if isinstance(app.get("meta"), dict) else {}
-                    if meta.get("step2_sample_id") == sid:
+                    if meta.get("layout_sample_id") == sid:
                         linked.append(fx.name)
                 except Exception:
                     pass
@@ -6679,17 +6679,17 @@ def list_step2_samples() -> dict[str, Any]:
             items.append({"file": fp.name, "error": str(e)})
     return {
         "samples": items,
-        "note": "step2 来自赛题影像的页序/检测框提取，无 OCR 文本；任务4演示用结构化字段模拟多单据交叉。",
+        "note": "登记证版面（页序与检测框），无 OCR 文本；跨单据核验使用结构化字段。",
     }
 
 
-@app.get("/api/ocr_inbox")
-def list_ocr_inbox() -> dict[str, Any]:
-    """List step2→OCR slot manifests (raw usually null until external OCR)."""
-    inbox = ROOT / "fixtures" / "ocr_inbox"
+@app.get("/api/layout/slots")
+def list_layout_slots_api() -> dict[str, Any]:
+    """List layout slot manifests (raw usually null until external OCR)."""
+    inbox = ROOT / "fixtures" / "layout_slots"
     items: list[dict[str, Any]] = []
     if inbox.is_dir():
-        for fp in sorted(inbox.glob("step2_slots_*.json")):
+        for fp in sorted(inbox.glob("layout_slots_*.json")):
             try:
                 data = json.loads(fp.read_text(encoding="utf-8"))
                 slots = data.get("slots") or []
@@ -6707,17 +6707,17 @@ def list_ocr_inbox() -> dict[str, Any]:
                 items.append({"file": fp.name, "error": str(e)})
     return {
         "items": items,
-        "note": "raw 为空表示待外部 OCR；见 docs/STEP2_TO_TASK4_PIPELINE.md",
+        "note": "raw 为空表示待外部 OCR；见 docs/LAYOUT_TO_TASK4_PIPELINE.md",
     }
 
 
-@app.get("/api/step2/{sample_id}")
-def get_step2_sample(sample_id: str) -> dict[str, Any]:
+@app.get("/api/layout/{sample_id}")
+def get_layout_sample(sample_id: str) -> dict[str, Any]:
     if "/" in sample_id or ".." in sample_id:
         raise HTTPException(400, "invalid sample_id")
-    fp = ROOT / "data" / "step2" / f"{sample_id}_page_order.json"
+    fp = ROOT / "data" / "registration_layout" / f"{sample_id}_page_order.json"
     if not fp.exists():
-        raise HTTPException(404, "step2 sample not found")
+        raise HTTPException(404, "layout sample not found")
     data = json.loads(fp.read_text(encoding="utf-8"))
     # compact detections for UI
     pages_out = []
@@ -7749,15 +7749,15 @@ def create_s02_test_app() -> FastAPI:
 # The sole code-owned allow-list: fixture_id -> fixed basename.  A request
 # value is never joined to a filesystem path.
 DEMO_FIXTURES: dict[str, str] = {
-    "app_demo_step2_ok": "app_demo_step2_ok.json",
-    "app_demo_step2_bad_vin": "app_demo_step2_bad_vin.json",
-    "app_demo_step2_fmt": "app_demo_step2_fmt.json",
+    "app_demo_layout_ok": "app_demo_layout_ok.json",
+    "app_demo_layout_bad_vin": "app_demo_layout_bad_vin.json",
+    "app_demo_layout_fmt": "app_demo_layout_fmt.json",
 }
 
 _DEMO_EVIDENCE_LIMITATION = (
-    "赛题影像页序/检测框元数据（无 OCR 文本）；字段值为合成仿真，不代表真实证据。"
+    "登记证版面元数据（页序/检测框，无 OCR 文本）；字段值为合成仿真，不代表真实证据。"
 )
-_STEP2_SAMPLE_ID_RE = re.compile(r"[A-Za-z0-9_.-]+")
+_LAYOUT_SAMPLE_ID_RE = re.compile(r"[A-Za-z0-9_.-]+")
 # Neutral code-owned selector copy: never sourced from fixture label,
 # expected_verdicts, or outcome-bearing demo_title/demo_desc metadata.
 _DEMO_NEUTRAL_TITLES = ("演示样例 1", "演示样例 2", "演示样例 3")
@@ -7793,7 +7793,7 @@ class DemoFixtureOption(BaseModel):
     title: str
     description: str
     field_source: Literal["synthetic"]
-    step2_sample_id: str
+    layout_sample_id: str
 
 
 class DemoFixturesResponse(BaseModel):
@@ -7875,7 +7875,7 @@ class DemoCheckItem(BaseModel):
 class DemoEvidenceLink(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["step2_sample"]
+    kind: Literal["layout_sample"]
     label: str
     sample_id: str
     href: str
@@ -7916,7 +7916,7 @@ class DemoErrorResponse(BaseModel):
 
 def _load_demo_fixture(fixture_id: str) -> dict[str, Any]:
     """Allow-list lookup plus fail-closed validation: the returned mapping is
-    always a synthetic fixture whose verified Step2 sample file exists.  All
+    always a synthetic fixture whose verified layout sample file exists.  All
     failures use the fixed generic contracts; none reflect caller input."""
     basename = DEMO_FIXTURES.get(fixture_id)
     if basename is None:
@@ -7931,10 +7931,10 @@ def _load_demo_fixture(fixture_id: str) -> dict[str, Any]:
     meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
     if meta.get("field_source") != "synthetic":
         raise _demo_error("DEMO_FIXTURE_UNAVAILABLE")
-    sid = meta.get("step2_sample_id")
-    if not isinstance(sid, str) or not _STEP2_SAMPLE_ID_RE.fullmatch(sid):
+    sid = meta.get("layout_sample_id")
+    if not isinstance(sid, str) or not _LAYOUT_SAMPLE_ID_RE.fullmatch(sid):
         raise _demo_error("DEMO_FIXTURE_UNAVAILABLE")
-    if not (ROOT / "data" / "step2" / f"{sid}_page_order.json").is_file():
+    if not (ROOT / "data" / "registration_layout" / f"{sid}_page_order.json").is_file():
         raise _demo_error("DEMO_FIXTURE_UNAVAILABLE")
     return data
 
@@ -7945,7 +7945,7 @@ def _load_demo_fixture(fixture_id: str) -> dict[str, Any]:
     responses={503: {"model": DemoErrorResponse}},
 )
 def demo_fixtures() -> DemoFixturesResponse:
-    """The closed option list: only validated synthetic Step2-bound fixtures,
+    """The closed option list: only validated synthetic layout-bound fixtures,
     with neutral code-owned copy that never reveals the expected outcome."""
     options: list[DemoFixtureOption] = []
     for index, fixture_id in enumerate(DEMO_FIXTURES):
@@ -7957,7 +7957,7 @@ def demo_fixtures() -> DemoFixturesResponse:
                 title=_DEMO_NEUTRAL_TITLES[index],
                 description=_DEMO_NEUTRAL_DESCRIPTION,
                 field_source="synthetic",
-                step2_sample_id=str(meta["step2_sample_id"]),
+                layout_sample_id=str(meta["layout_sample_id"]),
             )
         )
     return DemoFixturesResponse(
@@ -8042,17 +8042,17 @@ def demo_check(body: DemoCheckRequest) -> DemoCheckResponse:
     except Exception as error:
         raise _demo_error("DEMO_CHECK_FAILED") from error
     meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
-    sid = str(meta["step2_sample_id"])
+    sid = str(meta["layout_sample_id"])
     return _demo_report_response(
         app_obj=app_obj,
         fixture_id=body.fixture_id,
         data_scope="synthetic",
         evidence_links=[
             DemoEvidenceLink(
-                kind="step2_sample",
-                label=f"Step2 页序样本 {sid}",
+                kind="layout_sample",
+                label=f"登记证版面样本 {sid}",
                 sample_id=sid,
-                href=f"/api/step2/{sid}",
+                href=f"/api/layout/{sid}",
                 limitation=_DEMO_EVIDENCE_LIMITATION,
             )
         ],

@@ -99,11 +99,11 @@ bash scripts/run_web.sh
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
-| `TASK4_S01_STATE_PATH` | `<仓库>/out/s01.sqlite3` | S01 权威账本 SQLite，**必须是绝对路径**。脚本按仓库根拼接，换电脑只要仓库可写即可，不绑本机用户名 |
+| `TASK4_S01_STATE_PATH` | `<仓库根>/out/s01.sqlite3` | S01 权威账本 SQLite，必须是绝对路径；未设置时由脚本按仓库根生成 |
 | `TASK4_FULL_DEMO_ROOT` | `/tmp/task4-full-demo.XXXXXX` | 全流程演示会话目录；每次启动新建临时目录。排查时再指定绝对路径 |
 | `HOST` / `PORT` | `127.0.0.1` / `8765` | 监听地址 |
 
-账本文件（`*.sqlite3`）与 `out/` 运行产物由 `.gitignore` 排除，**不要提交**。另一台机器克隆后会从空账本起步，这是预期行为。生产发布请走 §5.2，把 `TASK4_S01_STATE_PATH` 指到安装根下的 `var/`。
+账本文件（`*.sqlite3`）与 `out/` 运行产物由 `.gitignore` 排除，不要提交。干净检出从空账本起步。生产发布请走 §5.2，把 `TASK4_S01_STATE_PATH` 指到安装根下的 `var/`。
 
 ### 5.2 已安装发布版（production）
 

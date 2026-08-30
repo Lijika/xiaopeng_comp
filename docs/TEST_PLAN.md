@@ -136,5 +136,5 @@ exact/fuzzy/tol/list/conditional · require_all_docs · skip ∉ coverage · cri
 ## 8. 非范围
 
 - 任务1–3 视觉训练  
-- 全量 `1.zip` OCR  
+- 全量影像 OCR  
 - 生产 SLA 压测 baselining  

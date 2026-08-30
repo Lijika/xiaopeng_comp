@@ -266,7 +266,7 @@ curl -s -X PUT localhost:8765/api/rules -H 'content-type: application/json' \
 | 2 | ADV-09 | `multi_numeric_all` 首锚非传递；`[100,100.9,99.1]` abs_tol=1 仍 match | 全对或 min/max 跨度检查 |
 | 3 | ADV-11 | placeholder/空白 ID 条件必填 → 仍可能 uncertain 非 hard fail | denylist 后 **inconsistent** |
 | 4 | ADV-12 | 短姓名形近（张伟/张玮）现 uncertain（改善）；硬匹配策略可再调 | 音形码/编辑距离专用 |
-| 5 | — | 真实 OCR/全量 `1.zip` 未接入 | 范围外风险，README 边界 |
+| 5 | — | 真实 OCR / 全量影像未接入 | 范围外风险，README 边界 |
 
 ### 已关（抽检确认）
 
@@ -615,7 +615,7 @@ PY
 ---
 
 ## Out of adversary scope
-- Mass OCR on `1.zip`
+- Mass OCR on registration-certificate images
 - Rewriting engine in this role (dev’s job)
 - Changing review’s PASS without their re-eval
 

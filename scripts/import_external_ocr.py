@@ -3,7 +3,7 @@
 
 Round19: no OCR engine. Path must stay inside repo. 2MB cap.
 
-  .venv/bin/python scripts/import_external_ocr.py fixtures/ocr_inbox/example.json -o fixtures/semi/
+  .venv/bin/python scripts/import_external_ocr.py fixtures/layout_slots/example.json -o fixtures/semi/
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--demo-note",
         default=None,
-        help="Optional meta.note (e.g. demo for ocr_inbox examples)",
+        help="Optional meta.note (e.g. demo for layout_slots examples)",
     )
     args = p.parse_args(argv)
     try:

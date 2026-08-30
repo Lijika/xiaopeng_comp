@@ -5,11 +5,11 @@
     "field_source": "synthetic",
     "round": 31,
     "r31_note": "id15/18 link consistent (lease 15 vs id 18)",
-    "source": "semi_real_step2",
-    "step2_sample_id": "JFL25P02L096143-01",
-    "step2_file": "JFL25P02L096143-01_page_order.json",
-    "step2_pages": 5,
-    "step2_note": "OCR text synthetic"
+    "source": "semi_real_layout",
+    "layout_sample_id": "JFL25P02L096143-01",
+    "layout_file": "JFL25P02L096143-01_page_order.json",
+    "layout_pages": 5,
+    "layout_note": "OCR text synthetic"
   },
   "documents": [
     {

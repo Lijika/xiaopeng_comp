@@ -18,12 +18,12 @@ from task4_consistency.web import app as webapp
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "fixtures" / "applications"
-STEP2 = ROOT / "data" / "step2"
+STEP2 = ROOT / "data" / "registration_layout"
 
 EXPECTED_FIXTURE_IDS = [
-    "app_demo_step2_ok",
-    "app_demo_step2_bad_vin",
-    "app_demo_step2_fmt",
+    "app_demo_layout_ok",
+    "app_demo_layout_bad_vin",
+    "app_demo_layout_fmt",
 ]
 EXPECTED_NEUTRAL_TITLES = ["演示样例 1", "演示样例 2", "演示样例 3"]
 NEUTRAL_DESCRIPTION = "预置合成多单据校验样例"
@@ -71,11 +71,11 @@ def test_demo_fixtures_closed_allow_list():
             "title",
             "description",
             "field_source",
-            "step2_sample_id",
+            "layout_sample_id",
         }
         assert opt["field_source"] == "synthetic"
         assert opt["description"] == NEUTRAL_DESCRIPTION
-        sid = opt["step2_sample_id"]
+        sid = opt["layout_sample_id"]
         assert (STEP2 / f"{sid}_page_order.json").is_file(), sid
         # no filename/path, raw application, rules, or expected_verdicts
         assert "path" not in opt
@@ -94,7 +94,7 @@ def test_demo_check_closed_response_with_bad_vin():
     typed report, safe server-projected Step2 evidence link."""
     client = make_client()
     r = client.post(
-        "/api/demo/check", json={"fixture_id": "app_demo_step2_bad_vin"}
+        "/api/demo/check", json={"fixture_id": "app_demo_layout_bad_vin"}
     )
     assert r.status_code == 200, r.text
     body = r.json()
@@ -110,7 +110,7 @@ def test_demo_check_closed_response_with_bad_vin():
     }
     assert body["track"] == "C-DEMO"
     assert body["data_scope"] == "synthetic"
-    assert body["fixture_id"] == "app_demo_step2_bad_vin"
+    assert body["fixture_id"] == "app_demo_layout_bad_vin"
     assert body["application_id"] == "DEMO-STEP2-JFL25P02L086208-01-BADVIN"
     assert "html" not in body
     assert "rules_path" not in body
@@ -157,12 +157,12 @@ def test_demo_check_closed_response_with_bad_vin():
     assert len(links) == 1
     link = links[0]
     assert set(link.keys()) == {"kind", "label", "sample_id", "href", "limitation"}
-    assert link["kind"] == "step2_sample"
+    assert link["kind"] == "layout_sample"
     assert link["sample_id"] == BAD_VIN_SAMPLE
     assert link["label"]
     assert link["limitation"]
-    # relative same-origin path, no scheme/netloc, under /api/step2/
-    assert link["href"].startswith("/api/step2/")
+    # relative same-origin path, no scheme/netloc, under /api/layout/
+    assert link["href"].startswith("/api/layout/")
     assert "://" not in link["href"]
     assert not link["href"].startswith("//")
     detail = client.get(link["href"])
@@ -173,7 +173,7 @@ def test_demo_check_closed_response_with_bad_vin():
 def test_demo_check_ok_fixture_consistent():
     """The ok fixture still runs and yields a zero-inconsistent summary."""
     client = make_client()
-    r = client.post("/api/demo/check", json={"fixture_id": "app_demo_step2_ok"})
+    r = client.post("/api/demo/check", json={"fixture_id": "app_demo_layout_ok"})
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["summary"]["inconsistent"] == 0
@@ -219,17 +219,17 @@ def test_demo_check_unknown_and_shape_rejected():
 
     # path-like or filename values are not in the allow-list -> 404, never
     # joined to a path and never reflected back
-    for bad in ("../app_demo_step2_ok.json", "app_demo_step2_ok.json", "/etc/passwd"):
+    for bad in ("../app_demo_layout_ok.json", "app_demo_layout_ok.json", "/etc/passwd"):
         r = client.post("/api/demo/check", json={"fixture_id": bad})
         _assert_closed_error(r, 404, DEMO_ERROR_404)
         assert bad not in r.text
-        assert "app_demo_step2_ok" not in r.text
+        assert "app_demo_layout_ok" not in r.text
         assert "etc" not in r.text
 
     # extra unknown field -> typed 422
     r = client.post(
         "/api/demo/check",
-        json={"fixture_id": "app_demo_step2_ok", "not_a_field": True},
+        json={"fixture_id": "app_demo_layout_ok", "not_a_field": True},
     )
     assert r.status_code == 422, r.text
 
@@ -264,7 +264,7 @@ def test_demo_check_fail_closed_non_synthetic(tmp_path, monkeypatch):
                 "documents": [],
                 "meta": {
                     "field_source": "real",
-                    "step2_sample_id": BAD_VIN_SAMPLE,
+                    "layout_sample_id": BAD_VIN_SAMPLE,
                 },
             }
         ),
@@ -278,7 +278,7 @@ def test_demo_check_fail_closed_non_synthetic(tmp_path, monkeypatch):
     assert "nonsynth" not in r.text
 
 
-def test_demo_check_fail_closed_missing_step2_sample(tmp_path, monkeypatch):
+def test_demo_check_fail_closed_missing_layout_sample(tmp_path, monkeypatch):
     """Synthetic fixture without its verified Step2 sample -> exact closed
     503 with no sample-id/locator exposure."""
     fx = tmp_path / "nostep2.json"
@@ -289,7 +289,7 @@ def test_demo_check_fail_closed_missing_step2_sample(tmp_path, monkeypatch):
                 "documents": [],
                 "meta": {
                     "field_source": "synthetic",
-                    "step2_sample_id": "NO-SUCH-SAMPLE",
+                    "layout_sample_id": "NO-SUCH-SAMPLE",
                 },
             }
         ),
@@ -312,7 +312,7 @@ def test_demo_check_500_generic_no_internal_detail(monkeypatch):
 
     monkeypatch.setattr(webapp, "_run_check", _explode)
     client = make_client()
-    r = client.post("/api/demo/check", json={"fixture_id": "app_demo_step2_ok"})
+    r = client.post("/api/demo/check", json={"fixture_id": "app_demo_layout_ok"})
     _assert_closed_error(r, 500, DEMO_ERROR_500)
     assert "/srv/secret" not in r.text
     assert "rules.yaml" not in r.text
@@ -323,7 +323,7 @@ def test_demo_check_500_generic_no_internal_detail(monkeypatch):
 def test_demo_check_http_exception_is_generic_500(monkeypatch):
     """Check-path HTTP errors cannot bypass the fixed public 500 envelope."""
     leaked_code = "INTERNAL_CHECK_HTTP_FAILURE"
-    leaked_fixture_id = "app_demo_step2_ok"
+    leaked_fixture_id = "app_demo_layout_ok"
     leaked_path = "/srv/secret/rules.yaml"
 
     def _explode(application, rules_path):
@@ -384,15 +384,15 @@ def test_legacy_surfaces_unchanged():
     f = client.get("/api/fixtures")
     assert f.status_code == 200
     names = {i["file"] for i in f.json()["fixtures"]}
-    assert "app_demo_step2_ok.json" in names
+    assert "app_demo_layout_ok.json" in names
 
-    c = client.post("/api/check", json={"fixture_id": "app_demo_step2_ok"})
+    c = client.post("/api/check", json={"fixture_id": "app_demo_layout_ok"})
     assert c.status_code == 200, c.text
     body = c.json()
     assert set(body.keys()) == {"report", "html", "rules_path"}
     assert body["report"]["summary"]["inconsistent"] == 0
 
-    fx = client.get("/api/fixtures/app_demo_step2_bad_vin.json")
+    fx = client.get("/api/fixtures/app_demo_layout_bad_vin.json")
     assert fx.status_code == 200
     assert fx.json()["application_id"] == "DEMO-STEP2-JFL25P02L086208-01-BADVIN"
 

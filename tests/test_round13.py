@@ -1,4 +1,4 @@
-"""Round13: labeled inconsistent expansion + step2 meta retained."""
+"""Round13: labeled inconsistent expansion + layout meta retained."""
 
 from __future__ import annotations
 
@@ -15,15 +15,15 @@ RULES = ROOT / "configs" / "rules_auto_lease.yaml"
 
 
 def test_r13_fixtures_exist_and_labeled_inconsistent():
-    files = sorted(FIX.glob("app_r13_step2_*.json"))
+    files = sorted(FIX.glob("app_r13_layout_*.json"))
     assert len(files) >= 12
     eng = RuleEngine(load_rules(RULES))
     n_inc_labels = 0
     for fp in files:
         data = json.loads(fp.read_text(encoding="utf-8"))
         meta = data.get("meta") or {}
-        assert meta.get("step2_sample_id"), f"{fp.name} missing step2_sample_id"
-        assert meta.get("source") == "semi_real_step2"
+        assert meta.get("layout_sample_id"), f"{fp.name} missing layout_sample_id"
+        assert meta.get("source") == "semi_real_layout"
         exp = data.get("expected_verdicts") or {}
         n_inc = sum(1 for v in exp.values() if v == "inconsistent")
         assert n_inc >= 1, f"{fp.name} needs ≥1 labeled inconsistent"

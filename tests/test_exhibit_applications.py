@@ -20,7 +20,7 @@ def _builder():
 
 def test_ocr_compact_feeds_registration_fields():
     builder = _builder()
-    ocr = builder.load_ocr_fields(ROOT / "材料" / "ocr_out" / "JFL25P02L080310-01")
+    ocr = builder.load_ocr_fields(ROOT / "材料" / "registration_extract" / "JFL25P02L080310-01")
     assert ocr["vin"] == "WDDUX6HB4FA197351"
     assert "engine_no" in ocr
     assert "reg_cert_no" in ocr
@@ -28,7 +28,7 @@ def test_ocr_compact_feeds_registration_fields():
 
 def test_ok_application_is_fully_consistent():
     builder = _builder()
-    ocr = builder.load_ocr_fields(ROOT / "材料" / "ocr_out" / "JFL25P02L080310-01")
+    ocr = builder.load_ocr_fields(ROOT / "材料" / "registration_extract" / "JFL25P02L080310-01")
     payload = builder.build_application("JFL25P02L080310-01", ocr, mismatch_vin=False)
     report = _run_check(Application.from_dict(payload), _active_rules_path())
     summary = report.to_dict()["summary"]
@@ -39,7 +39,7 @@ def test_ok_application_is_fully_consistent():
 
 def test_mismatch_application_flags_vin():
     builder = _builder()
-    ocr = builder.load_ocr_fields(ROOT / "材料" / "ocr_out" / "JFL25P02L080310-01")
+    ocr = builder.load_ocr_fields(ROOT / "材料" / "registration_extract" / "JFL25P02L080310-01")
     payload = builder.build_application("JFL25P02L080310-01", ocr, mismatch_vin=True)
     report = _run_check(Application.from_dict(payload), _active_rules_path())
     vin = next(

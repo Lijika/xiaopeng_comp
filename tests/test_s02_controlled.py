@@ -529,7 +529,7 @@ def test_every_observed_shape_is_registered_without_sample_allowlisting(
 ) -> None:
     shapes = (
         (
-            "step2-page-order/unversioned",
+            "registration-layout/unversioned",
             {
                 "sample_id": "never-seen-before",
                 "pages": [
@@ -558,7 +558,7 @@ def test_every_observed_shape_is_registered_without_sample_allowlisting(
             False,
         ),
         (
-            "step2-slots/v1",
+            "layout-slots/v1",
             {
                 "schema": "task4.external_ocr_slots.v1",
                 "sample_id": "never-seen-before",
@@ -914,7 +914,7 @@ def test_layout_only_and_raw_null_observations_never_become_field_values(
 ) -> None:
     service, submission = _shape_service(
         tmp_path,
-        shape="step2-page-order/unversioned",
+        shape="registration-layout/unversioned",
         payload={
             "sample_id": "unseen-layout-only",
             "pages": [
@@ -970,7 +970,7 @@ def test_layout_only_and_raw_null_observations_never_become_field_values(
         "document_instance_id": "document-layout-only",
         "document_role": "registration_certificate",
         "provenance": {
-            "adapter_id": "step2-page-order",
+            "adapter_id": "registration-layout",
             "adapter_version": "1",
             "source_filename": "page.png",
             "source_pointer": "/pages/0",

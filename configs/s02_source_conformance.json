@@ -4,8 +4,8 @@
   "hash_policy": "sha256_exact_source_bytes_preserved_as_source_result_sha256",
   "registered_shapes": [
     {
-      "source_shape": "step2-page-order/unversioned",
-      "adapter_id": "step2-page-order",
+      "source_shape": "registration-layout/unversioned",
+      "adapter_id": "registration-layout",
       "adapter_version": "1",
       "occurrence_counter": "pages[].detections[]",
       "accepted_top_level": ["pages"],
@@ -22,8 +22,8 @@
       ]
     },
     {
-      "source_shape": "step2-slots/v1",
-      "adapter_id": "step2-slots",
+      "source_shape": "layout-slots/v1",
+      "adapter_id": "layout-slots",
       "adapter_version": "1",
       "occurrence_counter": "slots[]",
       "accepted_top_level": ["n_slots", "schema", "slots"],
@@ -61,14 +61,14 @@
   "caller_reconciliation": [
     {
       "legacy_id": "A07",
-      "legacy_surface": "step2_page_order",
+      "legacy_surface": "registration_layout",
       "s02_status": "source_facing_replaced",
       "legacy_target_authority_writes": false,
       "retirement_status": "deferred_until_caller_zero_and_rollback_gate"
     },
     {
       "legacy_id": "A08",
-      "legacy_surface": "step2_slots",
+      "legacy_surface": "layout_slots",
       "s02_status": "conformance_input_only",
       "legacy_target_authority_writes": false,
       "retirement_status": "deferred_until_all_manifests_reconciled"

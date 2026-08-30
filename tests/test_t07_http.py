@@ -24,9 +24,9 @@ from task4_consistency.web import app as webapp
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "fixtures" / "applications"
 
-FIXTURE_OK = "app_demo_step2_ok"
-FIXTURE_BAD_VIN = "app_demo_step2_bad_vin"
-FIXTURE_FMT = "app_demo_step2_fmt"
+FIXTURE_OK = "app_demo_layout_ok"
+FIXTURE_BAD_VIN = "app_demo_layout_bad_vin"
+FIXTURE_FMT = "app_demo_layout_fmt"
 
 BATCH_CAP = 50
 BATCH_ITEM_FAILED_MSG = "条目校验失败，请稍后重试"

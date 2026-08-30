@@ -14,10 +14,10 @@ from task4_consistency.adapters.external_ocr_import import (
     load_external_ocr_file,
     validate_external_ocr_payload,
 )
-from task4_consistency.adapters.step2_page_order import page_order_to_application
+from task4_consistency.adapters.registration_layout import page_order_to_application
 
 ROOT = Path(__file__).resolve().parents[1]
-EXAMPLE = ROOT / "fixtures" / "ocr_inbox" / "example.json"
+EXAMPLE = ROOT / "fixtures" / "layout_slots" / "example.json"
 
 
 def test_example_valid_and_meta_forced():
@@ -68,7 +68,7 @@ def test_path_outside_repo_rejected(tmp_path):
     assert ei.value.error == "path_outside_repo"
 
 
-def test_step2_adapter_field_source_null():
+def test_layout_adapter_field_source_null():
     app = page_order_to_application(
         {
             "sample_id": "S1",

@@ -284,7 +284,7 @@ export interface paths {
         };
         /**
          * Demo Fixtures
-         * @description The closed option list: only validated synthetic Step2-bound fixtures,
+         * @description The closed option list: only validated synthetic layout-bound fixtures,
          *     with neutral code-owned copy that never reveals the expected outcome.
          */
         get: operations["demo_fixtures_api_demo_fixtures_get"];
@@ -414,7 +414,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/ocr_inbox": {
+    "/api/layout/samples": {
         parameters: {
             query?: never;
             header?: never;
@@ -422,10 +422,47 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List Ocr Inbox
-         * @description List step2→OCR slot manifests (raw usually null until external OCR).
+         * List Layout Samples
+         * @description List competition-side page_order extractions (bboxes, no OCR text).
          */
-        get: operations["list_ocr_inbox_api_ocr_inbox_get"];
+        get: operations["list_layout_samples_api_layout_samples_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/layout/slots": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Layout Slots Api
+         * @description List layout slot manifests (raw usually null until external OCR).
+         */
+        get: operations["list_layout_slots_api_api_layout_slots_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/layout/{sample_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Layout Sample */
+        get: operations["get_layout_sample_api_layout__sample_id__get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -465,43 +502,6 @@ export interface paths {
          * @description Dry-run rule package validation without writing runtime_rules.yaml.
          */
         post: operations["validate_rules_api_rules_validate_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/step2/samples": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List Step2 Samples
-         * @description List competition-side page_order extractions (bboxes, no OCR text).
-         */
-        get: operations["list_step2_samples_api_step2_samples_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/step2/{sample_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get Step2 Sample */
-        get: operations["get_step2_sample_api_step2__sample_id__get"];
-        put?: never;
-        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -3331,7 +3331,7 @@ export interface components {
              * Kind
              * @constant
              */
-            kind: "step2_sample";
+            kind: "layout_sample";
             /** Label */
             label: string;
             /** Limitation */
@@ -3366,8 +3366,8 @@ export interface components {
             field_source: "synthetic";
             /** Fixture Id */
             fixture_id: string;
-            /** Step2 Sample Id */
-            step2_sample_id: string;
+            /** Layout Sample Id */
+            layout_sample_id: string;
             /** Title */
             title: string;
         };
@@ -10819,7 +10819,7 @@ export interface operations {
             };
         };
     };
-    list_ocr_inbox_api_ocr_inbox_get: {
+    list_layout_samples_api_layout_samples_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -10837,6 +10837,61 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+        };
+    };
+    list_layout_slots_api_api_layout_slots_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    get_layout_sample_api_layout__sample_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sample_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -10875,61 +10930,6 @@ export interface operations {
                 "application/json": components["schemas"]["RulesBody"];
             };
         };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    list_step2_samples_api_step2_samples_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-        };
-    };
-    get_step2_sample_api_step2__sample_id__get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                sample_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {

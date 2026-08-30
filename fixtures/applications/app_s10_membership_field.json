@@ -2,10 +2,10 @@
   "application_id": "APP-S10-MEMBERSHIP-FIELD",
   "label": "S10 单页多候选/未解析/显式未归集 一致性 C-DEMO fixture",
   "meta": {
-    "source": "semi_real_step2",
-    "step2_sample_id": "JFL25P02L080310-01",
-    "step2_file": "JFL25P02L080310-01_page_order.json",
-    "step2_pages": 7,
+    "source": "semi_real_layout",
+    "layout_sample_id": "JFL25P02L080310-01",
+    "layout_file": "JFL25P02L080310-01_page_order.json",
+    "layout_pages": 7,
     "field_source": "synthetic",
     "round": 69,
     "s10_note": "S10 membership ledger + a mandatory R_ENGINE_CROSS field finding; used to prove the admitted graph.page_memberships survives an S04 field-correction successor."

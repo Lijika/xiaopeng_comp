@@ -434,7 +434,7 @@ docs_min 取「资金链路最小覆盖」，非默认包全文拷贝——允�
 | **C** 不碰 1.zip 大图；仅文档化 | 范围闸 | **并选** |
 
 **主张**
-1. step2 = **布局/检测 conf 信号**，不是文本源。adapter 继续 `raw=null` 或 **注入合成 raw** 并写 `meta.step2_sample_id` + `meta.field_source=synthetic`。
+1. step2 = **布局/检测 conf 信号**，不是文本源。adapter 继续 `raw=null` 或 **注入合成 raw** 并写 `meta.layout_sample_id` + `meta.field_source=synthetic`。
 2. 可用 step2 conf 做 **低置信探针**（检测 conf 映射 field.confidence）— 仍非 OCR 字。
 3. **1.zip**：Round19 **不** 解压全量 OCR；`DEPLOY`/`EVALUATION_REPORT` 写死边界。裁剪 OCR = 任务1–3 地盘，无标注文本 GT 则评价谎言。
 
@@ -562,7 +562,7 @@ metrics JSON 必带：`suite`, `mode: smoke|labeled`, `honesty_note`。
 **强制规则**
 1. `fixtures/semi/*` 写入时 **必须** `field_source=external_ocr`（import 写死，调用方不可省略）
 2. 新 main fixture 建议带 `field_source`；缺省 evaluate **warning**，不 fail（兼容旧集）
-3. `source=semi_real_step2` 且有合成字 → `field_source` **不得** 标 `external_ocr`
+3. `source=semi_real_layout` 且有合成字 → `field_source` **不得** 标 `external_ocr`
 4. 报告/README：**field_source≠external_ocr 不得宣传「真实 OCR 评估」**
 
 ### 4. 终裁总表
@@ -586,10 +586,10 @@ metrics JSON 必带：`suite`, `mode: smoke|labeled`, `honesty_note`。
 | 1 | `task4_consistency/cli.py` | `evaluate --suite {main,semi,all}` 默认 main |
 | 2 | `task4_consistency/evaluate.py` | 多目录；metrics 增 suite/mode/honesty_note；smoke 不算 FP/FN |
 | 3 | `fixtures/semi/.gitkeep` | semi 目录 |
-| 4 | `fixtures/ocr_inbox/example.json` | 合法中间 schema 样例（demo 字可合成，但 import 后 meta=external_ocr 且 note=demo） |
+| 4 | `fixtures/layout_slots/example.json` | 合法中间 schema 样例（demo 字可合成，但 import 后 meta=external_ocr 且 note=demo） |
 | 5 | `task4_consistency/adapters/external_ocr_import.py` | **新** load+校验+meta 强制 |
 | 6 | `scripts/import_external_ocr.py` | **新** CLI；repo 内路径；2MB 限 |
-| 7 | `task4_consistency/adapters/step2_page_order.py` | meta `field_source=null`；不造假字 |
+| 7 | `task4_consistency/adapters/registration_layout.py` | meta `field_source=null`；不造假字 |
 | 8 | `tests/test_evaluate_suite.py` | **新** main 回归；semi 空/样例不崩 |
 | 9 | `tests/test_external_ocr_import.py` | **新** 缺 model 拒；meta 强制 |
 | 10 | `docs/INTERFACE.md` | schema 字段表 + suite + field_source |
@@ -602,7 +602,7 @@ metrics JSON 必带：`suite`, `mode: smoke|labeled`, `honesty_note`。
 .venv/bin/pytest -q
 .venv/bin/python -m task4_consistency evaluate -c configs/rules_auto_lease.yaml --suite main -o out/metrics_main.json
 .venv/bin/python -m task4_consistency evaluate -c configs/rules_auto_lease.yaml --suite semi -o out/metrics_semi.json
-.venv/bin/python scripts/import_external_ocr.py fixtures/ocr_inbox/example.json -o fixtures/semi/
+.venv/bin/python scripts/import_external_ocr.py fixtures/layout_slots/example.json -o fixtures/semi/
 ```
 
 **P0 禁止：** GOAL 改动 · OcrProvider/paddle · 1.zip OCR · 假 OCR gen · step2 移出 main · semi smoke 宣称漏报≤3%

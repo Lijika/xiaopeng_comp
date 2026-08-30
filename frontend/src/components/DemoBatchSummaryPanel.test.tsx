@@ -10,8 +10,8 @@ import { writeExhibitUploads } from "../lib/exhibitSession";
 import { fetchRouter, renderWithQuery } from "../test-utils";
 import DemoBatchSummaryPanel from "./DemoBatchSummaryPanel";
 
-const FIXTURE_OK = "app_demo_step2_ok";
-const FIXTURE_BAD_VIN = "app_demo_step2_bad_vin";
+const FIXTURE_OK = "app_demo_layout_ok";
+const FIXTURE_BAD_VIN = "app_demo_layout_bad_vin";
 
 function seedUploads() {
   writeExhibitUploads([

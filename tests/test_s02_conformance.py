@@ -17,9 +17,9 @@ def _shape(payload: dict[str, Any]) -> str | None:
     if "per_image_results" in payload:
         return "ocr-detection/unversioned"
     if payload.get("schema") == "task4.external_ocr_slots.v1":
-        return "step2-slots/v1"
+        return "layout-slots/v1"
     if "pages" in payload:
-        return "step2-page-order/unversioned"
+        return "registration-layout/unversioned"
     if payload.get("schema_version") == 1 and "documents" in payload:
         return "external-ocr/v1"
     if "fields" in payload:
@@ -28,9 +28,9 @@ def _shape(payload: dict[str, Any]) -> str | None:
 
 
 def _occurrences(shape: str, payload: dict[str, Any]) -> int:
-    if shape == "step2-page-order/unversioned":
+    if shape == "registration-layout/unversioned":
         return sum(len(page.get("detections") or []) for page in payload.get("pages") or [])
-    if shape == "step2-slots/v1":
+    if shape == "layout-slots/v1":
         return len(payload.get("slots") or [])
     if shape == "ocr-detection/unversioned":
         return sum(
@@ -60,8 +60,8 @@ def test_conformance_manifest_registers_observed_shapes_and_legacy_callers() -> 
     assert manifest["schema_version"] == "s02-source-conformance/1"
     assert manifest["adapter_build"] == "s02-registered-source-adapters/1"
     assert shapes == {
-        "step2-page-order/unversioned",
-        "step2-slots/v1",
+        "registration-layout/unversioned",
+        "layout-slots/v1",
         "ocr-aggregate/unversioned",
         "ocr-detection/unversioned",
         "external-ocr/v1",
@@ -128,14 +128,14 @@ def test_environment_materials_have_registered_shapes_and_no_loss_records() -> N
     assert len(aggregate) == 64
 
 
-S10_STEP2_DIR = ROOT / "data" / "step2"
+S10_LAYOUT_DIR = ROOT / "data" / "registration_layout"
 
-# The complete content-ordered S10 Step2 corpus fact rows.  This is the exact
+# The complete content-ordered S10 layout corpus fact rows.  This is the exact
 # expected content (not a digest-length check): ten page_order files, forty-
 # four pages, 335 detections, 33 ``登记页``, 11 ``注册页`` and zero inferred
 # pages.  Each row is [filename, page_index, page_type, page_ordinal,
 # detection_count, inferred].
-S10_STEP2_CONTENT = [
+S10_LAYOUT_CONTENT = [
     ["JFL25P02L080310-01_page_order.json", 0, "注册页", 1, 16, False],
     ["JFL25P02L080310-01_page_order.json", 1, "注册页", 2, 16, False],
     ["JFL25P02L080310-01_page_order.json", 2, "登记页", 3, 5, False],
@@ -185,12 +185,12 @@ S10_STEP2_CONTENT = [
 # Full aggregate sha256 over the 44 mapped candidate claims (content equality,
 # never a digest-length check).
 S10_MEMBERSHIP_CLAIMS_DIGEST = (
-    "7e3a737ecd7efca6c86abce92eef9cc19ea838cff0d693ee17807df000a9eacd"
+    "2e0078eaccc01dbd96bed431edc3d76410d05fb3142eac42dd9c8972700206ac"
 )
 
 
-def test_s10_step2_page_membership_migration_no_loss() -> None:
-    from task4_consistency.controlled.s02 import step2_page_order_membership_claims
+def test_s10_layout_page_membership_migration_no_loss() -> None:
+    from task4_consistency.controlled.s02 import registration_layout_membership_claims
 
     # The corpus-level migration pins candidate-claim counts and provenance.
     # The Step2 corpus ships no image objects, so attachment/content identity
@@ -198,14 +198,14 @@ def test_s10_step2_page_membership_migration_no_loss() -> None:
     # Production canonicalize binds the same claims to the admitted
     # attachment reference/hash via ``resolve_page_binding``, which the S10
     # HTTP/controlled and browser (Playwright) evidence exercise end to end.
-    files = sorted(S10_STEP2_DIR.glob("*_page_order.json"))
+    files = sorted(S10_LAYOUT_DIR.glob("*_page_order.json"))
     records: list[list[Any]] = []
     claims: list[dict[str, Any]] = []
     for path in files:
         payload = json.loads(path.read_text(encoding="utf-8"))
         sample_id = str(payload.get("sample_id") or path.stem)
         claims.extend(
-            step2_page_order_membership_claims(payload, application_id=sample_id)
+            registration_layout_membership_claims(payload, application_id=sample_id)
         )
         pages = payload.get("pages") or []
         for index, page in enumerate(pages):
@@ -221,7 +221,7 @@ def test_s10_step2_page_membership_migration_no_loss() -> None:
             )
 
     # Exact content equality of the corpus fact rows.
-    assert records == S10_STEP2_CONTENT
+    assert records == S10_LAYOUT_CONTENT
     assert len(files) == 10
     assert len(records) == 44
     assert sum(row[4] for row in records) == 335

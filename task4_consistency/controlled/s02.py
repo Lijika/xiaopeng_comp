@@ -193,7 +193,6 @@ _SLOT_KEYS = {
     "page_order",
     "page_type",
     "raw",
-    "zip_member",
 }
 _AGGREGATE_ROOT_KEYS = {"fields", "sample_id", "statistics", "warnings"}
 _AGGREGATE_FIELD_KEYS = {"consistent", "sources", "value"}
@@ -1170,8 +1169,8 @@ class RegisteredSourceBoundary:
 
         producer = self._producer(submission.get("producer"), registration, failure_context)
         adapters = {
-            "step2-page-order/unversioned": self._adapt_page_order,
-            "step2-slots/v1": self._adapt_slots,
+            "registration-layout/unversioned": self._adapt_page_order,
+            "layout-slots/v1": self._adapt_slots,
             "ocr-aggregate/unversioned": self._adapt_aggregate,
             "ocr-detection/unversioned": self._adapt_detection,
             "external-ocr/v1": self._adapt_external_ocr,
@@ -1217,12 +1216,12 @@ class RegisteredSourceBoundary:
         for observation in observations:
             observation["provenance_manifest_digest"] = provenance_digest
 
-        # S10: map every step2 page_order page into one immutable candidate
+        # S10: map every registration-layout page_order page into one immutable candidate
         # page-membership claim (provenance-bearing; never inferred).  The page
         # identity is the admitted attachment reference plus page ordinal;
         # content hash remains the page-integrity evidence.
         page_memberships: list[dict[str, Any]] = []
-        if registration.source_shape == "step2-page-order/unversioned":
+        if registration.source_shape == "registration-layout/unversioned":
             def resolve_page_binding(
                 source_page: dict[str, Any],
             ) -> tuple[str, str]:
@@ -1238,7 +1237,7 @@ class RegisteredSourceBoundary:
                     RegisteredSourceBoundary._provenance_failure(failure_context)
                 return str(binding["attachment_ref"]), str(binding["source_sha256"])
 
-            page_memberships = step2_page_order_membership_claims(
+            page_memberships = registration_layout_membership_claims(
                 result_payload,
                 application_id=upstream_ref,
                 resolve_page_binding=resolve_page_binding,
@@ -1923,7 +1922,7 @@ class RegisteredSourceBoundary:
                 failure_context=failure_context,
             )
             binding = self._binding_for_source(
-                slot.get("image_filename") or slot.get("zip_member"),
+                slot.get("image_filename"),
                 pages,
                 failure_context,
             )
@@ -2452,7 +2451,7 @@ def _source_name(value: Any) -> str:
     return name
 
 
-def step2_page_order_membership_claims(
+def registration_layout_membership_claims(
     payload: dict[str, Any],
     *,
     application_id: str,
@@ -2460,7 +2459,7 @@ def step2_page_order_membership_claims(
     document_instance_id: str | None = None,
     document_role: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Map each step2 page_order page into one candidate page-membership claim.
+    """Map each registration-layout page_order page into one candidate page-membership claim.
 
     S10 migration: a non-inferred page with a recognised ``page_type`` becomes
     one candidate claim keyed by its page identity and explicit provenance.
@@ -2526,7 +2525,7 @@ def step2_page_order_membership_claims(
                     "document_role": document_role or "unknown",
                 },
                 "provenance": {
-                    "adapter_id": "step2-page-order",
+                    "adapter_id": "registration-layout",
                     "adapter_version": "1",
                     "source_filename": source_name,
                     "source_pointer": f"/pages/{page_index}",

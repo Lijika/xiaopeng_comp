@@ -2,11 +2,11 @@
   "application_id": "APP-R55-OK-MONEY",
   "label": "consistent",
   "meta": {
-    "source": "semi_real_step2",
-    "step2_sample_id": "JFL25P02L080310-01",
-    "step2_file": "JFL25P02L080310-01_page_order.json",
-    "step2_pages": 7,
-    "step2_note": "OCR text synthetic",
+    "source": "semi_real_layout",
+    "layout_sample_id": "JFL25P02L080310-01",
+    "layout_file": "JFL25P02L080310-01_page_order.json",
+    "layout_pages": 7,
+    "layout_note": "OCR text synthetic",
     "field_source": "synthetic",
     "round": 55,
     "r55_note": "money comma/unit format variant consistent"

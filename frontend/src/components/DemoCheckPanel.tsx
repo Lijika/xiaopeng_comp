@@ -248,7 +248,7 @@ export default function DemoCheckPanel() {
       <h2>上传申请 JSON，看跨单据是否对得上</h2>
       <p className="demo-limitation">
         只接收任务4申请 JSON（含 documents）。展会文件在
-        材料/task4_applications/：登记证字段来自 ocr_out，保单/合同/发票/身份证按同一辆车补齐。不要上传图片。
+        材料/task4_applications/：登记证字段来自抽取结果，保单/合同/发票/身份证按同一辆车补齐。不要上传图片。
       </p>
       <div className="demo-controls">
         <input
