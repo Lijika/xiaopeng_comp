@@ -7,7 +7,7 @@
 ## 一键验收（Round30）
 
 ```bash
-cd /home/lhjysyx/xiaopeng_comp   # 或你的克隆路径
+cd /path/to/xiaopeng_comp        # 换成你的克隆路径
 source .venv/bin/activate        # 若尚未创建：python3 -m venv .venv && pip install -e ".[dev,web]"
 
 # 1) 全部门禁（pytest + evaluate main + 对抗 + smoke_web + bench）
@@ -35,7 +35,7 @@ python -m task4_consistency --version
 ## 安装
 
 ```bash
-cd /home/lhjysyx/xiaopeng_comp
+cd /path/to/xiaopeng_comp
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
@@ -54,7 +54,7 @@ Python ≥ 3.10；依赖轻量（PyYAML + 标准库）。系统 Python 若受 PE
 | **CLI check** | `python -m task4_consistency check <app.json> -c configs/rules_auto_lease.yaml` | 单申请三态报告 |
 | **evaluate main** | `python -m task4_consistency evaluate -c configs/rules_auto_lease.yaml --suite main -o out/metrics_main.json` | **唯一交付数字** |
 | **evaluate semi** | `… --suite semi -o out/metrics_semi.json` | external_ocr 集；无 label 时仅 smoke |
-| **Web 演示** | `bash scripts/run_web.sh` → http://127.0.0.1:8765/ | 校验 / 批量 / 规则·KB 只读（变更走 S08/S09 治理）；可选 `TASK4_WEB_TOKEN` |
+| **Web 演示** | `bash scripts/run_web.sh` → http://127.0.0.1:8765/ | 默认提供统一导航的全流程本地演示；`TASK4_WEB_MODE=basic` 保留业务演示模式 |
 | **合规删除 S16** | `/controlled/s16`（独立数据治理身份，Ticket #32） | 已终止申请的九类副本聚合 dry-run → 双审批（提前删除）→ 短事务 commit → 持久 worker → 无原值 receipt；独立 SQLite 账本，旧备份恢复先重放删除清单再开放查询。配置见 `docs/DEPLOY.md` §5.3；S17 导出保持关闭 |
 | **OCR 导入** | `python scripts/import_external_ocr.py fixtures/ocr_inbox/example.json -o fixtures/semi/` | 离线中间 JSON，无 OCR 引擎 |
 | **bench** | `python scripts/bench.py` | → `out/bench.json`（mean≪50ms） |
@@ -77,10 +77,11 @@ python -m task4_consistency evaluate \
 # 单元测试
 pytest -q
 
-# Web 集成演示 + 规则/KB 只读视图（变更由 S08/S09 治理）
+# Web 全流程集成演示（统一导航）
 bash scripts/run_web.sh
 # 浏览器打开 http://127.0.0.1:8765/
-#   校验演示 / 批量·evaluate(suite) / 规则·知识库（只读；变更走 S08 策略管理 / S09 治理工作区）
+# 旧业务演示：TASK4_WEB_MODE=basic bash scripts/run_web.sh
+# 账本默认写到 <仓库>/out/s01.sqlite3（本机生成，不入库）；可覆盖 TASK4_S01_STATE_PATH
 ```
 
 ## 输入 / 输出

@@ -14,7 +14,7 @@
 ## 2. 安装
 
 ```bash
-cd /home/lhjysyx/xiaopeng_comp   # 或你的克隆路径
+cd /path/to/xiaopeng_comp        # 换成你的克隆路径
 python3 -m venv .venv
 source .venv/bin/activate       # Windows: .venv\Scripts\activate
 pip install -U pip
@@ -95,11 +95,15 @@ rm -f configs/runtime_rules.yaml
 bash scripts/run_web.sh
 ```
 
-`scripts/run_web.sh` 是**源码检出 demo 命令**：始终以 `--reload` 启动 uvicorn（开发热重载），不用于发布部署。等价命令：
+`scripts/run_web.sh` 是**源码检出 demo 命令**，不用于发布部署。默认拉起全流程本地演示（`task4_consistency.web.full_demo:create_app`）；`TASK4_WEB_MODE=basic` 才走旧业务演示入口。
 
-```bash
-.venv/bin/python -m uvicorn task4_consistency.web.app:app --host 127.0.0.1 --port 8765 --reload
-```
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `TASK4_S01_STATE_PATH` | `<仓库>/out/s01.sqlite3` | S01 权威账本 SQLite，**必须是绝对路径**。脚本按仓库根拼接，换电脑只要仓库可写即可，不绑本机用户名 |
+| `TASK4_FULL_DEMO_ROOT` | `/tmp/task4-full-demo.XXXXXX` | 全流程演示会话目录；每次启动新建临时目录。排查时再指定绝对路径 |
+| `HOST` / `PORT` | `127.0.0.1` / `8765` | 监听地址 |
+
+账本文件（`*.sqlite3`）与 `out/` 运行产物由 `.gitignore` 排除，**不要提交**。另一台机器克隆后会从空账本起步，这是预期行为。生产发布请走 §5.2，把 `TASK4_S01_STATE_PATH` 指到安装根下的 `var/`。
 
 ### 5.2 已安装发布版（production）
 

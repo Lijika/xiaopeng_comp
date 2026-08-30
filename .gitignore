@@ -1,5 +1,7 @@
+# Python
 __pycache__/
 *.py[cod]
+*$py.class
 *.egg-info/
 .eggs/
 dist/
@@ -7,23 +9,47 @@ build/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-out/*
-!out/.gitkeep
-.venv/
-venv/
-*.log
+.tox/
+.nox/
+.hypothesis/
 .coverage
 .coverage.*
 coverage.xml
 htmlcov/
+*.tsbuildinfo
+
+# Virtualenvs
+.venv/
+venv/
+
+# Logs and editor junk
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.tmp
+*.bak*
+*.orig
+*.rej
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Runtime output (keep the empty directory)
+out/*
+!out/.gitkeep
 
 # Reproducible browser-test dependencies and generated artifacts
 node_modules/
 playwright-report/
 test-results/
 blob-report/
-screenshots/
-traces/
+/screenshots/
+/traces/
+frontend/dist/
+frontend/coverage/
 
 # Local secrets and credentials
 .env
@@ -34,37 +60,36 @@ traces/
 *.p12
 *.pfx
 
-# Local Python tooling and runtime databases
-.tox/
-.nox/
-.hypothesis/
+# Local runtime databases (demo / S01 / S16 / S17 ledgers)
 *.sqlite
 *.sqlite3
+*.sqlite-journal
+*.sqlite3-journal
+*.db
+*.db-wal
+*.db-shm
 
-# Local IDE state
+# Local IDE / agent / indexer state
 .idea/
 .vscode/
+.claude/
+.agents/
+.codex/
+.omp_local/
+.cursor/
+.windsurf/
+.codegraph/
+.firecrawl/
 
 # Competition source materials and generated OCR work products
 材料/
 
-# Generated indexes and runtime state
-.codegraph/
-.firecrawl/
+# Generated runtime rule overlays (source of truth is configs/rules_auto_lease.yaml)
 configs/runtime_rules.yaml*
 
-# Backups and transient editor/tool files
-*.tmp
-*.bak*
-*.orig
-*.rej
-*.swp
-*.swo
-*~
-.DS_Store
-
-# Legacy iteration and review process documents
-docs/ROUND*_BRIEF.md
+# Legacy iteration and review process documents — not needed to build or run
+docs/ROUND*.md
+docs/ROUND*_*.md
 docs/ITERATION_LOG.md
 docs/ITERATION_PLAN.md
 docs/DEV_BRIEF.md
@@ -73,3 +98,8 @@ docs/GOAL_CHANGE_REQUEST.md
 docs/GOAL_ACCEPTANCE.md
 docs/ACCEPTANCE_*.md
 docs/REVIEW.md
+docs/MONITOR_W1PT_GOAL.md
+docs/SWARM_PARALLEL_PLAN.md
+docs/TEAM_OPS.md
+docs/TICKET_ACCEPTANCE_GUIDE.md
+docs/agents/
