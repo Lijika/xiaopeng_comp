@@ -154,9 +154,6 @@ python -m task4_consistency.adapters.registration_layout \
 | [`docs/DEPLOY.md`](docs/DEPLOY.md) | 安装、环境变量、生产发布 |
 | [`docs/INTERFACE.md`](docs/INTERFACE.md) | 输入输出与 API |
 | [`docs/CONFIG_GUIDE.md`](docs/CONFIG_GUIDE.md) | 规则与 KB |
-| [`docs/EVALUATION_REPORT.md`](docs/EVALUATION_REPORT.md) | 评估口径与结果 |
-| [`docs/DELIVERABLES.md`](docs/DELIVERABLES.md) | 交付清单 ↔ 仓库路径 |
-| [`ARCHITECTURE.md`](ARCHITECTURE.md) | 模块边界 |
 
 ---
 

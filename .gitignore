@@ -87,22 +87,12 @@ frontend/coverage/
 # Generated runtime rule overlays (source of truth is configs/rules_auto_lease.yaml)
 configs/runtime_rules.yaml*
 
-# Legacy iteration and review process documents — not needed to build or run
-docs/ROUND*.md
-docs/ROUND*_*.md
-docs/ITERATION_LOG.md
-docs/ITERATION_PLAN.md
-docs/DEV_BRIEF.md
-docs/REVIEW_BRIEF.md
-docs/GOAL_CHANGE_REQUEST.md
-docs/GOAL_ACCEPTANCE.md
-docs/ACCEPTANCE_*.md
-docs/REVIEW.md
-docs/MONITOR_W1PT_GOAL.md
-docs/SWARM_PARALLEL_PLAN.md
-docs/TEAM_OPS.md
-docs/TICKET_ACCEPTANCE_GUIDE.md
-docs/agents/
+# Docs kept in git: DEMO_GUIDE, DEPLOY, INTERFACE, CONFIG_GUIDE only.
+docs/*
+!docs/DEMO_GUIDE.md
+!docs/DEPLOY.md
+!docs/INTERFACE.md
+!docs/CONFIG_GUIDE.md
 CONTEXT.md
 AGENTS.md
 GOAL.md
